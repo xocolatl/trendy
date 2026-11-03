@@ -409,17 +409,20 @@ fn supertypes(
         if let (Some(_), Some(body)) = (decl.union_keyword(), decl.body()) {
             errors.push(errors::union_with_body(name, &body));
         }
-        let Some(ident) = decl
-            .supertype()
-            .and_then(|s| s.type_ref())
-            .and_then(|r| r.ident())
-        else {
+        let Some(type_ref) = decl.supertype().and_then(|s| s.type_ref()) else {
+            continue;
+        };
+        let Some(ident) = type_ref.ident() else {
+            continue;
+        };
+        let qualifier = type_ref.qualifier();
+        let Some(written_name) = namespaces.type_name(&ident, qualifier.as_ref(), errors) else {
             continue;
         };
         let written = ident.text();
         let at = trendy_syntax::span(ident.text_range());
         // What it names, as its unit sees it.
-        let named = namespaces.type_named(written, at);
+        let named = namespaces.type_named(written_name);
         let supertype = named.as_deref().unwrap_or(written);
         if union_decl(supertype).is_some() {
             immediate.insert(name.clone(), (supertype.to_string(), at));
@@ -437,10 +440,14 @@ fn supertypes(
                 immediate.insert(name.clone(), (supertype.to_string(), at));
                 constrained.insert(name.clone());
             }
-        } else if let Some((declared, _)) = namespaces.heading(written, at) {
+        } else if let Some((declared, _)) = namespaces.heading(written_name) {
             errors.push(errors::heading_as_type(&ident, declared));
-        } else if hir::Scalar::from_name(written).is_some() {
+        } else if namespaces.builtin_type(written_name).is_some() {
             errors.push(errors::built_in_supertype(&ident));
+        } else if let (Some(qualifier), Some(unit)) = (&qualifier, written_name.unit) {
+            errors.push(errors::unknown_qualified(
+                &ident, qualifier, unit, "type", namespaces,
+            ));
         } else {
             errors.push(errors::unknown_type(
                 &ident,
@@ -996,12 +1003,17 @@ fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<Contained> {
         .filter_map(|node| {
             let at = trendy_syntax::span(node.text_range());
             let name = HeadingRef::cast(node.clone())
-                .and_then(|r| r.ident())
-                .and_then(|i| namespaces.heading_named(i.text(), at))
+                .and_then(|r| {
+                    let ident = r.ident()?;
+                    namespaces.heading_named(
+                        namespaces.type_name_written(&ident, r.qualifier().as_ref())?,
+                    )
+                })
                 .or_else(|| {
-                    TypeRef::cast(node.clone())
-                        .and_then(|r| r.ident())
-                        .and_then(|i| namespaces.type_named(i.text(), at))
+                    let r = TypeRef::cast(node.clone())?;
+                    let ident = r.ident()?;
+                    namespaces
+                        .type_named(namespaces.type_name_written(&ident, r.qualifier().as_ref())?)
                 })?;
             Some(Contained {
                 name,

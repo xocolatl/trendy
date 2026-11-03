@@ -994,7 +994,11 @@ impl<'a> Checker<'a> {
         } else if let Some(error) = errors::tutorial_d_test(name, span, written, self.namespaces())
         {
             errors.push(error);
-        } else if let Some(dummy) = self.names.namespaces().dummy(name, span) {
+        } else if let Some(dummy) = self
+            .names
+            .namespaces()
+            .dummy(crate::TypeName::plain(name, span))
+        {
             // The names of the arguments, if each has one.
             let named = match written {
                 Written::Arguments(arguments) if arguments.positional().next().is_none() => {

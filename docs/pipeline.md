@@ -546,6 +546,16 @@ where` or `package lakes`, removed, Delphi's `end.`, removed, its
 parsed as headers and fixed to them, and `pub`, `export` or `public`
 before a definition.
 
+A type's or a heading's name can be qualified by a unit's,
+`lakes.depths::metres`: a `Qualifier`, the `UnitName` and `::`, a token
+of its own (`ColonColon`), first in the `TypeRef` or `HeadingRef`
+(`TypeRef::qualifier`), whose identifier is the name after it. The
+parser takes a qualifier where a unit's words, between `.`s, end in
+`::` before an identifier (`Parser::qualifier_len`); Rust's `::` between
+the words is fixed to `.`, and where a type goes, a name of words
+between `.`s alone, as Java and Python write a module's type, has its
+last `.` fixed to `::` (`Parser::type_qualifier_len`, P0058).
+
 `uses { lakes.depths, recipes as r };` (`UsesDecl`, its `UnitList` of
 `UsedUnit`s, each a `UnitName` and an alias's `Name`), with `uses` a
 contextual keyword, names the units a section uses; a unit's name's
@@ -904,7 +914,17 @@ and parameters' names. For a type, a heading or an operator that refers
 to nothing, which the interface of a unit the section doesn't use
 declares, that error has a fix naming the unit in the section's `uses`
 (`Namespaces::exporters`, `errors::unused_unit`, `sections::uses_added`),
-unless the unit uses this one, through any path (`Units::reaches`). A declaration is found from its own name by its
+unless the unit uses this one, through any path (`Units::reaches`). A
+qualified name is looked up in the unit its qualifier names
+(`Namespaces::type_name`, a `TypeName` with that unit, which
+`Namespaces::seen_type` looks in alone, hiding nothing): the prelude, or
+a unit the section uses, by the name each section uses each by
+(`Units::qualified`, of `Unit::named`), with the errors of a qualifier of
+the unit's own name, of a unit used by another name, of one not used
+(A0075), and of no unit (A0015), and of a name the unit's interface
+doesn't declare (`errors::unknown_qualified`, A0003). A lookup that
+reports nothing, as its type's resolution reports the qualifier, takes
+the unit as written (`Namespaces::type_name_written`). A declaration is found from its own name by its
 identity (`Namespaces::declared_type`), not by what its unit sees. An
 operator is seen by other units in the section it is declared in, the
 interface for the definition of one the interface declares

@@ -150,6 +150,8 @@ pub enum SyntaxKind {
     /// `.`, in `t.a`.
     Dot,
     ColonEq,
+    /// `::`, between a unit's name and a name it declares.
+    ColonColon,
     /// Equality, and recognized where `:=` is meant, with a fix.
     Eq,
     /// `<>`
@@ -217,6 +219,9 @@ pub enum SyntaxKind {
     /// A unit's name, its path from the directory of `main`'s file, dotted:
     /// `lakes.depths`.
     UnitName,
+    /// A unit's name and `::` before a name it declares: the unit a
+    /// qualified name's declaration is in.
+    Qualifier,
     /// `heading name := { name: type, … };`: a heading with a name, which
     /// stands for it after `relation` and `tuple`. `heading` is a
     /// contextual keyword, an identifier elsewhere.
@@ -463,7 +468,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 179] = [
+    pub const ALL: [SyntaxKind; 181] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -528,6 +533,7 @@ impl SyntaxKind {
         SyntaxKind::Comma,
         SyntaxKind::Dot,
         SyntaxKind::ColonEq,
+        SyntaxKind::ColonColon,
         SyntaxKind::Eq,
         SyntaxKind::LtGt,
         SyntaxKind::Lt,
@@ -557,6 +563,7 @@ impl SyntaxKind {
         SyntaxKind::UnitList,
         SyntaxKind::UsedUnit,
         SyntaxKind::UnitName,
+        SyntaxKind::Qualifier,
         SyntaxKind::HeadingDecl,
         SyntaxKind::ConstraintDecl,
         SyntaxKind::DatabaseDecl,
@@ -934,6 +941,7 @@ impl SyntaxKind {
             SyntaxKind::Comma => ",",
             SyntaxKind::Dot => ".",
             SyntaxKind::ColonEq => ":=",
+            SyntaxKind::ColonColon => "::",
             SyntaxKind::Eq => "=",
             SyntaxKind::LtGt => "<>",
             SyntaxKind::Lt => "<",
@@ -1031,6 +1039,7 @@ impl SyntaxKind {
             SyntaxKind::Comma => "`,`",
             SyntaxKind::Dot => "`.`",
             SyntaxKind::ColonEq => "`:=`",
+            SyntaxKind::ColonColon => "`::`",
             SyntaxKind::Eq => "`=`",
             SyntaxKind::LtGt => "`<>`",
             SyntaxKind::Lt => "`<`",
@@ -1066,6 +1075,7 @@ impl SyntaxKind {
             SyntaxKind::UnitList => "units used",
             SyntaxKind::UsedUnit => "unit used",
             SyntaxKind::UnitName => "unit's name",
+            SyntaxKind::Qualifier => "qualifier",
             SyntaxKind::HeadingDecl => "heading declaration",
             SyntaxKind::ConstraintDecl => "constraint declaration",
             SyntaxKind::DatabaseDecl => "database declaration",

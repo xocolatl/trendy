@@ -5,6 +5,9 @@
 /// What a `uses` is, for the notes of the errors about one.
 pub const USES_RULE: &str = "`uses { lakes.depths };`, first in a section, names the units whose interfaces the section's declarations see, each by its path from the directory of `main`'s file, as `lakes/depths.trendy` is `lakes.depths`; every name an interface declares comes with it";
 
+/// What a qualified name is, for the notes of the errors about one.
+pub const QUALIFIED_RULE: &str = "a name another unit declares can be qualified by that unit's name and `::`, as `lakes.depths::metres`: the unit's path from the directory of `main`'s file, its parts between `.`s, or the name its `uses` gives it after `as`, which a section sees once it uses the unit, as every unit sees the prelude, `trendy.prelude`; a unit's own names are never qualified, as they hide every other unit's";
+
 /// What starts the names of the units that come with the compiler, which
 /// are no files of a program.
 pub const COMPILERS: &str = "trendy.";

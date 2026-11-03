@@ -1428,6 +1428,19 @@ mod tests {
     }
 
     #[test]
+    fn qualified_names() {
+        // A unit's name and `::`, unspaced, before the name.
+        assert_eq!(
+            fmt("var a : relation lakes . depths :: lake := relation lakes.depths::lake {};"),
+            "var a: relation lakes.depths::lake := relation lakes.depths::lake {};\n"
+        );
+        assert_eq!(
+            fmt("type c is shapes :: figure { { r: integer } };"),
+            "type c is shapes::figure { { r: integer } };\n"
+        );
+    }
+
+    #[test]
     fn warnings() {
         // As a `fail` statement is, a space before parentheses too.
         assert_eq!(

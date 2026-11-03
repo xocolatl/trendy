@@ -43,6 +43,7 @@ ast_node!(UsesDecl);
 ast_node!(UnitList);
 ast_node!(UsedUnit);
 ast_node!(UnitName);
+ast_node!(Qualifier);
 ast_node!(Operator);
 ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
@@ -2369,22 +2370,34 @@ impl HeadingExpr {
 }
 
 impl HeadingRef {
+    /// The name, after the qualifier, if it has one.
     #[must_use]
     pub fn ident(&self) -> Option<SyntaxToken> {
         ident_of(&self.0)
     }
 
-    /// The declaration of the heading it names: its own file's, or else
-    /// that of the first of its program's other files that declares it. A
-    /// unit's own declaration of a name comes before another's, and a name
-    /// it doesn't declare is the prelude's, which no other unit can declare.
+    /// The unit's name and `::` before the name, if it is qualified.
+    #[must_use]
+    pub fn qualifier(&self) -> Option<Qualifier> {
+        self.0.children().find_map(Qualifier::cast)
+    }
+
+    /// Where the attributes of the heading it names are written, for
+    /// labels and layout: its own file's declaration, which hides any
+    /// other's, unless the name is qualified, or else that of the first of
+    /// its program's other files that declares it, as the tree has no
+    /// units' names to tell them apart by, nor scopes, which sema keeps.
     #[must_use]
     pub fn declaration(&self) -> Option<HeadingDecl> {
         let name = self.ident()?;
         let own = self.0.ancestors().find_map(SourceFile::cast)?;
-        own.heading(name.text()).or_else(|| {
+        let mine = self.qualifier().is_none().then(|| own.heading(name.text()));
+        mine.flatten().or_else(|| {
             let program = Program::cast(self.0.ancestors().last()?)?;
-            program.files().find_map(|file| file.heading(name.text()))
+            program
+                .files()
+                .filter(|file| *file != own)
+                .find_map(|file| file.heading(name.text()))
         })
     }
 }
@@ -2671,9 +2684,35 @@ impl AttributeValue {
 }
 
 impl TypeRef {
+    /// The name, after the qualifier, if it has one.
     #[must_use]
     pub fn ident(&self) -> Option<SyntaxToken> {
         ident_of(&self.0)
+    }
+
+    /// The unit's name and `::` before the name, if it is qualified.
+    #[must_use]
+    pub fn qualifier(&self) -> Option<Qualifier> {
+        self.0.children().find_map(Qualifier::cast)
+    }
+}
+
+/// The type or heading `node` names, if it is a reference to one, a
+/// `TypeRef` or a `HeadingRef`: its qualifier, if it has one, and its name.
+#[must_use]
+pub fn type_reference(node: &SyntaxNode) -> Option<(Option<Qualifier>, SyntaxToken)> {
+    if let Some(r) = TypeRef::cast(node.clone()) {
+        return Some((r.qualifier(), r.ident()?));
+    }
+    let r = HeadingRef::cast(node.clone())?;
+    Some((r.qualifier(), r.ident()?))
+}
+
+impl Qualifier {
+    /// The name of the unit whose declaration the name is.
+    #[must_use]
+    pub fn unit(&self) -> Option<UnitName> {
+        self.0.children().find_map(UnitName::cast)
     }
 }
 

@@ -3537,6 +3537,45 @@ pub(crate) fn unit_separator(span: Span, written: &str) -> Diagnostic {
     )
 }
 
+/// Rust's and C++'s `::`, at `span`, between the parts of a qualified
+/// name's unit's name, which `.` separates. The fix writes `.`.
+pub(crate) fn qualifier_separator(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::QualifiedForm,
+        "a unit's name separates its parts with `.`, and `::` comes once, before the name",
+        span,
+        "between the unit's parts",
+    )
+    .with_note(trendy_syntax::unit::QUALIFIED_RULE)
+    .with_suggestion(
+        "write `.`",
+        vec![Edit {
+            span,
+            replacement: ".".to_string(),
+        }],
+    )
+}
+
+/// The last `.`, at `span`, of a type's name of words between `.`s, as Java
+/// and Python write a module's: a type's name is qualified by its unit's
+/// with `::`. The fix writes `::`.
+pub(crate) fn dotted_qualified(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::QualifiedForm,
+        "a type's name is qualified by its unit's name with `::`",
+        span,
+        "before the type's name",
+    )
+    .with_note(trendy_syntax::unit::QUALIFIED_RULE)
+    .with_suggestion(
+        "write `::`",
+        vec![Edit {
+            span,
+            replacement: "::".to_string(),
+        }],
+    )
+}
+
 /// Another language's `import`, at `span`, where a definition goes. The fix
 /// writes the `uses` it means, if that is certain.
 pub(crate) fn foreign_import(import: &Import, span: Span) -> Diagnostic {

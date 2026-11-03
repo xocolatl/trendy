@@ -274,8 +274,24 @@ operator main{} [
   unit doesn't, means none of them, as nothing settles which by order. A
   unit that never writes it compiles, so a unit that gains a declaration
   breaks only the units that write its name, and none that declare it
-  too. Operators of one name whose parameters' names differ are
-  overloads, and don't clash.
+  too. A type or a heading so written is qualified by the unit meant, as
+  the help writes it. Operators of one name whose parameters' names
+  differ are overloads, and don't clash.
+- **A qualified name is the declaration of the unit it names:**
+  `lakes.depths::metres` is the type or the heading `metres` that
+  `lakes.depths`'s interface declares, whatever else the unit writing it
+  sees of that name, and `trendy.prelude::transaction_collection` the
+  prelude's, though that unit declares one of its own. The qualifier is
+  a unit the section uses, by the name its `uses` gives it after `as`, if
+  it gives one, or else by its own, or the prelude, which every unit
+  sees. A unit's own names are never qualified, as they hide every other
+  unit's, so a qualifier of its own name is removed by the fix; one of a
+  unit the section doesn't use gets a fix that uses it, and one of a unit
+  it uses by another name, a fix that writes that (A0075). An unknown
+  unit is fixed to the one it misspells (A0015), and so is a name it
+  doesn't declare (A0003), whose error says if only its implementation
+  does. Rust's `::` between a unit's parts is fixed to `.`, and, where a
+  type goes, Java's and Python's `.` before the name to `::` (P0058).
 - **A unit gives versions of the specifications it sees,** another
   unit's among them, for its own subtypes or another's, in its
   implementation: they are one family with the specification, and
@@ -294,7 +310,8 @@ operator main{} [
   directories and its file's stem between `.`s, as `lakes/depths.trendy`
   is `lakes.depths`, in braces, as the units can be in any order, and,
   after `as`, by one word the using unit calls it by instead, as `rename`
-  gives an attribute another name.
+  gives an attribute another name, in the names it qualifies by the unit
+  (see above).
 - **Each a unit of the program** (A0015): main's, those its units use,
   and those that come with the compiler, `trendy.prelude`, which every
   unit sees without using it, `trendy.files`, which reads files, and

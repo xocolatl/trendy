@@ -173,6 +173,7 @@ pub const FOREIGN_OPERATORS: [&str; 11] =
 fn two_character_token(text: &str) -> Option<(SyntaxKind, usize)> {
     let kind = match text.get(..2)? {
         "||" => SyntaxKind::PipePipe,
+        "::" => SyntaxKind::ColonColon,
         // Tutorial D's image relation; a lone `!` is a foreign `not`.
         "!!" => SyntaxKind::BangBang,
         "<>" => SyntaxKind::LtGt,

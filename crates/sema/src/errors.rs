@@ -511,7 +511,11 @@ pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> D
     );
     let kind = hir::Scalar::from_name(name)
         .map(|_| Kind::Type)
-        .or_else(|| namespaces.defined(name, span).map(|_| Kind::Defined))
+        .or_else(|| {
+            namespaces
+                .defined(crate::TypeName::plain(name, span))
+                .map(|_| Kind::Defined)
+        })
         .or_else(|| namespaces.variable(name, span).map(|_| Kind::Variable))
         .or_else(|| namespaces.operator(name, span).map(|(kind, _)| kind));
     if let Some(kind) = kind {
@@ -3367,22 +3371,15 @@ pub(crate) fn main_errors(
             format!("this is `{}`", given.ty),
         )
         .with_note(MAIN_PARAMETERS);
-        let collection = hir::Library::TRANSACTION_COLLECTION;
-        return Some(
-            if namespaces.is_preludes_heading(collection, written.span()) {
-                d.with_suggestion(
-                    "make it a `relation transaction_collection`",
-                    vec![Edit {
-                        span: written.span(),
-                        replacement: "relation transaction_collection".to_string(),
-                    }],
-                )
-            } else {
-                d.with_help(
-                    "make it a `relation` of the prelude's heading `transaction_collection`",
-                )
-            },
-        );
+        let collection = namespaces
+            .preludes_heading_written(hir::Library::TRANSACTION_COLLECTION, written.span());
+        return Some(d.with_suggestion(
+            format!("make it a `relation {collection}`"),
+            vec![Edit {
+                span: written.span(),
+                replacement: format!("relation {collection}"),
+            }],
+        ));
     }
     if given.mode == hir::Mode::Out {
         return None;
@@ -4361,35 +4358,31 @@ pub(crate) fn loop_in_read_only(name: &str, stmt: &trendy_syntax::ast::Statement
 
 /// The name `name`, at `span`, after the `collecting` of the transaction
 /// `stmt`, of no variable: one is declared before the transaction, which
-/// the fix does, of the one type a transaction's collection has, if its
-/// heading's name means the prelude's there.
+/// the fix does, of the one type a transaction's collection has, the
+/// prelude's heading, qualified if the unit hides it by its own.
 pub(crate) fn undeclared_collecting(
     name: &str,
     span: Span,
     stmt: &trendy_syntax::ast::TransactionStmt,
     namespaces: &Namespaces,
 ) -> Diagnostic {
-    let declaration = format!("var {name}: relation transaction_collection;");
-    let d = Diagnostic::error(
+    let collection =
+        namespaces.preludes_heading_written(hir::Library::TRANSACTION_COLLECTION, span);
+    let declaration = format!("var {name}: relation {collection};");
+    Diagnostic::error(
         Code::UnknownName,
         format!("unknown variable `{name}`"),
         span,
         "the transaction adds its errors to it",
     )
-    .with_note(COLLECTION);
-    if namespaces.is_preludes_heading(hir::Library::TRANSACTION_COLLECTION, span) {
-        d.with_suggestion(
-            format!("declare it before the transaction: `{declaration}`"),
-            vec![Edit {
-                span: Span::empty(stmt.span().start),
-                replacement: format!("{declaration}\n{}", indentation(stmt.syntax())),
-            }],
-        )
-    } else {
-        d.with_help(
-            "declare it before the transaction, a `relation` of the prelude's heading `transaction_collection`",
-        )
-    }
+    .with_note(COLLECTION)
+    .with_suggestion(
+        format!("declare it before the transaction: `{declaration}`"),
+        vec![Edit {
+            span: Span::empty(stmt.span().start),
+            replacement: format!("{declaration}\n{}", indentation(stmt.syntax())),
+        }],
+    )
 }
 
 /// The variable `name`, at `span`, of type `ty`, which a transaction's
@@ -8530,6 +8523,130 @@ pub(crate) fn versions_in_units(
         .with_help("keep one of them: the one in the unit that declares the subtype, or the specification")
 }
 
+/// `qualifier`, the name of the unit it is written in, whose names are
+/// never qualified, as they hide every other unit's. The fix removes it.
+pub(crate) fn own_qualifier(qualifier: &ast::Qualifier) -> Diagnostic {
+    let unit = qualifier.unit().map(|u| u.text()).unwrap_or_default();
+    Diagnostic::error(
+        Code::Qualifier,
+        format!("`{unit}` is this unit's own name, which its names are never qualified by"),
+        qualifier.span(),
+        "this unit's own",
+    )
+    .with_note(trendy_syntax::unit::QUALIFIED_RULE)
+    .with_suggestion(
+        "remove it: the name alone is this unit's own",
+        vec![Edit {
+            span: qualifier.span(),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// `written`, the name of a unit the section it is written in uses by
+/// another, `by`, which its `uses` gives it after `as`, and which replaces
+/// its own there. The fix writes that.
+pub(crate) fn aliased_qualifier(written: &ast::UnitName, by: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::Qualifier,
+        format!("`{}` is used here as `{by}`", written.text()),
+        written.span(),
+        format!("named `{by}` here"),
+    )
+    .with_note(trendy_syntax::unit::QUALIFIED_RULE)
+    .with_suggestion(
+        format!("write `{by}`"),
+        vec![Edit {
+            span: written.span(),
+            replacement: by.to_string(),
+        }],
+    )
+}
+
+/// `written`, the name of `unit`, a unit of the program that the `section`
+/// it is written in doesn't use, so that it sees nothing it declares. The
+/// fix uses it.
+pub(crate) fn unused_qualifier(
+    written: &ast::UnitName,
+    unit: &str,
+    section: Section,
+) -> Diagnostic {
+    let message = match section {
+        Section::Interface => format!("the interface's `uses` doesn't name `{unit}`"),
+        Section::Implementation => format!("this unit doesn't use `{unit}`"),
+    };
+    let d = Diagnostic::error(Code::Qualifier, message, written.span(), "not used here")
+        .with_note(trendy_syntax::unit::QUALIFIED_RULE);
+    let added = written
+        .syntax()
+        .ancestors()
+        .find_map(SourceFile::cast)
+        .and_then(|file| sections::uses_added(&file, section, unit));
+    match added {
+        Some(edit) => d.with_suggestion(format!("use `{unit}`"), vec![edit]),
+        None => d.with_help(format!("use `{unit}`")),
+    }
+}
+
+/// `written`, which names no unit of the program, with a fix to the one
+/// of `known` it misspells, if any.
+pub(crate) fn unknown_qualifier(written: &ast::UnitName, known: &[&str]) -> Diagnostic {
+    let name = written.text();
+    let d = Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown unit `{name}`"),
+        written.span(),
+        "no unit of the program",
+    )
+    .with_note(trendy_syntax::unit::QUALIFIED_RULE);
+    spelled_like(
+        d,
+        &name,
+        written.span(),
+        known,
+        "qualify the name by a unit the section uses, or by `trendy.prelude`",
+    )
+}
+
+/// `ident`, a `what`, `type` or `heading`, which `qualifier` says the unit
+/// `unit` declares, but which it declares in no section what is written
+/// there sees, with a fix to one it misspells.
+pub(crate) fn unknown_qualified(
+    ident: &SyntaxToken,
+    qualifier: &ast::Qualifier,
+    unit: hir::FileId,
+    what: &str,
+    namespaces: &Namespaces,
+) -> Diagnostic {
+    let name = ident.text();
+    let span = trendy_syntax::span(ident.text_range());
+    let written = qualifier.unit().map(|u| u.text()).unwrap_or_default();
+    let declaring = namespaces.units().name(unit);
+    let d = Diagnostic::error(
+        Code::UnknownType,
+        format!("unknown {what} `{written}::{name}`"),
+        span,
+        format!("not one `{declaring}` declares"),
+    );
+    let d = if namespaces.hides_type(unit, name, span) {
+        d.with_note(format!(
+            "`{declaring}` declares `{name}` in its implementation, which other units don't see"
+        ))
+    } else {
+        d.with_note(format!(
+            "`{declaring}`'s interface declares no type or heading `{name}`"
+        ))
+    }
+    .with_note(trendy_syntax::unit::QUALIFIED_RULE);
+    spelled_like(
+        d,
+        name,
+        span,
+        &namespaces.type_names_in(unit, span),
+        &format!("name one of the types or headings `{declaring}`'s interface declares"),
+    )
+}
+
 /// What a unit sees, for the notes of a clash.
 const SEEN: &str = "a name a unit writes means one declaration it sees: one of its own, which hides any other unit's, or else one of the prelude's interface, which every unit sees, or of the interface of a unit its section uses; a name more than one of those other units declares means none of them, as nothing settles which by order";
 
@@ -8541,14 +8658,33 @@ pub(crate) fn name_clash(
     namespace: Namespace,
     namespaces: &Namespaces,
 ) -> Option<Diagnostic> {
-    let declared = namespaces.clash(name, span, namespace)?;
-    Some(clash(name, span, &declared))
+    let units = namespaces.clash(name, span, namespace)?;
+    let declared: Vec<(&str, Span)> = units
+        .iter()
+        .map(|&(unit, at)| (namespaces.units().name(unit), at))
+        .collect();
+    // A type or a heading is qualified by the unit meant, by the name the
+    // unit there uses it by.
+    let qualified: Vec<String> = match namespace {
+        Namespace::Type => units
+            .iter()
+            .map(|&(unit, _)| format!("`{}::{name}`", namespaces.qualifier_for(unit, span)))
+            .collect(),
+        Namespace::Value => Vec::new(),
+    };
+    Some(clash(name, span, &declared, &qualified))
 }
 
 /// The name `name`, written at `span`, which each of `declared`, with its
 /// unit's name, declares, more than one of the other units the unit there
-/// sees: the prelude, or units it uses.
-pub(crate) fn clash(name: &str, span: Span, declared: &[(&str, Span)]) -> Diagnostic {
+/// sees: the prelude, or units it uses. `qualified` writes it qualified by
+/// each, if it can be.
+pub(crate) fn clash(
+    name: &str,
+    span: Span,
+    declared: &[(&str, Span)],
+    qualified: &[String],
+) -> Diagnostic {
     let prelude = trendy_prelude::PRELUDE.name;
     let used: Vec<String> = declared
         .iter()
@@ -8581,7 +8717,15 @@ pub(crate) fn clash(name: &str, span: Span, declared: &[(&str, Span)]) -> Diagno
     for (unit, at) in declared {
         d = d.with_secondary(*at, format!("`{name}` in `{unit}`"));
     }
-    d.with_note(SEEN).with_help(help)
+    let d = d.with_note(SEEN);
+    if qualified.is_empty() {
+        d.with_help(help)
+    } else {
+        d.with_help(format!(
+            "qualify it by the unit meant, {}; or {help}",
+            trendy_diag::disjoin(qualified)
+        ))
+    }
 }
 
 /// The operator `name`, of each of `tied`, more than one unit's, all with
@@ -8615,7 +8759,7 @@ pub(crate) fn operator_clash(
     } else {
         format!("{name}{{{}}}", params.join(", "))
     };
-    Some(clash(&shown, span, &declared))
+    Some(clash(&shown, span, &declared, &[]))
 }
 
 /// The type, heading or operator `token` names, as `kind` says, which what

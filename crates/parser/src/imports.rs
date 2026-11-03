@@ -100,13 +100,10 @@ fn path(tokens: &[Found]) -> Option<(Vec<String>, usize, bool)> {
                 words.push(at(1)?.text.to_string());
                 i += 2;
             }
-            Some(SyntaxKind::Colon)
-                if at(1).is_some_and(|f| f.kind == SyntaxKind::Colon)
-                    && at(2).is_some_and(is_word) =>
-            {
-                words.push(at(2)?.text.to_string());
+            Some(SyntaxKind::ColonColon) if at(1).is_some_and(is_word) => {
+                words.push(at(1)?.text.to_string());
                 colons = true;
-                i += 3;
+                i += 2;
             }
             _ => return Some((words, i, colons)),
         }
@@ -317,14 +314,12 @@ fn used(rest: &[Found]) -> Option<Import> {
         });
     }
     let after = &rest[end..];
-    let separator = |f: &[Found]| {
-        f.len() >= 2 && f[0].kind == SyntaxKind::Colon && f[1].kind == SyntaxKind::Colon
-    };
+    let separator = |f: &[Found]| f.first().is_some_and(|f| f.kind == SyntaxKind::ColonColon);
     // `use lakes::depths::*;` and `use lakes::depths::{deepest, record};`
     // import from the module itself.
     let whole = separator(after)
         && matches!(
-            after.get(2).map(|f| f.kind),
+            after.get(1).map(|f| f.kind),
             Some(SyntaxKind::Star | SyntaxKind::LBrace)
         );
     if whole {

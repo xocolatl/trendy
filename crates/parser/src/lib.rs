@@ -514,6 +514,9 @@ impl<'a> Parser<'a> {
             self.errors.push(errors::braced_supertype(open.span, close));
         } else {
             self.start_node(SyntaxKind::TypeRef);
+            if let Some(len) = self.type_qualifier_len(0) {
+                self.qualifier(len);
+            }
             self.bump();
             self.builder.finish_node();
         }
@@ -1258,6 +1261,79 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// How many significant tokens, from the one `n` after the next, are a
+    /// qualifier, a unit's name and `::` before a name: its words, between
+    /// `.`s or Rust's and C++'s `::`, then the last `::`, before an
+    /// identifier; or `None` if none starts there.
+    fn qualifier_len(&mut self, n: usize) -> Option<usize> {
+        self.nth_found(n).filter(|f| is_word(f.kind))?;
+        let mut i = n;
+        let mut last = None;
+        while let (Some(separator), Some(word)) = (self.nth_found(i + 1), self.nth_found(i + 2)) {
+            if !matches!(separator.kind, SyntaxKind::Dot | SyntaxKind::ColonColon)
+                || !is_word(word.kind)
+            {
+                break;
+            }
+            if separator.kind == SyntaxKind::ColonColon {
+                last = Some(i + 1);
+            }
+            i += 2;
+        }
+        let last = last?;
+        self.nth_found(last + 1)
+            .filter(|f| f.kind == SyntaxKind::Ident)?;
+        Some(last - n + 1)
+    }
+
+    /// The length of a qualifier, as [`Parser::qualifier_len`] counts it,
+    /// where a type's name goes, at the significant token `n` after the
+    /// next one, or of a name of words between `.`s alone, as Java and
+    /// Python write a type of a module's, whose last `.` can only stand
+    /// for `::` there.
+    fn type_qualifier_len(&mut self, n: usize) -> Option<usize> {
+        if let Some(len) = self.qualifier_len(n) {
+            return Some(len);
+        }
+        self.nth_found(n).filter(|f| is_word(f.kind))?;
+        let mut i = n;
+        while self
+            .nth_found(i + 1)
+            .is_some_and(|f| f.kind == SyntaxKind::Dot)
+            && self.nth_found(i + 2).is_some_and(|f| is_word(f.kind))
+        {
+            i += 2;
+        }
+        // The last word is the name, an identifier, after a unit's name.
+        (i > n
+            && self
+                .nth_found(i)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident))
+        .then_some(i - n)
+    }
+
+    /// A qualifier of `len` significant tokens: a unit's name, then its
+    /// `::`, or the last `.` of a type's dotted name, fixed to `::`. A `::`
+    /// between the unit's parts is fixed to `.`.
+    fn qualifier(&mut self, len: usize) {
+        self.start_node(SyntaxKind::Qualifier);
+        self.start_node(SyntaxKind::UnitName);
+        for _ in 1..len {
+            let colons = self.at(SyntaxKind::ColonColon);
+            let span = self.bump();
+            if colons {
+                self.errors.push(errors::qualifier_separator(span));
+            }
+        }
+        self.builder.finish_node();
+        let dot = self.at(SyntaxKind::Dot);
+        let span = self.bump();
+        if dot {
+            self.errors.push(errors::dotted_qualified(span));
+        }
+        self.builder.finish_node();
+    }
+
     /// A unit's name: words, its path's parts, between `.`s. Rust's and
     /// C++'s `::` and a path's `/` between them are reported, and fixed to
     /// `.`, and Java's `.*` after them, which imports every name, removed,
@@ -1285,19 +1361,9 @@ impl<'a> Parser<'a> {
                     self.errors
                         .push(errors::star_import(Span::new(next.span.start, star.end)));
                 }
-                SyntaxKind::Colon
-                    if kind(self, 1) == Some(SyntaxKind::Colon)
-                        && self
-                            .lookahead_nth(1)
-                            .is_some_and(|f| f.span.start == next.span.end)
-                        && kind(self, 2).is_some_and(is_word) =>
-                {
+                SyntaxKind::ColonColon if kind(self, 1).is_some_and(is_word) => {
                     self.bump();
-                    let second = self.bump();
-                    self.errors.push(errors::unit_separator(
-                        Span::new(next.span.start, second.end),
-                        "::",
-                    ));
+                    self.errors.push(errors::unit_separator(next.span, "::"));
                     self.bump();
                 }
                 SyntaxKind::Slash if kind(self, 1).is_some_and(is_word) => {
@@ -4283,6 +4349,11 @@ impl<'a> Parser<'a> {
             self.bump();
             self.type_expr();
             self.builder.finish_node();
+        } else if let Some(len) = self.type_qualifier_len(0) {
+            self.start_node(SyntaxKind::TypeRef);
+            self.qualifier(len);
+            self.bump();
+            self.builder.finish_node();
         } else if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::TypeRef);
             self.bump();
@@ -5904,7 +5975,7 @@ impl<'a> Parser<'a> {
         }
         if has_keyword && self.at_heading() {
             self.heading();
-        } else if has_keyword && self.at(SyntaxKind::Ident) {
+        } else if has_keyword && self.at_heading_name() {
             self.heading_ref();
         }
         self.delimited(
@@ -5968,7 +6039,7 @@ impl<'a> Parser<'a> {
         self.keyword(SyntaxKind::RelationKw);
         if self.at_heading() {
             self.heading();
-        } else if self.at(SyntaxKind::Ident) {
+        } else if self.at_heading_name() {
             self.heading_ref();
             if !self.at(SyntaxKind::LBrace) {
                 // `relation home;`: a declared heading's type, as a value.
@@ -6021,16 +6092,24 @@ impl<'a> Parser<'a> {
     /// A heading after `relation` or `tuple` in a type: a declared one's
     /// name, or its attributes written out.
     fn heading_expr(&mut self) {
-        if self.at(SyntaxKind::Ident) {
+        if self.at_heading_name() {
             self.heading_ref();
         } else {
             self.heading();
         }
     }
 
-    /// A declared heading's name.
+    /// Whether a declared heading's name, qualified or not, comes next.
+    fn at_heading_name(&mut self) -> bool {
+        self.at(SyntaxKind::Ident) || self.type_qualifier_len(0).is_some()
+    }
+
+    /// A declared heading's name, qualified or not.
     fn heading_ref(&mut self) {
         self.start_node(SyntaxKind::HeadingRef);
+        if let Some(len) = self.type_qualifier_len(0) {
+            self.qualifier(len);
+        }
         self.bump();
         self.builder.finish_node();
     }
@@ -8928,6 +9007,56 @@ var b := tuple { fail: fail }.fail;",
 
     /// Each source with the codes of its errors, which its fixes make the
     /// text it is with.
+    #[test]
+    fn a_type_or_heading_is_qualified_by_its_units_name() {
+        // A type, a heading, a supertype, and a `tuple`'s heading, each
+        // named by a unit's name, with `::`, its parts words, which can
+        // be keywords, as a file can be named `join.trendy`.
+        let source = "var a: lakes.depths::metres;\nvar b: relation trendy.prelude::transaction_collection;\ntype c is shapes::figure { { r: integer } };\nvar d := tuple join.lakes::lake { name: \"Tana\" };";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let qualified: Vec<(String, String)> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter_map(|node| {
+                let (qualifier, ident) = trendy_syntax::ast::type_reference(&node)?;
+                Some((qualifier?.unit()?.text(), ident.text().to_string()))
+            })
+            .collect();
+        assert_eq!(
+            qualified,
+            [
+                ("lakes.depths".to_string(), "metres".to_string()),
+                (
+                    "trendy.prelude".to_string(),
+                    "transaction_collection".to_string()
+                ),
+                ("shapes".to_string(), "figure".to_string()),
+                ("join.lakes".to_string(), "lake".to_string()),
+            ]
+        );
+        // Rust's `::` between a unit's parts, and, where a type goes, Java's
+        // and Python's `.` before its name.
+        fixed_with(&[
+            (
+                "var a: lakes::depths::metres;",
+                "var a: lakes.depths::metres;",
+                &[Code::QualifiedForm][..],
+            ),
+            (
+                "var a: lakes.depths.metres;",
+                "var a: lakes.depths::metres;",
+                &[Code::QualifiedForm],
+            ),
+            (
+                "var a: relation lakes.lake;",
+                "var a: relation lakes::lake;",
+                &[Code::QualifiedForm],
+            ),
+        ]);
+    }
+
     fn fixed_with(cases: &[(&str, &str, &[Code])]) {
         for &(source, fixed, codes) in cases {
             let parse = parse_str(source);

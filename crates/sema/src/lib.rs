@@ -828,6 +828,147 @@ impl Namespaces {
         }
     }
 
+    /// What `name` means in the namespace of types and headings: what its
+    /// unit sees of its name, or, qualified, the declaration of the unit
+    /// its qualifier names, which hides nothing.
+    fn seen_type(&self, name: TypeName) -> scope::Seen<(Kind, Span)> {
+        let Some(unit) = name.unit else {
+            return self.seen(name.name, name.at, Namespace::Type);
+        };
+        let viewer = self.viewer(name.at);
+        let found = self
+            .types
+            .seen_in(name.name, unit, viewer, &self.units)
+            .map(|&span| (Kind::Defined, span))
+            .or_else(|| {
+                self.headings
+                    .seen_in(name.name, unit, viewer, &self.units)
+                    .map(|&span| (Kind::Heading, span))
+            });
+        match found {
+            Some(found) => scope::Seen::One(unit, found),
+            None => scope::Seen::Nothing,
+        }
+    }
+
+    /// What `name` means, if it is a declaration of `kind`'s: its unit, and
+    /// where it is declared.
+    fn seen_type_as(&self, name: TypeName, kind: Kind) -> Option<(hir::FileId, Span)> {
+        match self.seen_type(name).one()? {
+            (unit, (found, span)) if found == kind => Some((unit, span)),
+            _ => None,
+        }
+    }
+
+    /// The name `ident`, qualified by `qualifier` or not, as it is looked
+    /// up, or `None` once its qualifier is reported as naming no unit its
+    /// unit sees (see [`Namespaces::qualified_unit`]).
+    pub(crate) fn type_name<'t>(
+        &self,
+        ident: &'t SyntaxToken,
+        qualifier: Option<&ast::Qualifier>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<TypeName<'t>> {
+        let unit = match qualifier {
+            Some(qualifier) => Some(self.qualified_unit(qualifier, errors)?),
+            None => None,
+        };
+        Some(TypeName {
+            name: ident.text(),
+            at: trendy_syntax::span(ident.text_range()),
+            unit,
+        })
+    }
+
+    /// The name `ident`, qualified by `qualifier` or not, as
+    /// [`Namespaces::type_name`] finds it, for a lookup that reports
+    /// nothing, as the name's qualifier is reported where its type is
+    /// resolved: `None` if the qualifier names no unit its unit sees.
+    pub(crate) fn type_name_written<'t>(
+        &self,
+        ident: &'t SyntaxToken,
+        qualifier: Option<&ast::Qualifier>,
+    ) -> Option<TypeName<'t>> {
+        let unit = match qualifier {
+            Some(qualifier) => {
+                let viewer = self.viewer(qualifier.span());
+                match self.units.qualified(viewer, &qualifier.unit()?.text()) {
+                    scope::Qualified::Seen(unit)
+                    | scope::Qualified::Own(unit)
+                    | scope::Qualified::Aliased(unit, _) => Some(unit),
+                    scope::Qualified::Unused(_) | scope::Qualified::Unknown => return None,
+                }
+            }
+            None => None,
+        };
+        Some(TypeName {
+            name: ident.text(),
+            at: trendy_syntax::span(ident.text_range()),
+            unit,
+        })
+    }
+
+    /// The unit `qualifier` names, where it is written: one its unit
+    /// sees, or, after reporting that, its own, whose names are never
+    /// qualified, or one its section uses by another name (A0075); or `None`
+    /// after reporting that it names a unit its section doesn't use (A0075)
+    /// or no unit (A0015).
+    pub(crate) fn qualified_unit(
+        &self,
+        qualifier: &ast::Qualifier,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::FileId> {
+        let written = qualifier.unit()?;
+        let viewer = self.viewer(qualifier.span());
+        match self.units.qualified(viewer, &written.text()) {
+            scope::Qualified::Seen(unit) => Some(unit),
+            scope::Qualified::Own(unit) => {
+                errors.push(errors::own_qualifier(qualifier));
+                Some(unit)
+            }
+            scope::Qualified::Aliased(unit, by) => {
+                errors.push(errors::aliased_qualifier(&written, &by));
+                Some(unit)
+            }
+            scope::Qualified::Unused(unit) => {
+                errors.push(errors::unused_qualifier(
+                    &written,
+                    self.units.name(unit),
+                    viewer.section,
+                ));
+                None
+            }
+            scope::Qualified::Unknown => {
+                errors.push(errors::unknown_qualifier(
+                    &written,
+                    &self.units.qualifiers(viewer),
+                ));
+                None
+            }
+        }
+    }
+
+    /// The names of the types and headings the unit `unit` declares that
+    /// what is written at `at` sees, qualifying them by that unit.
+    pub(crate) fn type_names_in(&self, unit: hir::FileId, at: Span) -> Vec<&str> {
+        let viewer = self.viewer(at);
+        let mut names: Vec<&str> = self
+            .types
+            .names_in(unit, viewer, &self.units)
+            .chain(self.headings.names_in(unit, viewer, &self.units))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Whether the unit `unit` declares a type or a heading `name` where
+    /// what is written at `at` doesn't see it: in its implementation.
+    pub(crate) fn hides_type(&self, unit: hir::FileId, name: &str, at: Span) -> bool {
+        let viewer = self.viewer(at);
+        self.types.hidden_in(name, unit, viewer, &self.units)
+            || self.headings.hidden_in(name, unit, viewer, &self.units)
+    }
+
     /// What `name`, written at `at`, means in `namespace`, if it is a
     /// declaration of `kind`'s: its unit, and where it is declared.
     fn seen_as(
@@ -851,16 +992,22 @@ impl Namespaces {
         name: &str,
         at: Span,
         namespace: Namespace,
-    ) -> Option<Vec<(&str, Span)>> {
+    ) -> Option<Vec<(hir::FileId, Span)>> {
         match self.seen(name, at, namespace) {
             scope::Seen::Clash(declared) => Some(
                 declared
                     .into_iter()
-                    .map(|(unit, (_, span))| (self.units.name(unit), span))
+                    .map(|(unit, (_, span))| (unit, span))
                     .collect(),
             ),
             scope::Seen::Nothing | scope::Seen::One(..) => None,
         }
+    }
+
+    /// The name a qualifier written at `at` names `unit` by: the one its
+    /// section uses it by, or else its own.
+    pub(crate) fn qualifier_for(&self, unit: hir::FileId, at: Span) -> &str {
+        self.units.used_as(self.viewer(at), unit)
     }
 
     /// The unit whose interface declares the type or heading `name`, which
@@ -960,11 +1107,14 @@ impl Namespaces {
         self.units.identity(name, unit, ambiguous)
     }
 
-    /// The heading named `name` that what is written at `at` sees: where
-    /// it is declared, and its attributes, unless they have errors.
-    pub(crate) fn heading(&self, name: &str, at: Span) -> Option<(Span, Option<&hir::Heading>)> {
-        let (unit, span) = self.seen_as(name, at, Namespace::Type, Kind::Heading)?;
-        Some((span, self.attributes.get(&self.type_identity(name, unit))))
+    /// The heading `name` names: where it is declared, and its attributes,
+    /// unless they have errors.
+    pub(crate) fn heading(&self, name: TypeName) -> Option<(Span, Option<&hir::Heading>)> {
+        let (unit, span) = self.seen_type_as(name, Kind::Heading)?;
+        Some((
+            span,
+            self.attributes.get(&self.type_identity(name.name, unit)),
+        ))
     }
 
     /// The attributes of the heading whose identity is `identity`, as the
@@ -1003,25 +1153,27 @@ impl Namespaces {
         self.type_identity(name, self.units.prelude())
     }
 
-    /// Whether `name`, written at `at`, means the prelude's heading of
-    /// that name, as a fix that writes it needs, unless the unit there
-    /// has one of its own, which hides it, or sees another unit's too.
-    pub(crate) fn is_preludes_heading(&self, name: &str, at: Span) -> bool {
-        self.heading_named(name, at) == Some(self.prelude_identity(name))
+    /// The prelude's heading `name`, as a fix writes it at `at`: plain, if
+    /// it means the prelude's there, and otherwise qualified, as the unit
+    /// there hides it by its own, or sees another unit's too.
+    pub(crate) fn preludes_heading_written(&self, name: &str, at: Span) -> String {
+        if self.heading_named(TypeName::plain(name, at)) == Some(self.prelude_identity(name)) {
+            name.to_string()
+        } else {
+            format!("{}::{name}", self.qualifier_for(self.units.prelude(), at))
+        }
     }
 
-    /// The identity of the heading named `name` that what is written at
-    /// `at` sees.
-    pub(crate) fn heading_named(&self, name: &str, at: Span) -> Option<String> {
-        let (unit, _) = self.seen_as(name, at, Namespace::Type, Kind::Heading)?;
-        Some(self.type_identity(name, unit))
+    /// The identity of the heading `name` names.
+    pub(crate) fn heading_named(&self, name: TypeName) -> Option<String> {
+        let (unit, _) = self.seen_type_as(name, Kind::Heading)?;
+        Some(self.type_identity(name.name, unit))
     }
 
-    /// The identity of the program's own type named `name` that what is
-    /// written at `at` sees.
-    pub(crate) fn type_named(&self, name: &str, at: Span) -> Option<String> {
-        let (unit, _) = self.seen_as(name, at, Namespace::Type, Kind::Defined)?;
-        Some(self.type_identity(name, unit))
+    /// The identity of the program's own type `name` names.
+    pub(crate) fn type_named(&self, name: TypeName) -> Option<String> {
+        let (unit, _) = self.seen_type_as(name, Kind::Defined)?;
+        Some(self.type_identity(name.name, unit))
     }
 
     /// Where the heading or the program's own type whose identity is
@@ -1035,12 +1187,20 @@ impl Namespaces {
             .map(|(_, &span)| span)
     }
 
-    /// The program's own type named `name` that what is written at `at`
-    /// sees: where it is declared, and the type, unless its components have
-    /// errors.
-    pub(crate) fn defined(&self, name: &str, at: Span) -> Option<(Span, Option<&hir::Defined>)> {
-        let (unit, span) = self.seen_as(name, at, Namespace::Type, Kind::Defined)?;
-        Some((span, self.defined.get(&self.type_identity(name, unit))))
+    /// The built-in type `name` names: the prelude's, plain, as no unit
+    /// can declare one of its name, or qualified by the prelude.
+    pub(crate) fn builtin_type(&self, name: TypeName) -> Option<hir::Scalar> {
+        if name.unit.is_some_and(|unit| unit != self.units.prelude()) {
+            return None;
+        }
+        hir::Scalar::from_name(name.name)
+    }
+
+    /// The program's own type `name` names: where it is declared, and the
+    /// type, unless its components have errors.
+    pub(crate) fn defined(&self, name: TypeName) -> Option<(Span, Option<&hir::Defined>)> {
+        let (unit, span) = self.seen_type_as(name, Kind::Defined)?;
+        Some((span, self.defined.get(&self.type_identity(name.name, unit))))
     }
 
     /// The program's own type the name `ident` declares, unless its
@@ -1067,12 +1227,11 @@ impl Namespaces {
         self.defined.get(identity)
     }
 
-    /// The program's own union type named `name` that what is written at
-    /// `at` sees, a dummy type, unless it isn't one, or its declaration has
-    /// errors.
-    pub(crate) fn dummy(&self, name: &str, at: Span) -> Option<&hir::Dummy> {
-        let (unit, _) = self.seen_as(name, at, Namespace::Type, Kind::Defined)?;
-        self.dummies.get(&self.type_identity(name, unit))
+    /// The program's own union type `name` names, a dummy type, unless it
+    /// isn't one, or its declaration has errors.
+    pub(crate) fn dummy(&self, name: TypeName) -> Option<&hir::Dummy> {
+        let (unit, _) = self.seen_type_as(name, Kind::Defined)?;
+        self.dummies.get(&self.type_identity(name.name, unit))
     }
 
     /// The union type whose identity is `identity`, as the HIR calls it, a
@@ -1154,6 +1313,27 @@ impl Namespaces {
             _ => here(&self.headings, Kind::Heading)
                 .or_else(|| here(&self.types, Kind::Defined))
                 .or_else(|| self.builtin_types.get(name).map(|&s| (Kind::Type, s))),
+        }
+    }
+}
+
+/// A name a unit writes in the namespace of types and headings: where, and,
+/// if it is qualified, the unit its qualifier names, as
+/// [`Namespaces::type_name`] finds it.
+#[derive(Clone, Copy)]
+pub(crate) struct TypeName<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) at: Span,
+    pub(crate) unit: Option<hir::FileId>,
+}
+
+impl<'a> TypeName<'a> {
+    /// `name`, written at `at` unqualified.
+    pub(crate) fn plain(name: &'a str, at: Span) -> Self {
+        TypeName {
+            name,
+            at,
+            unit: None,
         }
     }
 }
@@ -8313,9 +8493,12 @@ operator main{{}} [ var lines: array text; {main} ];"
         .unwrap_err();
         assert_eq!(failing.len(), 1, "{failing:#?}");
         assert_eq!(failing[0].code, Code::UnknownName);
-        // Its fix would declare `d` of the unit's own heading, so there is
-        // help instead.
-        assert!(failing[0].suggestions.is_empty(), "{failing:#?}");
+        // Its fix declares `d` of the prelude's heading, which the unit
+        // hides by its own.
+        assert_eq!(
+            failing[0].suggestions[0].edits[0].replacement,
+            "var d: relation trendy.prelude::transaction_collection;\n    "
+        );
         // Another unit's and the prelude's, both other units', clash where
         // the name is written.
         let errors = analyze_units(&[
@@ -12212,6 +12395,144 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
 
     /// A unit that declares a union type, a specification of it, and a
     /// version for its own subtype.
+    /// `main` analyzed with the units `lakes.depths` and `seas.depths`, each
+    /// declaring a type `metres`.
+    fn with_depths(main: &str) -> Result<hir::Program, Vec<Diagnostic>> {
+        analyze_units(&[
+            ("program", main),
+            ("lakes.depths", DEPTHS),
+            (
+                "seas.depths",
+                "interface\n\ntype metres { { m: integer } };",
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_type_or_heading_is_qualified_by_its_units_name() {
+        // A clash, settled where the name is written, a heading's too, and
+        // a type whose unit hides it by its own, or the prelude's built-in
+        // types, as the program calls them.
+        let program = with_depths("uses { lakes.depths, seas.depths };\n\ntype metres { { feet: integer } };\n\noperator deep{m: lakes.depths::metres, s: seas.depths::metres, f: metres, n: trendy.prelude::integer}: boolean [ m.m > s.m ];\n\noperator deepest{l: relation lakes.depths::lake}: integer [ count{r: l} ];\n\noperator main{} [];").unwrap();
+        let deep = program.operators.iter().find(|o| o.name == "deep").unwrap();
+        let types: Vec<String> = ["m", "s", "f", "n"]
+            .iter()
+            .map(|p| deep.params[*p].ty.to_string())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "lakes.depths::metres",
+                "seas.depths::metres",
+                "program::metres",
+                "integer"
+            ]
+        );
+        // A unit by the name its `uses` gives it, which replaces its own
+        // there, or by its own, if its section uses it.
+        let aliased = "uses { lakes.depths as depths };\n\noperator deep{m: depths::metres}: boolean [ m.m > 1 ];\n\noperator main{} [];";
+        assert!(
+            with_depths(aliased).is_ok(),
+            "{:#?}",
+            with_depths(aliased).err()
+        );
+        // The prelude's, though the unit hides it by its own.
+        let collected = "heading transaction_collection := { n: integer };\n\noperator main{out errors: relation trendy.prelude::transaction_collection} [\n    errors := relation trendy.prelude::transaction_collection {};\n];";
+        assert!(
+            with_depths(collected).is_ok(),
+            "{:#?}",
+            with_depths(collected).err()
+        );
+    }
+
+    #[test]
+    fn a_qualifier_names_a_unit_the_section_uses() {
+        let fixed = |main: &str| -> (Vec<Code>, String) {
+            let errors = with_depths(main).unwrap_err();
+            let codes = errors.iter().map(|e| e.code).collect();
+            let mut edits: Vec<trendy_diag::Edit> = errors
+                .iter()
+                .filter_map(|d| d.suggestions.first())
+                .flat_map(|s| s.edits.clone())
+                .collect();
+            edits.sort_by_key(|e| std::cmp::Reverse(e.span.start));
+            let mut fixed = main.to_string();
+            for edit in edits {
+                fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+            }
+            (codes, fixed)
+        };
+        let operator =
+            |t: &str| format!("operator deep{{m: {t}}}: integer [ 1 ];\n\noperator main{{}} [];");
+        for (main, codes, after) in [
+            // Its full name, where its `uses` gives it another.
+            (
+                format!(
+                    "uses {{ lakes.depths as depths }};\n\n{}",
+                    operator("lakes.depths::metres")
+                ),
+                vec![Code::Qualifier],
+                format!(
+                    "uses {{ lakes.depths as depths }};\n\n{}",
+                    operator("depths::metres")
+                ),
+            ),
+            // A unit its section doesn't use.
+            (
+                operator("lakes.depths::metres"),
+                vec![Code::Qualifier],
+                format!(
+                    "uses {{ lakes.depths }};\n\n{}",
+                    operator("lakes.depths::metres")
+                ),
+            ),
+            // Its own, whose names it never qualifies.
+            (
+                format!(
+                    "type metres {{ {{ m: integer }} }};\n{}",
+                    operator("program::metres")
+                ),
+                vec![Code::Qualifier],
+                format!(
+                    "type metres {{ {{ m: integer }} }};\n{}",
+                    operator("metres")
+                ),
+            ),
+            // A misspelling of a unit, and of what it declares.
+            (
+                format!(
+                    "uses {{ lakes.depths }};\n\n{}",
+                    operator("lake.depths::metres")
+                ),
+                vec![Code::UnknownName],
+                format!(
+                    "uses {{ lakes.depths }};\n\n{}",
+                    operator("lakes.depths::metres")
+                ),
+            ),
+            (
+                format!(
+                    "uses {{ lakes.depths }};\n\n{}",
+                    operator("lakes.depths::meters")
+                ),
+                vec![Code::UnknownType],
+                format!(
+                    "uses {{ lakes.depths }};\n\n{}",
+                    operator("lakes.depths::metres")
+                ),
+            ),
+        ] {
+            assert_eq!(fixed(&main), (codes, after), "{main}");
+        }
+        // What its implementation declares, which other units don't see.
+        let errors = with_depths(&format!(
+            "uses {{ lakes.depths }};\n\n{}",
+            operator("lakes.depths::secret")
+        ))
+        .unwrap_err();
+        assert_eq!(errors[0].message, "unknown type `lakes.depths::secret`");
+    }
+
     const FIGURES_UNIT: &str = "interface\n\ntype figure union;\n\ntype square is figure { { side: approximate } };\n\noperator area{f: figure}: approximate;\n\nimplementation\n\noperator area{f: square}: approximate [ f.side * f.side ];";
 
     /// A unit that uses `figures`, with a subtype of its own, and its version.
@@ -12457,6 +12778,14 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             "`metres` is declared by `lakes.depths` and `seas.depths`, which this unit uses"
         );
         assert_eq!(errors[0].secondary.len(), 2);
+        // Qualified by the unit meant, a type is that unit's.
+        assert!(
+            errors[1].help[0].starts_with(
+                "qualify it by the unit meant, `lakes.depths::metres` or `seas.depths::metres`"
+            ),
+            "{:#?}",
+            errors[1].help
+        );
         // Whatever order they are used, or given, in.
         let reordered = analyze_units(&[
             ("program", "uses { seas.depths, lakes.depths };\n\nvar m := metres{m: 1};\nvar n: metres;\n\noperator main{} [];"),

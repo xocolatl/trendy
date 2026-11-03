@@ -30,9 +30,11 @@ use crate::Namespaces;
 /// The program's units, by their [`hir::FileId`].
 #[derive(Clone)]
 pub(crate) struct Units {
-    units: Vec<Unit>,
+    all: Vec<Unit>,
     /// The prelude's.
     prelude: hir::FileId,
+    /// Each unit's, by its name.
+    ids: HashMap<String, hir::FileId>,
 }
 
 /// A unit, as scopes see it.
@@ -46,6 +48,25 @@ struct Unit {
     headers: Vec<(usize, Section)>,
     /// The units each of its sections uses, of the program's.
     uses: BTreeMap<Section, BTreeSet<hir::FileId>>,
+    /// The units each of its sections uses, by the name each is used by
+    /// there: the one its `uses` gives it after `as`, or else its own.
+    named: BTreeMap<Section, BTreeMap<String, hir::FileId>>,
+}
+
+/// The unit a qualifier names, by the name written in it, of those a
+/// viewer sees (see [`Units::qualified`]).
+pub(crate) enum Qualified {
+    /// A unit it sees: the prelude, or one its section uses, by the name
+    /// it uses it by.
+    Seen(hir::FileId),
+    /// Its own unit, whose names are never qualified.
+    Own(hir::FileId),
+    /// A unit its section uses by another name, this one.
+    Aliased(hir::FileId, String),
+    /// A unit of the program its section doesn't use.
+    Unused(hir::FileId),
+    /// No unit of the program.
+    Unknown,
 }
 
 /// Where a name is written: its unit, and the section of it, whose `uses`
@@ -60,20 +81,28 @@ impl Units {
     /// The units of `files`, each with its name, as the trees of one
     /// program, one after another, of which `prelude` is the prelude's.
     pub(crate) fn new(files: &[(&str, &SourceFile)], prelude: hir::FileId) -> Self {
-        let ids: HashMap<&str, hir::FileId> = files
+        let ids: HashMap<String, hir::FileId> = files
             .iter()
             .enumerate()
-            .map(|(i, (name, _))| (*name, hir::FileId(i)))
+            .map(|(i, (name, _))| ((*name).to_string(), hir::FileId(i)))
             .collect();
         let units = files
             .iter()
             .map(|&(name, file)| {
                 let mut uses: BTreeMap<Section, BTreeSet<hir::FileId>> = BTreeMap::new();
+                let mut named: BTreeMap<Section, BTreeMap<String, hir::FileId>> = BTreeMap::new();
                 for decl in file.uses() {
-                    let known = decl
-                        .units()
-                        .filter_map(|u| ids.get(u.name()?.text().as_str()).copied());
-                    uses.entry(decl.section()).or_default().extend(known);
+                    for used in decl.units() {
+                        let Some(&unit) = used.name().and_then(|n| ids.get(&n.text())) else {
+                            continue;
+                        };
+                        let by = match used.alias().and_then(|a| a.ident()) {
+                            Some(alias) => alias.text().to_string(),
+                            None => used.name().map(|n| n.text()).unwrap_or_default(),
+                        };
+                        uses.entry(decl.section()).or_default().insert(unit);
+                        named.entry(decl.section()).or_default().insert(by, unit);
+                    }
                 }
                 Unit {
                     name: name.to_string(),
@@ -83,15 +112,85 @@ impl Units {
                         .map(|h| (h.span().start, h.section()))
                         .collect(),
                     uses,
+                    named,
                 }
             })
             .collect();
-        Units { units, prelude }
+        Units {
+            all: units,
+            prelude,
+            ids,
+        }
+    }
+
+    /// The unit a qualifier written `name`, at `viewer`, names, as
+    /// [`Qualified`] says: by the name its section uses it by, or the
+    /// prelude by its own, unless its section uses it by another.
+    pub(crate) fn qualified(&self, viewer: Viewer, name: &str) -> Qualified {
+        let named = &self.all[viewer.unit.0].named;
+        let sections: &[Section] = match viewer.section {
+            Section::Interface => &[Section::Interface],
+            Section::Implementation => &[Section::Interface, Section::Implementation],
+        };
+        let used = sections
+            .iter()
+            .filter_map(|section| named.get(section))
+            .flatten();
+        let mut aliased = None;
+        for (by, &unit) in used {
+            if by == name {
+                return Qualified::Seen(unit);
+            }
+            if self.name(unit) == name {
+                aliased = Some((unit, by.clone()));
+            }
+        }
+        if let Some((unit, by)) = aliased {
+            return Qualified::Aliased(unit, by);
+        }
+        match self.ids.get(name).copied() {
+            Some(unit) if unit == viewer.unit => Qualified::Own(unit),
+            Some(unit) if unit == self.prelude => Qualified::Seen(unit),
+            Some(unit) => Qualified::Unused(unit),
+            None => Qualified::Unknown,
+        }
+    }
+
+    /// The name a qualifier written at `viewer` names `unit` by: the one its
+    /// section uses it by, or else its own.
+    pub(crate) fn used_as(&self, viewer: Viewer, unit: hir::FileId) -> &str {
+        let named = &self.all[viewer.unit.0].named;
+        named
+            .iter()
+            .filter(|(section, _)| {
+                **section == Section::Interface || viewer.section == Section::Implementation
+            })
+            .flat_map(|(_, used)| used.iter())
+            .find(|&(_, &u)| u == unit)
+            .map_or_else(|| self.name(unit), |(by, _)| by.as_str())
+    }
+
+    /// The names a qualifier written at `viewer` can mean, for a
+    /// misspelling of one: those its section uses units by, and the
+    /// program's units', those it doesn't use among them.
+    pub(crate) fn qualifiers(&self, viewer: Viewer) -> Vec<&str> {
+        let used_by = &self.all[viewer.unit.0].named;
+        let mut names: Vec<&str> = used_by
+            .iter()
+            .filter(|(section, _)| {
+                **section == Section::Interface || viewer.section == Section::Implementation
+            })
+            .flat_map(|(_, used)| used.keys().map(String::as_str))
+            .chain(self.ids.keys().map(String::as_str))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     /// The name of `unit`.
     pub(crate) fn name(&self, unit: hir::FileId) -> &str {
-        &self.units[unit.0].name
+        &self.all[unit.0].name
     }
 
     /// The prelude's.
@@ -102,9 +201,9 @@ impl Units {
     /// The unit `span` is in.
     pub(crate) fn at(&self, span: Span) -> hir::FileId {
         hir::FileId(
-            self.units
+            self.all
                 .partition_point(|unit| unit.end <= span.start)
-                .min(self.units.len() - 1),
+                .min(self.all.len() - 1),
         )
     }
 
@@ -112,7 +211,7 @@ impl Units {
     /// in.
     pub(crate) fn viewer(&self, span: Span) -> Viewer {
         let unit = self.at(span);
-        let section = self.units[unit.0]
+        let section = self.all[unit.0]
             .headers
             .iter()
             .take_while(|(start, _)| *start <= span.start)
@@ -153,7 +252,7 @@ impl Units {
         let mut seen = BTreeSet::new();
         let mut pending = vec![from];
         while let Some(unit) = pending.pop() {
-            for used in self.units[unit.0].uses.values().flatten() {
+            for used in self.all[unit.0].uses.values().flatten() {
                 if *used == to {
                     return true;
                 }
@@ -167,7 +266,7 @@ impl Units {
 
     /// Whether `viewer`'s section uses `unit`.
     fn uses(&self, viewer: Viewer, unit: hir::FileId) -> bool {
-        let uses = &self.units[viewer.unit.0].uses;
+        let uses = &self.all[viewer.unit.0].uses;
         let of = |section| uses.get(&section).is_some_and(|used| used.contains(&unit));
         of(Section::Interface)
             || (viewer.section == Section::Implementation && of(Section::Implementation))
@@ -178,7 +277,7 @@ impl Units {
     /// its unit's.
     pub(crate) fn identity(&self, name: &str, unit: hir::FileId, ambiguous: bool) -> String {
         if ambiguous {
-            format!("{}::{name}", self.units[unit.0].name)
+            format!("{}::{name}", self.all[unit.0].name)
         } else {
             name.to_string()
         }
@@ -356,6 +455,53 @@ impl<T> Declared<T> {
             .collect();
         seen.sort_by(|a, b| units.seen_order(viewer, a.unit, b.unit));
         seen.into_iter().map(|e| (e.unit, &e.value))
+    }
+
+    /// The first declaration named `name` in `unit` that `viewer` sees: in
+    /// its interface, unless it is the viewer's own, for a qualified name.
+    pub(crate) fn seen_in(
+        &self,
+        name: &str,
+        unit: hir::FileId,
+        viewer: Viewer,
+        units: &Units,
+    ) -> Option<&T> {
+        self.entries(name)
+            .iter()
+            .find(|e| e.unit == unit && units.sees(viewer, e.unit, e.section))
+            .map(|e| &e.value)
+    }
+
+    /// Each name `unit` declares that `viewer` sees, for misspellings of a
+    /// name it qualifies by that unit.
+    pub(crate) fn names_in<'a>(
+        &'a self,
+        unit: hir::FileId,
+        viewer: Viewer,
+        units: &'a Units,
+    ) -> impl Iterator<Item = &'a str> {
+        self.by_name
+            .iter()
+            .filter(move |(_, entries)| {
+                entries
+                    .iter()
+                    .any(|e| e.unit == unit && units.sees(viewer, e.unit, e.section))
+            })
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// Whether `unit` declares `name` in a section `viewer` doesn't see:
+    /// its implementation, which other units don't.
+    pub(crate) fn hidden_in(
+        &self,
+        name: &str,
+        unit: hir::FileId,
+        viewer: Viewer,
+        units: &Units,
+    ) -> bool {
+        self.entries(name)
+            .iter()
+            .any(|e| e.unit == unit && !units.sees(viewer, e.unit, e.section))
     }
 
     /// The first declaration named `name` in `unit`.

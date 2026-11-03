@@ -660,6 +660,22 @@ mod tests {
     }
 
     #[test]
+    fn qualified_names() {
+        // The unit's name's words, then the type or heading.
+        assert_eq!(
+            highlight("var a: relation lakes.depths::lake;"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("relation", Class::Keyword, false),
+                ("lakes", Class::Unit, false),
+                ("depths", Class::Unit, false),
+                ("lake", Class::Type, false),
+            ]
+        );
+    }
+
+    #[test]
     fn databases() {
         // The keyword, and the database, a variable, declared and named
         // before what is added to it.

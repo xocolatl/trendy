@@ -458,7 +458,8 @@ pub(crate) fn into_interface_uses(file: &SourceFile, unit: &str) -> Vec<Edit> {
 }
 
 /// The names of types and headings `item`, if it is in its unit's
-/// interface, mentions where other units see them, each with where: an
+/// interface, mentions where other units see them, unqualified, as a
+/// qualified one is another unit's, each with where: an
 /// operator's parameters' and result's types, a database's relvar's type,
 /// a heading's attributes', and
 /// a type's components' and supertype's. Its body, its constraints and its
@@ -493,9 +494,11 @@ fn mentioned(item: &Item) -> Vec<(String, Span)> {
         .iter()
         .flat_map(SyntaxNode::descendants)
         .filter_map(|node| {
-            let ident = ast::TypeRef::cast(node.clone())
-                .and_then(|r| r.ident())
-                .or_else(|| ast::HeadingRef::cast(node).and_then(|r| r.ident()))?;
+            // A qualified name is another unit's.
+            let (qualifier, ident) = ast::type_reference(&node)?;
+            if qualifier.is_some() {
+                return None;
+            }
             Some((
                 ident.text().to_string(),
                 trendy_syntax::span(ident.text_range()),

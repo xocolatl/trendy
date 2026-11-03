@@ -373,26 +373,31 @@ pub(crate) fn resolve(
     match type_expr {
         TypeExpr::Named(type_ref) => {
             let ident = type_ref.ident()?;
-            if let Some(parameter) = parameters.named(ident.text()) {
+            let qualifier = type_ref.qualifier();
+            // An operator's type parameters are its own, never qualified.
+            if let (None, Some(parameter)) = (&qualifier, parameters.named(ident.text())) {
                 return Some(hir::Type::Parameter(parameter.clone()));
             }
-            if let Some(scalar) = hir::Scalar::from_name(ident.text()) {
+            let name = namespaces.type_name(&ident, qualifier.as_ref(), errors)?;
+            if let Some(scalar) = namespaces.builtin_type(name) {
                 return Some(hir::Type::Scalar(scalar));
             }
             // A type whose declaration has errors is reported where it is
             // declared.
-            let at = trendy_syntax::span(ident.text_range());
-            if let Some((_, defined)) = namespaces.defined(ident.text(), at) {
+            if let Some((_, defined)) = namespaces.defined(name) {
                 return match defined {
                     Some(defined) => Some(hir::Type::Defined(Box::new(defined.clone()))),
                     None => namespaces
-                        .dummy(ident.text(), at)
+                        .dummy(name)
                         .map(|dummy| hir::Type::Dummy(Box::new(dummy.clone()))),
                 };
             }
-            errors.push(match namespaces.heading(ident.text(), at) {
-                Some((declared, _)) => errors::heading_as_type(&ident, declared),
-                None => errors::unknown_type(&ident, namespaces, parameters),
+            errors.push(match (namespaces.heading(name), &qualifier, name.unit) {
+                (Some((declared, _)), _, _) => errors::heading_as_type(&ident, declared),
+                (None, Some(qualifier), Some(unit)) => {
+                    errors::unknown_qualified(&ident, qualifier, unit, "type", namespaces)
+                }
+                (None, _, _) => errors::unknown_type(&ident, namespaces, parameters),
             });
             None
         }
@@ -445,9 +450,15 @@ pub(crate) fn resolve_heading_expr(
         }
         ast::HeadingExpr::Named(named) => {
             let ident = named.ident()?;
-            let at = trendy_syntax::span(ident.text_range());
-            let Some((_, attributes)) = namespaces.heading(ident.text(), at) else {
-                errors.push(errors::unknown_heading(&ident, namespaces));
+            let qualifier = named.qualifier();
+            let name = namespaces.type_name(&ident, qualifier.as_ref(), errors)?;
+            let Some((_, attributes)) = namespaces.heading(name) else {
+                errors.push(match (&qualifier, name.unit) {
+                    (Some(qualifier), Some(unit)) => {
+                        errors::unknown_qualified(&ident, qualifier, unit, "heading", namespaces)
+                    }
+                    _ => errors::unknown_heading(&ident, namespaces),
+                });
                 return None;
             };
             attributes.cloned()
@@ -637,9 +648,10 @@ pub(crate) fn tuple_selector(
     // `tuple celsius { degrees: 1e0 }`, for the type's selector.
     if let Some(ast::HeadingExpr::Named(named)) = tuple.heading()
         && let Some(ident) = named.ident()
-        && let Some((declared, _)) = checker
+        && let Some(name) = checker
             .namespaces()
-            .defined(ident.text(), trendy_syntax::span(ident.text_range()))
+            .type_name_written(&ident, named.qualifier().as_ref())
+        && let Some((declared, _)) = checker.namespaces().defined(name)
     {
         errors.push(errors::tuple_of_type(&ident, tuple, declared));
         return None;
