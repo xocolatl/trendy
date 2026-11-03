@@ -831,7 +831,7 @@ impl Namespaces {
     /// What `name` means in the namespace of types and headings: what its
     /// unit sees of its name, or, qualified, the declaration of the unit
     /// its qualifier names, which hides nothing.
-    fn seen_type(&self, name: TypeName) -> scope::Seen<(Kind, Span)> {
+    fn seen_type(&self, name: WrittenName) -> scope::Seen<(Kind, Span)> {
         let Some(unit) = name.unit else {
             return self.seen(name.name, name.at, Namespace::Type);
         };
@@ -853,7 +853,7 @@ impl Namespaces {
 
     /// What `name` means, if it is a declaration of `kind`'s: its unit, and
     /// where it is declared.
-    fn seen_type_as(&self, name: TypeName, kind: Kind) -> Option<(hir::FileId, Span)> {
+    fn seen_type_as(&self, name: WrittenName, kind: Kind) -> Option<(hir::FileId, Span)> {
         match self.seen_type(name).one()? {
             (unit, (found, span)) if found == kind => Some((unit, span)),
             _ => None,
@@ -863,17 +863,17 @@ impl Namespaces {
     /// The name `ident`, qualified by `qualifier` or not, as it is looked
     /// up, or `None` once its qualifier is reported as naming no unit its
     /// unit sees (see [`Namespaces::qualified_unit`]).
-    pub(crate) fn type_name<'t>(
+    pub(crate) fn written_name<'t>(
         &self,
         ident: &'t SyntaxToken,
         qualifier: Option<&ast::Qualifier>,
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<TypeName<'t>> {
+    ) -> Option<WrittenName<'t>> {
         let unit = match qualifier {
             Some(qualifier) => Some(self.qualified_unit(qualifier, errors)?),
             None => None,
         };
-        Some(TypeName {
+        Some(WrittenName {
             name: ident.text(),
             at: trendy_syntax::span(ident.text_range()),
             unit,
@@ -881,14 +881,14 @@ impl Namespaces {
     }
 
     /// The name `ident`, qualified by `qualifier` or not, as
-    /// [`Namespaces::type_name`] finds it, for a lookup that reports
-    /// nothing, as the name's qualifier is reported where its type is
+    /// [`Namespaces::written_name`] finds it, for a lookup that reports
+    /// nothing, as the name's qualifier is reported where what it names is
     /// resolved: `None` if the qualifier names no unit its unit sees.
-    pub(crate) fn type_name_written<'t>(
+    pub(crate) fn written_name_unreported<'t>(
         &self,
         ident: &'t SyntaxToken,
         qualifier: Option<&ast::Qualifier>,
-    ) -> Option<TypeName<'t>> {
+    ) -> Option<WrittenName<'t>> {
         let unit = match qualifier {
             Some(qualifier) => {
                 let viewer = self.viewer(qualifier.span());
@@ -901,7 +901,7 @@ impl Namespaces {
             }
             None => None,
         };
-        Some(TypeName {
+        Some(WrittenName {
             name: ident.text(),
             at: trendy_syntax::span(ident.text_range()),
             unit,
@@ -1109,7 +1109,7 @@ impl Namespaces {
 
     /// The heading `name` names: where it is declared, and its attributes,
     /// unless they have errors.
-    pub(crate) fn heading(&self, name: TypeName) -> Option<(Span, Option<&hir::Heading>)> {
+    pub(crate) fn heading(&self, name: WrittenName) -> Option<(Span, Option<&hir::Heading>)> {
         let (unit, span) = self.seen_type_as(name, Kind::Heading)?;
         Some((
             span,
@@ -1157,7 +1157,7 @@ impl Namespaces {
     /// it means the prelude's there, and otherwise qualified, as the unit
     /// there hides it by its own, or sees another unit's too.
     pub(crate) fn preludes_heading_written(&self, name: &str, at: Span) -> String {
-        if self.heading_named(TypeName::plain(name, at)) == Some(self.prelude_identity(name)) {
+        if self.heading_named(WrittenName::plain(name, at)) == Some(self.prelude_identity(name)) {
             name.to_string()
         } else {
             format!("{}::{name}", self.qualifier_for(self.units.prelude(), at))
@@ -1165,13 +1165,13 @@ impl Namespaces {
     }
 
     /// The identity of the heading `name` names.
-    pub(crate) fn heading_named(&self, name: TypeName) -> Option<String> {
+    pub(crate) fn heading_named(&self, name: WrittenName) -> Option<String> {
         let (unit, _) = self.seen_type_as(name, Kind::Heading)?;
         Some(self.type_identity(name.name, unit))
     }
 
     /// The identity of the program's own type `name` names.
-    pub(crate) fn type_named(&self, name: TypeName) -> Option<String> {
+    pub(crate) fn type_named(&self, name: WrittenName) -> Option<String> {
         let (unit, _) = self.seen_type_as(name, Kind::Defined)?;
         Some(self.type_identity(name.name, unit))
     }
@@ -1189,7 +1189,7 @@ impl Namespaces {
 
     /// The built-in type `name` names: the prelude's, plain, as no unit
     /// can declare one of its name, or qualified by the prelude.
-    pub(crate) fn builtin_type(&self, name: TypeName) -> Option<hir::Scalar> {
+    pub(crate) fn builtin_type(&self, name: WrittenName) -> Option<hir::Scalar> {
         if name.unit.is_some_and(|unit| unit != self.units.prelude()) {
             return None;
         }
@@ -1198,7 +1198,7 @@ impl Namespaces {
 
     /// The program's own type `name` names: where it is declared, and the
     /// type, unless its components have errors.
-    pub(crate) fn defined(&self, name: TypeName) -> Option<(Span, Option<&hir::Defined>)> {
+    pub(crate) fn defined(&self, name: WrittenName) -> Option<(Span, Option<&hir::Defined>)> {
         let (unit, span) = self.seen_type_as(name, Kind::Defined)?;
         Some((span, self.defined.get(&self.type_identity(name.name, unit))))
     }
@@ -1229,7 +1229,7 @@ impl Namespaces {
 
     /// The program's own union type `name` names, a dummy type, unless it
     /// isn't one, or its declaration has errors.
-    pub(crate) fn dummy(&self, name: TypeName) -> Option<&hir::Dummy> {
+    pub(crate) fn dummy(&self, name: WrittenName) -> Option<&hir::Dummy> {
         let (unit, _) = self.seen_type_as(name, Kind::Defined)?;
         self.dummies.get(&self.type_identity(name.name, unit))
     }
@@ -1317,20 +1317,20 @@ impl Namespaces {
     }
 }
 
-/// A name a unit writes in the namespace of types and headings: where, and,
+/// A name a unit writes, of a type, a heading or an operator: where, and,
 /// if it is qualified, the unit its qualifier names, as
-/// [`Namespaces::type_name`] finds it.
+/// [`Namespaces::written_name`] finds it.
 #[derive(Clone, Copy)]
-pub(crate) struct TypeName<'a> {
+pub(crate) struct WrittenName<'a> {
     pub(crate) name: &'a str,
     pub(crate) at: Span,
     pub(crate) unit: Option<hir::FileId>,
 }
 
-impl<'a> TypeName<'a> {
+impl<'a> WrittenName<'a> {
     /// `name`, written at `at` unqualified.
     pub(crate) fn plain(name: &'a str, at: Span) -> Self {
-        TypeName {
+        WrittenName {
             name,
             at,
             unit: None,
@@ -12443,6 +12443,56 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             "{:#?}",
             with_depths(collected).err()
         );
+    }
+
+    #[test]
+    fn an_operator_is_called_qualified_by_its_units_name() {
+        // A unit's own `count`, which hides the prelude's, calls it; a
+        // selector of one of two types of a name; and an update operator.
+        let tally = "interface\n\noperator note{n: integer};\n\nimplementation\n\noperator note{n: integer} [\n    call debug_value{v: n};\n];";
+        let main = "uses { lakes.depths, seas.depths, tally };\n\noperator count{r: any relation}: integer [ trendy.prelude::count{r: r} * 10 ];\n\nvar n := count{r: relation { { x: 1 }, { x: 2 } }};\nvar m := seas.depths::metres{m: 281};\n\noperator main{} [\n    call tally::note{n: n};\n];";
+        let units = |main: &str| {
+            analyze_units(&[
+                ("program", main),
+                ("lakes.depths", DEPTHS),
+                (
+                    "seas.depths",
+                    "interface\n\ntype metres { { m: integer } };",
+                ),
+                ("tally", tally),
+            ])
+        };
+        let program = units(main).unwrap();
+        let values: Vec<String> = program
+            .variables
+            .iter()
+            .map(|v| v.init.to_string())
+            .collect();
+        assert_eq!(values, ["20", "seas.depths::metres{m: 281}"]);
+        // A clash's help writes each operator qualified.
+        let errors = units("uses { lakes.depths, seas.depths };\n\nvar m := metres{m: 281};\n\noperator main{} [];").unwrap_err();
+        assert_eq!(errors[0].code, Code::NameClash);
+        assert!(
+            errors[0].help[0].starts_with(
+                "qualify it by the unit meant, `lakes.depths::metres{…}` or `seas.depths::metres{…}`"
+            ),
+            "{:#?}",
+            errors[0].help
+        );
+        // One the unit doesn't declare is fixed to one it misspells, in an
+        // expression or a `call`.
+        for (written, fixed) in [
+            (
+                "var n := trendy.prelude::cont{r: relation { { x: 1 } }};\n\noperator main{} [];",
+                "count",
+            ),
+            ("operator main{} [\n    call tally::nte{n: 1};\n];", "note"),
+        ] {
+            let errors = units(&format!("uses {{ tally }};\n\n{written}")).unwrap_err();
+            assert_eq!(errors.len(), 1, "{errors:#?}");
+            assert_eq!(errors[0].code, Code::UnknownName);
+            assert_eq!(errors[0].suggestions[0].edits[0].replacement, fixed);
+        }
     }
 
     #[test]

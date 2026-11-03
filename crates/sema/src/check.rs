@@ -808,7 +808,17 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let ident = call.callee()?.ident()?;
         let args = call.arguments()?;
-        self.call(&ident, Written::Arguments(&args), expr, expected, errors)
+        let name = self
+            .namespaces()
+            .written_name(&ident, call.qualifier().as_ref(), errors)?;
+        self.call(
+            &ident,
+            name,
+            Written::Arguments(&args),
+            expr,
+            expected,
+            errors,
+        )
     }
 
     /// A call of the operator `ident` names, written `expr` as a projection
@@ -831,7 +841,8 @@ impl<'a> Checker<'a> {
             self.positional_names(ident, list, errors);
             return None;
         }
-        self.call(ident, Written::Nothing(list), expr, expected, errors)
+        let name = crate::WrittenName::plain(ident.text(), trendy_syntax::span(ident.text_range()));
+        self.call(ident, name, Written::Nothing(list), expr, expected, errors)
     }
 
     /// The names in `list`, after the operator `ident` names, written as a
@@ -846,12 +857,14 @@ impl<'a> Checker<'a> {
         let operators = self.names.operators();
         let at = trendy_syntax::span(ident.text_range());
         // The one these arguments choose, if one is nearest.
-        let (signature, chosen) =
-            match operators.chosen(ident.text(), &argument_names(Written::Nothing(list)), at) {
-                Some(Chosen::One(signature)) => (signature, true),
-                Some(Chosen::Tied(tied)) => (tied[0], false),
-                None => unreachable!("a projected call is of an operator"),
-            };
+        let (signature, chosen) = match operators.chosen(
+            crate::WrittenName::plain(ident.text(), at),
+            &argument_names(Written::Nothing(list)),
+        ) {
+            Some(Chosen::One(signature)) => (signature, true),
+            Some(Chosen::Tied(tied)) => (tied[0], false),
+            None => unreachable!("a projected call is of an operator"),
+        };
         let names: Vec<ast::Name> = list.names().collect();
         let only_param = (chosen && signature.written.len() == 1 && names.len() == 1)
             .then(|| signature.written.keys().next())
@@ -895,14 +908,15 @@ impl<'a> Checker<'a> {
             .any(|value| matches!(self.ty(value), hir::Type::Array(_)))
     }
 
-    /// A call of the operator `ident` names, with `written` arguments, as
-    /// `expr`: a read-only operator's value, evaluated when compiling if
-    /// its arguments are known then. One whose
-    /// arguments are known only for each tuple at hand is evaluated once
-    /// it is, when a constant operand is folded.
+    /// A call of the operator `ident` names, written `called`, qualified or
+    /// not, with `written` arguments, as `expr`: a read-only operator's
+    /// value, evaluated when compiling if its arguments are known then.
+    /// One whose arguments are known only for each tuple at hand is
+    /// evaluated once it is, when a constant operand is folded.
     fn call(
         &mut self,
         ident: &SyntaxToken,
+        called: crate::WrittenName,
         written: Written,
         expr: &Expr,
         expected: Option<&Expected>,
@@ -913,7 +927,7 @@ impl<'a> Checker<'a> {
         let signature = match self
             .names
             .operators()
-            .chosen(name, &argument_names(written), span)
+            .chosen(called, &argument_names(written))
         {
             Some(Chosen::One(signature)) => signature.clone(),
             Some(Chosen::Tied(tied)) => {
@@ -922,7 +936,18 @@ impl<'a> Checker<'a> {
                 return None;
             }
             None => {
-                self.unknown_operator(ident, written, errors);
+                match (called.unit, expr) {
+                    (Some(unit), Expr::Call(call)) => errors.extend(call.qualifier().map(|q| {
+                        errors::unknown_qualified_operator(
+                            ident,
+                            &q,
+                            unit,
+                            self.names.namespaces(),
+                            self.names.operators(),
+                        )
+                    })),
+                    _ => self.unknown_operator(ident, written, errors),
+                }
                 return None;
             }
         };
@@ -997,7 +1022,7 @@ impl<'a> Checker<'a> {
         } else if let Some(dummy) = self
             .names
             .namespaces()
-            .dummy(crate::TypeName::plain(name, span))
+            .dummy(crate::WrittenName::plain(name, span))
         {
             // The names of the arguments, if each has one.
             let named = match written {

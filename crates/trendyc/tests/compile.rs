@@ -990,15 +990,16 @@ fn databases() {
 
 #[test]
 fn units() {
-    // The lakes shallower than 500 metres, given in centimetres, a
-    // representation whose conversions only `lakes.depths` sees, as the
-    // program's own `lake`, which hides that unit's.
+    // The deepest lake's name, by the program's own `deepest`, which calls
+    // the one it hides, and the lakes shallower than 500 metres, given in
+    // centimetres, a representation whose conversions only `lakes.depths`
+    // sees, as the program's own `lake`, which hides that unit's.
     let (code, stderr) = run_example("units");
     assert_eq!(
         (code, stderr.as_str()),
         (
             0,
-            "3\nrelation { name: text, native: text } { { name: \"Baikal\", native: \"Байкал\" } }\nrelation { name: text, shallow: boolean } { { name: \"Titicaca\", shallow: true } }\n"
+            "3\n\"Baikal\"\nrelation { name: text, shallow: boolean } { { name: \"Titicaca\", shallow: true } }\n"
         )
     );
 }

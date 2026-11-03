@@ -1599,6 +1599,12 @@ impl CallStmt {
         self.0.children().find_map(NameRef::cast)
     }
 
+    /// The unit's name and `::` before the operator's, if it is qualified.
+    #[must_use]
+    pub fn qualifier(&self) -> Option<Qualifier> {
+        self.0.children().find_map(Qualifier::cast)
+    }
+
     #[must_use]
     pub fn arguments(&self) -> Option<Arguments> {
         self.0.children().find_map(Arguments::cast)
@@ -1610,6 +1616,12 @@ impl CallExpr {
     #[must_use]
     pub fn callee(&self) -> Option<NameRef> {
         self.0.children().find_map(NameRef::cast)
+    }
+
+    /// The unit's name and `::` before the operator's, if it is qualified.
+    #[must_use]
+    pub fn qualifier(&self) -> Option<Qualifier> {
+        self.0.children().find_map(Qualifier::cast)
     }
 
     #[must_use]

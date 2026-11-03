@@ -506,6 +506,43 @@ impl Operators {
         self.seen(name, self.units.viewer(at))
     }
 
+    /// The operators `name` names, as a call writes it: those its unit
+    /// sees, or, qualified, those of the unit its qualifier names that it
+    /// sees, which hide nothing, each in the order they are defined.
+    fn called(&self, name: crate::WrittenName) -> Vec<&Signature> {
+        let viewer = self.units.viewer(name.at);
+        match name.unit {
+            None => self.seen(name.name, viewer).collect(),
+            Some(unit) => self
+                .by_name
+                .get(name.name)
+                .into_iter()
+                .flatten()
+                .map(|&id| self.get(id))
+                .filter(|s| s.unit == unit && self.units.sees(viewer, s.unit, s.section))
+                .collect(),
+        }
+    }
+
+    /// The names of the operators of `unit` that what is written at `at`
+    /// sees, for a misspelling of one a call qualifies by that unit.
+    pub(crate) fn names_in(&self, unit: hir::FileId, at: Span) -> Vec<&str> {
+        let viewer = self.units.viewer(at);
+        let mut names: Vec<&str> = self
+            .by_name
+            .iter()
+            .filter(|(_, ids)| {
+                ids.iter().any(|&id| {
+                    let s = self.get(id);
+                    s.unit == unit && self.units.sees(viewer, s.unit, s.section)
+                })
+            })
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     /// The prelude's `message{error: error}: text`, a specification of its
     /// union type `error`, which writes an error's message, if the prelude
     /// declares it so.
@@ -529,15 +566,19 @@ impl Operators {
         self.overloads(name, at).next().is_some()
     }
 
-    /// The operator named `name` that a call at `at` whose arguments are
-    /// named `args` calls, if the unit it is in sees one named so: the
-    /// only one, or the one whose parameters `args` names. Otherwise it is
-    /// the one they name most nearly, each argument it has no parameter
+    /// The operator `name` names that a call whose arguments are named
+    /// `args` calls, if there is one named so (see [`Operators::called`]):
+    /// the only one, or the one whose parameters `args` names. Otherwise it
+    /// is the one they name most nearly, each argument it has no parameter
     /// for, and each parameter they don't name, counting two, but an
     /// argument whose name is a misspelling of a parameter's they don't
     /// name, or that has no name, one, for both.
-    pub(crate) fn chosen(&self, name: &str, args: &ArgumentNames, at: Span) -> Option<Chosen<'_>> {
-        let overloads: Vec<&Signature> = self.overloads(name, at).collect();
+    pub(crate) fn chosen(
+        &self,
+        name: crate::WrittenName,
+        args: &ArgumentNames,
+    ) -> Option<Chosen<'_>> {
+        let overloads = self.called(name);
         if let [only] = overloads.as_slice() {
             return Some(Chosen::One(only));
         }

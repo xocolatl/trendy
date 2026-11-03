@@ -274,14 +274,19 @@ operator main{} [
   unit doesn't, means none of them, as nothing settles which by order. A
   unit that never writes it compiles, so a unit that gains a declaration
   breaks only the units that write its name, and none that declare it
-  too. A type or a heading so written is qualified by the unit meant, as
-  the help writes it. Operators of one name whose parameters' names
-  differ are overloads, and don't clash.
+  too. A name so written is qualified by the unit meant, as the help
+  writes it. Operators of one name whose parameters' names differ are
+  overloads, and don't clash.
 - **A qualified name is the declaration of the unit it names:**
   `lakes.depths::metres` is the type or the heading `metres` that
   `lakes.depths`'s interface declares, whatever else the unit writing it
-  sees of that name, and `trendy.prelude::transaction_collection` the
-  prelude's, though that unit declares one of its own. The qualifier is
+  sees of that name, `lakes.depths::deepest{lakes: l}` a call of its
+  operator `deepest`, `call tally::record{…};` of an update operator's,
+  and `seas.depths::metres{m: 281}` of a selector, and
+  `trendy.prelude::count{r: r}` the prelude's `count`, though the unit
+  writing it declares one of its own, which it hides there. Where a value
+  goes, a qualified name is a call, as no value is another unit's but one
+  an operator gives. The qualifier is
   a unit the section uses, by the name its `uses` gives it after `as`, if
   it gives one, or else by its own, or the prelude, which every unit
   sees. A unit's own names are never qualified, as they hide every other

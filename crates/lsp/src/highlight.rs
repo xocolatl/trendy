@@ -673,6 +673,19 @@ mod tests {
                 ("lake", Class::Type, false),
             ]
         );
+        // The unit's name's words, then the operator.
+        assert_eq!(
+            highlight("var n := trendy.prelude::count{r: r};"),
+            [
+                ("var", Class::Keyword, false),
+                ("n", Class::Variable, true),
+                ("trendy", Class::Unit, false),
+                ("prelude", Class::Unit, false),
+                ("count", Class::Operator, false),
+                ("r", Class::Attribute, false),
+                ("r", Class::Variable, false),
+            ]
+        );
     }
 
     #[test]

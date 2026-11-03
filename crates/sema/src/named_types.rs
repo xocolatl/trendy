@@ -416,7 +416,7 @@ fn supertypes(
             continue;
         };
         let qualifier = type_ref.qualifier();
-        let Some(written_name) = namespaces.type_name(&ident, qualifier.as_ref(), errors) else {
+        let Some(written_name) = namespaces.written_name(&ident, qualifier.as_ref(), errors) else {
             continue;
         };
         let written = ident.text();
@@ -1006,14 +1006,15 @@ fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<Contained> {
                 .and_then(|r| {
                     let ident = r.ident()?;
                     namespaces.heading_named(
-                        namespaces.type_name_written(&ident, r.qualifier().as_ref())?,
+                        namespaces.written_name_unreported(&ident, r.qualifier().as_ref())?,
                     )
                 })
                 .or_else(|| {
                     let r = TypeRef::cast(node.clone())?;
                     let ident = r.ident()?;
-                    namespaces
-                        .type_named(namespaces.type_name_written(&ident, r.qualifier().as_ref())?)
+                    namespaces.type_named(
+                        namespaces.written_name_unreported(&ident, r.qualifier().as_ref())?,
+                    )
                 })?;
             Some(Contained {
                 name,

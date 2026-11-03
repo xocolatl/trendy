@@ -513,7 +513,7 @@ pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> D
         .map(|_| Kind::Type)
         .or_else(|| {
             namespaces
-                .defined(crate::TypeName::plain(name, span))
+                .defined(crate::WrittenName::plain(name, span))
                 .map(|_| Kind::Defined)
         })
         .or_else(|| namespaces.variable(name, span).map(|_| Kind::Variable))
@@ -2801,7 +2801,10 @@ pub(crate) fn variable_in_read_only(
             let at = trendy_syntax::span(i.text_range());
             i.text() == op
                 && matches!(
-                    operators.chosen(op, &crate::check::argument_names(written), at),
+                    operators.chosen(
+                        crate::WrittenName::plain(op, at),
+                        &crate::check::argument_names(written),
+                    ),
                     Some(Chosen::One(chosen)) if chosen.id == operator.id
                 )
         })
@@ -8647,6 +8650,39 @@ pub(crate) fn unknown_qualified(
     )
 }
 
+/// `ident`, an operator `qualifier` says the unit `unit` declares, but
+/// which it declares in no section what is written there sees, with a fix
+/// to one it misspells.
+pub(crate) fn unknown_qualified_operator(
+    ident: &SyntaxToken,
+    qualifier: &ast::Qualifier,
+    unit: hir::FileId,
+    namespaces: &Namespaces,
+    operators: &Operators,
+) -> Diagnostic {
+    let name = ident.text();
+    let span = trendy_syntax::span(ident.text_range());
+    let written = qualifier.unit().map(|u| u.text()).unwrap_or_default();
+    let declaring = namespaces.units().name(unit);
+    let d = Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown operator `{written}::{name}`"),
+        span,
+        format!("not one `{declaring}` declares"),
+    )
+    .with_note(format!(
+        "`{declaring}`'s interface declares no operator `{name}`, nor a type of its name, whose selector it would be"
+    ))
+    .with_note(trendy_syntax::unit::QUALIFIED_RULE);
+    spelled_like(
+        d,
+        name,
+        span,
+        &operators.names_in(unit, span),
+        &format!("name one of the operators `{declaring}`'s interface declares"),
+    )
+}
+
 /// What a unit sees, for the notes of a clash.
 const SEEN: &str = "a name a unit writes means one declaration it sees: one of its own, which hides any other unit's, or else one of the prelude's interface, which every unit sees, or of the interface of a unit its section uses; a name more than one of those other units declares means none of them, as nothing settles which by order";
 
@@ -8759,7 +8795,15 @@ pub(crate) fn operator_clash(
     } else {
         format!("{name}{{{}}}", params.join(", "))
     };
-    Some(clash(&shown, span, &declared, &[]))
+    // Each called qualified by its unit, by the name the unit there uses
+    // it by.
+    let viewer = units.viewer(span);
+    let mut qualified: Vec<String> = tied
+        .iter()
+        .map(|s| format!("`{}::{name}{{…}}`", units.used_as(viewer, s.unit)))
+        .collect();
+    qualified.dedup();
+    Some(clash(&shown, span, &declared, &qualified))
 }
 
 /// The type, heading or operator `token` names, as `kind` says, which what

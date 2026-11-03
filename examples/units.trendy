@@ -11,6 +11,12 @@ uses { lakes.depths };
    that it hides qualified by that unit's name, `lakes.depths::lake`. */
 heading lake := { name: text, shallow: boolean };
 
+/* This unit's own `deepest`, which hides `lakes.depths`'s here too, and
+   calls it qualified: the name of the deepest of `lakes`. */
+operator deepest{lakes: relation lakes.depths::lake}: text [
+    value from (lakes.depths::deepest{lakes: lakes}){name}
+];
+
 operator main{} [
     call record{name: "Baikal", native: "Байкал", depth: 1642};
     call record{name: "Tanganyika", native: "Tanganyika", depth: 1470};
@@ -18,7 +24,7 @@ operator main{} [
     var lakes: relation lakes.depths::lake;
     call recorded{out lakes: lakes};
     call debug_value{v: count{r: lakes}};
-    call debug_value{v: (deepest{lakes: lakes}){name, native}};
+    call debug_value{v: deepest{lakes: lakes}};
     var marked := lakes extend { shallow := depth < metres{cm: 50000} };
     var shallow: relation lake := marked{name, shallow};
     call debug_value{v: shallow where shallow};

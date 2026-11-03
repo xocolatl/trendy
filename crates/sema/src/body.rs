@@ -708,12 +708,16 @@ impl Statements<'_, '_> {
         let ident = stmt.callee()?.ident()?;
         let name = ident.text();
         let span = trendy_syntax::span(ident.text_range());
+        let qualifier = stmt.qualifier();
+        let called = cx
+            .namespaces
+            .written_name(&ident, qualifier.as_ref(), errors)?;
         let args = stmt.arguments();
         let names = args
             .as_ref()
             .map(|args| argument_names(Written::Arguments(args)))
             .unwrap_or_default();
-        let signature = match cx.operators.chosen(name, &names, span) {
+        let signature = match cx.operators.chosen(called, &names) {
             Some(Chosen::One(signature)) => signature,
             Some(Chosen::Tied(tied)) => {
                 // Without arguments, a syntax error, which is reported.
@@ -728,6 +732,16 @@ impl Statements<'_, '_> {
                 return None;
             }
             None => {
+                if let (Some(unit), Some(qualifier)) = (called.unit, &qualifier) {
+                    errors.push(errors::unknown_qualified_operator(
+                        &ident,
+                        qualifier,
+                        unit,
+                        cx.namespaces,
+                        cx.operators,
+                    ));
+                    return None;
+                }
                 let what = if cx.operators.get(within).is_parameter(name) {
                     Some("a parameter")
                 } else if self.locals.find(name).is_some() {

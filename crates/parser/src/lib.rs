@@ -2085,7 +2085,8 @@ impl<'a> Parser<'a> {
             StatementStart::TransactionEnd
         } else if self.at_try() {
             StatementStart::Try
-        } else if found.kind == SyntaxKind::Ident && call_like {
+        } else if (found.kind == SyntaxKind::Ident && call_like) || self.qualifier_len(0).is_some()
+        {
             StatementStart::BareCall
         } else {
             return None;
@@ -3206,6 +3207,9 @@ impl<'a> Parser<'a> {
         if self.at_call_keyword() {
             self.any_case(SyntaxKind::CallKw);
         }
+        if let Some(len) = self.qualifier_len(0) {
+            self.qualifier(len);
+        }
         if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::NameRef);
             self.bump();
@@ -4014,10 +4018,15 @@ impl<'a> Parser<'a> {
             || self.binary_operator(n).is_some()
     }
 
-    /// `name{arguments}`, at [`Parser::at_call`]: a call of a read-only
-    /// operator. Arguments in parentheses are reported, with a fix.
-    fn call_expr(&mut self) {
+    /// `name{arguments}`, at [`Parser::at_call`], or a qualified name and
+    /// its arguments, of a qualifier of `qualified` tokens: a call of a
+    /// read-only operator. Arguments in parentheses are reported, with a
+    /// fix.
+    fn call_expr(&mut self, qualified: Option<usize>) {
         self.start_node(SyntaxKind::CallExpr);
+        if let Some(len) = qualified {
+            self.qualifier(len);
+        }
         self.start_node(SyntaxKind::NameRef);
         self.bump();
         self.builder.finish_node();
@@ -5782,8 +5791,12 @@ impl<'a> Parser<'a> {
                 found,
                 errors::boolean_spelling(found.text).expect("just checked"),
             ));
+        } else if let Some(len) = self.qualifier_len(0) {
+            // A qualified name, where a value goes, is an operator's, as no
+            // value is another unit's but one an operator gives.
+            self.call_expr(Some(len));
         } else if self.at_call() {
-            self.call_expr();
+            self.call_expr(None);
         } else if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::NameRef);
             self.bump();
@@ -9055,6 +9068,43 @@ var b := tuple { fail: fail }.fail;",
                 &[Code::QualifiedForm],
             ),
         ]);
+    }
+
+    #[test]
+    fn a_call_is_qualified_by_its_operators_units_name() {
+        // A read-only operator's, a selector's and an update operator's.
+        let source = "operator main{} [\n    var n := trendy.prelude::count{r: relation { { x: 1 } }};\n    var m := lakes.depths::metres{m: 281};\n    call tally::record{n: n};\n];";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let calls: Vec<(String, String)> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter_map(|node| {
+                let (qualifier, callee) =
+                    if let Some(call) = trendy_syntax::ast::CallExpr::cast(node.clone()) {
+                        (call.qualifier()?, call.callee()?)
+                    } else {
+                        let call = trendy_syntax::ast::CallStmt::cast(node)?;
+                        (call.qualifier()?, call.callee()?)
+                    };
+                Some((qualifier.unit()?.text(), callee.ident()?.text().to_string()))
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("trendy.prelude".to_string(), "count".to_string()),
+                ("lakes.depths".to_string(), "metres".to_string()),
+                ("tally".to_string(), "record".to_string()),
+            ]
+        );
+        // An update operator's without `call`, which a statement needs.
+        fixed_with(&[(
+            "operator main{} [ tally::record{n: 1}; ];",
+            "operator main{} [ call tally::record{n: 1}; ];",
+            &[Code::MissingCall][..],
+        )]);
     }
 
     fn fixed_with(cases: &[(&str, &str, &[Code])]) {

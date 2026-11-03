@@ -378,7 +378,7 @@ pub(crate) fn resolve(
             if let (None, Some(parameter)) = (&qualifier, parameters.named(ident.text())) {
                 return Some(hir::Type::Parameter(parameter.clone()));
             }
-            let name = namespaces.type_name(&ident, qualifier.as_ref(), errors)?;
+            let name = namespaces.written_name(&ident, qualifier.as_ref(), errors)?;
             if let Some(scalar) = namespaces.builtin_type(name) {
                 return Some(hir::Type::Scalar(scalar));
             }
@@ -451,7 +451,7 @@ pub(crate) fn resolve_heading_expr(
         ast::HeadingExpr::Named(named) => {
             let ident = named.ident()?;
             let qualifier = named.qualifier();
-            let name = namespaces.type_name(&ident, qualifier.as_ref(), errors)?;
+            let name = namespaces.written_name(&ident, qualifier.as_ref(), errors)?;
             let Some((_, attributes)) = namespaces.heading(name) else {
                 errors.push(match (&qualifier, name.unit) {
                     (Some(qualifier), Some(unit)) => {
@@ -650,7 +650,7 @@ pub(crate) fn tuple_selector(
         && let Some(ident) = named.ident()
         && let Some(name) = checker
             .namespaces()
-            .type_name_written(&ident, named.qualifier().as_ref())
+            .written_name_unreported(&ident, named.qualifier().as_ref())
         && let Some((declared, _)) = checker.namespaces().defined(name)
     {
         errors.push(errors::tuple_of_type(&ident, tuple, declared));
