@@ -19,7 +19,7 @@ use crate::narrowed::{self, Facts};
 use crate::operators::{ArgumentNames, Chosen, Operators, Param, Signature};
 use crate::ops::{self, Operator, Resolved};
 use crate::types::{self, Expected};
-use crate::{Namespace, Namespaces, errors};
+use crate::{Kind, Namespace, Namespaces, errors};
 
 /// What a name refers to.
 pub(crate) enum Lookup {
@@ -783,8 +783,15 @@ impl<'a> Checker<'a> {
         let call = if operator {
             list.names().next().is_none() || !self.names.has_value(name, at)
         } else {
+            // Another language's operator, or one of a unit this one could
+            // use, which its error names.
             let foreign = errors::elsewhere(name).is_some()
-                || errors::tutorial_d_tested(name, at, self.namespaces()).is_some();
+                || errors::tutorial_d_tested(name, at, self.namespaces()).is_some()
+                || !self
+                    .namespaces()
+                    .exporters(name, at, Kind::Operator)
+                    .0
+                    .is_empty();
             foreign && !self.names.has_value(name, at)
         };
         call.then_some((ident, list))
@@ -914,7 +921,7 @@ impl<'a> Checker<'a> {
                 return None;
             }
             None => {
-                self.unknown_operator(name, span, written, errors);
+                self.unknown_operator(ident, written, errors);
                 return None;
             }
         };
@@ -958,16 +965,17 @@ impl<'a> Checker<'a> {
         self.matched(expected, result, expr, errors)
     }
 
-    /// The error for a call of `name`, at `span`, with `written` arguments,
-    /// which no operator is named: a value's name, or an operator's
-    /// misspelled, or another language's.
+    /// The error for a call of the operator `ident` names, with `written`
+    /// arguments, which no operator is named: a value's name, one of a
+    /// unit the section could use, or an operator's misspelled, or another
+    /// language's.
     fn unknown_operator(
         &mut self,
-        name: &str,
-        span: Span,
+        ident: &SyntaxToken,
         written: Written,
         errors: &mut Vec<Diagnostic>,
     ) {
+        let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         if self.names.has_value(name, span) {
             errors.push(errors::not_an_operator(name, span, "a value"));
         } else if let Some(error) = errors::tutorial_d_test(name, span, written, self.namespaces())
@@ -992,6 +1000,10 @@ impl<'a> Checker<'a> {
                 namespaces,
                 named.as_ref(),
             ));
+        } else if let Some(error) =
+            errors::unused_unit(ident, Kind::Operator, self.names.namespaces())
+        {
+            errors.push(error);
         } else {
             let of_array = self.of_array(written);
             let operators = self.names.operators().names(span);

@@ -145,6 +145,24 @@ impl Units {
         rank(a).cmp(&rank(b))
     }
 
+    /// Whether `from` uses `to`, through any path of `uses`, in either
+    /// section.
+    pub(crate) fn reaches(&self, from: hir::FileId, to: hir::FileId) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![from];
+        while let Some(unit) = pending.pop() {
+            for used in self.units[unit.0].uses.values().flatten() {
+                if *used == to {
+                    return true;
+                }
+                if seen.insert(*used) {
+                    pending.push(*used);
+                }
+            }
+        }
+        false
+    }
+
     /// Whether `viewer`'s section uses `unit`.
     fn uses(&self, viewer: Viewer, unit: hir::FileId) -> bool {
         let uses = &self.units[viewer.unit.0].uses;
@@ -377,6 +395,28 @@ impl<T> Declared<T> {
             .iter()
             .filter(move |e| e.unit == prelude && e.unit != unit);
         own.chain(preludes).map(|e| (e.unit, &e.value))
+    }
+
+    /// The units whose interfaces declare `name`, which `viewer` doesn't
+    /// see, but whose `uses` its section could gain: none that uses the
+    /// viewer's unit, through any path, as no unit uses itself.
+    pub(crate) fn unseen_exporters(
+        &self,
+        name: &str,
+        viewer: Viewer,
+        units: &Units,
+    ) -> BTreeSet<hir::FileId> {
+        self.entries(name)
+            .iter()
+            .filter(|e| {
+                e.section == Section::Interface
+                    && e.unit != viewer.unit
+                    && e.unit != units.prelude()
+                    && !units.sees(viewer, e.unit, e.section)
+                    && !units.reaches(e.unit, viewer.unit)
+            })
+            .map(|e| e.unit)
+            .collect()
     }
 
     /// Each declaration named `name`, in any unit, with its unit.

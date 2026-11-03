@@ -200,7 +200,12 @@ operator main{} [
 - **It brings what the unit's interface declares:** its types, with their
   possible representations, its headings, its operators and its
   databases, each by its name, as the unit's own are. What the
-  implementation keeps, the program doesn't see.
+  implementation keeps, the program doesn't see. A type, a heading or an
+  operator the interface of a unit of the program declares, written where
+  it isn't seen, gets a fix that names the unit in that section's `uses`,
+  or, if several declare it, help naming them (A0003, A0015); a unit that
+  uses this one, through any path, isn't suggested, as no unit uses
+  itself.
 - **Nothing passes on:** what a unit uses is its own, so the units that
   use it see none of it, and use what they need themselves.
 - **The interface sees only its own `uses`,** as each unit that uses this

@@ -751,6 +751,22 @@ impl Namespaces {
         (unit != viewer.unit && unit != self.units.prelude()).then(|| self.units.name(unit))
     }
 
+    /// The names of the units whose interfaces declare `name` as a thing
+    /// of `kind`'s, a type, a heading or an operator, which what is written
+    /// at `at` doesn't see, but could use, by their names; and the section
+    /// it is written in, whose `uses` would gain one.
+    pub(crate) fn exporters(&self, name: &str, at: Span, kind: Kind) -> (Vec<&str>, ast::Section) {
+        let viewer = self.viewer(at);
+        let units = match kind {
+            Kind::Defined => self.types.unseen_exporters(name, viewer, &self.units),
+            Kind::Heading => self.headings.unseen_exporters(name, viewer, &self.units),
+            _ => self.operators.unseen_exporters(name, viewer, &self.units),
+        };
+        let mut names: Vec<&str> = units.into_iter().map(|u| self.units.name(u)).collect();
+        names.sort_unstable();
+        (names, viewer.section)
+    }
+
     /// Where the variable named `name` that what is written at `at` sees is
     /// declared.
     pub(crate) fn variable(&self, name: &str, at: Span) -> Option<Span> {
@@ -11653,6 +11669,102 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         assert_eq!(
             errors.iter().map(|e| e.code).collect::<Vec<_>>(),
             [Code::NameClash],
+            "{errors:#?}"
+        );
+    }
+
+    #[test]
+    fn a_name_of_a_unit_not_used_gets_its_uses() {
+        // The errors of `main`, with `units`, and `main` with each one's
+        // first fix in it.
+        let fixed = |main: &str, units: &[(&str, &str)]| {
+            let mut all = vec![("program", main)];
+            all.extend_from_slice(units);
+            let errors = analyze_units(&all).unwrap_err();
+            let mut edits: Vec<_> = errors
+                .iter()
+                .filter_map(|d| d.suggestions.first())
+                .flat_map(|s| s.edits.clone())
+                .filter(|e| e.span.end <= main.len())
+                .collect();
+            edits.sort_by_key(|e| std::cmp::Reverse(e.span.start));
+            edits.dedup();
+            let mut text = main.to_string();
+            for edit in edits {
+                text.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+            }
+            (errors, text)
+        };
+        // A type, a heading and an operator, each the interface of one unit
+        // declares: the fix uses it, before the first declaration.
+        let main = "/* Lakes. */\nvar n: metres;\n\noperator main{} [];";
+        let (errors, text) = fixed(main, &[("lakes.depths", DEPTHS)]);
+        assert_eq!(errors[0].message, "unknown type `metres`");
+        assert!(errors[0].notes[0].contains("`lakes.depths`"), "{errors:#?}");
+        assert_eq!(
+            text,
+            "uses { lakes.depths };\n\n/* Lakes. */\nvar n: metres;\n\noperator main{} [];"
+        );
+        let main = "uses { figures };\n\nvar l: relation lake;\nvar d := deepest{lakes: l};\n\noperator main{} [];";
+        let (errors, text) = fixed(
+            main,
+            &[
+                ("lakes.depths", DEPTHS),
+                ("figures", FIGURES_UNIT),
+                ("discs", DISCS_UNIT),
+            ],
+        );
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        assert_eq!(
+            text,
+            "uses { figures, lakes.depths };\n\nvar l: relation lake;\nvar d := deepest{lakes: l};\n\noperator main{} [];"
+        );
+        // A call without arguments, `f{}`, which no operator it sees has.
+        let rivers = "interface\n\noperator longest{}: text;\n\nimplementation\n\noperator longest{}: text [ \"Nile\" ];";
+        let (errors, text) = fixed(
+            "operator main{} [\n    call debug_value{v: longest{}};\n];",
+            &[("lakes.rivers", rivers)],
+        );
+        assert_eq!(
+            errors[0].message, "unknown operator `longest`",
+            "{errors:#?}"
+        );
+        assert_eq!(
+            text,
+            "uses { lakes.rivers };\n\noperator main{} [\n    call debug_value{v: longest{}};\n];"
+        );
+        // In the interface, its `uses`, after its header.
+        let main = "interface\n\noperator count_of{lakes: relation lake}: integer;\n\nimplementation\n\noperator count_of{lakes: relation lake}: integer [ count{r: lakes} ];\n\noperator main{} [];";
+        let (_, text) = fixed(main, &[("lakes.depths", DEPTHS)]);
+        assert!(
+            text.starts_with("interface\n\nuses { lakes.depths };\n\noperator count_of"),
+            "{text}"
+        );
+        // Of several units, help naming them.
+        let seas = "interface\n\ntype metres { { m: integer } };";
+        let (errors, text) = fixed(
+            "var n: metres;\n\noperator main{} [];",
+            &[("lakes.depths", DEPTHS), ("seas.depths", seas)],
+        );
+        assert!(errors[0].suggestions.is_empty(), "{errors:#?}");
+        assert!(
+            errors[0].notes[0].contains("`lakes.depths` and `seas.depths`"),
+            "{errors:#?}"
+        );
+        assert_eq!(text, "var n: metres;\n\noperator main{} [];");
+        // None that uses this unit, as no unit uses itself.
+        let (errors, _) = fixed(
+            "var n: metres;\n\noperator main{} [];",
+            &[(
+                "lakes.depths",
+                &DEPTHS.replace(
+                    "implementation\n\n",
+                    "implementation\n\nuses { program };\n\n",
+                ),
+            )],
+        );
+        assert!(
+            errors.iter().all(|e| e.suggestions.is_empty()),
             "{errors:#?}"
         );
     }

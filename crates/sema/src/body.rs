@@ -733,6 +733,10 @@ impl Statements<'_, '_> {
                 };
                 if let Some(what) = what {
                     errors.push(errors::not_an_operator(name, span, what));
+                } else if let Some(error) =
+                    errors::unused_unit(&ident, crate::Kind::Operator, cx.namespaces)
+                {
+                    errors.push(error);
                 } else {
                     let operators = cx.operators.names(span);
                     errors.push(errors::unknown_operator(

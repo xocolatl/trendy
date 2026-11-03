@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use trendy_diag::{Code, Diagnostic, Edit, Span, closest, edit_distance, misspelling};
 use trendy_hir as hir;
 use trendy_syntax::ast::{
-    self, AstNode, AttributeValue, Expr, Key, Mode, NaryExpr, OrderList, ProjectExpr, SourceFile,
-    TypeExpr, VarDecl,
+    self, AstNode, AttributeValue, Expr, Key, Mode, NaryExpr, OrderList, ProjectExpr, Section,
+    SourceFile, TypeExpr, VarDecl,
 };
 use trendy_syntax::{SyntaxKind, SyntaxToken};
 
@@ -365,6 +365,7 @@ pub(crate) fn unknown_type(
     let span = trendy_syntax::span(ident.text_range());
     if let Some(d) = name_clash(name, span, Namespace::Type, namespaces)
         .or_else(|| implementation_uses(ident, namespaces))
+        .or_else(|| unused_unit(ident, Kind::Defined, namespaces))
     {
         return d;
     }
@@ -508,6 +509,7 @@ pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> D
     let span = trendy_syntax::span(ident.text_range());
     if let Some(d) = name_clash(name, span, Namespace::Type, namespaces)
         .or_else(|| implementation_uses(ident, namespaces))
+        .or_else(|| unused_unit(ident, Kind::Heading, namespaces))
     {
         return d;
     }
@@ -8379,6 +8381,50 @@ pub(crate) fn operator_clash(
         format!("{name}{{{}}}", params.join(", "))
     };
     Some(clash(&shown, span, here, &declared))
+}
+
+/// The type, heading or operator `token` names, as `kind` says, which what
+/// is written there doesn't see, but which the interface of each of some
+/// units of the program declares: with a fix that names the only one in
+/// the `uses` of the section it is written in, or, for several, help.
+pub(crate) fn unused_unit(
+    token: &SyntaxToken,
+    kind: Kind,
+    namespaces: &Namespaces,
+) -> Option<Diagnostic> {
+    let name = token.text();
+    let span = trendy_syntax::span(token.text_range());
+    let (units, section) = namespaces.exporters(name, span, kind);
+    let first = *units.first()?;
+    let (code, what) = match kind {
+        Kind::Defined => (Code::UnknownType, "type"),
+        Kind::Heading => (Code::UnknownType, "heading"),
+        _ => (Code::UnknownName, "operator"),
+    };
+    let listed: Vec<String> = units.iter().map(|u| format!("`{u}`")).collect();
+    let unused = match section {
+        Section::Interface => "which the interface's `uses` doesn't name",
+        Section::Implementation => "which this unit doesn't use",
+    };
+    let d = Diagnostic::error(
+        code,
+        format!("unknown {what} `{name}`"),
+        span,
+        "not seen here",
+    )
+    .with_note(format!(
+        "`{name}` is declared by {}, {unused}",
+        trendy_diag::conjoin(&listed)
+    ))
+    .with_note(SEEN);
+    if units.len() > 1 {
+        return Some(d.with_help(format!("use the unit that declares the `{name}` meant")));
+    }
+    let file = token.parent_ancestors().find_map(SourceFile::cast)?;
+    Some(match sections::uses_added(&file, section, first) {
+        Some(edit) => d.with_suggestion(format!("use `{first}`"), vec![edit]),
+        None => d.with_help(format!("use `{first}`")),
+    })
 }
 
 /// The type or heading `ident` names, in an interface, which the interface

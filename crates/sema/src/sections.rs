@@ -179,27 +179,45 @@ pub(crate) fn entry_removal(file: &SourceFile, uses: &ast::UsesDecl, name: &ast:
     }
 }
 
-/// The edits that move the unit named `unit`, of `file`, from its
-/// implementation's `uses` to its interface's: its interface's `uses`
-/// names it, after its other units, or, if it has none, a new one after
-/// the interface's header does, and the implementation's no longer.
-pub(crate) fn into_interface_uses(file: &SourceFile, unit: &str) -> Vec<Edit> {
-    let mut edits = Vec::new();
-    let interface = file.uses().find(|u| u.section() == Section::Interface);
-    if let Some(last) = interface.as_ref().and_then(|u| u.units().last()) {
-        edits.push(Edit {
+/// The edit that names the unit `unit` in the `uses` of `file`'s
+/// `section`: after its other units, or, if it has none, in a new one at
+/// the section's start, after its header, or before the first declaration
+/// of an implementation without one; none for an interface without one,
+/// which has nothing written in it.
+pub(crate) fn uses_added(file: &SourceFile, section: Section, unit: &str) -> Option<Edit> {
+    let uses = file.uses().find(|u| u.section() == section);
+    if let Some(last) = uses.as_ref().and_then(|u| u.units().last()) {
+        return Some(Edit {
             span: Span::empty(usize::from(last.syntax().text_range().end())),
             replacement: format!(", {unit}"),
         });
-    } else {
-        let Some(header) = file.headers().find(|h| h.section() == Section::Interface) else {
-            return Vec::new();
-        };
-        edits.push(Edit {
-            span: Span::empty(next_start(file, header.syntax())),
-            replacement: format!("uses {{ {unit} }};\n\n"),
-        });
     }
+    let added = format!("uses {{ {unit} }};\n\n");
+    let at = match file.headers().find(|h| h.section() == section) {
+        Some(header) => next_start(file, header.syntax()),
+        None if section == Section::Interface => return None,
+        // An implementation without a header is what comes before the
+        // first header, or the whole file.
+        None => file
+            .syntax()
+            .children()
+            .take_while(|node| node.kind() != SyntaxKind::SectionHeader)
+            .find(|node| Item::cast(node.clone()).is_some())
+            .map_or_else(|| file.span().start, |node| attached_start(&node)),
+    };
+    Some(Edit {
+        span: Span::empty(at),
+        replacement: added,
+    })
+}
+
+/// The edits that move the unit named `unit`, of `file`, from its
+/// implementation's `uses` to its interface's (see [`uses_added`]).
+pub(crate) fn into_interface_uses(file: &SourceFile, unit: &str) -> Vec<Edit> {
+    let Some(added) = uses_added(file, Section::Interface, unit) else {
+        return Vec::new();
+    };
+    let mut edits = vec![added];
     for uses in file
         .uses()
         .filter(|u| u.section() == Section::Implementation)
