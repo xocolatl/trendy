@@ -44,8 +44,14 @@ pub(crate) struct Signature {
     /// The definition, for the program's own: where its parameter and
     /// result types are written, for the labels of mismatches.
     pub(crate) decl: Option<ast::Operator>,
+    /// The declaration in its unit's interface of the definition `decl`,
+    /// if the interface declares it: the heading its callers see.
+    pub(crate) declared: Option<ast::Operator>,
     /// The built-in it is, for the prelude's.
     pub(crate) builtin: Option<hir::Builtin>,
+    /// Where a built-in's declaration, which isn't an operator's, writes
+    /// its name.
+    pub(crate) builtin_name: Option<Span>,
     /// The file it is in. The prelude's declarations are labeled, but no
     /// fix changes them, as the prelude is part of the compiler.
     pub(crate) source: Source,
@@ -190,17 +196,28 @@ impl Signature {
             .map(String::as_str)
     }
 
-    /// Where parameter `name`'s type is written.
+    /// Where parameter `name`'s type is written, as its callers see it.
     pub(crate) fn param_origin(&self, name: &str) -> Origin {
-        match self.param_decl(name).and_then(|a| a.type_expr()) {
+        match self.param_seen(name).and_then(|a| a.type_expr()) {
             Some(written) if self.source.is_compilers() => Origin::Library(written),
             Some(written) => Origin::Type(written),
             None => Origin::Builtin,
         }
     }
 
-    /// Where parameter `name` is written, for the program's own: one made
-    /// from a type's declaration has a representation's components.
+    /// Where parameter `name` is written, as its callers see it: in the
+    /// heading its unit's interface declares, if it does, as the callers
+    /// in other units see nothing else.
+    pub(crate) fn param_seen(&self, name: &str) -> Option<ast::AttributeType> {
+        match &self.declared {
+            Some(declared) => declared.params()?.attributes().find(|a| a.is_named(name)),
+            None => self.param_decl(name),
+        }
+    }
+
+    /// Where parameter `name` is written, for the program's own, as its
+    /// body sees it: one made from a type's declaration has a
+    /// representation's components.
     pub(crate) fn param_decl(&self, name: &str) -> Option<ast::AttributeType> {
         let params = match &self.from_type {
             Some(from) => from.parameters()?.components()?,
@@ -262,11 +279,14 @@ impl Signature {
         }
     }
 
-    /// Where the operator's name is written in its definition, for the
-    /// program's own: a constraint's `constraint`, and a representation's
-    /// selector, if it isn't the stored one's, or conversion, its `to` or
-    /// `from`.
+    /// Where the operator's name is written in its definition, or a
+    /// built-in's declaration: a constraint's `constraint`, and a
+    /// representation's selector, if it isn't the stored one's, or
+    /// conversion, its `to` or `from`.
     pub(crate) fn defined(&self) -> Option<Span> {
+        if self.builtin_name.is_some() {
+            return self.builtin_name;
+        }
         let conversion = |r: &ast::Possrep, d: ast::Direction| {
             r.conversions()
                 .find(|c| c.direction() == Some(d))
@@ -314,6 +334,8 @@ pub(crate) struct Operators {
     by_name: HashMap<String, Vec<hir::OperatorId>>,
     /// Each type of the program's own's selectors, by its identity.
     selectors: HashMap<String, Vec<hir::OperatorId>>,
+    /// The prelude's union type `error`, which `message` writes values of.
+    error: hir::Dummy,
 }
 
 /// A call's arguments, as they choose which operator of its name it
@@ -338,8 +360,8 @@ pub(crate) enum Chosen<'a> {
 impl Operators {
     /// The operators of `list`, by id, each named in the order they are
     /// defined, but constraints and conversions, which no call can name,
-    /// in the program of `units`.
-    fn new(list: Vec<Signature>, units: scope::Units) -> Self {
+    /// in the program of `units`, whose union type of errors is `error`.
+    fn new(list: Vec<Signature>, units: scope::Units, error: hir::Dummy) -> Self {
         let mut by_name: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
         let mut selectors: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
         // A version is called through its specification, and a duplicate
@@ -364,6 +386,7 @@ impl Operators {
             units,
             by_name,
             selectors,
+            error,
         }
     }
 
@@ -385,9 +408,9 @@ impl Operators {
     /// What the operator `id` is called in the program, of `namespaces`: a
     /// selector as its type is, a type's constraint or conversion as it is
     /// named after its type already, and another operator as its family
-    /// is, by its name, or, if another family or selector of its name and
-    /// parameters' names is another unit's, none of them the prelude's,
-    /// qualified by its specification's unit's name.
+    /// is, by its name, or, if another family, built-in or selector of its
+    /// name and parameters' names is another unit's, the prelude's among
+    /// them, qualified by its specification's unit's name.
     pub(crate) fn identity(&self, id: hir::OperatorId, namespaces: &Namespaces) -> String {
         let signature = self.get(id);
         match &signature.from_type {
@@ -399,7 +422,9 @@ impl Operators {
         let named = |s: &&Signature| {
             s.name == family.name
                 && s.written.keys().eq(family.written.keys())
-                && (s.decl.is_some() || s.from_type.as_ref().is_some_and(|f| f.selects().is_some()))
+                && (s.decl.is_some()
+                    || s.builtin.is_some()
+                    || s.from_type.as_ref().is_some_and(|f| f.selects().is_some()))
         };
         let families: BTreeSet<hir::OperatorId> = self
             .list
@@ -407,10 +432,7 @@ impl Operators {
             .filter(named)
             .map(|s| self.family_of(s.id))
             .collect();
-        let prelude = families
-            .iter()
-            .any(|&f| self.get(f).source == Source::Prelude);
-        let ambiguous = families.len() > 1 && !prelude;
+        let ambiguous = families.len() > 1;
         namespaces
             .units()
             .identity(&family.name, family.unit, ambiguous)
@@ -454,9 +476,12 @@ impl Operators {
 
     /// The operators named `name` that `viewer` sees: its own unit's, then
     /// the prelude's, then the used units', by their names, as they are in
-    /// no order, each unit's in the order they are defined.
+    /// no order, each unit's in the order they are defined. Its own unit's
+    /// hide another unit's of the same parameters' names, so that a unit
+    /// never qualifies its own: each is the head of a family, which is
+    /// another's when another unit's is.
     fn seen(&self, name: &str, viewer: scope::Viewer) -> impl Iterator<Item = &Signature> {
-        let mut seen: Vec<&Signature> = self
+        let visible: Vec<&Signature> = self
             .by_name
             .get(name)
             .into_iter()
@@ -464,6 +489,13 @@ impl Operators {
             .map(|&id| self.get(id))
             .filter(|s| self.units.sees(viewer, s.unit, s.section))
             .collect();
+        let hidden = |s: &Signature| {
+            s.unit != viewer.unit
+                && visible
+                    .iter()
+                    .any(|own| own.unit == viewer.unit && own.written.keys().eq(s.written.keys()))
+        };
+        let mut seen: Vec<&Signature> = visible.iter().copied().filter(|s| !hidden(s)).collect();
         seen.sort_by(|a, b| self.units.seen_order(viewer, a.unit, b.unit));
         seen.into_iter()
     }
@@ -486,7 +518,7 @@ impl Operators {
             let error = s.params.get("error").map(|p| &p.ty);
             s.source == Source::Prelude
                 && s.written.keys().eq(["error"])
-                && matches!(error, Some(hir::Type::Dummy(d)) if d.name == "error")
+                && matches!(error, Some(hir::Type::Dummy(d)) if **d == self.error)
                 && s.result == Some(hir::Type::Scalar(hir::Scalar::Text))
                 && s.decl.as_ref().is_some_and(|d| d.body().is_none())
         })
@@ -615,15 +647,52 @@ impl Operators {
 }
 
 impl Signature {
+    /// The signature of a read-only operator a type's declaration makes,
+    /// `from`, whose id is `id`, named `name`, in `unit`, checked as
+    /// `source`, with `params` and a value of `result`, valid if the parts
+    /// of the declaration it is made from are.
+    fn of_type(
+        from: FromType,
+        id: hir::OperatorId,
+        name: String,
+        unit: hir::FileId,
+        source: Source,
+        (params, result): (BTreeMap<String, hir::Parameter>, hir::Type),
+        valid: bool,
+    ) -> Self {
+        Signature {
+            id,
+            name,
+            unit,
+            section: ast::section_of(from.decl.syntax()),
+            types: Vec::new(),
+            written: written(&params),
+            params,
+            unresolved: BTreeSet::new(),
+            read_only: true,
+            result: Some(result),
+            decl: None,
+            declared: None,
+            builtin: None,
+            builtin_name: None,
+            source,
+            from_type: Some(from),
+            family: Family::Own,
+            versions: Vec::new(),
+            valid,
+        }
+    }
+
     /// The signature of `builtin`, whose id is `id`, with the type
     /// parameters, parameters and result its declaration has, which are the
     /// compiler's, of the types of the `library` they name, declared in the
     /// section `section` of `unit`, a unit that comes with the compiler,
-    /// checked as `source`. Its declaration isn't an operator's, so it
-    /// points at none (see [`Signature::param_origin`]).
+    /// checked as `source`, which writes its name at `at`. Its declaration
+    /// isn't an operator's, so its parameters' types point at none (see
+    /// [`Signature::param_origin`]).
     pub(crate) fn builtin(
         id: hir::OperatorId,
-        builtin: hir::Builtin,
+        (builtin, at): (hir::Builtin, Span),
         library: &hir::Library,
         unit: hir::FileId,
         section: Section,
@@ -643,7 +712,9 @@ impl Signature {
             read_only: result.is_some(),
             result,
             decl: None,
+            declared: None,
             builtin: Some(builtin),
+            builtin_name: Some(at),
             source,
             from_type: None,
             family: Family::Own,
@@ -709,14 +780,17 @@ pub(crate) fn signatures(
         }
     }
     families(&mut list, namespaces, errors);
-    Operators::new(list, namespaces.units().clone())
+    Operators::new(
+        list,
+        namespaces.units().clone(),
+        (*namespaces.library().error).clone(),
+    )
 }
 
 /// The operators in `list` written in trendy, each by its place in it, in
 /// sets of one name and the same parameters' names, each a family, of the
-/// units of `units`: those of one unit, those of the prelude's, which
-/// every unit sees, with those of the units' of their name, and each
-/// version of another unit's that its unit sees with it (see
+/// units of `units`: those of one unit, and each version of another unit's
+/// that its unit sees with it, the prelude's among them (see
 /// [`version_of`]). An operator of another unit's name and parameters'
 /// names, no version of it, is in no set with it, and where a unit that
 /// sees both calls them, they clash. A built-in's duplicate is in none, as
@@ -753,11 +827,7 @@ fn sets(list: &[Signature], units: &scope::Units) -> Vec<Vec<usize>> {
         for (k, &a) in members.iter().enumerate() {
             for &b in &members[k + 1..] {
                 let (x, y) = (&list[a], &list[b]);
-                let one = x.unit == y.unit
-                    || x.source == Source::Prelude
-                    || y.source == Source::Prelude
-                    || version_of(x, y, units)
-                    || version_of(y, x, units);
+                let one = x.unit == y.unit || version_of(x, y, units) || version_of(y, x, units);
                 if one {
                     let (ra, rb) = (find(&mut first, a), find(&mut first, b));
                     first[ra.max(rb)] = ra.min(rb);
@@ -1015,6 +1085,8 @@ fn paired(list: &mut [Signature], members: &[usize], errors: &mut Vec<Diagnostic
         if let Some(definition) = definition {
             list[declaration].family = Family::Declaration(list[definition].id);
             list[definition].section = Section::Interface;
+            let declared = list[declaration].decl.clone();
+            list[definition].declared = declared;
             kept.retain(|&m| m != declaration);
         }
     }
@@ -1264,7 +1336,9 @@ fn operator(
         read_only: result_written.is_some(),
         result,
         decl: Some(op),
+        declared: None,
         builtin: None,
+        builtin_name: None,
         source,
         from_type: None,
         family: if duplicate {
@@ -1314,33 +1388,18 @@ fn type_operators(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces)
     }
     let mut signatures = Vec::new();
     let stored = namespaces.stored(decl);
+    let unit = namespaces.unit_at(trendy_syntax::span(ident.text_range()));
     // A read-only operator the type's declaration makes, `made`, whose
     // value is of `result`, valid if its declaration's parts are.
-    let made =
-        |id, name, params: BTreeMap<String, hir::Parameter>, result, made, valid| Signature {
-            id,
-            name,
-            unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
-            section: ast::section_of(decl.syntax()),
-            types: Vec::new(),
-            written: self::written(&params),
-            params,
-            unresolved: BTreeSet::new(),
-            read_only: true,
-            result: Some(result),
-            decl: None,
-            builtin: None,
-            source,
-            from_type: Some(FromType {
-                defined: defined.clone(),
-                decl: decl.clone(),
-                stored: stored.clone(),
-                made,
-            }),
-            family: Family::Own,
-            versions: Vec::new(),
-            valid,
+    let made = |id, name, params, result, made, valid| {
+        let from = FromType {
+            defined: defined.clone(),
+            decl: decl.clone(),
+            stored: stored.clone(),
+            made,
         };
+        Signature::of_type(from, id, name, unit, source, (params, result), valid)
+    };
     let boolean = || hir::Type::Scalar(hir::Scalar::Boolean);
     let params = component_parameters(&defined.components);
     for (i, (constraint, written)) in defined
@@ -1436,29 +1495,23 @@ fn from_type(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> V
     let selects = namespaces.selects(&ident);
     let stored = namespaces.stored_possrep(decl);
     let unit = namespaces.unit_at(trendy_syntax::span(ident.text_range()));
-    let made = |made: Made, params: BTreeMap<String, hir::Parameter>, result, valid| Signature {
-        id: hir::OperatorId(0),
-        name: name.to_string(),
-        unit,
-        section: ast::section_of(decl.syntax()),
-        types: Vec::new(),
-        written: written(&params),
-        params,
-        unresolved: BTreeSet::new(),
-        read_only: true,
-        result: Some(result),
-        decl: None,
-        builtin: None,
-        source,
-        from_type: Some(FromType {
+    let made = |made: Made, params, result, valid| {
+        let from = FromType {
             defined: defined.clone(),
             decl: decl.clone(),
             stored: stored.as_ref().map(|p| p.written().clone()),
             made,
-        }),
-        valid,
-        family: Family::Own,
-        versions: Vec::new(),
+        };
+        let id = hir::OperatorId(0);
+        Signature::of_type(
+            from,
+            id,
+            name.to_string(),
+            unit,
+            source,
+            (params, result),
+            valid,
+        )
     };
     let mut signatures = Vec::new();
     if let (true, Some(stored)) = (selects, stored.clone()) {

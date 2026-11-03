@@ -888,12 +888,16 @@ means a declaration it sees, one of its own, one of the prelude's
 interface, which every unit sees, or one of the interface of a unit its
 section uses, the interface's `uses` for the interface, and both
 sections' for the implementation (`scope::Viewer`, `Units::sees`); what
-a unit uses never reaches the units that use it. So two units can each declare a name, and
-a duplicate is one in a unit's scope, or of the prelude's
-(`Namespaces::declared_before`). A name more than one of the units seen
+a unit uses never reaches the units that use it. So two units can each
+declare a name, and a duplicate is one in a unit's scope
+(`Namespaces::declared_before`), or of a built-in type, whose names are
+no unit's to declare. A unit's own declaration of a name hides every
+other unit's it sees, the prelude's among them, so that a unit never
+qualifies its own names; a name more than one of the other units seen
 declares is a clash where it is written: it means none of them
 (`scope::Candidates::resolved`, merging the tables of a namespace, types
-with headings and variables with databases), and the error for a name
+with headings and variables with databases; for operators, of one name
+and parameters' names, `Operators::seen`), and the error for a name
 that refers to nothing reports it instead (A0073), as the error for
 operators the arguments' names tie between does for those of one name
 and parameters' names. For a type, a heading or an operator that refers
@@ -905,20 +909,24 @@ identity (`Namespaces::declared_type`), not by what its unit sees. An
 operator is seen by other units in the section it is declared in, the
 interface for the definition of one the interface declares
 (`Signature::section`). Operators of one name and parameters' names are
-one family (`operators::sets`) when they are one unit's, or one is the
-prelude's, or one is a version of the other's, which its unit's
-implementation sees (`operators::version_of`), so a unit's versions of
-another unit's specification are dispatched from every unit, and A0063
-holds over the program; each is called in the HIR as its family is
-(`Operators::identity`), qualified only if another family or a selector
-of its name and parameters' names is another unit's. A specification and its versions
-are one family only where every unit sees it: the prelude's, with each
-unit's versions of it, and otherwise each unit's own. Each declaration has
+one family (`operators::sets`) when they are one unit's, or one is a
+version of the other's, which its unit's implementation sees
+(`operators::version_of`), the prelude's among them, so a unit's
+versions of another unit's specification are dispatched from every
+unit, and A0063 holds over the program; each is called in the HIR as its
+family is (`Operators::identity`), qualified only if another family, a
+built-in or a selector of its name and parameters' names is another
+unit's. A definition the interface declares labels its callers'
+mismatches at that declaration, which they see (`Signature::declared`,
+`param_seen`), and its body's at its own heading. Each declaration has
 one name in the HIR, its identity: its name, if one unit of the program
 declares it in its namespace (an operator, with its parameters' names),
 and otherwise its name qualified by its unit's, `lakes::metres`, in every
-unit that declares it, main's included. The prelude's names are always
-plain, as no unit can declare one, of either of its sections. Since every name in the HIR is one
+unit that declares it, main's and the prelude's included: the compiler
+finds the prelude's declarations it needs by their identities
+(`Namespaces::prelude_identity`), and gives the union type `error` to
+the HIR with `code_point` (`hir::Library`), whatever a unit declares of
+their names. Since every name in the HIR is one
 declaration's, lowering and the runtime need no scopes. Sema's tables are
 keyed by identity, each entry with its unit, and a written name is looked
 up with where it is written, whose unit is the one that sees it

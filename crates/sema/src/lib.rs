@@ -527,8 +527,6 @@ fn entry(
 pub(crate) enum Kind {
     Operator,
     Builtin,
-    /// An operator the prelude defines in trendy.
-    Prelude,
     Variable,
     /// A database, which is a variable.
     Database,
@@ -547,7 +545,7 @@ pub(crate) enum Kind {
 impl Kind {
     pub(crate) fn describe(self) -> &'static str {
         match self {
-            Kind::Operator | Kind::Prelude => "an operator",
+            Kind::Operator => "an operator",
             Kind::Builtin => "a built-in operator",
             Kind::Variable => "a variable",
             Kind::Database => "a database",
@@ -919,7 +917,7 @@ impl Namespaces {
             .declaring(name)
             .map(|(u, _)| u)
             .chain(self.databases.declaring(name).map(|(u, _)| u));
-        let ambiguous = scope::ambiguous(declaring, &self.units);
+        let ambiguous = scope::ambiguous(declaring);
         self.units.identity(name, unit, ambiguous)
     }
 
@@ -958,10 +956,7 @@ impl Namespaces {
     /// What the constraint named `name`, declared in `unit`, is called in
     /// the program.
     pub(crate) fn constraint_identity(&self, name: &str, unit: hir::FileId) -> String {
-        let ambiguous = scope::ambiguous(
-            self.constraints.declaring(name).map(|(u, _)| u),
-            &self.units,
-        );
+        let ambiguous = scope::ambiguous(self.constraints.declaring(name).map(|(u, _)| u));
         self.units.identity(name, unit, ambiguous)
     }
 
@@ -997,8 +992,22 @@ impl Namespaces {
             .declaring(name)
             .map(|(u, _)| u)
             .chain(self.headings.declaring(name).map(|(u, _)| u));
-        let ambiguous = scope::ambiguous(declaring, &self.units);
+        let ambiguous = scope::ambiguous(declaring);
         self.units.identity(name, unit, ambiguous)
+    }
+
+    /// What the type or heading the prelude declares as `name` is called in
+    /// the program: the compiler's code finds the prelude's own so, though
+    /// another unit declares one of its name.
+    pub(crate) fn prelude_identity(&self, name: &str) -> String {
+        self.type_identity(name, self.units.prelude())
+    }
+
+    /// Whether `name`, written at `at`, means the prelude's heading of
+    /// that name, as a fix that writes it needs, unless the unit there
+    /// has one of its own, which hides it, or sees another unit's too.
+    pub(crate) fn is_preludes_heading(&self, name: &str, at: Span) -> bool {
+        self.heading_named(name, at) == Some(self.prelude_identity(name))
     }
 
     /// The identity of the heading named `name` that what is written at
@@ -1130,16 +1139,13 @@ impl Namespaces {
         self.is_first_in(&self.variables, ident)
     }
 
-    /// The first declaration in `unit`, or else the prelude, of `name` in
-    /// the namespace a declaration of `kind`'s is in, whose duplicate a
-    /// declaration of `unit`'s of that name is: what kind of thing it is,
-    /// and where it is declared.
+    /// The first declaration in `unit` of `name` in the namespace a
+    /// declaration of `kind`'s is in, or else the built-in type of that
+    /// name, whose duplicate a declaration of `unit`'s of that name is:
+    /// what kind of thing it is, and where it is declared.
     fn declared_before(&self, name: &str, unit: hir::FileId, kind: Kind) -> Option<(Kind, Span)> {
         let here = |table: &scope::Declared<Span>, kind: Kind| {
-            table
-                .each_own_or_prelude(name, unit, &self.units)
-                .next()
-                .map(|(_, &span)| (kind, span))
+            table.each_in(name, unit).next().map(|&span| (kind, span))
         };
         match kind {
             Kind::Variable | Kind::Database => here(&self.variables, Kind::Variable)
@@ -1172,14 +1178,7 @@ fn collect_names(
     for (source, item) in files.items() {
         let prelude = source == Source::Prelude;
         let (kind, name, params) = match item {
-            Item::Operator(ref op) => {
-                let kind = if prelude {
-                    Kind::Prelude
-                } else {
-                    Kind::Operator
-                };
-                (kind, op.name(), Some(op.params()))
-            }
+            Item::Operator(ref op) => (Kind::Operator, op.name(), Some(op.params())),
             Item::Builtin(ref decl) if source.is_compilers() => {
                 (Kind::Builtin, decl.name(), Some(decl.params()))
             }
@@ -1212,9 +1211,9 @@ fn collect_names(
             let params = param_names(params.as_ref());
             let first = namespaces
                 .operators
-                .each_own_or_prelude(name, unit, &namespaces.units)
-                .find(|(_, d)| d.params == params)
-                .map(|(_, d)| (d.kind, d.span));
+                .each_in(name, unit)
+                .find(|d| d.params == params)
+                .map(|d| (d.kind, d.span));
             match first {
                 // A built-in has no versions, so this is never called
                 // (`operators::signatures`).
@@ -1235,9 +1234,10 @@ fn collect_names(
             }
             continue;
         }
-        // A duplicate of a declaration of its unit's, or of the
-        // prelude's, whose names are always plain: one of another unit's of that
-        // name is a clash only where a unit that sees both writes it.
+        // A duplicate of a declaration of its unit's: one of another unit's
+        // of that name, the prelude's among them, is hidden by it, or
+        // clashes with another unit's where a unit that sees both writes
+        // it.
         if let Some(first) = namespaces.declared_before(name, unit, kind) {
             errors.push(errors::duplicate_name(name, (kind, span), first));
             continue;
@@ -1271,11 +1271,12 @@ pub(crate) fn param_names(params: Option<&ast::Heading>) -> BTreeSet<String> {
 }
 
 /// Record each type's selector, an operator named after it, with its
-/// components as its parameters, in `namespaces`: no other operator can
-/// have a type's name, so one that does is reported. The program's own
-/// give way to the selector, as a duplicate does to the first definition,
-/// and a type with a prelude operator's name, reported at the type, has
-/// no selector.
+/// components as its parameters, in `namespaces`: no other operator of its
+/// unit can have a type's name, so one that does is reported, and gives
+/// way to the selector, as a duplicate does to the first definition.
+/// Another unit's operator of its name, the prelude's among them, is
+/// hidden by it where it is seen, or overloaded, as any operator of
+/// another unit's is.
 fn selectors(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagnostic>) {
     for decl in files.types() {
         let Some(ident) = decl.name().and_then(|n| n.ident()) else {
@@ -1287,20 +1288,13 @@ fn selectors(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagno
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         let unit = namespaces.unit_at(span);
         let section = ast::section_of(decl.syntax());
-        let others: Vec<(Kind, Span)> = namespaces
+        let others: Vec<Span> = namespaces
             .operators
-            .each_own_or_prelude(name, unit, &namespaces.units)
-            .map(|(_, other)| (other.kind, other.span))
+            .each_in(name, unit)
+            .map(|other| other.span)
             .collect();
-        if let Some(&(kind, at)) = others
-            .iter()
-            .find(|(kind, _)| matches!(kind, Kind::Builtin | Kind::Prelude))
-        {
-            errors.push(errors::selector_name(name, span, kind, at));
-            continue;
-        }
-        for &(kind, at) in &others {
-            errors.push(errors::selector_name(name, span, kind, at));
+        for &at in &others {
+            errors.push(errors::selector_name(name, span, at));
         }
         namespaces.operators.remove_in(name, unit);
         // A selector for each possible representation.
@@ -1607,28 +1601,16 @@ mod tests {
         )
         .unwrap();
         // Not two of one name with the same parameters' names, in any
-        // order, nor the prelude's.
-        for (source, message) in [
-            (
-                "operator a{x: integer, y: integer} [];\noperator a{y: text, x: text} [];",
-                "`a` is defined more than once with parameters named `x` and `y`",
-            ),
-            (
-                "operator count{r: any relation}: integer [ 0 ];",
-                "`count` is defined more than once with parameters named `r`",
-            ),
-        ] {
-            let errors = errors(&format!("{source}{MAIN}"));
-            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
-            assert_eq!(errors[0].code, Code::DuplicateName, "{source}");
-            assert_eq!(errors[0].message, message);
-        }
-        // A call chooses the built-in, not its duplicate, which is never
-        // called.
-        let errors = errors(
-            "operator count{r: any relation}: integer [ 0 ];\noperator main{} [ call debug_value{v: count{r: relation { { x: 1 } }}}; ];",
-        );
+        // order.
+        let errors = errors(&format!(
+            "operator a{{x: integer, y: integer}} [];\noperator a{{y: text, x: text}} [];{MAIN}"
+        ));
         assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::DuplicateName);
+        assert_eq!(
+            errors[0].message,
+            "`a` is defined more than once with parameters named `x` and `y`"
+        );
         // `main` is the one without parameters.
         analyze_str("operator main{x: integer} [];\noperator main{} [];").unwrap();
     }
@@ -4081,15 +4063,9 @@ operator main{{}} [ var lines: array text; {main} ];"
             "var any := 1;\nvar types := any;\noperator main{} [ call debug_value{v: types}; ];",
         )
         .unwrap();
-        // A built-in's name and parameters' names are taken, though not
-        // its name with others.
-        let source = "operator debug_value{v: integer} [];\noperator main{} [];";
-        let errors = errors(source);
-        assert_eq!(errors[0].code, Code::DuplicateName);
-        assert_eq!(
-            in_prelude(source, errors[0].secondary[0].span),
-            "debug_value"
-        );
+        // A built-in's name, with its parameters' names or others, can be
+        // a program's, which hides it, or overloads it.
+        analyze_str("operator debug_value{v: integer} [];\noperator main{} [];").unwrap();
         analyze_str("operator debug_value{} [];\noperator main{} [];").unwrap();
     }
 
@@ -8272,12 +8248,91 @@ operator main{{}} [ var lines: array text; {main} ];"
         assert_eq!(errors[0].code, Code::TypeMismatch);
         assert_eq!(in_prelude(&source, errors[0].secondary[0].span), "boolean");
         assert_eq!(errors[0].suggestions.len(), 1, "{errors:#?}");
-        // Their names with their parameters' names and types are taken, as
-        // the program's own operators' are.
-        let source = "operator some{r: any relation, of: boolean per r}: boolean [ false ];\noperator main{} [];";
-        let taken = self::errors(source);
-        assert_eq!(taken[0].code, Code::DuplicateName);
-        assert_eq!(in_prelude(source, taken[0].secondary[0].span), "some");
+    }
+
+    #[test]
+    fn a_units_own_names_hide_the_preludes() {
+        // An operator of a prelude operator's name and parameters' names,
+        // built in or written in trendy, is the unit's own, which its
+        // calls call, and each is named by its unit in the program.
+        let units = |main: &str| {
+            analyze_units(&[
+                ("program", main),
+                (
+                    "tally",
+                    "interface\n\noperator tallied{r: any relation}: integer;\n\nimplementation\n\noperator tallied{r: any relation}: integer [ count{r: r} ];",
+                ),
+            ])
+        };
+        let program = units("uses { tally };\n\noperator count{r: any relation}: integer [ 0 ];\noperator some{r: any relation, of: boolean per r}: boolean [ true ];\nvar r := relation { { x: 1 }, { x: 2 } };\nvar mine := count{r: r};\nvar theirs := tallied{r: r};\nvar any := some{r: r, of: x > 5};\n\noperator main{} [];").unwrap();
+        let values: Vec<String> = program
+            .variables
+            .iter()
+            .map(|v| v.init.to_string())
+            .collect();
+        assert_eq!(values[1..], ["0", "2", "true"]);
+        let names: BTreeSet<&str> = program
+            .operators
+            .iter()
+            .map(|o| o.name.as_str())
+            .filter(|n| n.ends_with("count") || n.ends_with("some"))
+            .collect();
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "program::count",
+                "program::some",
+                "trendy.prelude::count",
+                "trendy.prelude::some"
+            ])
+        );
+        // A type of a prelude operator's name, whose selector overloads it.
+        let program = units("type count { { n: integer } };\nvar c := count{n: 1};\nvar n := count{r: relation { { x: 1 } }};\n\noperator main{} [];").unwrap();
+        let values: Vec<String> = program
+            .variables
+            .iter()
+            .map(|v| v.init.to_string())
+            .collect();
+        assert_eq!(values, ["count{n: 1}", "1"]);
+        // A type of a prelude type's name, which the prelude's operators
+        // still take and give.
+        let program = units("type code_point { { n: integer } };\nvar mine := code_point{n: 1};\nvar theirs := to_code_points{from: \"a\"}[1].value;\n\noperator main{} [];").unwrap();
+        assert_eq!(program.variables[0].ty.to_string(), "program::code_point");
+        assert_eq!(program.variables[1].init.to_string(), "97");
+        // The prelude's union type `error` and its heading
+        // `transaction_collection`, which the language's failures and
+        // transactions are of, whatever a unit declares of their names.
+        let shadowing = "type error { { code: integer } };\nheading transaction_collection := { n: integer };\nvar e := error{code: 1};\nvar m := message{error: failure{message: \"no\"}};\n";
+        let program = units(&format!("{shadowing}operator main{{}} [];")).unwrap();
+        assert_eq!(program.variables[0].ty.to_string(), "program::error");
+        assert_eq!(program.variables[1].init.to_string(), "\"no\"");
+        assert_eq!(program.library.error.name, "trendy.prelude::error");
+        let failing = units(&format!(
+            "{shadowing}operator main{{}} [\n    var c: relation {{ error: integer }};\n    transaction collecting d [\n        fail failure{{message: \"no\"}};\n    ];\n];"
+        ))
+        .unwrap_err();
+        assert_eq!(failing.len(), 1, "{failing:#?}");
+        assert_eq!(failing[0].code, Code::UnknownName);
+        // Its fix would declare `d` of the unit's own heading, so there is
+        // help instead.
+        assert!(failing[0].suggestions.is_empty(), "{failing:#?}");
+        // Another unit's and the prelude's, both other units', clash where
+        // the name is written.
+        let errors = analyze_units(&[
+            ("program", "uses { tally };\n\nvar n := count{r: relation { { x: 1 } }};\n\noperator main{} [];"),
+            ("tally", "interface\n\noperator count{r: any relation}: integer;\n\nimplementation\n\noperator count{r: any relation}: integer [ 0 ];"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::NameClash],
+            "{errors:#?}"
+        );
+        assert_eq!(
+            errors[0].message,
+            "`count{r}` is declared by the prelude, which every unit sees, and by `tally`, which this unit uses"
+        );
+        assert_eq!(errors[0].secondary.len(), 2, "{errors:#?}");
     }
 
     #[test]
@@ -11663,16 +11718,12 @@ type position { { latitude: approximate, longitude: approximate } };
             fix(&source),
             format!("{celsius}var t := celsius{{degrees: 1e0}};{MAIN}")
         );
-        // Its name is its selector's: another operator can't have it, which
-        // then gives way, nor can a type have a prelude operator's.
+        // Its name is its selector's: another operator of its unit can't
+        // have it, which then gives way.
         let source = format!(
             "{celsius}operator celsius{{f: approximate}}: celsius [ celsius{{degrees: f}} ];{MAIN}"
         );
         assert_eq!(codes(&source), [Code::SelectorName]);
-        assert_eq!(
-            codes(&format!("type count {{ {{ n: integer }} }};{MAIN}")),
-            [Code::SelectorName]
-        );
         // Defined once, and not as a heading.
         assert_eq!(
             codes(&format!(
@@ -12243,18 +12294,22 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         };
         assert_eq!(messages(&reordered), messages(&errors));
         // An operator of a name and parameters' names it sees, but no
-        // version of it, is the unit's own, and clashes where it is called.
-        let errors = analyze_units(&[
+        // version of it, is the unit's own, which hides the other there,
+        // and each is named by its unit in the program.
+        let program = analyze_units(&[
             ("program", "uses { figures };\n\noperator area{f: integer}: approximate [ 0e0 ];\nvar a := area{f: 1};\n\noperator main{} [];"),
             ("figures", FIGURES_UNIT),
             ("discs", DISCS_UNIT),
         ])
-        .unwrap_err();
-        assert_eq!(
-            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
-            [Code::NameClash],
-            "{errors:#?}"
-        );
+        .unwrap();
+        assert_eq!(program.variables[0].init.to_string(), "0e0");
+        let areas: BTreeSet<&str> = program
+            .operators
+            .iter()
+            .filter(|o| o.name.ends_with("area"))
+            .map(|o| o.name.as_str())
+            .collect();
+        assert_eq!(areas, BTreeSet::from(["figures::area", "program::area"]));
     }
 
     #[test]
@@ -12417,15 +12472,10 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
                 .collect::<Vec<_>>()
         };
         assert_eq!(at(&reordered[0]), at(&errors[0]));
-        // The unit's own and a used unit's.
-        let errors = units("uses { seas.depths };\n\ntype metres { { m: integer } };\nvar m := metres{m: 1};\n\noperator main{} [];").unwrap_err();
-        assert_eq!(
-            errors
-                .iter()
-                .map(|e| e.message.as_str())
-                .collect::<Vec<_>>(),
-            ["`metres` is declared by this unit and by `seas.depths`, which it uses"]
-        );
+        // The unit's own hides a used unit's, as a unit never qualifies
+        // its own names.
+        let program = units("uses { seas.depths };\n\ntype metres { { m: integer, deep: boolean } };\nvar m := metres{m: 1, deep: false};\nvar n: metres := m;\n\noperator main{} [];").unwrap();
+        assert_eq!(program.variables[1].ty.to_string(), "program::metres");
         // Operators of one name and the same parameters' names clash;
         // those of others are overloads.
         let errors = units("uses { lakes.depths, seas.depths };\n\noperator main{} [ call debug_value{v: deepest{lakes: relation { { name: \"Tana\" } }}}; ];").unwrap_err();

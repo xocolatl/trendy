@@ -2289,7 +2289,7 @@ impl<'a> FunctionBuilder<'a> {
     /// relation of them, and its descriptor's address. Their types are in
     /// the table the entry gives the runtime ([`Lowering::failures`]).
     fn errors(&mut self, cx: &mut Lowering) -> Errors {
-        let ty = hir::LanguageError::relation();
+        let ty = self.program.library.errors_type();
         let given = self.slot(lir::Layout::Struct(vec![
             cx.layout(&ty),
             lir::Layout::Address,
@@ -6490,9 +6490,13 @@ mod tests {
     }
 
     /// The library's types as sema gives them: `code_point`, of its
-    /// stored components alone.
+    /// stored components alone, and `error`.
     fn library() -> hir::Library {
         hir::Library {
+            error: Box::new(hir::Dummy {
+                name: hir::Library::ERROR.to_string(),
+                supertypes: Vec::new(),
+            }),
             code_point: Box::new(hir::Defined {
                 name: hir::Library::CODE_POINT.to_string(),
                 components: hir::Library::code_point_components(),
@@ -6537,7 +6541,7 @@ mod tests {
             types: Vec::new(),
             params: [(
                 "error".to_string(),
-                hir::Parameter::constant(hir::LanguageError::union()),
+                hir::Parameter::constant(library().error_type()),
             )]
             .into(),
             kind: hir::OperatorKind::ReadOnly {

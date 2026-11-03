@@ -2300,8 +2300,7 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let error = self.expr(written, None, errors)?;
         // The prelude declares it, or that is reported.
-        let dummy = self.namespaces().dummy_named("error")?;
-        let ty = hir::Type::Dummy(Box::new(dummy.clone()));
+        let ty = self.namespaces().library().error_type();
         let found = self.ty(&error);
         if !found.is_subtype_of(&ty) {
             errors.push(errors::not_an_error(written, &found, keyword, signal));

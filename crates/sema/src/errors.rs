@@ -71,30 +71,17 @@ pub(crate) fn duplicate_name(name: &str, this: (Kind, Span), first: (Kind, Span)
 }
 
 /// The type `name`, declared at `declared`, whose name is that of an
-/// operator of kind `kind`, defined at `operator`: a type's name is its
-/// selector's, which no other operator can have. The error is the
-/// operator's, unless it is the prelude's.
-pub(crate) fn selector_name(name: &str, declared: Span, kind: Kind, operator: Span) -> Diagnostic {
-    let d = match kind {
-        Kind::Builtin | Kind::Prelude => Diagnostic::error(
-            Code::SelectorName,
-            format!(
-                "type `{name}` has the name of {} in the prelude",
-                kind.describe()
-            ),
-            declared,
-            "its selector would have the prelude operator's name",
-        )
-        .with_secondary(operator, format!("the prelude defines `{name}` here")),
-        _ => Diagnostic::error(
-            Code::SelectorName,
-            format!("operator `{name}` has the name of a type"),
-            operator,
-            "the type's selector has this name",
-        )
-        .with_secondary(declared, format!("the type `{name}` is declared here")),
-    };
-    d.with_note(format!(
+/// operator its unit defines at `operator`: a type's name is its
+/// selector's, which no other operator of its unit can have.
+pub(crate) fn selector_name(name: &str, declared: Span, operator: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::SelectorName,
+        format!("operator `{name}` has the name of a type"),
+        operator,
+        "the type's selector has this name",
+    )
+    .with_secondary(declared, format!("the type `{name}` is declared here"))
+    .with_note(format!(
         "a type's selector has its name: `{name}{{…}}` selects a value of the type from its components, so no other operator can have the name"
     ))
     .with_help("rename the operator or the type")
@@ -3365,30 +3352,36 @@ pub(crate) fn main_errors(
     given: &hir::Parameter,
     namespaces: &Namespaces,
 ) -> Option<Diagnostic> {
-    let error = namespaces.dummy_named("error")?;
-    let expected = hir::Type::Relation(hir::transaction_collection(hir::Type::Dummy(Box::new(
-        error.clone(),
-    ))));
+    let expected = hir::Type::Relation(hir::transaction_collection(
+        namespaces.library().error_type(),
+    ));
     if given.ty != expected {
         let written = param.type_expr()?;
-        return Some(
-            Diagnostic::error(
-                Code::MainSignature,
-                format!(
-                    "`main` gives its errors as a `relation transaction_collection`, not `{}`",
-                    given.ty
-                ),
-                written.span(),
-                format!("this is `{}`", given.ty),
-            )
-            .with_note(MAIN_PARAMETERS)
-            .with_suggestion(
-                "make it a `relation transaction_collection`",
-                vec![Edit {
-                    span: written.span(),
-                    replacement: "relation transaction_collection".to_string(),
-                }],
+        let d = Diagnostic::error(
+            Code::MainSignature,
+            format!(
+                "`main` gives its errors as a `relation transaction_collection`, not `{}`",
+                given.ty
             ),
+            written.span(),
+            format!("this is `{}`", given.ty),
+        )
+        .with_note(MAIN_PARAMETERS);
+        let collection = hir::Library::TRANSACTION_COLLECTION;
+        return Some(
+            if namespaces.is_preludes_heading(collection, written.span()) {
+                d.with_suggestion(
+                    "make it a `relation transaction_collection`",
+                    vec![Edit {
+                        span: written.span(),
+                        replacement: "relation transaction_collection".to_string(),
+                    }],
+                )
+            } else {
+                d.with_help(
+                    "make it a `relation` of the prelude's heading `transaction_collection`",
+                )
+            },
         );
     }
     if given.mode == hir::Mode::Out {
@@ -4368,27 +4361,35 @@ pub(crate) fn loop_in_read_only(name: &str, stmt: &trendy_syntax::ast::Statement
 
 /// The name `name`, at `span`, after the `collecting` of the transaction
 /// `stmt`, of no variable: one is declared before the transaction, which
-/// the fix does, of the one type a transaction's collection has.
+/// the fix does, of the one type a transaction's collection has, if its
+/// heading's name means the prelude's there.
 pub(crate) fn undeclared_collecting(
     name: &str,
     span: Span,
     stmt: &trendy_syntax::ast::TransactionStmt,
+    namespaces: &Namespaces,
 ) -> Diagnostic {
     let declaration = format!("var {name}: relation transaction_collection;");
-    Diagnostic::error(
+    let d = Diagnostic::error(
         Code::UnknownName,
         format!("unknown variable `{name}`"),
         span,
         "the transaction adds its errors to it",
     )
-    .with_note(COLLECTION)
-    .with_suggestion(
-        format!("declare it before the transaction: `{declaration}`"),
-        vec![Edit {
-            span: Span::empty(stmt.span().start),
-            replacement: format!("{declaration}\n{}", indentation(stmt.syntax())),
-        }],
-    )
+    .with_note(COLLECTION);
+    if namespaces.is_preludes_heading(hir::Library::TRANSACTION_COLLECTION, span) {
+        d.with_suggestion(
+            format!("declare it before the transaction: `{declaration}`"),
+            vec![Edit {
+                span: Span::empty(stmt.span().start),
+                replacement: format!("{declaration}\n{}", indentation(stmt.syntax())),
+            }],
+        )
+    } else {
+        d.with_help(
+            "declare it before the transaction, a `relation` of the prelude's heading `transaction_collection`",
+        )
+    }
 }
 
 /// The variable `name`, at `span`, of type `ty`, which a transaction's
@@ -8247,7 +8248,7 @@ pub(crate) fn argument_mode(
     let d = Diagnostic::error(Code::ArgumentMode, message, span, label)
         .with_note(format!("the parameters are {}", signature.text()))
         .with_note(MODE_RULE);
-    let d = match signature.param_decl(name) {
+    let d = match signature.param_seen(name) {
         Some(decl) => d.with_secondary(decl.span(), "the parameter"),
         None => d,
     };
@@ -8530,7 +8531,7 @@ pub(crate) fn versions_in_units(
 }
 
 /// What a unit sees, for the notes of a clash.
-const SEEN: &str = "a name a unit writes means one declaration it sees: one of its own, one of the prelude's interface, or one of the interface of a unit its section uses; a name more than one of those units declares means none of them, as nothing settles which by order";
+const SEEN: &str = "a name a unit writes means one declaration it sees: one of its own, which hides any other unit's, or else one of the prelude's interface, which every unit sees, or of the interface of a unit its section uses; a name more than one of those other units declares means none of them, as nothing settles which by order";
 
 /// The name `name`, written at `span`, if what is written there sees it
 /// in `namespace` declared by more than one unit: a clash.
@@ -8541,27 +8542,34 @@ pub(crate) fn name_clash(
     namespaces: &Namespaces,
 ) -> Option<Diagnostic> {
     let declared = namespaces.clash(name, span, namespace)?;
-    let here = namespaces.units().name(namespaces.unit_at(span));
-    Some(clash(name, span, here, &declared))
+    Some(clash(name, span, &declared))
 }
 
-/// The name `name`, written at `span`, in the unit `here`, which each of
-/// `declared`, with its unit's name, declares, more than one unit.
-pub(crate) fn clash(name: &str, span: Span, here: &str, declared: &[(&str, Span)]) -> Diagnostic {
-    let others: Vec<String> = declared
+/// The name `name`, written at `span`, which each of `declared`, with its
+/// unit's name, declares, more than one of the other units the unit there
+/// sees: the prelude, or units it uses.
+pub(crate) fn clash(name: &str, span: Span, declared: &[(&str, Span)]) -> Diagnostic {
+    let prelude = trendy_prelude::PRELUDE.name;
+    let used: Vec<String> = declared
         .iter()
-        .filter(|(unit, _)| *unit != here)
+        .filter(|(unit, _)| *unit != prelude)
         .map(|(unit, _)| format!("`{unit}`"))
         .collect();
-    let message = if declared.iter().any(|(unit, _)| *unit == here) {
-        format!(
-            "`{name}` is declared by this unit and by {}, which it uses",
-            trendy_diag::conjoin(&others)
+    let (message, help) = if declared.iter().any(|(unit, _)| *unit == prelude) {
+        (
+            format!(
+                "`{name}` is declared by the prelude, which every unit sees, and by {}, which this unit uses",
+                trendy_diag::conjoin(&used)
+            ),
+            "rename the used unit's declaration, or don't use that unit here",
         )
     } else {
-        format!(
-            "`{name}` is declared by {}, which this unit uses",
-            trendy_diag::conjoin(&others)
+        (
+            format!(
+                "`{name}` is declared by {}, which this unit uses",
+                trendy_diag::conjoin(&used)
+            ),
+            "rename one of the declarations, or use only one of the units here",
         )
     };
     let mut d = Diagnostic::error(
@@ -8573,8 +8581,7 @@ pub(crate) fn clash(name: &str, span: Span, here: &str, declared: &[(&str, Span)
     for (unit, at) in declared {
         d = d.with_secondary(*at, format!("`{name}` in `{unit}`"));
     }
-    d.with_note(SEEN)
-        .with_help("rename one of the declarations, or use only one of the units here")
+    d.with_note(SEEN).with_help(help)
 }
 
 /// The operator `name`, of each of `tied`, more than one unit's, all with
@@ -8595,7 +8602,6 @@ pub(crate) fn operator_clash(
         return None;
     }
     let span = written.span();
-    let here = units.name(units.at(span));
     let declared: Vec<(&str, Span)> = tied
         .iter()
         .filter_map(|s| Some((units.name(s.unit), s.defined()?)))
@@ -8609,7 +8615,7 @@ pub(crate) fn operator_clash(
     } else {
         format!("{name}{{{}}}", params.join(", "))
     };
-    Some(clash(&shown, span, here, &declared))
+    Some(clash(&shown, span, &declared))
 }
 
 /// The type, heading or operator `token` names, as `kind` says, which what

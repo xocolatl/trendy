@@ -196,12 +196,15 @@ operator main{} [
   declared in an interface without one is an error (A0059).
 - **A unit's names are its own.** A name written in a unit is one it
   declares, or one of the prelude's interface, which every unit sees, so
-  two units can each declare one of a name, which is no duplicate (A0001). The
-  program calls a declaration by its name if one unit declares it, and
-  otherwise by its name qualified by its unit's, `lakes::metres`, in
-  every unit that declares it, `main`'s too, as errors, failures and
-  `debug_value` write it. The prelude's names are always plain, as no
-  unit can declare one, though only its interface is seen.
+  two units can each declare one of a name, which is no duplicate
+  (A0001), and a unit's own hides the prelude's, or a used unit's, of its
+  name, so that a unit never qualifies its own names. The program calls a
+  declaration by its name if one unit declares it, and otherwise by its
+  name qualified by its unit's, `lakes::metres`, in every unit that
+  declares it, `main`'s and the prelude's too, as errors, failures and
+  `debug_value` write it: a program's own `count{r: …}` is
+  `main::count`, and the prelude's `trendy.prelude::count`. Only the
+  built-in types' names are no unit's to declare.
 - **A unit has one interface and one implementation, the interface
   first** (P0053). `interface` and `implementation` are contextual
   keywords, names elsewhere.
@@ -267,10 +270,11 @@ operator main{} [
   implementation uses is fixed by using that unit in the interface
   instead.
 - **A clash is where the name is written** (A0073): a name more than one
-  of the units it sees declares, the unit's own among them, means none of
-  them, as nothing settles which by order. A unit that never writes it
-  compiles, so a unit that gains a declaration breaks only the units that
-  write its name. Operators of one name whose parameters' names differ are
+  of the other units it sees declares, the prelude among them, and the
+  unit doesn't, means none of them, as nothing settles which by order. A
+  unit that never writes it compiles, so a unit that gains a declaration
+  breaks only the units that write its name, and none that declare it
+  too. Operators of one name whose parameters' names differ are
   overloads, and don't clash.
 - **A unit gives versions of the specifications it sees,** another
   unit's among them, for its own subtypes or another's, in its
@@ -1032,11 +1036,12 @@ declarations as if the program had written them, so a program can extend
 what it declares as it can its own, with a subtype of a union type or a
 version of a specification (see [Union types](#union-types)), and an
 operator is compiled into a program only if it calls it. A program can't
-declare built-ins, nor define an operator with a built-in's name and
-parameters' names, as a built-in has no versions, nor one with the name
-and the parameters, their names and types, of an operator the prelude
-defines in trendy (A0001); the error points at the prelude's, shown as
-`<prelude>`.
+declare built-ins (A0013), but its units' names are their own: an
+operator or a type of the name of one of the prelude's, built in or
+written in trendy, hides the prelude's in its unit, which every other
+unit still sees, as a unit's own name does a used unit's (see
+[Units](#units)). Only the built-in types' names, `boolean`, `integer`,
+`approximate` and `text`, are no unit's to declare (A0001).
 
 The prelude keeps built-ins as few as possible: what can be written in
 trendy is, so that it means exactly what its definition says, and when the
@@ -2406,8 +2411,9 @@ operator main{} [
   its arguments: `position{latitude: -1.29e0, longitude: 36.82e0}` is the
   value of `position` with those components. It is an operator, as TTM's
   selectors are, and a call like any other, so a missing or misspelled
-  component is reported as an argument is. No other operator can have a
-  type's name, nor a type a prelude operator's (A0057).
+  component is reported as an argument is. No other operator of its unit
+  can have a type's name (A0057); another unit's of its name, the
+  prelude's among them, is hidden by it there, or overloaded.
 - **`p.latitude` is a component's value,** with the dot of a tuple's
   attribute: TTM's `THE_LATITUDE(P)` (RM Prescription 5).
 - **`p replace { latitude := x }` is the value with a component
@@ -5819,9 +5825,9 @@ variable of its name. So a variable can have an operator's name, or a
 type's, and which one a name is depends on where it is: in
 `call greet{…};` it is an operator, and as a value it is a variable or a
 parameter. No two operators can have the same name, nor two variables,
-nor two headings, nor a heading and a type, nor two constraints (A0001),
-and a type's name is its selector's, which no other operator can have
-(A0057). No name refers to a constraint, so constraints have a namespace
+nor two headings, nor a heading and a type, nor two constraints, in one
+unit (A0001), and a type's name is its selector's, which no other
+operator of its unit can have (A0057). No name refers to a constraint, so constraints have a namespace
 of their own. A database is a variable, and shares the variables'
 namespace; its relvars and constraints are named within it.
 

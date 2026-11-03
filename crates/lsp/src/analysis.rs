@@ -582,29 +582,32 @@ mod tests {
 
     #[test]
     fn labels_in_the_prelude_are_related_information_there() {
-        let source = "operator debug_value{v: integer} [];\noperator main{} [];";
+        // The parameter's type, where the prelude declares `some`.
+        let source = "var x := some{r: relation { { x: 1 } }, of: 1};\noperator main{} [];";
         let diags = diagnostics(&uri(), source);
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert_eq!(
             diags[0].range,
-            Range::new(Position::new(0, 9), Position::new(0, 20))
+            Range::new(Position::new(0, 44), Position::new(0, 45))
         );
         let related = diags[0].related_information.as_ref().unwrap();
         assert_eq!(
             related[0].location.uri,
             source_uri(trendy_prelude::PRELUDE.source_path)
         );
-        let line = trendy_prelude::PRELUDE
+        let (line, text) = trendy_prelude::PRELUDE
             .source
             .lines()
-            .position(|line| line.starts_with("builtin operator debug_value{"))
+            .enumerate()
+            .find(|(_, line)| line.starts_with("operator some{"))
             .unwrap();
+        let column = text.find("boolean").unwrap();
+        let at = |column: usize| {
+            Position::new(u32::try_from(line).unwrap(), u32::try_from(column).unwrap())
+        };
         assert_eq!(
             related[0].location.range,
-            Range::new(
-                Position::new(u32::try_from(line).unwrap(), 17),
-                Position::new(u32::try_from(line).unwrap(), 28)
-            )
+            Range::new(at(column), at(column + "boolean".len()))
         );
     }
 

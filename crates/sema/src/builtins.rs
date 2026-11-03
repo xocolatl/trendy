@@ -165,7 +165,7 @@ fn builtin_operator(
     }
     Some(Signature::builtin(
         id,
-        builtin,
+        (builtin, ident_span(&ident)),
         library,
         namespaces.unit_at(ident_span(&ident)),
         ast::section_of(decl.syntax()),
@@ -370,8 +370,9 @@ pub(crate) fn kinds(
 /// they name, and nothing else is reported for it.
 pub(crate) fn library(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagnostic>) {
     let name = hir::Library::CODE_POINT;
+    let identity = namespaces.prelude_identity(name);
     let components = hir::Library::code_point_components();
-    let declared = namespaces.defined_named(name).cloned();
+    let declared = namespaces.defined_named(&identity).cloned();
     let as_made = declared.as_ref().is_some_and(|defined| {
         defined.components == components
             && defined.supertypes.is_empty()
@@ -388,7 +389,7 @@ pub(crate) fn library(files: &Files, namespaces: &mut Namespaces, errors: &mut V
         ));
     }
     let code_point = declared.unwrap_or_else(|| hir::Defined {
-        name: name.to_string(),
+        name: identity,
         components,
         representations: Vec::new(),
         constraints: Vec::new(),
@@ -398,8 +399,19 @@ pub(crate) fn library(files: &Files, namespaces: &mut Namespaces, errors: &mut V
         specialized: false,
         specialization: None,
     });
+    // A missing `error` is reported with what a failure needs
+    // (`failures`), and one of its name stands for it.
+    let error = namespaces.prelude_identity(hir::Library::ERROR);
+    let error = namespaces
+        .dummy_named(&error)
+        .cloned()
+        .unwrap_or(hir::Dummy {
+            name: error,
+            supertypes: Vec::new(),
+        });
     namespaces.library = Some(hir::Library {
         code_point: Box::new(code_point),
+        error: Box::new(error),
     });
 }
 
@@ -467,7 +479,8 @@ pub(crate) fn failures(
     errors: &mut Vec<Diagnostic>,
 ) -> BTreeMap<hir::LanguageError, String> {
     let end = Span::empty(files.prelude().span().end);
-    if namespaces.dummy_named("error").is_none() {
+    let union = &namespaces.library().error;
+    if namespaces.dummy_named(&union.name).is_none() {
         errors.push(Diagnostic::error(
             Code::Internal,
             "the prelude doesn't declare `type error union;`, what a program fails with",
@@ -483,9 +496,10 @@ pub(crate) fn failures(
         ));
     }
     // What a transaction collects, whose tuples the compiler makes.
-    if let Some(error) = namespaces.dummy_named("error") {
-        let collection = hir::transaction_collection(hir::Type::Dummy(Box::new(error.clone())));
-        let declared = namespaces.heading_attributes("transaction_collection");
+    if namespaces.dummy_named(&union.name).is_some() {
+        let collection = hir::transaction_collection(namespaces.library().error_type());
+        let identity = namespaces.prelude_identity(hir::Library::TRANSACTION_COLLECTION);
+        let declared = namespaces.heading_attributes(&identity);
         if declared != Some(&collection) {
             errors.push(Diagnostic::error(
                 Code::Internal,
@@ -518,7 +532,7 @@ pub(crate) fn failures(
             Some([identity]) => namespaces
                 .defined_named(identity)
                 .filter(|defined| {
-                    defined.supertypes == ["error"]
+                    defined.supertypes == [union.name.clone()]
                         && defined.specialization.is_none()
                         && defined.components == components
                 })

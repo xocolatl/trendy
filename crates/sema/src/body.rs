@@ -595,15 +595,19 @@ impl Statements<'_, '_> {
     ) -> Option<hir::Target> {
         let ident = collecting.variable()?.ident()?;
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-        let error = self.cx.namespaces.dummy_named("error")?;
-        let errors_type = hir::Type::Relation(hir::transaction_collection(hir::Type::Dummy(
-            Box::new(error.clone()),
-        )));
+        let errors_type = hir::Type::Relation(hir::transaction_collection(
+            self.cx.namespaces.library().error_type(),
+        ));
         let known = self.locals.find(name).is_some()
             || self.cx.operators.get(self.within).is_parameter(name)
             || self.cx.declared.find(name, span).is_some();
         if !known {
-            errors.push(errors::undeclared_collecting(name, span, stmt));
+            errors.push(errors::undeclared_collecting(
+                name,
+                span,
+                stmt,
+                self.cx.namespaces,
+            ));
             return None;
         }
         let assignee = self.names().assigned(name, span, errors)?;

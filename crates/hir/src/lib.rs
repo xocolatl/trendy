@@ -99,7 +99,7 @@ impl Program {
     #[must_use]
     pub fn language_error(&self, error: LanguageError) -> &Defined {
         let identity = &self.language_errors[&error];
-        self.subtypes["error"]
+        self.subtypes[&self.library.error.name]
             .iter()
             .find_map(|ty| match ty {
                 Type::Defined(defined) if defined.name == *identity => Some(&**defined),
@@ -854,23 +854,6 @@ impl LanguageError {
                 .collect(),
         )
     }
-
-    /// The prelude's union type `error`, a root, whose subtypes these are.
-    #[must_use]
-    pub fn union() -> Type {
-        Type::Dummy(Box::new(Dummy {
-            name: "error".to_string(),
-            supertypes: Vec::new(),
-        }))
-    }
-
-    /// The type of a built-in's `errors`: `relation { error: error }`.
-    #[must_use]
-    pub fn relation() -> Type {
-        Type::Relation(Heading::new(
-            [("error".to_string(), LanguageError::union())].into(),
-        ))
-    }
 }
 
 /// The types the units that come with the compiler define in trendy that
@@ -882,9 +865,34 @@ pub struct Library {
     /// The prelude's `code_point`, a Unicode scalar value, stored as
     /// [`Library::code_point_components`] says.
     pub code_point: Box<Defined>,
+    /// The prelude's union type `error`, a root, whose subtypes are what a
+    /// program fails or warns with, the errors the language makes among
+    /// them ([`LanguageError`]).
+    pub error: Box<Dummy>,
 }
 
 impl Library {
+    /// The name of the prelude's union type of errors.
+    pub const ERROR: &'static str = "error";
+
+    /// The name of the prelude's heading of what a transaction collects
+    /// ([`transaction_collection`]).
+    pub const TRANSACTION_COLLECTION: &'static str = "transaction_collection";
+
+    /// The prelude's union type `error`.
+    #[must_use]
+    pub fn error_type(&self) -> Type {
+        Type::Dummy(self.error.clone())
+    }
+
+    /// The type of a built-in's `errors`: `relation { error: error }`.
+    #[must_use]
+    pub fn errors_type(&self) -> Type {
+        Type::Relation(Heading::new(
+            [("error".to_string(), self.error_type())].into(),
+        ))
+    }
+
     /// The name of the prelude's type of code points.
     pub const CODE_POINT: &'static str = "code_point";
 
@@ -1142,7 +1150,7 @@ impl Builtin {
             Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors) => [
                 constant("path", Type::Scalar(Scalar::Text)),
                 out("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
-                out("errors", LanguageError::relation()),
+                out("errors", library.errors_type()),
             ]
             .into(),
             Builtin::Update(UpdateBuiltin::LoadCsv) => [
@@ -1157,7 +1165,7 @@ impl Builtin {
                 constant("header", Type::Scalar(Scalar::Boolean)),
                 constant("columns", parameter(0)),
                 out("rows", Type::Array(Box::new(parameter(1)))),
-                out("errors", LanguageError::relation()),
+                out("errors", library.errors_type()),
             ]
             .into(),
             Builtin::ReadOnly(

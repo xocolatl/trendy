@@ -2,21 +2,21 @@
 //! and what each is called in the program.
 //!
 //! A name written in a unit means a declaration it sees: one of its own,
-//! one of the prelude's interface, which every unit sees, or one of the
-//! interface of a unit its section uses, as the interface's `uses` are
-//! what its declarations see, and the implementation's add to them. What a unit
-//! uses never reaches the units that use it. A name that more than one of
-//! those units declares, the using unit's own among them, is a clash where
-//! it is written, which nothing settles by order, so it means none of them.
+//! which hides every other unit's, so that a unit never qualifies its own
+//! names, or else one of the prelude's interface, which every unit sees,
+//! or of the interface of a unit its section uses, as the interface's
+//! `uses` are what its declarations see, and the implementation's add to
+//! them. What a unit uses never reaches the units that use it. A name
+//! that more than one of those other units declares is a clash where it is
+//! written, which nothing settles by order, so it means none of them.
 //!
 //! A name declared in one unit of the program is called plainly everywhere,
 //! and one declared in several, each a declaration of its own, is qualified
-//! by its unit's name in every one of them, `lakes.depths::metres`, so that
-//! every name the HIR has is one declaration's: what the program writes is
+//! by its unit's name in every one of them, the prelude's too,
+//! `lakes.depths::metres` and `trendy.prelude::count`, so that every name
+//! the HIR has is one declaration's: what the program writes is
 //! unambiguous, and lowering and the runtime can tell declarations apart by
-//! name. No unit can declare one of the prelude's names, of either of its
-//! sections, though every unit sees only its interface's, so those are
-//! always plain.
+//! name.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -210,9 +210,8 @@ impl<T> Seen<T> {
 pub(crate) struct Candidates<T> {
     /// The first of the viewer's own unit's.
     own: Option<(hir::FileId, T)>,
-    /// The first of the prelude's.
-    prelude: Option<(hir::FileId, T)>,
-    /// The first of each used unit's, in its interface.
+    /// The first of each other unit's whose interface it sees, the
+    /// prelude's and each used unit's, by their units' names.
     used: Vec<(hir::FileId, T)>,
 }
 
@@ -221,7 +220,6 @@ impl<T> Candidates<T> {
     pub(crate) fn map<U>(self, f: impl Fn(T) -> U) -> Candidates<U> {
         Candidates {
             own: self.own.map(|(unit, value)| (unit, f(value))),
-            prelude: self.prelude.map(|(unit, value)| (unit, f(value))),
             used: self
                 .used
                 .into_iter()
@@ -234,7 +232,6 @@ impl<T> Candidates<T> {
     /// types and headings are, and variables and databases.
     pub(crate) fn merged(mut self, other: Candidates<T>) -> Candidates<T> {
         self.own = self.own.or(other.own);
-        self.prelude = self.prelude.or(other.prelude);
         for (unit, value) in other.used {
             if self.used.iter().all(|(u, _)| *u != unit) {
                 self.used.push((unit, value));
@@ -243,43 +240,32 @@ impl<T> Candidates<T> {
         self
     }
 
-    /// What the name means: the viewer's own, unless a used unit declares
-    /// it too, a clash, or else the prelude's, which no unit can declare
-    /// again, as a used unit that does is reported where it does, or else
-    /// a used unit's, the only one, or a clash, or nothing.
+    /// What the name means: the viewer's own, which hides the other
+    /// units', so that a unit never qualifies its own names, or else the
+    /// only other unit's, or else, of several, a clash, which nothing
+    /// settles by order, or nothing.
     pub(crate) fn resolved(self) -> Seen<T> {
-        let Candidates { own, prelude, used } = self;
-        match (own, prelude) {
-            (Some((unit, value)), prelude) if used.is_empty() || prelude.is_some() => {
+        let Candidates { own, mut used } = self;
+        if let Some((unit, value)) = own {
+            return Seen::One(unit, value);
+        }
+        match used.len() {
+            0 => Seen::Nothing,
+            1 => {
+                let (unit, value) = used.remove(0);
                 Seen::One(unit, value)
             }
-            (Some(own), _) => Seen::Clash(std::iter::once(own).chain(used).collect()),
-            (None, Some((unit, value))) => Seen::One(unit, value),
-            (None, None) => {
-                let mut used = used;
-                match used.len() {
-                    0 => Seen::Nothing,
-                    1 => {
-                        let (unit, value) = used.remove(0);
-                        Seen::One(unit, value)
-                    }
-                    _ => Seen::Clash(used),
-                }
-            }
+            _ => Seen::Clash(used),
         }
     }
 }
 
 /// Whether a name is ambiguous, declared in each of `declaring`: in more
-/// than one unit, none of them the prelude, whose names no other unit can
-/// have.
-pub(crate) fn ambiguous(declaring: impl Iterator<Item = hir::FileId>, units: &Units) -> bool {
+/// than one unit, the prelude among them.
+pub(crate) fn ambiguous(declaring: impl Iterator<Item = hir::FileId>) -> bool {
     let mut first = None;
     let mut several = false;
     for unit in declaring {
-        if unit == units.prelude() {
-            return false;
-        }
         match first {
             None => first = Some(unit),
             Some(other) => several |= other != unit,
@@ -336,14 +322,9 @@ impl<T> Declared<T> {
                 .find(|e| e.unit == unit)
                 .map(|e| (e.unit, &e.value))
         };
-        let prelude = entries
-            .iter()
-            .find(|e| e.unit == units.prelude() && units.sees(viewer, e.unit, e.section))
-            .map(|e| (e.unit, &e.value));
         let mut used: Vec<(hir::FileId, &T)> = Vec::new();
         for e in entries {
-            let other = e.unit != viewer.unit && e.unit != units.prelude();
-            if other
+            if e.unit != viewer.unit
                 && units.sees(viewer, e.unit, e.section)
                 && used.iter().all(|(u, _)| *u != e.unit)
             {
@@ -354,7 +335,6 @@ impl<T> Declared<T> {
         used.sort_by(|(a, _), (b, _)| units.name(*a).cmp(units.name(*b)));
         Candidates {
             own: first(viewer.unit),
-            prelude: prelude.filter(|_| viewer.unit != units.prelude()),
             used,
         }
     }
@@ -386,21 +366,18 @@ impl<T> Declared<T> {
             .map(|e| &e.value)
     }
 
-    /// Each declaration named `name` in `unit` or the prelude, `unit`'s
-    /// first, with the unit it is in: those another of `unit`'s duplicates.
-    pub(crate) fn each_own_or_prelude<'a>(
+    /// Each declaration named `name` in `unit`, in the order they are
+    /// declared: those another of `unit`'s duplicates, as another unit's
+    /// of that name are only hidden by it.
+    pub(crate) fn each_in<'a>(
         &'a self,
         name: &str,
         unit: hir::FileId,
-        units: &Units,
-    ) -> impl Iterator<Item = (hir::FileId, &'a T)> {
-        let prelude = units.prelude();
-        let entries = self.entries(name);
-        let own = entries.iter().filter(move |e| e.unit == unit);
-        let preludes = entries
+    ) -> impl Iterator<Item = &'a T> {
+        self.entries(name)
             .iter()
-            .filter(move |e| e.unit == prelude && e.unit != unit);
-        own.chain(preludes).map(|e| (e.unit, &e.value))
+            .filter(move |e| e.unit == unit)
+            .map(|e| &e.value)
     }
 
     /// The units whose interfaces declare `name`, which `viewer` doesn't
