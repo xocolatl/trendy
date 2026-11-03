@@ -47,27 +47,31 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
     let path = input.display().to_string();
     let source = std::fs::read_to_string(input).map_err(|e| format!("{path}: {e}"))?;
 
-    let parse = trendy_parser::parse(&source, trendy_lexer::lex(&source));
-    if !parse.errors.is_empty() {
-        let sources = Sources::one(&path, &source);
-        return Err(report(&parse.errors, format, &path, &sources));
+    // Main's unit and those it uses, each from its file, whose spans are
+    // in their texts one after another.
+    let program = trendy_load::program(input, source);
+    if let Some((unread, e)) = program.unreadable.first() {
+        return Err(format!("{unread}: {e}"));
+    }
+    let errors = program.errors();
+    if !errors.is_empty() {
+        let sources = Sources::new(program.sources());
+        return Err(report(&errors, format, &path, &sources));
     }
     let prelude = library_unit(trendy_prelude::SOURCE, trendy_prelude::PATH)?;
     let catalog = library_unit(
         trendy_prelude::catalog::SOURCE,
         trendy_prelude::catalog::PATH,
     )?;
-    // Sema's spans are in the program, then the catalog, then the prelude.
-    // A unit's name is its path from the directory of `main`'s file.
-    let name = input
-        .file_stem()
-        .map(|stem| stem.to_string_lossy())
-        .ok_or_else(|| format!("{path}: not a file's path"))?;
-    let unit = trendy_sema::File {
-        name: &name,
-        path: &path,
-        tree: &parse.tree,
-    };
+    let units: Vec<trendy_sema::File> = program
+        .units
+        .iter()
+        .map(|unit| trendy_sema::File {
+            name: &unit.name,
+            path: &unit.path,
+            tree: &unit.parse.tree,
+        })
+        .collect();
     let library = trendy_sema::Library {
         prelude: trendy_sema::File {
             name: trendy_prelude::NAME,
@@ -80,15 +84,15 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
             tree: &catalog.tree,
         },
     };
-    let hir = trendy_sema::analyze(&[unit], &library).map_err(|errors| {
-        let sources = Sources::new([
-            (path.as_str(), source.as_str()),
+    // Sema's spans are in the units, then the catalog, then the prelude.
+    let hir = trendy_sema::analyze(&units, &library).map_err(|errors| {
+        let sources = Sources::new(program.sources().chain([
             (
                 trendy_prelude::catalog::PATH,
                 trendy_prelude::catalog::SOURCE,
             ),
             (trendy_prelude::PATH, trendy_prelude::SOURCE),
-        ]);
+        ]));
         report(&errors, format, &path, &sources)
     })?;
 

@@ -575,6 +575,16 @@ name = "trendy_lir"
 version = "0.1.0"
 
 [[package]]
+name = "trendy_load"
+version = "0.1.0"
+dependencies = [
+ "trendy_diag",
+ "trendy_lexer",
+ "trendy_parser",
+ "trendy_syntax",
+]
+
+[[package]]
 name = "trendy_lower"
 version = "0.1.0"
 dependencies = [
@@ -592,6 +602,7 @@ dependencies = [
  "trendy_diag",
  "trendy_fmt",
  "trendy_lexer",
+ "trendy_load",
  "trendy_parser",
  "trendy_prelude",
  "trendy_sema",
@@ -674,6 +685,7 @@ dependencies = [
  "trendy_diag",
  "trendy_hir",
  "trendy_lexer",
+ "trendy_load",
  "trendy_lower",
  "trendy_opt",
  "trendy_parser",

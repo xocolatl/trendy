@@ -10,6 +10,7 @@ workspace = true
 trendy_diag.workspace = true
 trendy_lexer.workspace = true
 trendy_parser.workspace = true
+trendy_load.workspace = true
 trendy_sema.workspace = true
 trendy_opt.workspace = true
 trendy_prelude.workspace = true

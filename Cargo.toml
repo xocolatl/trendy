@@ -22,6 +22,7 @@ trendy_sema = { path = "crates/sema" }
 trendy_opt = { path = "crates/opt" }
 trendy_codegen = { path = "crates/codegen" }
 trendy_fmt = { path = "crates/fmt" }
+trendy_load = { path = "crates/load" }
 
 # No debug info: on macOS it stays in each crate's object files, which every
 # rebuild leaves behind in target/debug/deps, and a folder of hundreds of

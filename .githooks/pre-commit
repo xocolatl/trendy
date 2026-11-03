@@ -32,7 +32,7 @@ step() {
 step "rustfmt" cargo fmt --all --check
 step "clippy" cargo clippy --locked --workspace --all-targets --quiet -- -D warnings
 step "rustdoc" env RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --quiet
-step "trendyfmt" cargo run --locked --quiet -p trendyfmt -- --check examples/*.trendy projects/*/*.trendy
+step "trendyfmt" cargo run --locked --quiet -p trendyfmt -- --check examples/*.trendy examples/*/*.trendy projects/*/*.trendy
 step "textmate grammar" cargo test --locked --quiet -p trendy_lsp --test textmate
 
 # The extension's dependencies aren't in the index, so borrow the installed ones.

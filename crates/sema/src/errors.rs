@@ -8458,7 +8458,7 @@ pub(crate) fn implementation_uses(
 /// program's `units`: a misspelling of one, if it may be one, and
 /// otherwise the file it would be.
 pub(crate) fn unknown_unit(name: &str, span: Span, units: &[&str]) -> Diagnostic {
-    let path = format!("{}.trendy", name.replace('.', "/"));
+    let path = trendy_syntax::unit::path_of(name);
     let d = Diagnostic::error(
         Code::UnknownName,
         format!("unknown unit `{name}`"),

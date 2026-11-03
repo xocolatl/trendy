@@ -5,6 +5,18 @@
 /// What a `uses` is, for the notes of the errors about one.
 pub const USES_RULE: &str = "`uses { lakes.depths };`, first in a section, names the units whose interfaces the section's declarations see, each by its path from the directory of `main`'s file, as `lakes/depths.trendy` is `lakes.depths`; every name an interface declares comes with it";
 
+/// What starts the names of the units that come with the compiler, which
+/// are no files of a program.
+pub const COMPILERS: &str = "trendy.";
+
+/// The file of the unit `name`, from the directory of `main`'s file: its
+/// parts as directories, the last its file's stem, as `lakes.depths` is
+/// `lakes/depths.trendy`.
+#[must_use]
+pub fn path_of(name: &str) -> String {
+    format!("{}.trendy", name.replace('.', "/"))
+}
+
 /// The extensions of the files other languages' imports name, which a
 /// path's unit leaves out: trendy's own, and those of C, C++, JavaScript,
 /// TypeScript, Python, Ruby, Lua, Go, Pascal, Haskell, Rust, Java and C#.

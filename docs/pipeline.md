@@ -624,6 +624,23 @@ declared heading's name standing for its declaration's.
 Attributes are unordered, so that can't change what a program means. It must
 also be idempotent: formatting its own output changes nothing.
 
+### load (`trendy_load`)
+
+**Input:** the path of a program's main file and its text. **Output:** the
+program's units (`trendy_load::Program`): main's, named by its file's
+stem, then each unit it uses, through any path, by name, as they are in no
+order, each read from its file and parsed, and each file there is that
+couldn't be read.
+
+**Owns:** where a unit's file is: its name's path from the directory of
+main's file (`trendy_syntax::unit::path_of`), and the units that come with
+the compiler, under `trendy.`, which are no files. **Must not:** report a
+unit used whose file there is none of, which sema does, as the catalog's
+`known_units`, with the file it would be; nor depend on sema. Each unit's
+lexer's and parser's errors are given in the program's spans, the units'
+texts one after another (`Diagnostic::shifted`), as sema's are, so a
+driver renders both the same way.
+
 ### hir (`trendy_hir`)
 
 **Provides:** the high-level IR, which is the checked program. It is
@@ -2083,18 +2100,23 @@ compiler error.
 Drivers read input, run the layers they need in order, and present the
 results. They contain no language logic of their own.
 
-- **`trendyc`**, the compiler: runs lexer, parser, sema, opt, lower and codegen,
-  renders diagnostics (`--error-format=human|json`), over the program and
-  the prelude, shown as `<prelude>`, and links the object
+- **`trendyc`**, the compiler: loads the program's units from main's file
+  (`trendy_load`), runs lexer, parser, sema, opt, lower and codegen,
+  renders diagnostics (`--error-format=human|json`), over the program's
+  units, the catalog and the prelude, shown as `<catalog>` and
+  `<prelude>`, and links the object
   with the system `cc`. `trendyc --explain <code>` prints an error code's
   explanation.
 - **`trendyfmt`**, the formatter command: runs lexer, parser and fmt, then
   rewrites files in place. With `--check`, it lists unformatted files and
   exits non-zero instead.
 - **`trendy-lsp`** (crate `trendy_lsp`), the language server, speaking LSP over
-  stdio. On every change it reports all lexer and parser errors, or, if there
-  are none, all sema errors, a label in the prelude as a related location
-  in the prelude's file. It offers each suggestion as a quick fix,
+  stdio. It checks a document as a program's main unit, with the units it
+  uses, loaded from their files beside it, if it is a file
+  (`trendy_load`), or else alone, and the prelude's and the catalog's own
+  files as themselves. On every change it reports all lexer and parser
+  errors, or, if there are none, all sema errors, one in another file, and
+  a label there, as a related location in that file. It offers each suggestion as a quick fix,
   provides semantic highlighting by classifying tokens in the CST (so
   highlighting always agrees with the compiler, even in broken files), and answers formatting requests with fmt. It also converts
   byte spans to the UTF-16 positions LSP uses. The VS Code extension in
@@ -2273,6 +2295,7 @@ trendy_syntax  : trendy_diag trendy_text rowan
 trendy_lexer   : trendy_diag trendy_syntax
 trendy_parser  : trendy_diag trendy_syntax trendy_lexer
 trendy_fmt     : trendy_syntax trendy_lexer
+trendy_load    : trendy_diag trendy_syntax trendy_lexer trendy_parser
 trendy_hir     : trendy_diag trendy_numeric trendy_text
 trendy_sema    : trendy_diag trendy_syntax trendy_hir trendy_text
 trendy_opt     : trendy_hir
@@ -2280,7 +2303,7 @@ trendy_lir     :
 trendy_lower   : trendy_hir trendy_lir
 trendy_runtime : trendy_numeric trendy_text unicode-width
 trendy_codegen : trendy_lir cranelift-codegen cranelift-frontend cranelift-module cranelift-native cranelift-object
-trendyc        : trendy_diag trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_opt trendy_lower trendy_codegen
+trendyc        : trendy_diag trendy_lexer trendy_parser trendy_load trendy_prelude trendy_sema trendy_opt trendy_lower trendy_codegen
 trendyfmt      : trendy_diag trendy_lexer trendy_parser trendy_fmt
-trendy_lsp     : trendy_diag trendy_syntax trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_fmt lsp-server lsp-types serde_json
+trendy_lsp     : trendy_diag trendy_syntax trendy_lexer trendy_parser trendy_load trendy_prelude trendy_sema trendy_fmt lsp-server lsp-types serde_json
 ```

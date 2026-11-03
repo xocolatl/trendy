@@ -137,6 +137,24 @@ impl Diagnostic {
         self
     }
 
+    /// This diagnostic, of one file, in the spans of a program whose texts
+    /// are one after another, in which that file's starts at `start`.
+    #[must_use]
+    pub fn shifted(mut self, start: usize) -> Self {
+        let shift = |span: &mut Span| {
+            span.start += start;
+            span.end += start;
+        };
+        shift(&mut self.primary.span);
+        for label in &mut self.secondary {
+            shift(&mut label.span);
+        }
+        for edit in self.suggestions.iter_mut().flat_map(|s| s.edits.iter_mut()) {
+            shift(&mut edit.span);
+        }
+        self
+    }
+
     /// Where the problem is.
     #[must_use]
     pub fn span(&self) -> Span {

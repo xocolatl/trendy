@@ -1,0 +1,44 @@
+/* A unit of the `units` example, `lakes.depths`, named by its path from
+   the directory of the program's main file. Its interface declares what
+   other units see of it: here a type, a heading, and operators, each
+   operator by its heading alone. Its implementation repeats each such
+   operator's heading with its body, and keeps what no other unit sees:
+   the variable the lakes are recorded in, which other units reach only
+   through its update operators, so what is true of it is the unit's to
+   keep. */
+
+interface
+
+/* A depth, in whole metres. */
+type metres {
+    { m: integer },
+    constraint m > 0,
+};
+
+/* A lake, its name in its own language too, and how deep it is. */
+heading lake := { name: text, native: text, depth: metres };
+
+/* The deepest of `lakes`. */
+operator deepest{lakes: relation lake}: relation lake;
+
+/* Record a lake, `depth` metres deep. */
+operator record{name: text, native: text, depth: integer};
+
+/* The lakes recorded so far. */
+operator recorded{out lakes: relation lake};
+
+implementation
+
+var known: relation lake key { name };
+
+operator deepest{lakes: relation lake}: relation lake [
+    lakes where depth.m = max{r: lakes, of: depth.m}
+];
+
+operator record{name: text, native: text, depth: integer} [
+    insert known relation { { name: name, native: native, depth: metres{m: depth} } };
+];
+
+operator recorded{out lakes: relation lake} [
+    lakes := known;
+];

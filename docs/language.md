@@ -241,7 +241,9 @@ operator main{} [
   gives an attribute another name.
 - **Each a unit of the program** (A0015): main's, those its units use,
   and those that come with the compiler, such as `trendy.catalog`. A
-  misspelling of one is fixed to it.
+  misspelling of one is fixed to it. The compiler is given main's file,
+  and reads each unit it uses, through any path, from its file there;
+  the names under `trendy.` are the compiler's own.
 - **No unit uses itself, through any path** (A0072), so that a unit's
   interface is known before each unit that uses it is checked. What two
   units need of each other goes in a unit of its own, which each uses.
