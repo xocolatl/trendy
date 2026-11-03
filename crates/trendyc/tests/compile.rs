@@ -4386,6 +4386,54 @@ fn image_relations_are_looked_up_once_per_loop() {
     );
 }
 
+/// Tuples of nothing but integers, nested ones and a type of the program's
+/// own's among them, are compared as a run of integers, when running, in
+/// the order the compiler has them in when it knows them.
+#[test]
+fn tuples_of_integers_sort_when_running_as_when_compiling() {
+    let source = "type point { { x: integer, y: integer } };
+
+var known := relation {
+    { m: tuple { p: 3, q: -2 }, n: point{x: 2, y: 3}, o: -1 },
+    { m: tuple { p: -3, q: 2 }, n: point{x: 2, y: 3}, o: 1 },
+    { m: tuple { p: 3, q: 2 }, n: point{x: -2, y: 3}, o: 1 },
+    { m: tuple { p: 3, q: 2 }, n: point{x: 2, y: -3}, o: 1 },
+    { m: tuple { p: 3, q: 2 }, n: point{x: 2, y: 3}, o: -1 },
+    { m: tuple { p: 3, q: 2 }, n: point{x: 2, y: 3}, o: 1 },
+};
+
+operator show{a: integer, b: integer} [
+    var made := relation {
+        { m: tuple { p: a, q: b }, n: point{x: b, y: a}, o: 1 },
+        { m: tuple { p: a, q: b }, n: point{x: b, y: a}, o: -1 },
+        { m: tuple { p: a, q: b }, n: point{x: b, y: -a}, o: 1 },
+        { m: tuple { p: a, q: b }, n: point{x: -b, y: a}, o: 1 },
+        { m: tuple { p: -a, q: b }, n: point{x: b, y: a}, o: 1 },
+        { m: tuple { p: a, q: -b }, n: point{x: b, y: a}, o: -1 },
+        { m: tuple { p: a, q: b }, n: point{x: b, y: a}, o: 1 },
+    };
+    call debug_value{v: made};
+    call debug_value{v: known};
+    call debug_value{v: made = known};
+];
+
+operator main{} [
+    call show{a: 3, b: 2};
+];
+";
+    let (code, stderr) = run_source("integers_sorted", source);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(lines[0], lines[1], "{stderr}");
+    assert_eq!(lines[2], "true", "{stderr}");
+    assert!(
+        lines[0].contains(
+            "{ m: tuple { p: -3, q: 2 }, n: point{x: 2, y: 3}, o: 1 }, { m: tuple { p: 3, q: -2 }, n: point{x: 2, y: 3}, o: -1 }, { m: tuple { p: 3, q: 2 }, n: point{x: -2, y: 3}, o: 1 }"
+        ),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn arrays() {
     assert_eq!(

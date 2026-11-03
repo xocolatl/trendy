@@ -2252,7 +2252,14 @@ attribute's `Attr` has no name, which `debug_value` writes
 as `…`, as a type's source text does, so the runtime needn't know how such
 attributes are named. Its sizes and offsets are LIR's `Size` and `Offset` fields, which
 codegen resolves with the same layout engine as everything else, so the
-runtime never repeats the layout rules.
+runtime never repeats the layout rules. A descriptor also says when the
+walk through it can be skipped, which a relational operation would
+otherwise make for each tuple: whether a value of the type can point to
+buffers at all (`points`), which takes no reference to anything if not,
+and, of a tuple, a value of a type of the program's own or a relation of
+such tuples, how many integers it is, if it is nothing else, one after
+another in name order, as they are laid out and compared (`integers`), which sorting
+and equality compare as a run of them.
 
 A value of a type in a hierarchy, a union type or a subtype of one, is
 laid out as every value of the union type at its top: the address of its

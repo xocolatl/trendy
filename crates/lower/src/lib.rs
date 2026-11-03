@@ -958,8 +958,15 @@ impl Lowering {
             _ => ("", ""),
         };
         let (name, written) = (self.name(name), self.name(written));
+        let points = self.points(ty);
+        let integers = match ty {
+            hir::Type::Relation(heading) => integers(&hir::Type::Tuple(heading.clone())),
+            _ => integers(ty),
+        };
         let id = self.constant(vec![
             lir::Field::U8(kind),
+            lir::Field::U8(u8::from(points)),
+            lir::Field::Usize(len(integers)),
             lir::Field::Size(self.layout(ty)),
             lir::Field::Address(attributes),
             lir::Field::Usize(len(count)),
@@ -989,8 +996,11 @@ impl Lowering {
         ])]);
         let name = self.name(&ty.to_string());
         let written = self.name("");
+        let points = self.points(ty);
         let id = self.constant(vec![
             lir::Field::U8(KIND_UNION),
+            lir::Field::U8(u8::from(points)),
+            lir::Field::Usize(0),
             lir::Field::Size(layout),
             lir::Field::Address(components),
             lir::Field::Usize(1),
@@ -1266,6 +1276,26 @@ struct Lookup {
     ty: hir::Type,
     kept: lir::Place,
     index: lir::Place,
+}
+
+/// How many integers a value of type `ty` is, one after another in the
+/// order they compare, if it is nothing else, and otherwise 0: an integer
+/// is one, and a tuple or a value of a type outside a hierarchy is its
+/// attributes', in name order, as they are laid out and compared.
+fn integers(ty: &hir::Type) -> usize {
+    match ty {
+        hir::Type::Scalar(hir::Scalar::Integer) => 1,
+        hir::Type::Tuple(_) | hir::Type::Defined(_) if ty.root().is_none() => {
+            let fields = ty.fields().expect("tuples and types' values have fields");
+            let each: Vec<usize> = fields.attributes().map(|(_, ty)| integers(ty)).collect();
+            if each.contains(&0) {
+                0
+            } else {
+                each.iter().sum()
+            }
+        }
+        _ => 0,
+    }
 }
 
 /// The type of a relation's index (see [`lir::RuntimeFn::Index`]): an
@@ -9019,9 +9049,11 @@ mod tests {
             panic!("the descriptor is data");
         };
         assert_eq!(
-            lowered.data[descriptor.0].fields[..2],
+            lowered.data[descriptor.0].fields[..4],
             [
                 lir::Field::U8(KIND_INTEGER),
+                lir::Field::U8(0),
+                lir::Field::Usize(1),
                 lir::Field::Size(lir::Layout::I64)
             ]
         );
@@ -9044,7 +9076,7 @@ mod tests {
         );
         let mut cx = Lowering::new(&["test.trendy".to_string()], &BTreeMap::new());
         let id = cx.descriptor(&hir::Type::Tuple(heading));
-        let lir::Field::Address(attributes) = cx.data[id.0].fields[2] else {
+        let lir::Field::Address(attributes) = cx.data[id.0].fields[4] else {
             panic!("attributes are an address");
         };
         let tuple = lir::Layout::Struct(vec![lir::Layout::U8, lir::Layout::I64]);
@@ -9058,7 +9090,7 @@ mod tests {
     fn descriptors_point_to_their_elements_type() {
         let mut cx = Lowering::new(&["test.trendy".to_string()], &BTreeMap::new());
         let element = |cx: &Lowering, id: lir::DataId| {
-            let lir::Field::Address(element) = cx.data[id.0].fields[4] else {
+            let lir::Field::Address(element) = cx.data[id.0].fields[6] else {
                 panic!("the element's descriptor is an address");
             };
             cx.data[element.0].fields[0].clone()
@@ -9072,7 +9104,61 @@ mod tests {
         assert_eq!(element(&cx, relation), lir::Field::U8(KIND_TUPLE));
         // Other types have none.
         let scalar = cx.descriptor(&integer());
-        assert_eq!(cx.data[scalar.0].fields[4], lir::Field::Usize(0));
+        assert_eq!(cx.data[scalar.0].fields[6], lir::Field::Usize(0));
+    }
+
+    #[test]
+    fn descriptors_say_when_walking_them_can_be_skipped() {
+        let mut cx = Lowering::new(&["test.trendy".to_string()], &BTreeMap::new());
+        let text = || hir::Type::Scalar(hir::Scalar::Text);
+        let boolean = || hir::Type::Scalar(hir::Scalar::Boolean);
+        let heading = |attributes: Vec<(&str, hir::Type)>| {
+            hir::Heading::new(
+                attributes
+                    .into_iter()
+                    .map(|(name, ty)| (name.to_string(), ty))
+                    .collect(),
+            )
+        };
+        let two = || heading(vec![("a", integer()), ("b", integer())]);
+        let nested = hir::Type::Tuple(heading(vec![
+            ("a", hir::Type::Tuple(two())),
+            ("b", integer()),
+        ]));
+        for (ty, points, integers) in [
+            (integer(), 0, 1),
+            (boolean(), 0, 0),
+            (text(), 1, 0),
+            (hir::Type::Tuple(two()), 0, 2),
+            (nested, 0, 3),
+            // A boolean among them isn't a run of integers.
+            (
+                hir::Type::Tuple(heading(vec![("a", boolean()), ("b", integer())])),
+                0,
+                0,
+            ),
+            (hir::Type::Tuple(heading(vec![("a", text())])), 1, 0),
+            (
+                hir::Type::Tuple(heading(vec![("a", integer()), ("b", text())])),
+                1,
+                0,
+            ),
+            // A relation's are its tuples', which it points to.
+            (hir::Type::Relation(two()), 1, 2),
+            (
+                hir::Type::Tuple(heading(vec![("r", hir::Type::Relation(two()))])),
+                1,
+                0,
+            ),
+            (hir::Type::Array(Box::new(integer())), 1, 0),
+        ] {
+            let id = cx.descriptor(&ty);
+            assert_eq!(
+                cx.data[id.0].fields[1..3],
+                [lir::Field::U8(points), lir::Field::Usize(integers)],
+                "{ty}"
+            );
+        }
     }
 
     #[test]

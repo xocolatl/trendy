@@ -205,6 +205,9 @@ pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
 unsafe fn tuples_equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
     // SAFETY: guaranteed by the caller.
     unsafe {
+        if desc.integers > 0 {
+            return compare_integers(lhs, rhs, desc.integers).is_eq();
+        }
         attributes(desc)
             .iter()
             .all(|attr| equal(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc))
@@ -576,6 +579,9 @@ fn new_buffer(bytes: usize, desc: *const TypeDesc) -> Fallible<*mut u8> {
 /// with null pointers.
 #[cfg(not(test))]
 unsafe fn each_buffer(value: *const u8, desc: &TypeDesc, f: &mut impl FnMut(*mut u8)) {
+    if !desc.points {
+        return;
+    }
     // SAFETY: guaranteed by the caller.
     unsafe {
         match desc.kind {
@@ -597,24 +603,6 @@ unsafe fn each_buffer(value: *const u8, desc: &TypeDesc, f: &mut impl FnMut(*mut
                 each_buffer(components, own, f);
             }
             _ => {}
-        }
-    }
-}
-
-/// Whether a value of the type `desc` describes points to buffers.
-///
-/// # Safety
-///
-/// `desc` must be a valid descriptor.
-#[cfg(not(test))]
-unsafe fn points(desc: &TypeDesc) -> bool {
-    // SAFETY: guaranteed by the caller.
-    unsafe {
-        match desc.kind {
-            // Which of a hierarchy's types a value has is known only from it.
-            KIND_TEXT | KIND_RELATION | KIND_ARRAY | KIND_UNION => true,
-            KIND_TUPLE | KIND_DEFINED => attributes(desc).iter().any(|attr| points(&*attr.desc)),
-            _ => false,
         }
     }
 }
@@ -662,7 +650,7 @@ unsafe fn release_buffer(buffer: *mut u8) {
         }
         if let Some(desc) = counted.desc.as_ref() {
             let element = desc.element();
-            if points(element) {
+            if element.points {
                 for i in 0..counted.len {
                     release(buffer.add(i * element.size), element);
                 }
@@ -824,7 +812,7 @@ pub unsafe extern "C" fn trendy_rt_adopt(value: *const u8, desc: *const TypeDesc
     unsafe {
         let element = (*desc).element();
         let (buffer, len) = read_slice(value);
-        if points(element) {
+        if element.points {
             for i in 0..len {
                 retain(buffer.add(i * element.size), element);
             }
@@ -2308,15 +2296,32 @@ unsafe fn canonical(
 ///
 /// `lhs` and `rhs` must point to valid values of the type `desc` describes.
 #[must_use]
+#[inline]
 pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cmp::Ordering {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        // Sorting compares little else, so this is inlined into each loop
+        // over attributes, without a call for each.
+        if desc.kind == KIND_INTEGER {
+            return lhs
+                .cast::<i64>()
+                .read_unaligned()
+                .cmp(&rhs.cast::<i64>().read_unaligned());
+        }
+        order_otherwise(lhs, rhs, desc)
+    }
+}
+
+/// [`order`] of values of any type but `integer`.
+///
+/// # Safety
+///
+/// As for [`order`].
+unsafe fn order_otherwise(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cmp::Ordering {
     // SAFETY: guaranteed by the caller.
     unsafe {
         match desc.kind {
             KIND_BOOLEAN => (*lhs).cmp(&*rhs),
-            KIND_INTEGER => lhs
-                .cast::<i64>()
-                .read_unaligned()
-                .cmp(&rhs.cast::<i64>().read_unaligned()),
             // IEEE 754 totalOrder, which, without NaN or `-0.0`, is the
             // order of the values.
             KIND_APPROXIMATE => lhs
@@ -2354,6 +2359,30 @@ pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cm
     }
 }
 
+/// The order of the `count` integers at `lhs` and those at `rhs`, one after
+/// another: that of the first that differ.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must each point to `count` integers.
+#[inline]
+unsafe fn compare_integers(lhs: *const u8, rhs: *const u8, count: usize) -> core::cmp::Ordering {
+    for i in 0..count {
+        let at = i * size_of::<i64>();
+        // SAFETY: guaranteed by the caller.
+        let (a, b) = unsafe {
+            (
+                lhs.add(at).cast::<i64>().read_unaligned(),
+                rhs.add(at).cast::<i64>().read_unaligned(),
+            )
+        };
+        if a != b {
+            return a.cmp(&b);
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
 /// The canonical order of two tuples with the attributes of `desc`.
 ///
 /// # Safety
@@ -2362,6 +2391,9 @@ pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cm
 unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cmp::Ordering {
     // SAFETY: guaranteed by the caller.
     unsafe {
+        if desc.integers > 0 {
+            return compare_integers(lhs, rhs, desc.integers);
+        }
         for attr in attributes(desc) {
             let ordering = order(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc);
             if ordering.is_ne() {
@@ -3372,6 +3404,16 @@ fn write_failure(write: impl FnOnce(&mut Stderr) -> fmt::Result) {
 pub struct TypeDesc {
     /// One of the `KIND_` constants.
     pub kind: u8,
+    /// Whether a value of this type can point to buffers: whether it is or
+    /// has a text, a relation or an array, or, in a hierarchy, one of its
+    /// types' does. One that can't takes no walking when a reference to
+    /// what it points to would be taken or given up.
+    pub points: bool,
+    /// How many integers a value of this type, or a tuple of a relation of
+    /// this type, is, if it is nothing else, one after another in the
+    /// order they compare, and otherwise 0. Comparing them takes no walking
+    /// through their descriptors.
+    pub integers: usize,
     /// The size of a value of this type, in bytes.
     pub size: usize,
     /// For a tuple or relation, its heading's attributes, and for a type of
@@ -6384,6 +6426,8 @@ mod tests {
     fn scalar(kind: u8, size: usize) -> TypeDesc {
         TypeDesc {
             kind,
+            points: kind == KIND_TEXT,
+            integers: 0,
             size,
             attributes: core::ptr::null(),
             count: 0,
@@ -6395,10 +6439,18 @@ mod tests {
         }
     }
 
+    /// Whether a value with `attributes` can point to buffers.
+    fn any_points(attributes: &[Attr]) -> bool {
+        // SAFETY: each test's descriptors outlive it.
+        attributes.iter().any(|attr| unsafe { (*attr.desc).points })
+    }
+
     /// A tuple of `size` bytes with `attributes`.
     fn tuple_of(attributes: &[Attr], size: usize) -> TypeDesc {
         TypeDesc {
             kind: KIND_TUPLE,
+            points: any_points(attributes),
+            integers: 0,
             size,
             attributes: attributes.as_ptr(),
             count: attributes.len(),
@@ -6415,6 +6467,8 @@ mod tests {
     fn defined_of(name: &'static str, attributes: &[Attr], size: usize) -> TypeDesc {
         TypeDesc {
             kind: KIND_DEFINED,
+            points: any_points(attributes),
+            integers: 0,
             size,
             attributes: attributes.as_ptr(),
             count: attributes.len(),
@@ -6430,6 +6484,8 @@ mod tests {
     fn relation_of(tuple: &TypeDesc) -> TypeDesc {
         TypeDesc {
             kind: KIND_RELATION,
+            points: true,
+            integers: 0,
             size: 16,
             attributes: tuple.attributes,
             count: tuple.count,
@@ -6445,6 +6501,8 @@ mod tests {
     fn array_of(element: &TypeDesc) -> TypeDesc {
         TypeDesc {
             kind: KIND_ARRAY,
+            points: true,
+            integers: 0,
             size: 16,
             attributes: core::ptr::null(),
             count: 0,
@@ -6571,6 +6629,33 @@ mod tests {
         assert!(ordering(&[1], &[1, 0]).is_lt());
         assert!(ordering(&[], &[0]).is_lt());
         assert!(ordering(&[3, 1], &[3, 1]).is_eq());
+    }
+
+    #[test]
+    fn tuples_of_integers_compare_as_their_attributes_do() {
+        let integer = scalar(KIND_INTEGER, 8);
+        let attributes = [attr("a", 0, &integer), attr("b", 8, &integer)];
+        let walked = tuple_of(&attributes, 16);
+        let words = TypeDesc {
+            integers: 2,
+            ..tuple_of(&attributes, 16)
+        };
+        let values = [i64::MIN, -1, 0, 1, i64::MAX];
+        for a in values {
+            for b in values {
+                for c in values {
+                    for d in values {
+                        let (x, y): ([i64; 2], [i64; 2]) = ([a, b], [c, d]);
+                        let (x, y) = (x.as_ptr().cast(), y.as_ptr().cast());
+                        // SAFETY: each is two integers, as both describe.
+                        unsafe {
+                            assert_eq!(order(x, y, &words), order(x, y, &walked));
+                            assert_eq!(equal(x, y, &words), equal(x, y, &walked));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
