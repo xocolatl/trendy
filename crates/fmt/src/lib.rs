@@ -420,7 +420,7 @@ fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usiz
             SyntaxKind::Comment => {
                 comments.push(Comment {
                     own_line: newline || prev.is_none(),
-                    blank_before: blank_since && !comments.is_empty(),
+                    blank_before: blank_since,
                     token,
                 });
                 newline = false;
@@ -565,8 +565,10 @@ struct Comment {
     token: SyntaxToken,
     /// Whether it starts its own line.
     own_line: bool,
-    /// Whether the source has a blank line between it and the comment before
-    /// it.
+    /// Whether the source has a blank line between it and the comment or
+    /// token before it. Before the first of a gap's comments, the layout's
+    /// separator decides; after the file's last token, there is none, so
+    /// the source does.
     blank_before: bool,
 }
 
@@ -1970,8 +1972,14 @@ mod tests {
             fmt("var a := 1;\n/* one */\n\n/* two */"),
             "var a := 1;\n/* one */\n\n/* two */\n"
         );
-        // At the end of the file.
+        // At the end of the file, after a blank line if the source has one
+        // there, as between the comments.
         assert_eq!(fmt("var a := 1;\n/* end */"), "var a := 1;\n/* end */\n");
+        let notes =
+            "var a := 1;\n\n/* A comment after the last declaration. */\n\n/* And another. */\n";
+        assert_eq!(fmt(notes), notes);
+        let after_main = "operator main{} [\n    call f{};\n];\n\n/* A note. */\n";
+        assert_eq!(fmt(after_main), after_main);
         assert_eq!(fmt("var a := 1; /* end */"), "var a := 1; /* end */\n");
         assert_eq!(fmt("/* only */"), "/* only */\n");
     }
