@@ -2287,20 +2287,29 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
         let Some(converted) = converted(compared, bindings)? else {
             return Ok(hir::Expr::Call(call));
         };
-        let value = builtin
-            .evaluate(&known, &converted)
-            .map_err(|failure| match failure {
-                hir::BuiltinFailure::NoTuples => Failed::NoTuples(builtin),
-                hir::BuiltinFailure::Failure(failure) => Failed::Scalar(failure),
-                hir::BuiltinFailure::Unparsable(why) => match &known["from"] {
-                    hir::Value::Text(text) => Failed::Unparsable {
-                        builtin,
-                        text: text.clone(),
-                        why,
+        let result = builtin
+            .result(bindings.namespaces.library())
+            .instantiated(&call.types);
+        let value =
+            builtin
+                .evaluate(&known, &converted, &result)
+                .map_err(|failure| match failure {
+                    hir::BuiltinFailure::NoTuples => Failed::NoTuples(builtin),
+                    hir::BuiltinFailure::Failure(failure) => Failed::Scalar(failure),
+                    hir::BuiltinFailure::Unparsable(why) => match &known["from"] {
+                        hir::Value::Text(text) => Failed::Unparsable {
+                            builtin,
+                            text: text.clone(),
+                            why,
+                        },
+                        other => panic!("`{}` of {other:?}", builtin.name()),
                     },
-                    other => panic!("`{}` of {other:?}", builtin.name()),
-                },
-            })?;
+                })?;
+        // Each value of a type of the program's own it makes is of its
+        // most specific type, as selecting it would make it.
+        let Some(value) = specialized(value, bindings)? else {
+            return Ok(hir::Expr::Call(call));
+        };
         return Ok(hir::Expr::Constant(value));
     }
     // The callee's value for the types its type parameters are given.
@@ -2834,6 +2843,53 @@ fn keys_hold(
         }
     }
     Ok(true)
+}
+
+/// `value`, which a built-in made, a value of a type of the program's own,
+/// or an array of them, each of its most specific type, as selecting it
+/// would make it (see [`most_specific`]), or `None` if a constraint that
+/// decides one is known only when running.
+///
+/// # Errors
+///
+/// Returns why computing a constraint fails, or two subtypes a value is
+/// of.
+fn specialized(value: hir::Value, bindings: Bindings) -> Result<Option<hir::Value>, Failed> {
+    Ok(Some(match value {
+        hir::Value::Defined(value) => {
+            let args: BTreeMap<String, hir::Expr> = value
+                .ty
+                .components
+                .attributes()
+                .map(|(name, ty)| {
+                    let component = value.components.get(name);
+                    let component = component.expect("a value has its type's components");
+                    (name.to_string(), typed(component.clone(), ty))
+                })
+                .collect();
+            let Some(ty) = most_specific(&value.ty, &args, &value, bindings)? else {
+                return Ok(None);
+            };
+            hir::Value::Defined(hir::DefinedValue {
+                ty,
+                components: value.components,
+            })
+        }
+        hir::Value::Array(array) => {
+            let mut elements = Vec::with_capacity(array.elements.len());
+            for element in array.elements {
+                let Some(element) = specialized(element, bindings)? else {
+                    return Ok(None);
+                };
+                elements.push(element);
+            }
+            hir::Value::Array(hir::ArrayValue {
+                element: array.element,
+                elements,
+            })
+        }
+        other => other,
+    }))
 }
 
 /// The most specific type of `value`, a value of `defined` whose

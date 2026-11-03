@@ -720,6 +720,14 @@ fn text() {
             r#""hello, ""#,
             r#""""#,
             folded,
+            // A word's code points, how many, and its last: `á` as one,
+            // then as `a` and a combining accent; and the word again.
+            "6",
+            "code_point{value: 225}",
+            "true",
+            "7",
+            "code_point{value: 769}",
+            "true",
             // The file's lines, in its order, how many it has, and those
             // that aren't empty.
             r#"array ["Nile", "Amazon", "Yangtze", "", "Paraná", "Mekong", "Volga"]"#,
@@ -758,6 +766,31 @@ fn text() {
             r#"warning[R0017]: line 3 of "examples/lakes.csv" gives `depth` metres{m: -281}, which isn't a value of `metres`: it breaks the constraint `m > 0`"#,
             r#"warning[R0014]: "eighty-four", in column 3 on line 5 of "examples/lakes.csv", isn't an integer, the type of `depth.m`"#,
         ]
+    );
+}
+
+#[test]
+fn code_points_of_a_subtype_when_running() {
+    // Made as selecting each would make it, of a subtype a constraint
+    // defines when it is true of it, and read back, wherever the
+    // hierarchy keeps their components.
+    let source = "type ascii is code_point { constraint value < 128 };
+
+operator show{word: text} [
+    var points := to_code_points{from: word};
+    for p in points loop [
+        call debug_value{v: p is ascii};
+    ];
+    call debug_value{v: from_code_points{from: points}};
+];
+
+operator main{} [
+    call show{word: \"aé\"};
+];
+";
+    assert_eq!(
+        run_source("code_points_of_a_subtype", source),
+        (0, "true\nfalse\n\"aé\"\n".to_string())
     );
 }
 

@@ -225,6 +225,18 @@ pub enum RuntimeFn {
     /// text writes, as `parse_boolean` reads one. It fails if the text
     /// writes none.
     ParseBoolean,
+    /// `trendy_rt_to_code_points(dst, text, descriptor)`: store at `dst`
+    /// the array of the code points of the text, in order, of the type the
+    /// descriptor describes, whose elements are a code point's stored
+    /// components, `{ value: integer }`, in memory the statement owns. It
+    /// fails if the memory can't be allocated.
+    ToCodePoints,
+    /// `trendy_rt_from_code_points(dst, array, descriptor)`: store at `dst`
+    /// the text of the code points of the array, in order, of the type the
+    /// descriptor describes, whose elements are a code point's stored
+    /// components, in memory the statement owns. It fails if the memory
+    /// can't be allocated.
+    FromCodePoints,
     /// `trendy_rt_sqrt(dst, x)`: store at `dst` the square root of the
     /// approximate number `x`, as `sqrt` computes it. It fails if `x` is
     /// negative, which has none.
@@ -615,13 +627,15 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 72] = [
+    pub const ALL: [RuntimeFn; 74] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
         RuntimeFn::ParseInteger,
         RuntimeFn::ParseApproximate,
         RuntimeFn::ParseBoolean,
+        RuntimeFn::ToCodePoints,
+        RuntimeFn::FromCodePoints,
         RuntimeFn::Sqrt,
         RuntimeFn::Sin,
         RuntimeFn::Cos,
@@ -705,6 +719,8 @@ impl RuntimeFn {
             | RuntimeFn::ParseInteger
             | RuntimeFn::ParseApproximate
             | RuntimeFn::ParseBoolean
+            | RuntimeFn::ToCodePoints
+            | RuntimeFn::FromCodePoints
             | RuntimeFn::Sqrt
             | RuntimeFn::LoadTextFile
             | RuntimeFn::LoadTextFileWithErrors
@@ -785,6 +801,8 @@ impl RuntimeFn {
             RuntimeFn::ParseInteger => "trendy_rt_parse_integer",
             RuntimeFn::ParseApproximate => "trendy_rt_parse_approximate",
             RuntimeFn::ParseBoolean => "trendy_rt_parse_boolean",
+            RuntimeFn::ToCodePoints => "trendy_rt_to_code_points",
+            RuntimeFn::FromCodePoints => "trendy_rt_from_code_points",
             RuntimeFn::Sqrt => "trendy_rt_sqrt",
             RuntimeFn::Sin => "trendy_rt_sin",
             RuntimeFn::Cos => "trendy_rt_cos",

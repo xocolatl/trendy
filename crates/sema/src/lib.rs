@@ -331,6 +331,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     // type can name, a built-in's parameters too, and their constraints,
     // whose operators come first.
     named_types::resolve(files, &mut namespaces, hir::OperatorId(0), errors);
+    builtins::library(files, &mut namespaces, errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
@@ -431,6 +432,7 @@ impl Checked {
             .into_iter()
             .map(|v| v.expect("a program without errors has every variable"))
             .collect();
+        let library = self.namespaces.library().clone();
         hir::Program {
             operators,
             variables,
@@ -438,6 +440,7 @@ impl Checked {
             constraints: self.constraints,
             subtypes: self.namespaces.subtypes,
             language_errors: self.language_errors,
+            library,
             entry,
             message,
         }
@@ -582,6 +585,10 @@ pub(crate) struct Namespaces {
     /// The kinds, which only the prelude declares, by name, each with the
     /// built-in types of it.
     kinds: HashMap<String, (hir::Kind, BTreeSet<hir::Scalar>)>,
+    /// The types of the units that come with the compiler that built-ins'
+    /// signatures name, once the types are resolved:
+    /// [`builtins::library`] fills it in.
+    library: Option<hir::Library>,
 }
 
 /// An operator's definition, as its name's namespace has it.
@@ -632,7 +639,21 @@ impl Namespaces {
                 .iter()
                 .map(|(kind, members)| (kind.name.clone(), (kind.clone(), members.clone())))
                 .collect(),
+            library: None,
         }
+    }
+
+    /// The types of the units that come with the compiler that built-ins'
+    /// signatures name.
+    ///
+    /// # Panics
+    ///
+    /// Before the types are resolved, when [`builtins::library`] gives
+    /// them.
+    pub(crate) fn library(&self) -> &hir::Library {
+        self.library
+            .as_ref()
+            .expect("the library's types are resolved before the operators")
     }
 
     /// The program's units.
@@ -1407,9 +1428,17 @@ mod tests {
     fn entry_is_main_wherever_it_appears() {
         let program = analyze_str("operator a{}[]; operator main{}[];").unwrap();
         assert_eq!(program.operator(program.entry).name, "main");
+        // The built-ins come after the types' constraints, the prelude's
+        // first.
+        let first = program
+            .operators
+            .iter()
+            .find(|op| matches!(op.kind, hir::OperatorKind::Builtin(_)));
         assert!(matches!(
-            program.operators[0].kind,
-            hir::OperatorKind::Builtin(hir::Builtin::Update(hir::UpdateBuiltin::DebugValue))
+            first.map(|op| &op.kind),
+            Some(hir::OperatorKind::Builtin(hir::Builtin::Update(
+                hir::UpdateBuiltin::DebugValue
+            )))
         ));
     }
 
@@ -2967,7 +2996,7 @@ var zero := seg{{len: 0}};{MAIN}"
             .unwrap();
         assert_eq!(
             debug_value.params,
-            hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params()
+            hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params(&program.library)
         );
     }
 
@@ -3320,6 +3349,113 @@ operator main{{}} [ var lines: array text; {main} ];"
                 .any(|d| d.code == Code::Internal && d.message.contains("`type error union;`")),
             "{errors:#?}"
         );
+    }
+
+    #[test]
+    fn a_text_is_its_code_points() {
+        // In order, one for each Unicode scalar value, which is no
+        // character a reader sees, and back.
+        let vars = variables(
+            "var p := to_code_points{from: \"hé🌍\"};\nvar t := from_code_points{from: p};\nvar n := length{a: to_code_points{from: \"e\\u{301}\"}};\nvar none := to_code_points{from: \"\"};\nvar omega := to_code_points{from: \"Ω\"}[1].value;\nvar empty := from_code_points{from: array code_point []};",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(
+            values,
+            [
+                "array [code_point{value: 104}, code_point{value: 233}, code_point{value: 127757}]",
+                "\"hé🌍\"",
+                "2",
+                "array code_point []",
+                "937",
+                "\"\"",
+            ]
+        );
+        // A code point is a Unicode scalar value: from 0 to 10FFFF hex, but
+        // not the surrogates.
+        let selected = |n: i64| format!("var c := code_point{{value: {n}}};{MAIN}");
+        for n in [0, 55295, 57344, 1_114_111] {
+            assert!(analyze_str(&selected(n)).is_ok(), "{n}");
+        }
+        for n in [-1, 55296, 57343, 1_114_112] {
+            assert_eq!(codes(&selected(n)), [Code::BrokenConstraint], "{n}");
+        }
+        // Each made as selecting it would make it: of a subtype a
+        // constraint defines, if it is true of it.
+        let vars = variables(
+            "type ascii is code_point { constraint value < 128 };\nvar a := to_code_points{from: \"aé\"};\nvar b := a[1] is ascii;\nvar c := a[2] is ascii;",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(values[1..], ["true", "false"]);
+    }
+
+    #[test]
+    fn the_prelude_declares_code_point_as_the_compiler_makes_it() {
+        let declared = "type code_point {\n    { value: integer },";
+        assert!(trendy_prelude::PRELUDE.source.contains(declared));
+        let source = trendy_prelude::PRELUDE
+            .source
+            .replace(
+                declared,
+                "type code_point {\n    { value: integer, plane: integer },",
+            )
+            .replace("order [asc value]", "order [asc value, asc plane]");
+        let errors = checked_prelude(&parse(&source));
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::Internal);
+        assert!(
+            errors[0]
+                .message
+                .contains("`type code_point { { value: integer }, … };`"),
+            "{errors:#?}"
+        );
+    }
+
+    #[test]
+    fn other_languages_ways_with_characters_are_fixed() {
+        // Python's `len` of a text counts its code points.
+        let length = |of: &str| format!("var word := \"Zürich\";\nvar n := {of};{MAIN}");
+        assert_eq!(
+            fix(&length("length{a: word}")),
+            length("length{a: to_code_points{from: word}}")
+        );
+        assert_eq!(
+            fix(&length("count{r: word}")),
+            length("length{a: to_code_points{from: word}}")
+        );
+        assert_eq!(
+            fix(&fix(&length("len{word}"))),
+            length("length{a: to_code_points{from: word}}")
+        );
+        // Rust's `chars`, Java's `codePoints` and JavaScript's
+        // `fromCodePoint`, with their arguments named.
+        let call = |written: &str| format!("var word := \"Zürich\";\nvar p := {written};{MAIN}");
+        assert_eq!(
+            fix(&call("chars{word}")),
+            call("to_code_points{from: word}")
+        );
+        assert_eq!(
+            fix(&call("codePoints{word}")),
+            call("to_code_points{from: word}")
+        );
+        assert_eq!(
+            fix(&call("fromCodePoint{to_code_points{from: word}}")),
+            call("from_code_points{from: to_code_points{from: word}}")
+        );
+        // A character's number, and the character of one, as Python's `ord`
+        // and `chr` give them, which trendy has no type of.
+        for (written, help) in [
+            ("ord{word}", "`to_code_points{from: t}[1].value`"),
+            (
+                "chr{233}",
+                "`from_code_points{from: array [code_point{value: n}]}`",
+            ),
+        ] {
+            let errors = errors(&call(written));
+            assert_eq!(errors.len(), 1, "{errors:#?}");
+            assert_eq!(errors[0].code, Code::UnknownName);
+            assert!(errors[0].help[0].contains(help), "{errors:#?}");
+            assert!(errors[0].notes[0].contains("`code_point`"), "{errors:#?}");
+        }
     }
 
     #[test]

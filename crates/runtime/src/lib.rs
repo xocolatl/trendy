@@ -3520,6 +3520,103 @@ pub unsafe extern "C" fn trendy_rt_parse_boolean(dst: *mut u8, from: *const Text
     })
 }
 
+/// Store at `dst` the array of the code points of the text `from`, in
+/// order, of the type `desc` describes, whose elements are a code point's
+/// stored components, `{ value: integer }`, its number, in memory the
+/// statement owns, as `to_code_points` gives them, and the compiler with
+/// it. Fails if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `from` must point to a valid text value, `desc` to a valid descriptor
+/// of that array type, and `dst` to memory for an array. The statement
+/// must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_to_code_points(
+    dst: *mut Text,
+    from: *const Text,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller; each element has room for the
+    // components its descriptor describes.
+    status(|| unsafe {
+        let text = read_text(from.cast());
+        let desc = &*desc;
+        let element = desc.element();
+        let [number] = attributes(element) else {
+            unreachable!("a code point's stored components are its number");
+        };
+        let count = text.chars().count();
+        let Some(size) = count.checked_mul(element.size) else {
+            return Err(out_of_memory());
+        };
+        let points = allocate_buffer(size, desc)?;
+        for (i, c) in text.chars().enumerate() {
+            let at = points.add(i * element.size + number.offset);
+            at.cast::<i64>().write_unaligned(i64::from(u32::from(c)));
+        }
+        dst.write_unaligned(Text {
+            bytes: points,
+            len: count,
+        });
+        Ok(())
+    })
+}
+
+/// Store at `dst` the text of the code points of the array `from`, in
+/// order, of the type `desc` describes, whose elements are a code point's
+/// stored components, as [`trendy_rt_to_code_points`] makes them, in memory
+/// the statement owns, as `from_code_points` gives it, and the compiler
+/// with it. Fails if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `from` must point to a valid array of that type, `desc` to its
+/// descriptor, and `dst` to memory for a text value. The statement must
+/// have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_from_code_points(
+    dst: *mut Text,
+    from: *const Text,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller; each code point is a Unicode scalar
+    // value, as `code_point`'s constraint says.
+    status(|| unsafe {
+        let array = from.read_unaligned();
+        let element = (*desc).element();
+        let [number] = attributes(element) else {
+            unreachable!("a code point's stored components are its number");
+        };
+        let point = |i: usize| {
+            let at = array.bytes.add(i * element.size + number.offset);
+            let n = at.cast::<i64>().read_unaligned();
+            u32::try_from(n)
+                .ok()
+                .and_then(char::from_u32)
+                .unwrap_or_else(|| internal_error("a code point is no Unicode scalar value"))
+        };
+        let mut len = 0usize;
+        for i in 0..array.len {
+            len = len
+                .checked_add(point(i).len_utf8())
+                .ok_or_else(out_of_memory)?;
+        }
+        let bytes = allocate_buffer(len, core::ptr::null())?;
+        let mut at = 0;
+        for i in 0..array.len {
+            let mut buffer = [0; 4];
+            let encoded = point(i).encode_utf8(&mut buffer);
+            core::ptr::copy_nonoverlapping(encoded.as_ptr(), bytes.add(at), encoded.len());
+            at += encoded.len();
+        }
+        dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
 /// Where a field of a CSV file is, for an attribute: in a column, counting
 /// from 0, on a line, of the file at a path.
 #[cfg(not(test))]

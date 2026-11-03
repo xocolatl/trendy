@@ -596,21 +596,21 @@ impl Operators {
 
 impl Signature {
     /// The signature of `builtin`, whose id is `id`, with the type
-    /// parameters and parameters its declaration has, which are the
-    /// compiler's, declared in the section `section` of `unit`, a unit
-    /// that comes with the compiler, checked as `source`. Its declaration
-    /// isn't an operator's, so it points at none (see
-    /// [`Signature::param_origin`]).
+    /// parameters, parameters and result its declaration has, which are the
+    /// compiler's, of the types of the `library` they name, declared in the
+    /// section `section` of `unit`, a unit that comes with the compiler,
+    /// checked as `source`. Its declaration isn't an operator's, so it
+    /// points at none (see [`Signature::param_origin`]).
     pub(crate) fn builtin(
         id: hir::OperatorId,
         builtin: hir::Builtin,
-        types: Vec<hir::TypeParameter>,
-        params: BTreeMap<String, hir::Parameter>,
+        library: &hir::Library,
         unit: hir::FileId,
         section: Section,
         source: Source,
     ) -> Self {
-        let result = builtin.result();
+        let (types, params) = (builtin.types(), builtin.params(library));
+        let result = builtin.result(library);
         Signature {
             id,
             name: builtin.name().to_string(),

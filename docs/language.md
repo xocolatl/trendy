@@ -1083,6 +1083,24 @@ builtin operator parse_approximate{from: text}: approximate;
    else, not even spaces. Other text fails (R0014). */
 builtin operator parse_boolean{from: text}: boolean;
 
+/* A Unicode code point that a text can hold: from 0 to 10FFFF hex, but
+   not the surrogates, D800 to DFFF, which UTF-8 can't encode, so each is a
+   Unicode scalar value. Code points are ordered by their numbers. */
+type code_point {
+    { value: integer },
+    constraint value >= 0 and value <= 1114111 and (value < 55296 or value > 57343),
+    order [asc value],
+};
+
+/* The code points of `from`, in order: what its text is made of, one for
+   each Unicode scalar value, not each character a reader sees, as `é` can
+   be written as `e` and a combining accent, two code points. */
+builtin operator to_code_points{from: text}: array code_point;
+
+/* The text of the code points `from`, in order, which every array of them
+   writes, so that it is `to_code_points`'s inverse. */
+builtin operator from_code_points{from: array code_point}: text;
+
 /* π, the ratio of a circle's circumference to its diameter: the
    approximate number nearest it. */
 operator pi{}: approximate [
@@ -3766,8 +3784,9 @@ operator main{} [
   `ARRAY[1, 2]` too (P0010); `a[0]` for the first element, to `a[1]`, and
   `a[-1]` for the last, to `a[length{a: a}]` (R0011); `len`, `size` and
   `CARDINALITY`, to `length` of an array and `count` of a relation, and
-  `count` and `length` given the other's kind of value to each other
-  (A0015, A0004); and `t["name"]` for a tuple's attribute, to `t.name`
+  `count` and `length` given the other's kind of value to each other, or
+  a text, to `length` of its code points (A0015, A0004); and `t["name"]`
+  for a tuple's attribute, to `t.name`
   (A0022).
 
 ```trendy,error
@@ -4449,6 +4468,50 @@ operator main{} [];
 Concatenations of constants are done when compiling. One done while the
 program runs allocates memory for its result, and stops the program with
 `error[R0003]: out of memory` if there is none.
+
+A text is made of *code points*, values of the prelude's `code_point`:
+`to_code_points{from: t}` is the array of the text `t`'s, in order, and
+`from_code_points{from: a}` the text of the array `a`'s.
+
+```trendy
+var word := "Paraná";
+
+operator main{} [
+    var points := to_code_points{from: word};
+    call debug_value{v: points[6]};
+    call debug_value{v: length{a: points}};
+    call debug_value{v: from_code_points{from: points} = word};
+];
+```
+
+- **A code point is a Unicode scalar value,** as `code_point{value: 225}`
+  is `á`: a number from 0 to 10FFFF hex, but not the surrogates, D800 to
+  DFFF, which no UTF-8 text holds, so selecting another fails (R0017). It
+  is a type of its own, not an integer, as *The Third Manifesto*'s `QTY`
+  is (chapter 6): its number is `p.value`, and code points are ordered by
+  it. So every array of them has a text, which `from_code_points` gives.
+- **It is no character a reader sees.** `é` can be written as one code
+  point, `\u{E9}`, or as two, `e` and a combining accent, `\u{301}`, which
+  are different texts. trendy has no type of one character.
+- **Each is made as selecting it would make it,** so of a subtype a
+  constraint defines, as `type ascii is code_point { constraint value <
+  128 };` does, if it is true of it (see [Subtypes defined by
+  constraints](#subtypes-defined-by-constraints)).
+- **A text's length is the count of its code points,** `length{a:
+  to_code_points{from: t}}`, as Python's `len` counts them, which
+  `length` or `count` of a text is fixed to (A0004).
+- **Other languages' habits are fixed:** Rust's `chars` and Java's
+  `codePoints` to `to_code_points`, and JavaScript's `String.fromCodePoint`
+  to `from_code_points` (A0015). Python's `ord` and `chr`, and
+  JavaScript's `charCodeAt` and `fromCharCode`, of one character, are
+  reported with how to write their values (A0015).
+
+```trendy,error
+var word := "Zürich";
+var letters := length{a: word};
+
+operator main{} [];
+```
 
 ### Comparisons
 

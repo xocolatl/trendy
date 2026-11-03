@@ -12,6 +12,18 @@ operator greet{name: text, punctuation: text} [
     call debug_value{v: tuple { t: "constant " || "parts fold" }};
 ];
 
+/* A text is made of code points, values of `code_point`, which
+   `to_code_points` gives in order: one for each Unicode scalar value, so
+   the `á` of `Paraná` is one, and the same letter written as `a` and a
+   combining accent is two. `from_code_points` is the text of an array of
+   them, which makes the word again. */
+operator spell{word: text} [
+    var points := to_code_points{from: word};
+    call debug_value{v: length{a: points}};
+    call debug_value{v: points[length{a: points}]};
+    call debug_value{v: from_code_points{from: points} = word};
+];
+
 /* A text file's lines, read when the program runs, into the variable
    for `lines`: an array, in the file's order, the first line its element
    1. A relative path is from the directory the program runs in: here,
@@ -134,6 +146,8 @@ operator main{out errors: relation transaction_collection} [
     call greet{name: "Ada", punctuation: "!"};
     call greet{name: "é\u{1F600}\"", punctuation: "\n"};
     call greet{name: "", punctuation: ""};
+    call spell{word: "Paraná"};
+    call spell{word: "Parana\u{301}"};
     call list_rivers{};
     call list_missing{};
     var skipped: relation { error: error };

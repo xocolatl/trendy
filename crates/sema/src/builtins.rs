@@ -47,11 +47,20 @@ fn declared_text(types: &[hir::TypeParameter]) -> String {
 
 /// The built-in named `name` whose parameters are named `params`, as a
 /// call names their arguments, or else the first named `name`, whose
-/// parameters the declaration's then differ from.
-fn implemented(name: &str, params: &BTreeSet<String>) -> Option<hir::Builtin> {
+/// parameters the declaration's then differ from: of the types of the
+/// `library` they name.
+fn implemented(
+    name: &str,
+    params: &BTreeSet<String>,
+    library: &hir::Library,
+) -> Option<hir::Builtin> {
     let named = || hir::Builtin::ALL.into_iter().filter(|b| b.name() == name);
     named()
-        .find(|b| operators::written(&b.params()).keys().eq(params.iter()))
+        .find(|b| {
+            operators::written(&b.params(library))
+                .keys()
+                .eq(params.iter())
+        })
         .or_else(|| named().next())
 }
 
@@ -79,7 +88,8 @@ fn builtin_operator(
                 .collect()
         })
         .unwrap_or_default();
-    let Some(builtin) = implemented(name, &written) else {
+    let library = namespaces.library();
+    let Some(builtin) = implemented(name, &written, library) else {
         errors.push(internal(
             format!("`{name}` is not a built-in the compiler implements"),
             &ident,
@@ -119,7 +129,7 @@ fn builtin_operator(
     };
     // The type parameters first, which the result type can name.
     let implemented = builtin.types();
-    if types != implemented || params != builtin.params() {
+    if types != implemented || params != builtin.params(library) {
         // At `types { … }`, if those it declares are what differ.
         let named = |list: &[hir::TypeParameter]| -> Vec<hir::TypeParameter> {
             list.iter().filter(|t| t.name.is_some()).cloned().collect()
@@ -132,7 +142,7 @@ fn builtin_operator(
             Code::Internal,
             format!(
                 "`{name}` is declared with parameters that differ from its implementation's, `{}{}`",
-                operators::params_text(&operators::written(&builtin.params())),
+                operators::params_text(&operators::written(&builtin.params(library))),
                 declared_text(&implemented)
             ),
             span,
@@ -140,10 +150,10 @@ fn builtin_operator(
         ));
         return None;
     }
-    if result != builtin.result() {
+    if result != builtin.result(library) {
         let span = written.map_or_else(|| ident_span(&ident), |w| w.span());
         let expected = builtin
-            .result()
+            .result(library)
             .map_or_else(|| "none".to_string(), |r| format!("`{r}`"));
         errors.push(Diagnostic::error(
             Code::Internal,
@@ -156,8 +166,7 @@ fn builtin_operator(
     Some(Signature::builtin(
         id,
         builtin,
-        types,
-        params,
+        library,
         namespaces.unit_at(ident_span(&ident)),
         ast::section_of(decl.syntax()),
         source,
@@ -351,6 +360,49 @@ pub(crate) fn kinds(
     kinds
 }
 
+/// Give `namespaces` the types of the units that come with the compiler
+/// that built-ins' signatures name, from `files`, as they declare them,
+/// once the types are resolved: the prelude's `code_point`, whose values
+/// the compiler makes with the components [`hir::Library::code_point_components`],
+/// as a type of its own, no subtype. One that isn't is an internal error,
+/// at the prelude's end, and so is one missing, which a type of just those
+/// components stands for, so that the built-ins are checked against what
+/// they name, and nothing else is reported for it.
+pub(crate) fn library(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagnostic>) {
+    let name = hir::Library::CODE_POINT;
+    let components = hir::Library::code_point_components();
+    let declared = namespaces.defined_named(name).cloned();
+    let as_made = declared.as_ref().is_some_and(|defined| {
+        defined.components == components
+            && defined.supertypes.is_empty()
+            && defined.specialization.is_none()
+    });
+    if !as_made {
+        errors.push(Diagnostic::error(
+            Code::Internal,
+            format!(
+                "the prelude doesn't declare `type {name} {{ {{ value: integer }}, … }};`, of a code point, which `to_code_points` makes values of"
+            ),
+            Span::empty(files.prelude().span().end),
+            "missing",
+        ));
+    }
+    let code_point = declared.unwrap_or_else(|| hir::Defined {
+        name: name.to_string(),
+        components,
+        representations: Vec::new(),
+        constraints: Vec::new(),
+        keys: BTreeMap::new(),
+        order: None,
+        supertypes: Vec::new(),
+        specialized: false,
+        specialization: None,
+    });
+    namespaces.library = Some(hir::Library {
+        code_point: Box::new(code_point),
+    });
+}
+
 /// Add to `list` the signature of each built-in operator the units that
 /// come with the compiler declare, in `files`, numbered after those it
 /// has, checking that they are exactly those the compiler implements, each
@@ -385,7 +437,7 @@ pub(crate) fn operators(
         .into_iter()
         .filter(|b| !declared.contains(b))
     {
-        let params = operators::params_text(&operators::written(&b.params()));
+        let params = operators::params_text(&operators::written(&b.params(namespaces.library())));
         errors.push(Diagnostic::error(
             Code::Internal,
             format!(

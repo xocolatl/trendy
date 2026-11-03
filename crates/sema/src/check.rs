@@ -786,6 +786,7 @@ impl<'a> Checker<'a> {
             // Another language's operator, or one of a unit this one could
             // use, which its error names.
             let foreign = errors::elsewhere(name).is_some()
+                || errors::absent(name).is_some()
                 || errors::tutorial_d_tested(name, at, self.namespaces()).is_some()
                 || !self
                     .namespaces()
@@ -942,8 +943,20 @@ impl<'a> Checker<'a> {
             return None;
         }
         let call = self.arguments(written, &signature, errors)?;
-        // A built-in's implementation is the compiler's, never checked.
-        if signature.builtin.is_none() && !self.names.checked(signature.id, span, errors) {
+        // A built-in's implementation is the compiler's, never checked, but
+        // one that makes values of a type the library defines makes each as
+        // selecting it would, which checks what that checks first.
+        let checks = match signature.builtin {
+            None => vec![signature.id],
+            Some(builtin) => builtin
+                .makes(self.namespaces().library())
+                .map(|made| self.namespaces().selection_checks(made))
+                .unwrap_or_default(),
+        };
+        if !checks
+            .into_iter()
+            .all(|operator| self.names.checked(operator, span, errors))
+        {
             return None;
         }
         // Its value may compare the values of a type it is given.
@@ -3340,7 +3353,7 @@ impl Unbound<'_> {
             }
             Unbound::Kind(parameter, origin) => {
                 let d = errors::not_of_kind(parameter, origin, actual, arg, namespaces);
-                errors::counted_otherwise(d, builtin, actual, arg)
+                errors::counted_otherwise(d, builtin, actual, arg, namespaces)
             }
         }
     }

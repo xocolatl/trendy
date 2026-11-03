@@ -35,6 +35,9 @@ pub struct Program {
     /// name, or, if a unit of the program's declares one of that name too,
     /// its name qualified by its unit's.
     pub language_errors: BTreeMap<LanguageError, String>,
+    /// The types of the units that come with the compiler that built-ins'
+    /// signatures name, as the program declares them.
+    pub library: Library,
     /// The operator the executable starts in: a user operator with no
     /// parameters.
     pub entry: OperatorId,
@@ -140,7 +143,7 @@ impl Program {
         let result = match &self.operator(call.operator).kind {
             OperatorKind::ReadOnly { result, .. } => Some(result.clone()),
             OperatorKind::Specification { result } => result.clone(),
-            OperatorKind::Builtin(builtin) => builtin.result(),
+            OperatorKind::Builtin(builtin) => builtin.result(&self.library),
             OperatorKind::Update { .. } => None,
         };
         result
@@ -474,6 +477,10 @@ pub enum ReadOnlyBuiltin {
     ParseApproximate,
     /// The boolean a text writes.
     ParseBoolean,
+    /// The code points of a text, in order.
+    ToCodePoints,
+    /// The text of code points, in order.
+    FromCodePoints,
     /// The square root of an approximate number, correctly rounded, which
     /// a negative one hasn't.
     Sqrt,
@@ -866,8 +873,113 @@ impl LanguageError {
     }
 }
 
+/// The types the units that come with the compiler define in trendy that
+/// built-ins' signatures name, whose values the compiler makes, each as
+/// the program declares it, which sema checks is as the compiler makes
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Library {
+    /// The prelude's `code_point`, a Unicode scalar value, stored as
+    /// [`Library::code_point_components`] says.
+    pub code_point: Box<Defined>,
+}
+
+impl Library {
+    /// The name of the prelude's type of code points.
+    pub const CODE_POINT: &'static str = "code_point";
+
+    /// The components of the representation `code_point`'s values are
+    /// stored as, which the compiler makes them with: `{ value: integer }`,
+    /// the scalar value's number.
+    #[must_use]
+    pub fn code_point_components() -> Heading {
+        Heading::new([("value".to_string(), Type::Scalar(Scalar::Integer))].into())
+    }
+
+    /// The type `array code_point`.
+    #[must_use]
+    pub fn code_points(&self) -> Type {
+        Type::Array(Box::new(Type::Defined(self.code_point.clone())))
+    }
+
+    /// The components of the code point of `c`.
+    #[must_use]
+    pub fn code_point_components_of(c: char) -> TupleValue {
+        TupleValue::new([("value".to_string(), Value::Integer(i64::from(u32::from(c))))].into())
+    }
+
+    /// The array of the code points of `text`, in order, of the type `ty`,
+    /// `array code_point`, each of `code_point` itself.
+    ///
+    /// # Panics
+    ///
+    /// If `ty` isn't an array of a type of the program's own.
+    #[must_use]
+    pub fn code_points_of(text: &str, ty: &Type) -> Value {
+        let Type::Array(element) = ty else {
+            panic!("code points as {ty}");
+        };
+        let Type::Defined(code_point) = &**element else {
+            panic!("code points as {ty}");
+        };
+        let elements = text
+            .chars()
+            .map(|c| {
+                Value::Defined(DefinedValue {
+                    ty: code_point.clone(),
+                    components: Library::code_point_components_of(c),
+                })
+            })
+            .collect();
+        Value::Array(ArrayValue {
+            element: (**element).clone(),
+            elements,
+        })
+    }
+
+    /// The text of the code points of `points`, an array of them, in
+    /// order.
+    ///
+    /// # Panics
+    ///
+    /// If `points` isn't an array of code points.
+    #[must_use]
+    pub fn text_of(points: &Value) -> String {
+        let Value::Array(array) = points else {
+            panic!("the text of {points:?}");
+        };
+        array
+            .elements
+            .iter()
+            .map(Library::code_point_char)
+            .collect()
+    }
+
+    /// The scalar value `point`, a value of `code_point`, or of a subtype
+    /// of it, is.
+    ///
+    /// # Panics
+    ///
+    /// If it isn't one, which `code_point`'s constraint, which sema checks
+    /// is the compiler's, rules out.
+    #[must_use]
+    pub fn code_point_char(point: &Value) -> char {
+        let number = match point {
+            Value::Defined(point) => point.components.get("value"),
+            _ => None,
+        };
+        let Some(Value::Integer(number)) = number else {
+            panic!("{point:?} isn't a code point");
+        };
+        u32::try_from(*number)
+            .ok()
+            .and_then(char::from_u32)
+            .unwrap_or_else(|| panic!("{number} is no Unicode scalar value"))
+    }
+}
+
 impl Builtin {
-    pub const ALL: [Builtin; 21] = [
+    pub const ALL: [Builtin; 23] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -881,6 +993,8 @@ impl Builtin {
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseInteger),
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseApproximate),
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseBoolean),
+        Builtin::ReadOnly(ReadOnlyBuiltin::ToCodePoints),
+        Builtin::ReadOnly(ReadOnlyBuiltin::FromCodePoints),
         Builtin::ReadOnly(ReadOnlyBuiltin::Sqrt),
         Builtin::ReadOnly(ReadOnlyBuiltin::Sin),
         Builtin::ReadOnly(ReadOnlyBuiltin::Cos),
@@ -955,6 +1069,8 @@ impl Builtin {
                 | ReadOnlyBuiltin::ParseInteger
                 | ReadOnlyBuiltin::ParseApproximate
                 | ReadOnlyBuiltin::ParseBoolean
+                | ReadOnlyBuiltin::ToCodePoints
+                | ReadOnlyBuiltin::FromCodePoints
                 | ReadOnlyBuiltin::Sqrt
                 | ReadOnlyBuiltin::Sin
                 | ReadOnlyBuiltin::Cos
@@ -973,10 +1089,11 @@ impl Builtin {
         }
     }
 
-    /// The parameters the compiler's implementation takes, as it sees them:
-    /// a `per` parameter is an attribute of its relation's tuples.
+    /// The parameters the compiler's implementation takes, as it sees them,
+    /// of the types of the `library` they name: a `per` parameter is an
+    /// attribute of its relation's tuples.
     #[must_use]
-    pub fn params(self) -> BTreeMap<String, Parameter> {
+    pub fn params(self, library: &Library) -> BTreeMap<String, Parameter> {
         let types = self.types();
         let parameter = |index: usize| Type::Parameter(types[index].clone());
         let constant = |name: &str, ty: Type| (name.to_string(), Parameter::constant(ty));
@@ -1003,6 +1120,12 @@ impl Builtin {
                 | ReadOnlyBuiltin::ParseApproximate
                 | ReadOnlyBuiltin::ParseBoolean,
             ) => [constant("from", Type::Scalar(Scalar::Text))].into(),
+            Builtin::ReadOnly(ReadOnlyBuiltin::ToCodePoints) => {
+                [constant("from", Type::Scalar(Scalar::Text))].into()
+            }
+            Builtin::ReadOnly(ReadOnlyBuiltin::FromCodePoints) => {
+                [constant("from", library.code_points())].into()
+            }
             Builtin::ReadOnly(
                 ReadOnlyBuiltin::Sqrt | ReadOnlyBuiltin::Sin | ReadOnlyBuiltin::Cos,
             ) => [constant("of", Type::Scalar(Scalar::Approximate))].into(),
@@ -1065,12 +1188,24 @@ impl Builtin {
     }
 
     /// The result type of the compiler's implementation, for a read-only
-    /// built-in, whose call is a value.
+    /// built-in, whose call is a value, of the types of the `library` it
+    /// names.
     #[must_use]
-    pub fn result(self) -> Option<Type> {
+    pub fn result(self, library: &Library) -> Option<Type> {
         match self {
-            Builtin::ReadOnly(builtin) => Some(builtin.result()),
+            Builtin::ReadOnly(builtin) => Some(builtin.result(library)),
             Builtin::Update(_) => None,
+        }
+    }
+
+    /// The type of the `library`'s whose values it makes, each as selecting
+    /// it would make it, of its most specific type: `to_code_points`'s code
+    /// points.
+    #[must_use]
+    pub fn makes(self, library: &Library) -> Option<&Defined> {
+        match self {
+            Builtin::ReadOnly(ReadOnlyBuiltin::ToCodePoints) => Some(&library.code_point),
+            _ => None,
         }
     }
 }
@@ -1090,6 +1225,8 @@ impl ReadOnlyBuiltin {
             ReadOnlyBuiltin::ParseInteger => "parse_integer",
             ReadOnlyBuiltin::ParseApproximate => "parse_approximate",
             ReadOnlyBuiltin::ParseBoolean => "parse_boolean",
+            ReadOnlyBuiltin::ToCodePoints => "to_code_points",
+            ReadOnlyBuiltin::FromCodePoints => "from_code_points",
             ReadOnlyBuiltin::Sqrt => "sqrt",
             ReadOnlyBuiltin::Sin => "sin",
             ReadOnlyBuiltin::Cos => "cos",
@@ -1098,9 +1235,9 @@ impl ReadOnlyBuiltin {
     }
 
     /// The type of the value of a call, which every read-only operator's
-    /// call is.
+    /// call is, of the types of the `library` it names.
     #[must_use]
-    pub fn result(self) -> Type {
+    pub fn result(self, library: &Library) -> Type {
         match self {
             ReadOnlyBuiltin::Count | ReadOnlyBuiltin::Length | ReadOnlyBuiltin::ParseInteger => {
                 Type::Scalar(Scalar::Integer)
@@ -1111,7 +1248,8 @@ impl ReadOnlyBuiltin {
             | ReadOnlyBuiltin::Product => {
                 Type::Parameter(Builtin::ReadOnly(self).types()[0].clone())
             }
-            ReadOnlyBuiltin::ToText => Type::Scalar(Scalar::Text),
+            ReadOnlyBuiltin::ToText | ReadOnlyBuiltin::FromCodePoints => Type::Scalar(Scalar::Text),
+            ReadOnlyBuiltin::ToCodePoints => library.code_points(),
             ReadOnlyBuiltin::ToApproximate
             | ReadOnlyBuiltin::ParseApproximate
             | ReadOnlyBuiltin::Sqrt
@@ -1123,9 +1261,13 @@ impl ReadOnlyBuiltin {
     }
 
     /// The value of a call with the arguments `args`, known when compiling,
-    /// by parameter name: what running the call gives, as it is a function
-    /// of its arguments. `min` and `max` compare values of types of the
-    /// program's own with the components in `converted` (see [`compare`]).
+    /// by parameter name, of the type `result`: what running the call gives,
+    /// as it is a function of its arguments. `min` and `max` compare values
+    /// of types of the program's own with the components in `converted`
+    /// (see [`compare`]). `to_code_points` makes values of `code_point`,
+    /// each of the type `result` says, which is no subtype's: a type of the
+    /// program's own that a constraint defines as one of its subtypes is
+    /// the caller's to give the values it is of.
     ///
     /// # Errors
     ///
@@ -1142,6 +1284,7 @@ impl ReadOnlyBuiltin {
         self,
         args: &BTreeMap<String, Value>,
         converted: &Converted,
+        result: &Type,
     ) -> Result<Value, BuiltinFailure> {
         let relation = || match &args["r"] {
             Value::Relation(r) => r,
@@ -1203,6 +1346,11 @@ impl ReadOnlyBuiltin {
             ReadOnlyBuiltin::ParseBoolean => self.parsed(args, |text| {
                 trendy_text::parse_boolean(text).map(Value::Boolean)
             }),
+            ReadOnlyBuiltin::ToCodePoints => match &args["from"] {
+                Value::Text(text) => Ok(Library::code_points_of(text, result)),
+                other => panic!("`to_code_points` of {other:?}"),
+            },
+            ReadOnlyBuiltin::FromCodePoints => Ok(Value::Text(Library::text_of(&args["from"]))),
             ReadOnlyBuiltin::Sqrt => {
                 let x = approximate("of");
                 trendy_numeric::sqrt(x.get())

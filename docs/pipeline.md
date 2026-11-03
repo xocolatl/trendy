@@ -66,7 +66,21 @@ with the text for one that isn't a value of its type (R0014). `sqrt`,
 `sin`, `cos` and `atan2` are runtime calls too (`trendy_rt_sqrt`,
 `trendy_rt_sin`, `trendy_rt_cos`, `trendy_rt_atan2`), with
 `trendy_numeric`, and `sqrt` stops the program for a negative number
-(R0018). `debug_value` and `debug_table`, update operators, are runtime calls
+(R0018). `to_code_points` and `from_code_points` are runtime calls too
+(`trendy_rt_to_code_points`, `trendy_rt_from_code_points`), which make
+and read an array of code points' stored components, `{ value: integer
+}`, given its descriptor. A built-in's signature can name a type the
+prelude defines in trendy, whose values the compiler makes, as theirs
+name `code_point`: sema checks the prelude declares it as the compiler
+makes its values (`builtins::library`, X0000), and the signatures take
+it (`hir::Library`, which `hir::Program::library` keeps). A built-in that
+makes values of it (`hir::Builtin::makes`) makes each as selecting it
+would, of its most specific type: a call checks the selection's checks
+first, folding gives each value its type (`ops::specialized`), and when
+running, if a subtype a constraint defines puts `code_point` in a
+hierarchy, lowering makes each value of the runtime's array in a new one
+(`made_in_hierarchy`), and copies their components out of one for
+`from_code_points`. `debug_value` and `debug_table`, update operators, are runtime calls
 given their argument and its type's descriptor (`trendy_rt_debug_value`,
 `trendy_rt_debug_table`). `to_text` is
 a runtime call, which writes the value as `debug_value` does; folded, it

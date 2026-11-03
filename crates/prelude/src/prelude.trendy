@@ -90,6 +90,24 @@ builtin operator parse_approximate{from: text}: approximate;
    else, not even spaces. Other text fails (R0014). */
 builtin operator parse_boolean{from: text}: boolean;
 
+/* A Unicode code point that a text can hold: from 0 to 10FFFF hex, but
+   not the surrogates, D800 to DFFF, which UTF-8 can't encode, so each is a
+   Unicode scalar value. Code points are ordered by their numbers. */
+type code_point {
+    { value: integer },
+    constraint value >= 0 and value <= 1114111 and (value < 55296 or value > 57343),
+    order [asc value],
+};
+
+/* The code points of `from`, in order: what its text is made of, one for
+   each Unicode scalar value, not each character a reader sees, as `é` can
+   be written as `e` and a combining accent, two code points. */
+builtin operator to_code_points{from: text}: array code_point;
+
+/* The text of the code points `from`, in order, which every array of them
+   writes, so that it is `to_code_points`'s inverse. */
+builtin operator from_code_points{from: array code_point}: text;
+
 /* π, the ratio of a circle's circumference to its diameter: the
    approximate number nearest it. */
 operator pi{}: approximate [

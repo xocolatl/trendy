@@ -2133,11 +2133,7 @@ pub(crate) fn unknown_operator(
     );
     // An operator the prelude hasn't, as SQL's `avg`, which is no
     // misspelling of `min`, nor `log` of `cos`.
-    let lowercase = name.to_lowercase();
-    if let Some(&(_, note, help)) = ABSENT
-        .iter()
-        .find(|(names, ..)| names.contains(&&*lowercase))
-    {
+    if let Some((note, help)) = absent(name) {
         return d.with_note(note).with_help(help);
     }
     // Other languages' names for the operators that come with the
@@ -2253,10 +2249,34 @@ const ABSENT: &[(&[&str], &str, &str)] = &[
         MATHEMATICAL,
         "write it as an operator of the program's own, with those",
     ),
+    (
+        &["ord", "codepointat", "charcodeat"],
+        CHARACTERS,
+        "the number of the first code point of `t` is `to_code_points{from: t}[1].value`",
+    ),
+    (
+        &["chr", "unichr", "fromcharcode"],
+        CHARACTERS,
+        "the text of the code point numbered `n` is `from_code_points{from: array [code_point{value: n}]}`",
+    ),
 ];
+
+/// Of an operator other languages have and the prelude hasn't, called
+/// `name` there, in any case, what the prelude has instead, and how to
+/// write its value with it (see [`ABSENT`]).
+pub(crate) fn absent(name: &str) -> Option<(&'static str, &'static str)> {
+    let lowercase = name.to_lowercase();
+    ABSENT
+        .iter()
+        .find(|(names, ..)| names.contains(&&*lowercase))
+        .map(|&(_, note, help)| (note, help))
+}
 
 /// What the prelude has of mathematics.
 const MATHEMATICAL: &str = "the prelude's mathematical operators are `+`, `-`, `*`, `/`, `div`, `mod`, `sqrt`, `sin`, `cos`, `atan2` and `pi`, and it has no others yet";
+
+/// What a text is made of, in the prelude's terms.
+const CHARACTERS: &str = "trendy has no type of one character: a text is made of code points, values of the prelude's `code_point`, which `to_code_points` gives an array of, and `from_code_points` a text of";
 
 /// The edit naming the one argument of a call, written `written`, `param`,
 /// the one parameter of the operator meant, if it has another name or
@@ -2323,7 +2343,9 @@ fn spelled_like(
 /// and
 /// JavaScript's `parseInt` and `parseFloat`, Java's `parseDouble`, and C's
 /// `atoi` and `atof`, as Go's `Atoi`, read numbers, and Java's
-/// `parseBoolean` and Go's `ParseBool` booleans; and `sine`, `cosine` and
+/// `parseBoolean` and Go's `ParseBool` booleans; Rust's `chars` and
+/// Java's `codePoints` give a text's code points, and JavaScript's
+/// `String.fromCodePoint` the text of some; and `sine`, `cosine` and
 /// NumPy's `arctan2` are `sin`, `cos` and `atan2`.
 const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("len", "count", Some("length")),
@@ -2341,6 +2363,9 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("atof", "parse_approximate", None),
     ("parseboolean", "parse_boolean", None),
     ("parsebool", "parse_boolean", None),
+    ("chars", "to_code_points", None),
+    ("codepoints", "to_code_points", None),
+    ("fromcodepoint", "from_code_points", None),
     ("sine", "sin", None),
     ("cosine", "cos", None),
     ("arctan2", "atan2", None),
@@ -2382,30 +2407,49 @@ pub(crate) fn parameter_elsewhere(builtin: hir::Builtin, name: &str) -> Option<&
 /// `d`, about the argument written `arg`, of type `actual`, of a call of
 /// the built-in `builtin`, with the fix calling the one for its kind of
 /// value instead: `count` counts a relation's tuples, and `length` an
-/// array's elements.
+/// array's elements, as a text's are counted, of its code points, as
+/// Python's `len` counts them. `namespaces` have the types the built-ins
+/// name.
 pub(crate) fn counted_otherwise(
     d: Diagnostic,
     builtin: Option<hir::ReadOnlyBuiltin>,
     actual: &hir::Type,
     arg: &Expr,
+    namespaces: &Namespaces,
 ) -> Diagnostic {
-    let ours = match (builtin, actual) {
-        (Some(hir::ReadOnlyBuiltin::Count), hir::Type::Array(_)) => hir::ReadOnlyBuiltin::Length,
-        (Some(hir::ReadOnlyBuiltin::Length), hir::Type::Relation(_)) => hir::ReadOnlyBuiltin::Count,
+    let written = arg.syntax().text().to_string();
+    let (ours, counted, what) = match (builtin, actual) {
+        (Some(hir::ReadOnlyBuiltin::Count), hir::Type::Array(_)) => {
+            (hir::ReadOnlyBuiltin::Length, written, "count it")
+        }
+        (Some(hir::ReadOnlyBuiltin::Length), hir::Type::Relation(_)) => {
+            (hir::ReadOnlyBuiltin::Count, written, "count it")
+        }
+        (
+            Some(hir::ReadOnlyBuiltin::Count | hir::ReadOnlyBuiltin::Length),
+            hir::Type::Scalar(hir::Scalar::Text),
+        ) => {
+            let points = hir::ReadOnlyBuiltin::ToCodePoints;
+            (
+                hir::ReadOnlyBuiltin::Length,
+                format!("{}{{from: {written}}}", points.name()),
+                "count its code points",
+            )
+        }
         _ => return d,
     };
     let call = arg
         .syntax()
         .parent()
         .and_then(|p| p.ancestors().find_map(trendy_syntax::ast::CallExpr::cast));
-    let params = hir::Builtin::ReadOnly(ours).params();
+    let params = hir::Builtin::ReadOnly(ours).params(namespaces.library());
     let (Some(call), Some(param)) = (call, params.into_keys().next()) else {
         return d;
     };
     let name = ours.name();
-    let replacement = format!("{name}{{{param}: {}}}", arg.syntax().text());
+    let replacement = format!("{name}{{{param}: {counted}}}");
     d.with_suggestion(
-        format!("count it with `{name}`: `{replacement}`"),
+        format!("{what} with `{name}`: `{replacement}`"),
         vec![Edit {
             span: call.span(),
             replacement,
@@ -5508,6 +5552,7 @@ fn unparsable(
                     .evaluate(
                         &[("from".to_string(), quoted.clone())].into(),
                         &hir::Converted::default(),
+                        &hir::Type::Scalar(hir::Scalar::Approximate),
                     )
                     .is_ok()
             {

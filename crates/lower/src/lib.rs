@@ -3008,6 +3008,8 @@ impl<'a> FunctionBuilder<'a> {
             hir::ReadOnlyBuiltin::ParseBoolean => {
                 self.parsed(lir::RuntimeFn::ParseBoolean, call, cx)
             }
+            hir::ReadOnlyBuiltin::ToCodePoints => self.code_points(call, cx),
+            hir::ReadOnlyBuiltin::FromCodePoints => self.text_of_code_points(call, cx),
             hir::ReadOnlyBuiltin::Sqrt => {
                 self.mathematical(lir::RuntimeFn::Sqrt, call, &["of"], cx)
             }
@@ -3017,6 +3019,92 @@ impl<'a> FunctionBuilder<'a> {
                 self.mathematical(lir::RuntimeFn::Atan2, call, &["y", "x"], cx)
             }
         }
+    }
+
+    /// The value of `call`, of `to_code_points`: the array of its text's
+    /// code points, as `hir::ReadOnlyBuiltin::evaluate` gives it, which the
+    /// runtime makes of their stored components, `{ value: integer }`. If
+    /// `code_point` is in a hierarchy, as a subtype a constraint defines
+    /// puts it, each is then made in a new array as selecting it would make
+    /// it, of its most specific type.
+    fn code_points(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
+        let ty = self.program.result(call);
+        let hir::Type::Array(element) = &ty else {
+            unreachable!("`to_code_points` gives an array");
+        };
+        let hir::Type::Defined(code_point) = &**element else {
+            unreachable!("`to_code_points` gives code points");
+        };
+        let components = hir::Type::Tuple(code_point.components.clone());
+        let stored = hir::Type::Array(Box::new(components.clone()));
+        let text = self.place(&call.args["from"], cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&stored)));
+        let points = self.slot(cx.layout(&stored));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::ToCodePoints,
+            args: vec![points.clone(), text, descriptor],
+        });
+        self.scoped = true;
+        // Laid out as their stored components.
+        if element.root().is_none() {
+            return points;
+        }
+        let mut count = points.clone();
+        count.path.push(1);
+        let made = self.allocated(&ty, count, cx);
+        let layout = cx.layout(element);
+        self.each_tuple(
+            &points,
+            cx.layout(&components),
+            cx,
+            |this, point, index, cx| {
+                let dst = this.element(&made, index, layout);
+                this.made_in_hierarchy(code_point, &point, &dst, &Checking::Selected, cx);
+            },
+        );
+        made
+    }
+
+    /// The value of `call`, of `from_code_points`: the text of its array's
+    /// code points, as `hir::ReadOnlyBuiltin::evaluate` gives it, which the
+    /// runtime reads of their stored components. An array of a type in a
+    /// hierarchy has them copied to a new array of them first.
+    fn text_of_code_points(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
+        let from = &call.args["from"];
+        let ty = self.type_of(from);
+        let hir::Type::Array(element) = &ty else {
+            unreachable!("`from_code_points` takes an array");
+        };
+        let hir::Type::Defined(code_point) = &**element else {
+            unreachable!("`from_code_points` takes code points");
+        };
+        let components = hir::Type::Tuple(code_point.components.clone());
+        let stored = hir::Type::Array(Box::new(components.clone()));
+        let array = self.place(from, cx);
+        let points = if element.root().is_none() {
+            array
+        } else {
+            let mut count = array.clone();
+            count.path.push(1);
+            let points = self.allocated(&stored, count, cx);
+            let layout = cx.layout(&components);
+            let path = cx.families.components_path(code_point);
+            self.each_tuple(&array, cx.layout(element), cx, |this, point, index, _| {
+                let dst = this.element(&points, index, layout.clone());
+                let mut src = point;
+                src.path.extend(path);
+                this.insts.push(lir::Inst::Copy { dst, src, layout });
+            });
+            points
+        };
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&stored)));
+        let dst = self.slot(scalar_layout(hir::Scalar::Text));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::FromCodePoints,
+            args: vec![dst.clone(), points, descriptor],
+        });
+        self.scoped = true;
+        dst
     }
 
     /// The value of `call`, of `sqrt`, `sin`, `cos` or `atan2`, an
@@ -6266,8 +6354,26 @@ mod tests {
             versions: Vec::new(),
             name: "debug_value".to_string(),
             types: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).types(),
-            params: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params(),
+            params: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params(&library()),
             kind: hir::OperatorKind::Builtin(hir::Builtin::Update(hir::UpdateBuiltin::DebugValue)),
+        }
+    }
+
+    /// The library's types as sema gives them: `code_point`, of its
+    /// stored components alone.
+    fn library() -> hir::Library {
+        hir::Library {
+            code_point: Box::new(hir::Defined {
+                name: hir::Library::CODE_POINT.to_string(),
+                components: hir::Library::code_point_components(),
+                representations: Vec::new(),
+                constraints: Vec::new(),
+                keys: BTreeMap::new(),
+                order: None,
+                supertypes: Vec::new(),
+                specialized: false,
+                specialization: None,
+            }),
         }
     }
 
@@ -6321,6 +6427,7 @@ mod tests {
                 .iter()
                 .map(|error| (*error, error.name().to_string()))
                 .collect(),
+            library: library(),
             entry: hir::OperatorId(entry),
         }
     }
@@ -7365,7 +7472,7 @@ mod tests {
             versions: Vec::new(),
             name: "count".to_string(),
             types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).types(),
-            params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).params(),
+            params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).params(&library()),
             kind: hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count)),
         };
         let tuple = |n| hir::TupleValue::new([("a".to_string(), hir::Value::Integer(n))].into());
@@ -7413,7 +7520,7 @@ mod tests {
             versions: Vec::new(),
             name: "max".to_string(),
             types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).types(),
-            params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).params(),
+            params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).params(&library()),
             kind: hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max)),
         };
         let own = hir::Heading::new(BTreeMap::new());
@@ -7827,7 +7934,7 @@ mod tests {
             versions: Vec::new(),
             name: builtin.name().to_string(),
             types: builtin.types(),
-            params: builtin.params(),
+            params: builtin.params(&library()),
             kind: hir::OperatorKind::Builtin(builtin),
         };
         let own = hir::Heading::new(BTreeMap::new());
@@ -7878,7 +7985,7 @@ mod tests {
             versions: Vec::new(),
             name: builtin.name().to_string(),
             types: builtin.types(),
-            params: builtin.params(),
+            params: builtin.params(&library()),
             kind: hir::OperatorKind::Builtin(builtin),
         };
         let converted = |operator, types| {
