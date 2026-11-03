@@ -4386,6 +4386,81 @@ fn image_relations_are_looked_up_once_per_loop() {
     );
 }
 
+/// Relations whose tuples come out in canonical order or don't, and too big
+/// for the runtime's scratch memory or not, when running.
+#[test]
+fn relations_are_sorted_only_if_they_need_it() {
+    let source = "operator show{zero: integer} [
+    var digits := relation {
+        { d: 0 },
+        { d: 1 },
+        { d: 2 },
+        { d: 3 },
+        { d: 4 },
+        { d: 5 },
+        { d: 6 },
+        { d: 7 },
+        { d: 8 },
+        { d: 9 },
+    };
+    var many := (times{
+        digits rename {d as a},
+        digits rename {d as b},
+        digits rename {d as c},
+        digits rename {d as e},
+    } extend { n := 1000 * a + 100 * b + 10 * c + e + zero }){n};
+    /* In order, by `n`, so nothing is sorted. */
+    var same := many extend { p := n + 1 };
+    call debug_value{v: value from (same where n = 9999){p}};
+    /* Out of order: `a` comes first, and falls as `n` rises. */
+    var fallen := many extend { a := 9999 - n };
+    call debug_value{v: count{r: fallen}};
+    call debug_value{v: value from (fallen where a = 0){n}};
+    call debug_value{v: value from (fallen where n = 0){a}};
+    /* Removing attributes makes duplicates, of many tuples. */
+    call debug_value{v: count{r: (fallen extend { g := n mod 10 }){g}}};
+    /* Pairs that outgrow the scratch memory, as they are made. */
+    var arcs := (many where n < 300) extend { m := n + 1 };
+    call debug_value{v: count{r: arcs tclose}};
+    /* In order, holding texts each tuple's scope made, kept after them. */
+    var named := (many where n < 3) extend { t := \"n = \" || to_text{from: n} };
+    var other := named;
+    call debug_table{r: other};
+    /* One tuple, and none. */
+    call debug_table{r: (many where n = 7) extend { t := to_text{from: n} }};
+    call debug_value{v: count{r: (many where n < 0){n}}};
+];
+
+operator main{} [
+    call show{zero: 0};
+];
+";
+    let (code, stderr) = run_source("sorted_if_need_be", source);
+    let expected = [
+        "10000",
+        "10000",
+        "9999",
+        "9999",
+        "10",
+        "45150",
+        "┌───┬───────┐",
+        "│ n │ t     │",
+        "├───┼───────┤",
+        "│ 0 │ n = 0 │",
+        "│ 1 │ n = 1 │",
+        "│ 2 │ n = 2 │",
+        "└───┴───────┘",
+        "┌───┬───┐",
+        "│ n │ t │",
+        "├───┼───┤",
+        "│ 7 │ 7 │",
+        "└───┴───┘",
+        "0",
+    ];
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!((code, &lines[..]), (0, &expected[..]), "{stderr}");
+}
+
 /// Tuples of nothing but integers, nested ones and a type of the program's
 /// own's among them, are compared as a run of integers, when running, in
 /// the order the compiler has them in when it knows them.

@@ -192,7 +192,10 @@ holds, which ends as the statement fails:
   header counts only the elements it holds references through, so a
   half-built one is released safely.
 - Its own memory, such as a sort's pointers or a file's bytes, is a
-  `Temp`, freed however the function ends.
+  `Temp`, freed however the function ends. One that fits comes from
+  `SCRATCH`, 64 KiB kept for them, as they never outlast the functions
+  running, so that it costs a few instructions; a bigger one comes from
+  `malloc`, which costs little beside the work on what fills it.
 
 **`trendy_text`**, `no_std` and dependency-free, holds the escape
 rules for text literals, so the compiler, which reads them and writes them
@@ -2171,7 +2174,11 @@ For a relation, `trendy_rt_allocate` makes the result's tuples; a loop then
 goes through the operand's, with the address of the tuple at hand in a
 slot (`Base::Indirect`), building each result tuple the same way; and
 `trendy_rt_sort` puts them in the canonical order, making one of the
-tuples a `replace` made equal. A failure inside the loop stops the program
+tuples a `replace` made equal. Whatever makes a relation sorts only what
+isn't in that order already (`canonical`, `in_canonical_order`), which takes
+a comparison or two to find if it isn't: an extension whose new attributes
+come after one that orders its tuples keeps them in their buffer, and a
+relation of one tuple is never sorted. A failure inside the loop stops the program
 as anywhere else. `Ungroup` is a call to `trendy_rt_ungroup`, with, as for
 `And`, where each attribute of the result comes from, the outer tuple or
 the tuple of which ungrouped relation, and each ungrouped attribute's

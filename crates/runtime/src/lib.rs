@@ -810,15 +810,29 @@ pub unsafe extern "C" fn trendy_rt_retain(value: *const u8, desc: *const TypeDes
 pub unsafe extern "C" fn trendy_rt_adopt(value: *const u8, desc: *const TypeDesc) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let element = (*desc).element();
         let (buffer, len) = read_slice(value);
+        adopt(buffer.cast_mut(), len, (*desc).element());
+    }
+}
+
+/// Have `buffer` hold references through its first `len` tuples or
+/// elements, of the type `element` describes, which something has written.
+///
+/// # Safety
+///
+/// `buffer` must hold them, each valid, and references through none of its
+/// elements yet.
+#[cfg(not(test))]
+unsafe fn adopt(buffer: *mut u8, len: usize, element: &TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
         if element.points {
             for i in 0..len {
                 retain(buffer.add(i * element.size), element);
             }
         }
         set_header(
-            buffer.cast_mut(),
+            buffer,
             Header {
                 len,
                 ..header(buffer)
@@ -951,9 +965,86 @@ fn allocate<T>(count: usize) -> Fallible<*mut T> {
     Ok(memory.cast())
 }
 
-/// Memory for values of type `T`, as [`allocate`] gives it, for a
-/// function's own use while it runs, freed when it is dropped, however the
-/// function ends: room for `len` of them, which are a slice once written.
+/// How much memory [`SCRATCH`] has: enough that a relational operation that
+/// takes less than the `malloc` and the `free` it saves fits in it.
+#[cfg(not(test))]
+const SCRATCH_BYTES: usize = 1 << 16;
+
+/// The alignment of what [`SCRATCH`] gives, which is `malloc`'s: enough for
+/// any type.
+#[cfg(not(test))]
+const SCRATCH_ALIGN: usize = 16;
+
+/// Memory for the [`Temp`]s of the functions running now, one after another,
+/// so that one costs a few instructions, where a relational operation over
+/// a few tuples, made for each of many tuples, would otherwise spend much of
+/// its time in `malloc` and `free`. One too big for what is left has its own
+/// from `malloc`.
+#[cfg(not(test))]
+#[repr(C, align(16))]
+struct Scratch {
+    memory: core::cell::UnsafeCell<[core::mem::MaybeUninit<u8>; SCRATCH_BYTES]>,
+    /// The bytes in use, from the start of `memory`.
+    top: core::cell::Cell<usize>,
+    /// How many `Temp`s hold some of it. It is all free when none does.
+    held: core::cell::Cell<usize>,
+}
+
+// SAFETY: the program runs on one thread.
+#[cfg(not(test))]
+unsafe impl Sync for Scratch {}
+
+/// The program's scratch memory, which takes no memory until it is used,
+/// and no more than its size.
+#[cfg(not(test))]
+static SCRATCH: Scratch = Scratch {
+    memory: core::cell::UnsafeCell::new([core::mem::MaybeUninit::uninit(); SCRATCH_BYTES]),
+    top: core::cell::Cell::new(0),
+    held: core::cell::Cell::new(0),
+};
+
+#[cfg(not(test))]
+impl Scratch {
+    /// `bytes` of memory, if there are that many left.
+    fn take(&self, bytes: usize) -> Option<*mut u8> {
+        let top = self.top.get();
+        // Some, even of none, so that what it gives is within the memory.
+        let rounded = bytes.max(1).checked_next_multiple_of(SCRATCH_ALIGN)?;
+        if rounded > SCRATCH_BYTES - top {
+            return None;
+        }
+        self.top.set(top + rounded);
+        self.held.set(self.held.get() + 1);
+        // SAFETY: `top` is within the memory, whose start is aligned, and
+        // each `take` keeps it aligned.
+        Some(unsafe { self.memory.get().cast::<u8>().add(top) })
+    }
+
+    /// Whether `memory` came from [`Scratch::take`].
+    fn gave(&self, memory: *const u8) -> bool {
+        let start = self.memory.get().cast::<u8>().cast_const();
+        (start..start.wrapping_add(SCRATCH_BYTES)).contains(&memory)
+    }
+
+    /// Have back `memory`, of `bytes` or fewer, from [`Scratch::take`]: all
+    /// of it once nothing holds any, and otherwise, if it is the last
+    /// taken, as a function that makes one for each of many usually
+    /// frees it, what it took.
+    fn give_back(&self, memory: *const u8, bytes: usize) {
+        self.held.set(self.held.get() - 1);
+        let at = memory as usize - self.memory.get() as usize;
+        if self.held.get() == 0 {
+            self.top.set(0);
+        } else if at + bytes.max(1).next_multiple_of(SCRATCH_ALIGN) == self.top.get() {
+            self.top.set(at);
+        }
+    }
+}
+
+/// Memory for values of type `T`, from [`SCRATCH`] or else as [`allocate`]
+/// gives it, for a function's own use while it runs, freed when it is
+/// dropped, however the function ends: room for `len` of them, which are a
+/// slice once written.
 #[cfg(not(test))]
 struct Temp<T> {
     memory: *mut T,
@@ -965,10 +1056,14 @@ impl<T> Temp<T> {
     /// Room for `len` values, not written yet. Fails if there is no memory
     /// for them.
     fn new(len: usize) -> Fallible<Self> {
-        Ok(Temp {
-            memory: allocate(len)?,
-            len,
-        })
+        let scratch = len
+            .checked_mul(size_of::<T>())
+            .and_then(|bytes| SCRATCH.take(bytes));
+        let memory = match scratch {
+            Some(memory) => memory.cast(),
+            None => allocate(len)?,
+        };
+        Ok(Temp { memory, len })
     }
 
     /// Room for `len` values, all zero bytes.
@@ -982,6 +1077,15 @@ impl<T> Temp<T> {
     /// Room for `len` values, the first of them as they were. Fails,
     /// leaving them as they are, if there is no memory for them.
     fn grow(&mut self, len: usize) -> Fallible {
+        if SCRATCH.gave(self.memory.cast()) {
+            let bigger = allocate::<T>(len)?;
+            // SAFETY: both have room for the first `self.len`.
+            unsafe { core::ptr::copy_nonoverlapping(self.memory, bigger, self.len) };
+            SCRATCH.give_back(self.memory.cast(), self.len * size_of::<T>());
+            self.memory = bigger;
+            self.len = len;
+            return Ok(());
+        }
         let Some(bytes) = len.checked_mul(size_of::<T>()) else {
             return Err(out_of_memory());
         };
@@ -1014,8 +1118,12 @@ impl<T> Temp<T> {
 #[cfg(not(test))]
 impl<T> Drop for Temp<T> {
     fn drop(&mut self) {
-        // SAFETY: `allocate` gave the memory, which only this frees.
-        unsafe { free(self.memory.cast()) }
+        if SCRATCH.gave(self.memory.cast()) {
+            SCRATCH.give_back(self.memory.cast(), self.len * size_of::<T>());
+        } else {
+            // SAFETY: `allocate` gave the memory, which only this frees.
+            unsafe { free(self.memory.cast()) }
+        }
     }
 }
 
@@ -2046,6 +2154,10 @@ pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDe
     // SAFETY: guaranteed by the caller.
     status(|| unsafe {
         let (tuples, count) = read_slice(relation.cast());
+        if in_canonical_order(tuples, count, &*desc) {
+            adopt(tuples.cast_mut(), count, (*desc).element());
+            return Ok(());
+        }
         let (bytes, len) = canonical(tuples, count, &*desc)?;
         relation.write_unaligned(Text { bytes, len });
         release_replaced(tuples.cast_mut());
@@ -2271,6 +2383,12 @@ unsafe fn canonical(
     // SAFETY: guaranteed by the caller.
     unsafe {
         let size = desc.element().size;
+        if in_canonical_order(tuples, count, desc) {
+            let out = allocate_buffer(count * size, desc)?;
+            core::ptr::copy_nonoverlapping(tuples, out, count * size);
+            adopt(out, count, desc.element());
+            return Ok((out, count));
+        }
         let mut order = pointers(tuples, count, size)?;
         let order = order.values();
         order.sort_unstable_by(|a, b| compare_tuples(*a, *b, desc));
@@ -2284,6 +2402,27 @@ unsafe fn canonical(
             kept += 1;
         }
         Ok((out, kept))
+    }
+}
+
+/// Whether the `count` tuples at `tuples`, of the relation `desc` describes,
+/// are in canonical order, without duplicates: so that they need no sorting,
+/// as one tuple never does, nor those that something has kept in order.
+/// Tuples out of order take few comparisons to find so, as this stops at
+/// the first.
+///
+/// # Safety
+///
+/// `tuples` must point to `count` valid tuples of that relation.
+#[cfg(not(test))]
+unsafe fn in_canonical_order(tuples: *const u8, count: usize, desc: &TypeDesc) -> bool {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let size = desc.element().size;
+        (1..count).all(|i| {
+            let (earlier, later) = (tuples.add((i - 1) * size), tuples.add(i * size));
+            compare_tuples(earlier, later, desc).is_lt()
+        })
     }
 }
 
