@@ -525,18 +525,13 @@ fn between(
 ) -> String {
     if let Some(indent) = line_break {
         // Statements in a row go on adjacent lines, unless the source groups
-        // them with a blank line, which is kept; several become one.
+        // them with a blank line, which is kept; several become one. Every
+        // kind of statement, a local variable's declaration among them.
         let statement_end = prev.kind() == SyntaxKind::Semicolon
-            && prev.parent().is_some_and(|p| {
-                matches!(
-                    p.kind(),
-                    SyntaxKind::CallStmt
-                        | SyntaxKind::AssignStmt
-                        | SyntaxKind::AssignBlock
-                        | SyntaxKind::ReturnStmt
-                        | SyntaxKind::IfStmt
-                )
-            });
+            && prev
+                .parent()
+                .and_then(trendy_syntax::ast::Statement::cast)
+                .is_some();
         let blank = blank_line && statement_end && next.kind() != SyntaxKind::RBracket;
         return format!(
             "{}\n{}",
@@ -920,7 +915,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // parameters or a read-only operator's result type: `f{}: integer [`,
     // and so does an array selector's, whether its keyword or its elements'
     // type: `array [1, 2]`, `array text []`, and a load's order's, after
-    // `order`. An index's `[` follows its operand directly: `a[1]`.
+    // `order`.
     let spaced_bracket = next.kind() == LBracket
         && next.parent().is_some_and(|p| {
             matches!(
@@ -934,20 +929,11 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         && prev
             .parent()
             .is_some_and(|p| p.kind() == SyntaxKind::HeadingRef);
-    // A projection's braces follow its operand directly: `r{a}{b}`. Those
-    // of a selector it projects don't: `tuple { a: 1 }{a}`.
-    let projection = next.kind() == LBrace
-        && next.parent().is_some_and(|list| {
-            list.kind() == SyntaxKind::NameList
-                && list
-                    .parent()
-                    .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
-        });
     match (prev.kind(), next.kind()) {
         _ if key_start(next).is_some() || per || requirements || named_heading => " ",
         // The variable an assignment assigns, as in `update r { … }`.
         _ if is_target(prev) => " ",
-        _ if projection => "",
+        _ if follows_operand(next) => "",
         _ if spaced_bracket => " ",
         (LBrace, RBrace) if list_brace(prev) => "",
         (LBrace, _) if list_brace(prev) => " ",
@@ -960,6 +946,27 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         (RBrace, LBracket | LBrace) => " ",
         (prev, next) if spaced_after(prev) || spaced_before(next) => " ",
         _ => "",
+    }
+}
+
+/// Whether `token` follows its operand directly: a projection's braces,
+/// as in `r{a}{b}` and `tuple { a: 1 }{a}`, though a selector's own follow
+/// its keyword after a space, and an index's `[`, whatever its operand ends
+/// with, `a[1]`, `f{x}[1]`, `(e)[1]` and `a[1][2]`, as a `[` right after a
+/// value always indexes it.
+fn follows_operand(token: &SyntaxToken) -> bool {
+    let Some(parent) = token.parent() else {
+        return false;
+    };
+    match token.kind() {
+        SyntaxKind::LBrace => {
+            parent.kind() == SyntaxKind::NameList
+                && parent
+                    .parent()
+                    .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
+        }
+        SyntaxKind::LBracket => parent.kind() == SyntaxKind::IndexExpr,
+        _ => false,
     }
 }
 
@@ -1225,6 +1232,15 @@ mod tests {
                 "var a:array   integer:=array[1,2 ,3];var e:=array text[ ];var g:=array[array[1],array integer[]];var x:=a [ 1 ]+g[1][1];operator f{a:any   array}:integer[length{a:a}];"
             ),
             "var a: array integer := array [1, 2, 3];\nvar e := array text [];\nvar g := array [array [1], array integer []];\nvar x := a[1] + g[1][1];\n\noperator f{a: any array}: integer [\n    length{a: a}\n];\n"
+        );
+        // An index's `[` follows its operand directly, whatever it ends
+        // with: a call's arguments, parentheses, or another index, but an
+        // operator's body's follows its parameters after a space.
+        assert_eq!(
+            fmt(
+                "operator f{} [\n    var a := g{x: array [1]} [1] + (array [2]) [1] + array [array [3]][1] [1];\n];"
+            ),
+            "operator f{} [\n    var a := g{x: array [1]}[1] + (array [2])[1] + array [array [3]][1][1];\n];\n"
         );
         // Too long for one line, one element per line.
         let months = r#"var m := array ["January", "February", "March", "April", "May", "June", "July", "August", "September"];"#;
@@ -2006,6 +2022,13 @@ mod tests {
             fmt("operator main{} [\ncall a{};\n\n\n\ncall b{};\ncall c{};\n\n];"),
             "operator main{} [\n    call a{};\n\n    call b{};\n    call c{};\n];\n"
         );
+        // After every kind of statement: a local variable's declaration,
+        // a loop and a transaction too, and before a comment that starts
+        // the next group.
+        let grouped = "operator main{} [\n    var a := 1;\n\n    call debug_value{v: a};\n\n    var b := a;\n\n    /* The next group. */\n    for x in array [b] loop [\n        call debug_value{v: x};\n    ];\n\n    transaction [];\n\n    while false loop [];\n\n    fail failure{message: \"done\"};\n];\n";
+        assert_eq!(fmt(grouped), grouped);
+        let together = grouped.replace("\n\n    ", "\n    ");
+        assert_eq!(fmt(&together), together);
     }
 
     #[test]

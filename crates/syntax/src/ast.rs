@@ -816,21 +816,7 @@ pub enum Statement {
 
 /// The statements among `node`'s children.
 fn statements_of(node: &SyntaxNode) -> impl Iterator<Item = Statement> + use<> {
-    node.children().filter_map(|node| {
-        CallStmt::cast(node.clone())
-            .map(Statement::Call)
-            .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
-            .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
-            .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
-            .or_else(|| FailStmt::cast(node.clone()).map(Statement::Fail))
-            .or_else(|| WarnStmt::cast(node.clone()).map(Statement::Warn))
-            .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
-            .or_else(|| WhileStmt::cast(node.clone()).map(Statement::While))
-            .or_else(|| LoopStmt::cast(node.clone()).map(Statement::Loop))
-            .or_else(|| ForStmt::cast(node.clone()).map(Statement::For))
-            .or_else(|| TransactionStmt::cast(node.clone()).map(Statement::Transaction))
-            .or_else(|| VarDecl::cast(node).map(Statement::Var))
-    })
+    node.children().filter_map(Statement::cast)
 }
 
 impl ValueBlock {
@@ -846,6 +832,25 @@ impl ValueBlock {
 }
 
 impl Statement {
+    /// The statement `node` is, if it is one. A variable's declaration is
+    /// one where a body has it, and a program's definition elsewhere.
+    #[must_use]
+    pub fn cast(node: SyntaxNode) -> Option<Statement> {
+        CallStmt::cast(node.clone())
+            .map(Statement::Call)
+            .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
+            .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
+            .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
+            .or_else(|| FailStmt::cast(node.clone()).map(Statement::Fail))
+            .or_else(|| WarnStmt::cast(node.clone()).map(Statement::Warn))
+            .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
+            .or_else(|| WhileStmt::cast(node.clone()).map(Statement::While))
+            .or_else(|| LoopStmt::cast(node.clone()).map(Statement::Loop))
+            .or_else(|| ForStmt::cast(node.clone()).map(Statement::For))
+            .or_else(|| TransactionStmt::cast(node.clone()).map(Statement::Transaction))
+            .or_else(|| VarDecl::cast(node).map(Statement::Var))
+    }
+
     #[must_use]
     pub fn syntax(&self) -> &SyntaxNode {
         match self {
