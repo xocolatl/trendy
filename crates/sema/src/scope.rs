@@ -2,9 +2,9 @@
 //! and what each is called in the program.
 //!
 //! A name written in a unit means a declaration it sees: one of its own,
-//! one of the prelude's, which every unit sees, or one of the interface of
-//! a unit its section uses, as the interface's `uses` are what its
-//! declarations see, and the implementation's add to them. What a unit
+//! one of the prelude's interface, which every unit sees, or one of the
+//! interface of a unit its section uses, as the interface's `uses` are
+//! what its declarations see, and the implementation's add to them. What a unit
 //! uses never reaches the units that use it. A name that more than one of
 //! those units declares, the using unit's own among them, is a clash where
 //! it is written, which nothing settles by order, so it means none of them.
@@ -14,8 +14,9 @@
 //! by its unit's name in every one of them, `lakes.depths::metres`, so that
 //! every name the HIR has is one declaration's: what the program writes is
 //! unambiguous, and lowering and the runtime can tell declarations apart by
-//! name. No unit can declare one of the prelude's names, which every unit
-//! sees, so those are always plain.
+//! name. No unit can declare one of the prelude's names, of either of its
+//! sections, though every unit sees only its interface's, so those are
+//! always plain.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -121,13 +122,12 @@ impl Units {
     }
 
     /// Whether `viewer` sees a declaration of `unit`'s, in its `section`:
-    /// every one of its own unit's and the prelude's, and those of the
-    /// interface of a unit its section uses, which, for the
+    /// every one of its own unit's, and those of the interface of the
+    /// prelude and of a unit its section uses, which, for the
     /// implementation, are its interface's too.
     pub(crate) fn sees(&self, viewer: Viewer, unit: hir::FileId, section: Section) -> bool {
         viewer.unit == unit
-            || unit == self.prelude()
-            || self.uses(viewer, unit) && section == Section::Interface
+            || section == Section::Interface && (unit == self.prelude() || self.uses(viewer, unit))
     }
 
     /// The order in which `viewer` lists what the units `a` and `b` declare:
@@ -336,6 +336,10 @@ impl<T> Declared<T> {
                 .find(|e| e.unit == unit)
                 .map(|e| (e.unit, &e.value))
         };
+        let prelude = entries
+            .iter()
+            .find(|e| e.unit == units.prelude() && units.sees(viewer, e.unit, e.section))
+            .map(|e| (e.unit, &e.value));
         let mut used: Vec<(hir::FileId, &T)> = Vec::new();
         for e in entries {
             let other = e.unit != viewer.unit && e.unit != units.prelude();
@@ -350,7 +354,7 @@ impl<T> Declared<T> {
         used.sort_by(|(a, _), (b, _)| units.name(*a).cmp(units.name(*b)));
         Candidates {
             own: first(viewer.unit),
-            prelude: first(units.prelude()),
+            prelude: prelude.filter(|_| viewer.unit != units.prelude()),
             used,
         }
     }

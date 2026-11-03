@@ -15,8 +15,9 @@ This document is about the compiler. For the language itself, see
 source that is part of every program (`trendy_prelude::Unit`, each with
 its name, the path shown for it, its text, and where its file was when
 the compiler was built), listed in `trendy_prelude::UNITS`: the prelude,
-`trendy.prelude`, which every unit sees, declaring the built-in types and
-most built-in operators, and defining operators in trendy; `trendy.files`,
+`trendy.prelude`, whose interface every unit sees, declaring the
+built-in types and most built-in operators, and whose implementation
+defines operators in trendy; `trendy.files`,
 which declares the operators that read files, built-ins too, and the
 errors only they give; and the catalog, `trendy.catalog` (see
 [sema](#sema-trendy_sema)). The loader parses them (`trendy_load::library`),
@@ -883,11 +884,11 @@ operator's parameters too when another has its name, as it does an
 instance of a generic operator, so that their symbols differ.
 
 Each unit has a scope of its own (`scope`): a name written in a unit
-means a declaration it sees, one of its own, one of the prelude's, which
-every unit sees, or one of the interface of a unit its section uses, the
-interface's `uses` for the interface, and both sections' for the
-implementation (`scope::Viewer`, `Units::sees`); what a unit uses never
-reaches the units that use it. So two units can each declare a name, and
+means a declaration it sees, one of its own, one of the prelude's
+interface, which every unit sees, or one of the interface of a unit its
+section uses, the interface's `uses` for the interface, and both
+sections' for the implementation (`scope::Viewer`, `Units::sees`); what
+a unit uses never reaches the units that use it. So two units can each declare a name, and
 a duplicate is one in a unit's scope, or of the prelude's
 (`Namespaces::declared_before`). A name more than one of the units seen
 declares is a clash where it is written: it means none of them
@@ -917,7 +918,7 @@ one name in the HIR, its identity: its name, if one unit of the program
 declares it in its namespace (an operator, with its parameters' names),
 and otherwise its name qualified by its unit's, `lakes::metres`, in every
 unit that declares it, main's included. The prelude's names are always
-plain, as no unit can declare one. Since every name in the HIR is one
+plain, as no unit can declare one, of either of its sections. Since every name in the HIR is one
 declaration's, lowering and the runtime need no scopes. Sema's tables are
 keyed by identity, each entry with its unit, and a written name is looked
 up with where it is written, whose unit is the one that sees it

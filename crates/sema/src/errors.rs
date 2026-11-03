@@ -8530,7 +8530,7 @@ pub(crate) fn versions_in_units(
 }
 
 /// What a unit sees, for the notes of a clash.
-const SEEN: &str = "a name a unit writes means one declaration it sees: one of its own, one of the prelude's, or one of the interface of a unit its section uses; a name more than one of those units declares means none of them, as nothing settles which by order";
+const SEEN: &str = "a name a unit writes means one declaration it sees: one of its own, one of the prelude's interface, or one of the interface of a unit its section uses; a name more than one of those units declares means none of them, as nothing settles which by order";
 
 /// The name `name`, written at `span`, if what is written there sees it
 /// in `namespace` declared by more than one unit: a clash.

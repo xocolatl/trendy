@@ -1236,7 +1236,7 @@ fn collect_names(
             continue;
         }
         // A duplicate of a declaration of its unit's, or of the
-        // prelude's, which every unit sees: one of another unit's of that
+        // prelude's, whose names are always plain: one of another unit's of that
         // name is a clash only where a unit that sees both writes it.
         if let Some(first) = namespaces.declared_before(name, unit, kind) {
             errors.push(errors::duplicate_name(name, (kind, span), first));
@@ -3073,9 +3073,21 @@ var zero := seg{{len: 0}};{MAIN}"
 
     #[test]
     fn a_program_extends_the_prelude() {
-        let prelude = format!(
-            "{}\ntype shape union;\ntype square is shape {{ {{ side: integer }} }};\ntype disc is shape {{ {{ radius: integer }} }};\noperator area{{s: shape}}: integer;\noperator area{{s: square}}: integer [ s.side * s.side ];\noperator area{{s: disc}}: integer [ 3 * s.radius * s.radius ];\n",
+        // Every unit sees its interface, but not its implementation.
+        let hidden = parse(&format!(
+            "{}operator twice{{n: integer}}: integer [ n * 2 ];\n",
             trendy_prelude::PRELUDE.source
+        ));
+        assert_eq!(checked_prelude(&hidden), Vec::new());
+        let calls = parse("var a := twice{n: 2};\noperator main{} [];");
+        let unseen = analyze_with(&calls, &hidden).unwrap_err();
+        assert_eq!(unseen.len(), 1, "{unseen:#?}");
+        assert_eq!(unseen[0].code, Code::UnknownName);
+        // Its types and the specification in its interface, and the
+        // versions in its implementation.
+        let prelude = trendy_prelude::PRELUDE.source.replace(
+            "\nimplementation\n",
+            "\ntype shape union;\ntype square is shape { { side: integer } };\ntype disc is shape { { radius: integer } };\noperator area{s: shape}: integer;\n\nimplementation\n\noperator area{s: square}: integer [ s.side * s.side ];\noperator area{s: disc}: integer [ 3 * s.radius * s.radius ];\n",
         );
         let prelude = parse(&prelude);
         assert_eq!(checked_prelude(&prelude), Vec::new());
@@ -3461,14 +3473,21 @@ operator main{{}} [ var lines: array text; {main} ];"
 
     #[test]
     fn the_prelude_declares_code_point_as_the_compiler_makes_it() {
-        // Of other components than the compiler makes its values with.
+        // Of other components than the compiler makes its values with, in
+        // one representation, which has no conversions to give.
         let prelude = trendy_prelude::PRELUDE.source;
-        let start = prelude.find("type code_point {").unwrap();
-        let end = start + prelude[start..].find("\n};\n").unwrap() + "\n};\n".len();
+        let declaration = |from: usize| {
+            let start = from + prelude[from..].find("type code_point {").unwrap();
+            let end = start + prelude[start..].find("\n};\n").unwrap() + "\n};\n".len();
+            (start, end)
+        };
+        let (start, end) = declaration(0);
+        let (part, part_end) = declaration(end);
         let source = format!(
-            "{}type code_point {{ {{ value: integer, plane: integer }} }};\n{}",
+            "{}type code_point {{ {{ value: integer, plane: integer }} }};\n{}{}",
             &prelude[..start],
-            &prelude[end..]
+            &prelude[end..part],
+            &prelude[part_end..]
         );
         let errors = checked_prelude(&parse(&source));
         assert_eq!(errors.len(), 1, "{errors:#?}");
@@ -3981,8 +4000,13 @@ operator main{{}} [ var lines: array text; {main} ];"
             matches!(**rest, hir::Expr::At(at, _) if at == site(3, 5)),
             "{rest:?}"
         );
-        // The prelude's are the prelude's.
-        let some = program.operators.iter().find(|o| o.name == "some").unwrap();
+        // The prelude's are the prelude's: its implementation's, which its
+        // interface's declaration completes.
+        let some = program
+            .operators
+            .iter()
+            .find(|o| o.name == "some" && matches!(o.kind, hir::OperatorKind::ReadOnly { .. }))
+            .unwrap();
         let hir::OperatorKind::ReadOnly { value, .. } = &some.kind else {
             panic!("`some` is read-only");
         };

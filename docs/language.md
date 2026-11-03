@@ -195,13 +195,13 @@ operator main{} [
   declaration,** as it has nothing to convert, and one with several
   declared in an interface without one is an error (A0059).
 - **A unit's names are its own.** A name written in a unit is one it
-  declares, or one of the prelude's, which every unit sees, so two units
-  can each declare one of a name, which is no duplicate (A0001). The
+  declares, or one of the prelude's interface, which every unit sees, so
+  two units can each declare one of a name, which is no duplicate (A0001). The
   program calls a declaration by its name if one unit declares it, and
   otherwise by its name qualified by its unit's, `lakes::metres`, in
   every unit that declares it, `main`'s too, as errors, failures and
   `debug_value` write it. The prelude's names are always plain, as no
-  unit can declare one.
+  unit can declare one, though only its interface is seen.
 - **A unit has one interface and one implementation, the interface
   first** (P0053). `interface` and `implementation` are contextual
   keywords, names elsewhere.
@@ -1020,12 +1020,14 @@ operator main{} [];
 
 Some operators are part of every program, always in scope: the
 *prelude*'s, trendy source the compiler includes, the unit
-`trendy.prelude`, which every unit sees without using it. A few the
-compiler implements itself, the *built-ins*, which the prelude declares
-with `builtin`, as it does the built-in types, and as the compiler's other
-units declare theirs, such as `trendy.files` (see [Reading
-files](#reading-files)); the rest it defines in trendy, as any program
-could. The prelude is checked with every program, its
+`trendy.prelude`, whose interface every unit sees without using it. A
+few the compiler implements itself, the *built-ins*, which the prelude
+declares with `builtin`, as it does the built-in types, and as the
+compiler's other units declare theirs, such as `trendy.files` (see
+[Reading files](#reading-files)); the rest its implementation defines in
+trendy, as any unit's could, with its types' conversions and its
+errors' messages, which no other unit sees. The prelude is checked with
+every program, its
 declarations as if the program had written them, so a program can extend
 what it declares as it can its own, with a subtype of a union type or a
 version of a specification (see [Union types](#union-types)), and an
@@ -1040,7 +1042,16 @@ The prelude keeps built-ins as few as possible: what can be written in
 trendy is, so that it means exactly what its definition says, and when the
 language can express more, built-ins become ordinary operators.
 
+Its interface, what every unit sees of it:
+
 ```
+/* The prelude, `trendy.prelude`: the types and operators of every
+   program, which every unit sees, without using it, through its
+   interface. Its built-ins, declared with `builtin`, the compiler
+   implements; its other operators, and its types' conversions, its
+   implementation gives in trendy. */
+interface
+
 /* The types with a total order, `<`: a type parameter of `any ordered`
    can be compared with `<`, `<=`, `>` and `>=`. A type of the program's
    own is of it when its braces give it an order, `order [asc …]`. */
@@ -1064,9 +1075,7 @@ builtin operator debug_table{r: any relation};
 builtin operator count{r: any relation}: integer;
 
 /* Whether `r` has no tuples, Tutorial D's `IS_EMPTY`. */
-operator is_empty{r: any relation}: boolean [
-    count{r: r} = 0
-];
+operator is_empty{r: any relation}: boolean;
 
 /* The number of elements of `a`. */
 builtin operator length{a: any array}: integer;
@@ -1097,15 +1106,11 @@ builtin operator product{r: any relation, of: T per r}: T
 
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one. Of no tuples, it is false. */
-operator some{r: any relation, of: boolean per r}: boolean [
-    not is_empty{r: r where of}
-];
+operator some{r: any relation, of: boolean per r}: boolean;
 
 /* Whether `of` is true for every tuple of `r`: whether no tuple makes it
    false. Of no tuples, it is true. */
-operator every{r: any relation, of: boolean per r}: boolean [
-    is_empty{r: r where not of}
-];
+operator every{r: any relation, of: boolean per r}: boolean;
 
 /* `from` as trendy source, the text `debug_value` writes: `42`, `5e-1`,
    `"Lima"` with its quotes, or `tuple { city: "Lima" }`. */
@@ -1141,9 +1146,7 @@ builtin operator parse_boolean{from: text}: boolean;
    numbers. */
 type code_point {
     { value: integer },
-    { character: text, constraint length{a: to_code_points{from: character}} = 1 }
-        to { value := to_code_points{from: character}[1].value }
-        from { character := from_code_points{from: array [code_point{value: value}]} },
+    { character: text, constraint length{a: to_code_points{from: character}} = 1 },
     constraint value >= 0 and value <= 1114111 and (value < 55296 or value > 57343),
     order [asc value],
 };
@@ -1159,9 +1162,7 @@ builtin operator from_code_points{from: array code_point}: text;
 
 /* π, the ratio of a circle's circumference to its diameter: the
    approximate number nearest it. */
-operator pi{}: approximate [
-    3.141592653589793e0
-];
+operator pi{}: approximate;
 
 /* The square root of `of`: the approximate number nearest it, correctly
    rounded, as IEEE 754 has it. A negative number has none, and the program
@@ -1198,80 +1199,32 @@ heading transaction_collection := { error: error, failed: boolean };
    `fail failure{message: "the list is empty"}`. */
 type failure is error { { message: text } };
 
-operator message{error: failure}: text [
-    error.message
-];
-
 /* A relation has `count` tuples where its only one is taken (R0005). */
 type not_one_tuple is error { { count: integer } };
 
-operator message{error: not_one_tuple}: text [
-    var tuples := if error.count = 0 then "no tuples" else to_text{from: error.count} || " tuples";
-    "the relation has " || tuples || ", but exactly one is taken"
-];
-
 /* An array of `length` elements has none at `position` (R0011). */
 type index_out_of_range is error { { position: integer, length: integer } };
-
-operator message{error: index_out_of_range}: text [
-    var at := "position " || to_text{from: error.position};
-    if error.position < 1
-        then "an array has no element at " || at || ": positions count from 1"
-        else if error.length = 0
-        then "the array is empty, so it has no element at " || at
-        else if error.length = 1
-        then "the array has 1 element, so none at " || at
-        else "the array has " || to_text{from: error.length} || " elements, so none at " || at
-];
 
 /* `operation`, written as trendy writes it, as `7 div 0`, divides by zero
    (R0002). */
 type division_by_zero is error { { operation: text } };
 
-operator message{error: division_by_zero}: text [
-    "division by zero: " || error.operation || " has no result"
-];
-
 /* `operation`'s result, written as trendy writes it, as
    `9223372036854775807 + 1`, is out of its type's range (R0001). */
 type overflow is error { { operation: text } };
-
-operator message{error: overflow}: text [
-    "overflow: " || error.operation || " is out of its type's range"
-];
 
 /* Tuples being joined disagree on their common attribute `attribute`,
    whose values in them, `first` and `second`, written as `debug_value`
    writes them, differ, so they have no join (R0004). */
 type tuple_mismatch is error { { attribute: text, first: text, second: text } };
 
-operator message{error: tuple_mismatch}: text [
-    "the tuples disagree on `"
-        || error.attribute
-        || "`, so they have no join: `"
-        || error.attribute
-        || "` is "
-        || error.first
-        || " in one and "
-        || error.second
-        || " in the other"
-];
-
 /* A disjoint union, `d_union` or `d_insert`, adds a tuple, `value`,
    written as `debug_value` writes it, which is already there (R0006). */
 type shared_tuple is error { { value: text } };
 
-operator message{error: shared_tuple}: text [
-    "d_union or d_insert adds a tuple that is already there: " || error.value
-];
-
 /* An included minus, `i_minus` or `i_delete`, removes a tuple, `value`,
    written as `debug_value` writes it, which isn't there (R0007). */
 type missing_tuple is error { { value: text } };
-
-operator message{error: missing_tuple}: text [
-    "i_minus or i_delete removes a tuple that isn't there: " || error.value
-];
 
 /* The tuples `first` and `second`, written as `debug_value` writes them,
    of the relation about to be assigned to the variable `variable`, share
@@ -1279,148 +1232,56 @@ operator message{error: missing_tuple}: text [
    which a key of none allows at most one tuple (R0008). */
 type key_violated is error { { variable: text, key: text, first: text, second: text } };
 
-operator message{error: key_violated}: text [
-    var tuples := if error.key = ""
-        then "`" || error.variable || "` has two tuples, but its key {} allows at most one"
-        else "two tuples of `"
-            || error.variable
-            || "` have the same values for its key { "
-            || error.key
-            || " }";
-    tuples || ": " || error.first || " and " || error.second
-];
-
 /* As `key_violated`, of the relation-valued component `component` of a
    value selected of the type named `type` (R0008). */
 type component_key_violated is error {
     { type: text, component: text, key: text, first: text, second: text },
 };
 
-operator message{error: component_key_violated}: text [
-    var named := "`" || error.type || "`'s `" || error.component || "`";
-    var tuples := if error.key = ""
-        then named || " has two tuples, but its key {} allows at most one"
-        else "two tuples of "
-            || named
-            || " have the same values for its key { "
-            || error.key
-            || " }";
-    tuples || ": " || error.first || " and " || error.second
-];
-
 /* Two changes in an `assign` block remove a tuple, `value`, written as
    `debug_value` writes it (R0009). */
 type tuple_removed_twice is error { { value: text } };
-
-operator message{error: tuple_removed_twice}: text [
-    "two changes in an assign block remove the same tuple: " || error.value
-];
 
 /* Two changes in an `assign` block set the array element at `element`,
    its positions as trendy writes them, as `[2][1]`, or, if `within`, one
    sets it and another an element in it (R0009). */
 type element_set_twice is error { { element: text, within: boolean } };
 
-operator message{error: element_set_twice}: text [
-    if error.within
-        then "one change in an assign block sets the element at "
-            || error.element
-            || ", and another an element in it"
-        else "two changes in an assign block set the same element, at " || error.element
-];
-
 /* A relation has no tuples where `aggregate`, `min` or `max`, takes the
    least or greatest value of an attribute of them (R0010). */
 type no_min_or_max is error { { aggregate: text } };
-
-operator message{error: no_min_or_max}: text [
-    "the relation has no tuples, so it has no " || error.aggregate
-];
 
 /* `text` isn't a value of the type named `type`, `integer`,
    `approximate` or `boolean`, that it is parsed as, or is one out of its
    range, if `out_of_range` (R0014). */
 type unparsable is error { { text: text, type: text, out_of_range: boolean } };
 
-operator message{error: unparsable}: text [
-    var a := if error.type = "integer"
-        then "an integer"
-        else if error.type = "approximate"
-        then "an approximate number"
-        else "a boolean";
-    to_text{from: error.text}
-        || (if error.out_of_range then " is out of " || a || "'s range" else " isn't " || a)
-];
-
 /* `value`, written as `debug_value` writes it, selected of the type named
    `type`, breaks its constraint written `constraint` (R0017). */
 type broken_constraint is error { { value: text, type: text, constraint: text } };
 
-operator message{error: broken_constraint}: text [
-    error.value
-        || " isn't a value of `"
-        || error.type
-        || "`: it breaks the constraint `"
-        || error.constraint
-        || "`"
-];
-
 /* `of`, a negative number, has no square root (R0018). */
 type no_square_root is error { { of: approximate } };
-
-operator message{error: no_square_root}: text [
-    to_text{from: error.of} || " has no square root"
-];
 
 /* `value`, written as `debug_value` writes it, treated as one of the type
    named `type`, isn't one (R0019). */
 type not_of_type is error { { value: text, type: text } };
-
-operator message{error: not_of_type}: text [
-    error.value || " isn't a value of `" || error.type || "`"
-];
 
 /* `value`, written as `debug_value` writes it, is of both of the subtypes
    `first` and `second` of its type defined by constraints, but a value
    has one most specific type (R0020). */
 type overlapping_subtypes is error { { value: text, first: text, second: text } };
 
-operator message{error: overlapping_subtypes}: text [
-    error.value
-        || " is of both `"
-        || error.first
-        || "` and `"
-        || error.second
-        || "`, but a value has one most specific type"
-];
-
 /* A statement left the variables so that the constraint named
    `constraint` is false: its condition, or the operand of its `and` that
    is, written `condition` (R0023). */
 type constraint_violated is error { { constraint: text, condition: text } };
-
-operator message{error: constraint_violated}: text [
-    "the statement breaks the constraint `"
-        || error.constraint
-        || "`: `"
-        || error.condition
-        || "` is false"
-];
 
 /* As `constraint_violated`, with the tuples that make `condition` false,
    written as `debug_value` writes the relation of them: those of `a` that
    aren't in `b`, for `a <= b`, and those of `e`, for `is_empty{r: e}`
    (R0023). */
 type constraint_violated_by is error { { constraint: text, condition: text, tuples: text } };
-
-operator message{error: constraint_violated_by}: text [
-    "the statement breaks the constraint `"
-        || error.constraint
-        || "`: `"
-        || error.condition
-        || "` is false of "
-        || error.tuples
-];
 ```
 
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
@@ -1756,7 +1617,8 @@ its names are as any unit's: a unit can declare a `malformed_csv` of its
 own, and the program then calls each by its unit's name,
 `trendy.files::malformed_csv` (see [Units](#units)). Calling one of its
 operators, or naming one of its errors, in a unit that doesn't use it is
-an error whose fix uses it (A0015, A0003).
+an error whose fix uses it (A0015, A0003). Its interface, what a unit
+that uses it sees:
 
 ```
 /* Reading files: the lines of a text file, and the records of a CSV
@@ -1908,139 +1770,6 @@ type component_key_violated_in_file is error {
 type overlapping_subtypes_in_file is error {
     { path: text, line: integer, attribute: text, value: text, first: text, second: text },
 };
-
-implementation
-
-operator message{error: unreadable_file}: text [
-    "can't read " || to_text{from: error.path} || ": " || error.reason
-];
-
-operator message{error: not_utf8}: text [
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " isn't UTF-8 text"
-];
-
-operator message{error: malformed_csv}: text [
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " "
-        || error.problem
-];
-
-operator message{error: missing_column}: text [
-    var columns := if error.columns = 1 then " column" else " columns";
-    "`"
-        || error.attribute
-        || "` is read from column "
-        || to_text{from: error.column}
-        || ", but "
-        || to_text{from: error.path}
-        || " has "
-        || to_text{from: error.columns}
-        || columns
-];
-
-operator message{error: column_shared}: text [
-    "`"
-        || error.first
-        || "` and `"
-        || error.second
-        || "` are both read from column "
-        || to_text{from: error.column}
-];
-
-operator message{error: column_below_one}: text [
-    "`"
-        || error.attribute
-        || "` is read from column "
-        || to_text{from: error.column}
-        || ", but columns count from 1"
-];
-
-operator message{error: unreadable_field}: text [
-    var a := if error.type = "integer"
-        then "an integer"
-        else if error.type = "approximate"
-        then "an approximate number"
-        else "a boolean";
-    var why := if error.out_of_range then " is out of " || a || "'s range" else " isn't " || a;
-    /* With a header, line 1 is no record's. */
-    var header := if error.line = 1 then "; if line 1 is a header, `header: true` skips it" else "";
-    to_text{from: error.text}
-        || ", in column "
-        || to_text{from: error.column}
-        || " on line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || ","
-        || why
-        || ", the type of `"
-        || error.attribute
-        || "`"
-        || header
-];
-
-operator message{error: broken_constraint_in_file}: text [
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " gives `"
-        || error.attribute
-        || "` "
-        || error.value
-        || ", which isn't a value of `"
-        || error.type
-        || "`: it breaks the constraint `"
-        || error.constraint
-        || "`"
-];
-
-operator message{error: component_key_violated_in_file}: text [
-    var tuples := if error.key = ""
-        then "its `" || error.component || "` has two tuples, but its key {} allows at most one"
-        else "two tuples of its `"
-            || error.component
-            || "` have the same values for its key { "
-            || error.key
-            || " }";
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " gives `"
-        || error.attribute
-        || "` a value of `"
-        || error.type
-        || "` in which "
-        || tuples
-        || ": "
-        || error.first
-        || " and "
-        || error.second
-];
-
-operator message{error: overlapping_subtypes_in_file}: text [
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " gives `"
-        || error.attribute
-        || "` "
-        || error.value
-        || ", which is of both `"
-        || error.first
-        || "` and `"
-        || error.second
-        || "`, but a value has one most specific type"
-];
 ```
 
 **`load_text_file{path: text, out lines: array text}`** reads input: the

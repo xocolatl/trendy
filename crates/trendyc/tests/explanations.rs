@@ -173,17 +173,27 @@ fn language_reference_examples_behave_as_documented() {
     }
 }
 
+/// What a unit's users see of it, `source`: its interface, up to its
+/// implementation's header.
+fn interface(source: &str) -> String {
+    match source.find("\nimplementation\n") {
+        Some(end) => format!("{}\n", source[..end].trim_end()),
+        None => source.to_string(),
+    }
+}
+
 #[test]
-fn language_reference_shows_the_units_that_come_with_the_compiler_as_they_are() {
+fn language_reference_shows_the_interfaces_of_the_units_that_come_with_the_compiler() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/language.md");
     let reference = std::fs::read_to_string(path).unwrap();
     let blocks = code_blocks(&reference);
     for unit in trendy_prelude::UNITS {
+        let shown = interface(unit.source);
         assert!(
             blocks
                 .iter()
-                .any(|(info, source)| info.is_empty() && source == unit.source),
-            "docs/language.md's copy of `{}` differs from {}",
+                .any(|(info, source)| info.is_empty() && *source == shown),
+            "docs/language.md's copy of `{}`'s interface differs from {}",
             unit.name,
             unit.source_path
         );
