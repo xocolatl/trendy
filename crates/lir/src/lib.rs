@@ -968,8 +968,9 @@ pub enum Operand {
 /// A monadic operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
-    /// Of a boolean.
-    Not,
+    /// Of a boolean, its negation; of an integer, its complement, each bit
+    /// flipped.
+    Not(Bits),
     /// Overflows for the smallest integer; never fails for an approximate
     /// number.
     Negate(Numeric),
@@ -995,10 +996,29 @@ impl UnaryOp {
     #[must_use]
     pub fn operand(self) -> Operand {
         match self {
-            UnaryOp::Not => Operand::Boolean,
+            UnaryOp::Not(bits) => bits.operand(),
             UnaryOp::Negate(numeric) => Operand::Numeric(numeric),
             UnaryOp::Integer => Operand::Usize,
             UnaryOp::Usize | UnaryOp::Approximate => Operand::Numeric(Numeric::Integer),
+        }
+    }
+}
+
+/// What `not`, `and`, `or` and `xor` take the bits of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bits {
+    /// Booleans, whose one bit, of a byte, is their value.
+    Boolean,
+    /// Integers, in two's complement.
+    Integer,
+}
+
+impl Bits {
+    #[must_use]
+    pub fn operand(self) -> Operand {
+        match self {
+            Bits::Boolean => Operand::Boolean,
+            Bits::Integer => Operand::Numeric(Numeric::Integer),
         }
     }
 }
@@ -1010,9 +1030,9 @@ impl UnaryOp {
 /// binary64 rounds them, and must be finite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
-    And,
-    Or,
-    Xor,
+    And(Bits),
+    Or(Bits),
+    Xor(Bits),
     Add(Numeric),
     Subtract(Numeric),
     Multiply(Numeric),
@@ -1022,6 +1042,15 @@ pub enum BinaryOp {
     Div,
     /// Of integers, with the sign of the dividend. `i64::MIN mod -1` is 0.
     Mod,
+    /// Of integers: the left one times 2 to the power of the right one,
+    /// failing if that is out of range, or, of a negative right one, shifted
+    /// right by its magnitude (see `trendy_numeric::shifted_left`).
+    ShiftLeft,
+    /// Of integers: the left one divided by 2 to the power of the right one,
+    /// rounded down, or, of a negative right one, shifted left by its
+    /// magnitude, failing if that is out of range (see
+    /// `trendy_numeric::shifted_right`).
+    ShiftRight,
     /// A comparison, whose result is a boolean: `false` before `true`, and
     /// integers and approximate numbers numerically.
     /// Texts are compared by [`RuntimeFn::CompareText`], and tuples,
@@ -1046,25 +1075,29 @@ impl BinaryOp {
     #[must_use]
     pub fn can_fail(self) -> bool {
         match self {
-            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Compare(..) => false,
+            BinaryOp::And(_) | BinaryOp::Or(_) | BinaryOp::Xor(_) | BinaryOp::Compare(..) => false,
             BinaryOp::Add(_)
             | BinaryOp::Subtract(_)
             | BinaryOp::Multiply(_)
             | BinaryOp::Divide
             | BinaryOp::Div
-            | BinaryOp::Mod => true,
+            | BinaryOp::Mod
+            | BinaryOp::ShiftLeft
+            | BinaryOp::ShiftRight => true,
         }
     }
 
     #[must_use]
     pub fn operand(self) -> Operand {
         match self {
-            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => Operand::Boolean,
+            BinaryOp::And(bits) | BinaryOp::Or(bits) | BinaryOp::Xor(bits) => bits.operand(),
             BinaryOp::Add(numeric) | BinaryOp::Subtract(numeric) | BinaryOp::Multiply(numeric) => {
                 Operand::Numeric(numeric)
             }
             BinaryOp::Divide => Operand::Numeric(Numeric::Approximate),
-            BinaryOp::Div | BinaryOp::Mod => Operand::Numeric(Numeric::Integer),
+            BinaryOp::Div | BinaryOp::Mod | BinaryOp::ShiftLeft | BinaryOp::ShiftRight => {
+                Operand::Numeric(Numeric::Integer)
+            }
             BinaryOp::Compare(_, operand) => operand,
         }
     }
@@ -1082,6 +1115,8 @@ pub enum Arithmetic {
     Div,
     Mod,
     Negate,
+    ShiftLeft,
+    ShiftRight,
 }
 
 impl Arithmetic {
@@ -1096,6 +1131,8 @@ impl Arithmetic {
             Arithmetic::Div => 4,
             Arithmetic::Mod => 5,
             Arithmetic::Negate => 6,
+            Arithmetic::ShiftLeft => 7,
+            Arithmetic::ShiftRight => 8,
         }
     }
 }

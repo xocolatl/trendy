@@ -295,7 +295,7 @@ fails: an unrecognized character becomes an error token, and lexing
 continues.
 
 **A malformed literal keeps the kind it was meant to have.** For example,
-`1_000` is still an integer literal, `1.5`, which lacks an exponent, is
+`1__000` or `0755` is still an integer literal, `1.5`, which lacks an exponent, is
 still an approximate literal, and `"abc` is still a text literal, so the
 parser accepts them, and the mistake gives one error, not a cascade. An
 unterminated text literal ends at the end of its line, or just before a final
@@ -339,8 +339,11 @@ Expressions use precedence climbing. From tightest to loosest: the prefix
 operators `not`, `-` and `+`; `*`, `/`, `div` and `mod`; `+`, `-` and
 `||`; the joins, `join`, `times` and `compose`; the comparisons, which don't chain (P0015, with a fix that compares
 the middle operand twice); `and`; `xor`; `or`; and `implies`, which groups
-to the right. Since `not` binds tightest, `not n = 0` on an integer is a
-type error, whose fix negates the comparison instead: `not (n = 0)`. Looking for
+to the right. Since `not` binds tightest, `not t = "x"` on a text is a
+type error, whose fix negates the comparison instead: `not (t = "x")`;
+on an integer, `not n = 0` is the complement compared, which other
+languages read either way, so sema reports it without a fix (A0076,
+`errors::begun_comparison`). Looking for
 a dyadic operator after an operand uses a lookahead that leaves whitespace
 unattached, so whitespace after the last operand belongs to the node that
 continues, not to the expression. The symbols of other languages (`&&`,
@@ -1374,7 +1377,13 @@ it, when a type parameter becomes a boolean or another scalar:
 - **A chain is one connective,** however it is grouped, so no `and` is
   an operand of an `and`, and `and{a, b, c}` is `a and b and c`.
   `a implies b` is `not a or b` (`ops::Resolved`). Sema checks every
-  connective, a list or two operands, in `Checker::connective`.
+  connective, a list or two operands, in `Checker::connective`, which
+  checks each operand on its own first (`ops::OnTheirOwn`), since
+  `and`, `or` and `xor` are of integers too: the operands' types, with
+  the context's, say which (`ops::connected`), and of integers each is
+  nested `hir::BinaryOp::Bitwise`s, which no operand decides. Of an
+  integer and a comparison of one, `x and 1 = 1`, the comparison of bits
+  was meant (`Checker::misgrouped`, A0076).
   Of booleans, `a <> b` is `a xor b`, and `a = b` is `not (a xor b)`,
   so that `(a = b) xor c` is `not (a xor b xor c)`, and `a = true` is
   `a`.
@@ -2190,6 +2199,12 @@ produced with Cranelift.
 - laying out data for the target's byte order and pointer size, where every
   object occupies at least one byte;
 - calling conventions, and the C-ABI `main` entry shim;
+- `shl` and `shr` (`Functions::shifted`): Cranelift's shifts take the
+  count modulo 64, so a count is first clamped to 63, which gives a right
+  shift's result beyond it, and a left shift lost a bit if shifting back
+  doesn't give its operand, or the count is beyond 63, which only a zero
+  survives; a negative count shifts the other way, as
+  `trendy_numeric::shifted_left`, which folding uses, has it;
 - the checks of arithmetic instructions, each branching to a cold block that
   calls `trendy_rt_integer_failed` or `trendy_rt_approximate_failed` with
   the operator and its operands, by value, which fails with the error, an

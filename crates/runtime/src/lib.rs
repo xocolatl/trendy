@@ -81,6 +81,10 @@ pub const ARITHMETIC_DIV: u32 = 4;
 pub const ARITHMETIC_MOD: u32 = 5;
 /// `-`, of one operand.
 pub const ARITHMETIC_NEGATE: u32 = 6;
+/// `shl`.
+pub const ARITHMETIC_SHIFT_LEFT: u32 = 7;
+/// `shr`.
+pub const ARITHMETIC_SHIFT_RIGHT: u32 = 8;
 
 /// A `text` value: the address of its UTF-8 bytes, and their number. The
 /// compiler lays text out as this pair.
@@ -2313,6 +2317,8 @@ fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) {
         ARITHMETIC_DIVIDE => "/",
         ARITHMETIC_DIV => "div",
         ARITHMETIC_MOD => "mod",
+        ARITHMETIC_SHIFT_LEFT => "shl",
+        ARITHMETIC_SHIFT_RIGHT => "shr",
         _ => internal_error("unknown arithmetic operator"),
     };
     let divides = matches!(op, ARITHMETIC_DIVIDE | ARITHMETIC_DIV | ARITHMETIC_MOD);

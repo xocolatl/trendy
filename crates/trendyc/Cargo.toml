@@ -17,6 +17,7 @@ trendy_codegen.workspace = true
 [dev-dependencies]
 trendy_hir.workspace = true
 trendy_lexer.workspace = true
+trendy_numeric.workspace = true
 trendy_parser.workspace = true
 trendy_prelude.workspace = true
 serde_json = "1"

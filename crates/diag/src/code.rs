@@ -177,6 +177,7 @@ codes! {
     NameClash => "A0073",
     OtherRepresentation => "A0074",
     Qualifier => "A0075",
+    BitGrouping => "A0076",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

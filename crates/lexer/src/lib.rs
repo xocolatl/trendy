@@ -164,8 +164,9 @@ fn foreign_include(source: &str, span: Span) -> Diagnostic {
 /// keywords: `&&` for `and`, `->` for `implies`, `%` for `mod`, and so on,
 /// and C's `c ? a : b` with an `if`. Longer ones come first, so that `&&`
 /// isn't two `&`.
-pub const FOREIGN_OPERATORS: [&str; 11] =
-    ["&&", "->", "=>", "==", "!=", "!", "&", "|", "^", "%", "?"];
+pub const FOREIGN_OPERATORS: [&str; 15] = [
+    ">>>", "<<", ">>", "&&", "->", "=>", "==", "!=", "!", "&", "|", "^", "~", "%", "?",
+];
 
 /// The two-character punctuation `text` starts with, if any. It's tried
 /// before foreign operators, so that `||` isn't two `|`; none of these
@@ -434,7 +435,7 @@ fn invalid_approximate(problem: &ApproximateProblem, text: &str, span: Span) -> 
         format!("this literal {reason}"),
     )
     .with_note(
-        "an approximate literal has an exponent, and digits on both sides of a decimal point if it has one, such as `1e0`, `2.5e0` or `1e-10`; a decimal number without an exponent, such as `2.5`, is reserved for exact numbers",
+        "an approximate literal has an exponent, and digits on both sides of a decimal point if it has one, such as `1e0`, `2.5e0` or `1e-10`, with `_` between any two digits, as `1_000.5e0`; a decimal number without an exponent, such as `2.5`, is reserved for exact numbers",
     );
     match problem {
         ApproximateProblem::Fixable { fixed, .. } => d.with_suggestion(
@@ -448,33 +449,57 @@ fn invalid_approximate(problem: &ApproximateProblem, text: &str, span: Span) -> 
     }
 }
 
+/// What an integer literal is, for the notes of the errors about one.
+const INTEGER_RULE: &str = "an integer literal is decimal digits, as `42`, or `0x`, `0o` or `0b` and hexadecimal, octal or binary ones, as `0xFF`, `0o755` or `0b1010`, with `_` between any two digits, as `1_000_000`; a decimal one has no leading zero";
+
 fn invalid_integer(problem: &IntProblem, text: &str, span: Span) -> Diagnostic {
-    let d = Diagnostic::error(
-        Code::InvalidInteger,
-        format!("invalid integer literal `{text}`"),
-        span,
-        "not a decimal integer",
-    )
-    .with_note("integer literals are decimal digits only, such as `42`");
-    let replace =
-        |message: String, replacement: String| (message, vec![Edit { span, replacement }]);
-    let fix = match problem {
-        IntProblem::Underscores { digits } => Some(replace(
-            "remove the underscores".to_string(),
-            digits.clone(),
-        )),
-        IntProblem::Radix {
-            name,
-            value: Some(value),
-        } => Some(replace(
-            format!("write the {name} literal in decimal: `{value}`"),
-            value.to_string(),
-        )),
-        IntProblem::Radix { value: None, .. } | IntProblem::Invalid => None,
+    let replace = |fixed: &str| {
+        vec![Edit {
+            span,
+            replacement: fixed.to_string(),
+        }]
     };
-    match fix {
-        Some((message, edits)) => d.with_suggestion(message, edits),
-        None => d,
+    match problem {
+        IntProblem::Uppercase { fixed } => Diagnostic::error(
+            Code::InvalidInteger,
+            format!("`{text}`'s prefix is written in lower case"),
+            span,
+            "an upper-case prefix",
+        )
+        .with_note(INTEGER_RULE)
+        .with_suggestion(format!("write `{fixed}`"), replace(fixed)),
+        IntProblem::Underscores { fixed } => Diagnostic::error(
+            Code::InvalidInteger,
+            format!("`{text}` has an underscore that isn't between two digits"),
+            span,
+            "an underscore out of place",
+        )
+        .with_note(INTEGER_RULE)
+        .with_suggestion(format!("write `{fixed}`"), replace(fixed)),
+        IntProblem::LeadingZero { digits } => Diagnostic::error(
+            Code::InvalidInteger,
+            format!("`{text}` has a leading zero"),
+            span,
+            "C reads this as an octal number",
+        )
+        .with_note(INTEGER_RULE)
+        .with_help(format!(
+            "write `{digits}` for the decimal number, or `0o{digits}` for the octal one, as C reads it"
+        )),
+        IntProblem::Digit { digit, at, radix } => Diagnostic::error(
+            Code::InvalidInteger,
+            format!("`{text}` has `{digit}`, which isn't a {radix} digit"),
+            Span::new(span.start + at, span.start + at + digit.len_utf8()),
+            format!("not a {radix} digit"),
+        )
+        .with_note(INTEGER_RULE),
+        IntProblem::NoDigits => Diagnostic::error(
+            Code::InvalidInteger,
+            format!("`{text}` has no digits"),
+            span,
+            "a prefix with no digits after it",
+        )
+        .with_note(INTEGER_RULE),
     }
 }
 
@@ -682,10 +707,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_integers_keep_their_kind() {
-        assert_eq!(kinds("1_000"), [IntLiteral]);
-        assert_eq!(codes("1_000 0x1F 12ab"), [Code::InvalidInteger; 3]);
-        assert_eq!(fix("1_000 0x1F 0b101 12ab"), "1000 31 5 12ab");
+    fn integers_in_four_radixes() {
+        assert!(lex("42 1_000 0xFF_ff 0o755 0b1010").errors.is_empty());
+        assert_eq!(kinds("0xFF"), [IntLiteral]);
+        // Malformed ones keep their kind, and are fixed where that's
+        // certain.
+        assert_eq!(kinds("1__000"), [IntLiteral]);
+        assert_eq!(codes("1__000 0X1F 0755 12ab"), [Code::InvalidInteger; 4]);
+        assert_eq!(fix("1__000 0X1F 1_ 0755 12ab"), "1_000 0x1F 1 0755 12ab");
     }
 
     #[test]
@@ -712,7 +741,7 @@ mod tests {
         assert_eq!(kinds(".5"), [ApproximateLiteral]);
         assert_eq!(kinds("5."), [ApproximateLiteral]);
         assert_eq!(codes("5. .5 1_000.5 1e"), [Code::InvalidApproximate; 4]);
-        assert_eq!(fix("5. .5 1_000.5 1e"), "5e0 0.5e0 1000.5e0 1e");
+        assert_eq!(fix("5. .5 1_000.5 1e"), "5e0 0.5e0 1_000.5e0 1e");
         // A decimal number needs an exponent to be approximate.
         assert_eq!(codes("1.5 1.0"), [Code::InvalidApproximate; 2]);
         assert_eq!(fix("1.5 1.0"), "1.5e0 1e0");

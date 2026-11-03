@@ -4142,8 +4142,11 @@ operator main{} [
 | `or{a, b, c}` | `true` when one is `true` |
 | `xor{a, b, c}` | `true` when an odd number are `true` |
 
-The operands must be booleans: there is no truthiness, so `not 0` and
-`"" or true` are errors.
+`not`, `and`, `or` and `xor` are also of integers, whose bits they take
+(see [Bits](#bits)), but there is no truthiness: `"" or true` is an
+error, and so is `n and true` of an integer `n`. Of operands of both
+types, the boolean ones set it, and an integer among them is reported,
+as a boolean written as C writes it is likelier than bits.
 
 - **Lists:** `and{…}`, `or{…}` and `xor{…}` take any number of
   operands, in braces, since their order doesn't matter, as Tutorial D's
@@ -4165,12 +4168,12 @@ The operands must be booleans: there is no truthiness, so `not 0` and
   the left, or SQL, which doesn't say. As nothing depends on which
   operand runs first, an optimizer can choose.
 - **An expression can fail** if it does arithmetic, `+`, `-`, `*`, `/`,
-  `div`, `mod` or a prefix `-` of an integer, which can overflow or divide
-  by zero; joins texts, `||`, or builds, changes, combines or loads a
+  `div`, `mod`, `shl`, `shr` or a prefix `-` of an integer, which can
+  overflow or divide by zero; joins texts, `||`, or builds, changes, combines or loads a
   relation or an array, which can run out of memory; takes an element or
-  the only tuple; or calls an operator. Comparisons, the boolean
-  operators, literals, names, attributes and tuple selectors can't fail
-  themselves; an expression made of them can fail only if a part of it
+  the only tuple; or calls an operator. Comparisons, `not`, `and`, `or`,
+  `xor` and `implies`, of booleans or of integers, literals, names,
+  attributes and tuple selectors can't fail themselves; an expression made of them can fail only if a part of it
   can.
 
 ```trendy
@@ -4309,6 +4312,71 @@ operator main{} [
 
 ```trendy,error
 var root := sqrt{of: -4e0};
+
+operator main{} [];
+```
+
+### Bits
+
+`not`, `and`, `or` and `xor` of integers take their bits, as two's
+complement writes them, the sign's bit going on to the left forever, so
+that a result doesn't depend on how wide an integer is: `not a` is
+`-a - 1`. `shl` and `shr` move the bits, as they multiply and divide by
+a power of 2.
+
+| Operator | Operands | Result |
+|---|---|---|
+| `not a` | an integer | each bit flipped: `-a - 1` |
+| `a and b`, `a or b`, `a xor b` | integers | the bits set in both, in either, and in exactly one: `0b1100 and 0b1010` is `0b1000` |
+| `and{a, b, c}`, `or{a, b, c}`, `xor{a, b, c}` | integers | the same, of any number; of none, `and{}` is `-1`, every bit set, and `or{}` and `xor{}` are `0` |
+| `a shl n` | integers | `a` times 2 to the power `n`, its bits moved `n` places to the left |
+| `a shr n` | integers | `a` divided by 2 to the power `n`, rounded down, its bits moved `n` places to the right: `-9 shr 1` is `-5` |
+
+- **The same precedence as of booleans:** `not` binds tightest, and
+  `and`, `xor` and `or` looser than a comparison, so `flags and 4 = 4` is
+  `flags and (4 = 4)`, as `flags & 4 == 4` is in C. Of an integer and a
+  comparison of integers, the comparison of bits was surely meant, and
+  the fix parenthesizes it, `(flags and 4) = 4` (A0076). `shl` and `shr`
+  bind as `*` does: `1 shl n - 1` is `(1 shl n) - 1`.
+- **`not` of an integer that begins a comparison** is written in
+  parentheses, since SQL and Python read `not n = 0` as `not (n = 0)`,
+  and C `~n == 0` as `(~n) == 0`: neither is assumed (A0076).
+- **A shift never loses a bit but by rounding down.** A left shift out of
+  range fails, as an overflow does (R0001), so `1 shl 63` is an error,
+  never the smallest integer. A negative `n` shifts the other way, as
+  Haskell's `shift` does, and beyond 63 places a right shift leaves `0`,
+  or `-1` of a negative integer.
+- **A word of fixed width** is the bits it keeps, `and` a mask, as in
+  `(x shl n or x shr (32 - n)) and 0xFFFF_FFFF`, a 32-bit word rotated.
+  There is no unsigned shift, as JavaScript's `>>>`, since no integer is
+  unsigned: masking first, `(a and 0xFFFF_FFFF) shr n`, is one.
+
+```trendy
+var mode := 0o755;
+var readable := (mode and 0o444) <> 0;
+var flags := 0b0101 or 0b0010;
+
+/* `x`, a 32-bit word, its bits rotated `n` places to the left. */
+operator rotated{x: integer, n: integer}: integer [
+    (x shl n or x shr (32 - n)) and 0xFFFF_FFFF
+];
+
+operator main{} [
+    call debug_value{v: rotated{x: 0x8000_0001, n: 4}};
+    call debug_value{v: not flags};
+    call debug_value{v: -9 shr 1};
+];
+```
+
+```trendy,error
+var flags := 6;
+var set := flags and 4 = 4;
+
+operator main{} [];
+```
+
+```trendy,error
+var smallest := 1 shl 63;
 
 operator main{} [];
 ```
@@ -5423,7 +5491,7 @@ From tightest to loosest:
 | `!!`, of a name or a parenthesized expression | none: see below |
 | postfix `.a`, indexing `[…]`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}`, `ungroup {…}`, `wrap {…}`, `unwrap {…}` and `tclose` | left |
 | prefix `not`, `-`, `+`, `tuple from` and `value from` | |
-| `*`, `/`, `div`, `mod` | left |
+| `*`, `/`, `div`, `mod`, `shl`, `shr` | left |
 | `+`, `-`, `\|\|` | left |
 | `join`, `times`, `compose`, `matching`, `not matching`, `intersect`, `minus`, `i_minus` | left |
 | `union`, `d_union`, `xunion` | left |
@@ -5437,9 +5505,11 @@ From tightest to loosest:
 
 So `-a * b` is `(-a) * b`, `a + 1 < b` is `(a + 1) < b`, and, as with
 every prefix operator, `not a = b` is `(not a) = b`. To negate a
-comparison, parenthesize it: `not (n = 0)`. Writing `not n = 0` for an
-integer `n` is an error, since `not` takes a boolean, and its fix is that
-parenthesization; SQL and Python read it that way.
+comparison, parenthesize it: `not (n = 0)`. Writing `not t = "x"` for a
+text `t` is an error, since `not` takes a boolean or an integer, and its
+fix is that parenthesization; SQL and Python read it that way. Of an
+integer `n`, `not n = 0` is an error with no fix, since `(not n) = 0`,
+its complement compared, could be meant too (see [Bits](#bits)).
 `implies` groups from the right, as in logic: `a implies b implies c`
 means `a implies (b implies c)`. The joins bind looser than arithmetic,
 since their operands are relations, and tighter than the comparisons, so
@@ -5477,11 +5547,15 @@ operator main{} [];
 
 ### Other languages' operators
 
-The symbols other languages use, such as `&&`, `|`, `!`, `^`, `->`, `%`,
-`==` and `!=`, are not operators in trendy. Neither are capitalized
-spellings such as `AND` or `MOD`. The compiler suggests trendy's operator
-for each. `||` is concatenation, as in Tutorial D and SQL, so `a || b` on
-booleans is an error with a fix to `or`.
+The symbols other languages use, such as `&&`, `&`, `|`, `!`, `~`, `<<`,
+`>>`, `->`, `%`, `==` and `!=`, are not operators in trendy. Neither are
+capitalized spellings such as `AND` or `MOD`. The compiler fixes each to
+trendy's operator, of booleans and of integers alike, as `&` and `&&` are
+both `and`. `^` is the exclusive or in C, but a power in SQL and R, so
+the help says to write `xor`, without a fix, and `>>>`, JavaScript's
+unsigned shift, has no fix either, since no integer is unsigned (see
+[Bits](#bits)). `||` is concatenation, as in Tutorial D and SQL, so
+`a || b` on booleans is an error with a fix to `or`.
 
 ```trendy,error
 var a := true && false;
@@ -5739,8 +5813,28 @@ operator main{} [];
 
 **Integer literals** are decimal digits, such as `0` or `42`, up to
 `9223372036854775807`, or negative with a `-` before them, down to
-`-9223372036854775808`. There are no digit separators (`1_000`) and no
-radix prefixes (`0xFF`).
+`-9223372036854775808`. A radix prefix, `0x`, `0o` or `0b`, in lower
+case, writes one in hexadecimal, octal or binary digits, such as `0xFF`,
+`0o755` or `0b1010`, a hexadecimal digit after 9 a letter, in either
+case. An underscore between two digits separates them, in any radix and
+in an approximate literal too, as in `1_000_000`, `0xFFFF_FFFF` or
+`6.022_140_76e23`. A decimal number has no leading zero, since C reads
+`0755` as octal (P0008).
+
+```trendy
+var population := 37_468_000;
+var mode := 0o755;
+var mask := 0xFF_FF;
+var flags := 0b1010_0101;
+
+operator main{} [];
+```
+
+```trendy,error
+var mode := 0755;
+
+operator main{} [];
+```
 
 **Approximate literals** always have an exponent, which starts with `e` or
 `E` and has an optional sign, such as `1e0`, `0e0`, `2.5e0` or `1.5e-3`. A
@@ -5828,7 +5922,7 @@ operator main{} [];
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `array`, `true`, `false`, `not`, `and`, `or`, `xor`,
-`implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
+`implies`, `div`, `mod`, `shl`, `shr`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `tclose`, `join`, `times`, `compose`, `matching`,
 `union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
 `as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign`,
@@ -6061,7 +6155,13 @@ line after a comment on its own line, such as a file's header, is kept.
 | `!a`, `a && b` | `not a`, `a and b` |
 | `a \|\| b` for booleans | `a or b` |
 | `"a" + "b"`, `concat("a", "b")` | `"a" \|\| "b"` |
-| `a ^ b`, `a != b` for booleans | `a xor b` |
+| `a ^ b`, `a != b` for booleans | `a xor b`; `^` has no fix, as it is a power in SQL and R |
+| `a & b`, `a \| b`, `~a`, of integers | `a and b`, `a or b`, `not a` |
+| `a << n`, `a >> n` | `a shl n`, `a shr n` |
+| `a >>> n`, an unsigned shift | `(a and 0xFFFF_FFFF) shr n`, of a 32-bit word |
+| `x & 4 == 4` | `(x and 4) = 4` |
+| `0755`, C's octal | `0o755` |
+| `0XFF`, `1__000` | `0xFF`, `1_000` |
 | `a -> b`, `a => b` | `a implies b` |
 | `AND { a, b, c }`, Python's `all([a, b, c])` | `and{a, b, c}` |
 | Python's `any([a, b, c])` | `or{a, b, c}` |

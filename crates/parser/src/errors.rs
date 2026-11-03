@@ -1981,8 +1981,10 @@ pub(crate) fn foreign_operator(text: &str) -> Option<SyntaxKind> {
         "|" => SyntaxKind::OrKw,
         "^" => SyntaxKind::XorKw,
         "->" | "=>" => SyntaxKind::ImpliesKw,
-        "!" => SyntaxKind::NotKw,
+        "!" | "~" => SyntaxKind::NotKw,
         "%" => SyntaxKind::ModKw,
+        "<<" => SyntaxKind::ShlKw,
+        ">>" | ">>>" => SyntaxKind::ShrKw,
         "==" => SyntaxKind::Eq,
         "!=" => SyntaxKind::LtGt,
         _ => return None,
@@ -2007,7 +2009,7 @@ pub(crate) fn foreign_operator_used(
     neighbors: (Option<char>, Option<char>),
 ) -> Diagnostic {
     let spelled = keyword.fixed_text().expect("keywords have fixed text");
-    Diagnostic::error(
+    let d = Diagnostic::error(
         Code::ForeignOperator,
         format!("`{}` is not an operator; write `{spelled}`", found.text),
         found.span,
@@ -2018,15 +2020,28 @@ pub(crate) fn foreign_operator_used(
         SyntaxKind::Eq | SyntaxKind::LtGt => {
             "equality is `=`, and inequality `<>`; assignment is `:=`"
         }
-        _ => "the boolean operators are the keywords `not`, `and`, `or`, `xor` and `implies`",
-    })
-    .with_suggestion(
-        format!("write `{spelled}`"),
-        vec![Edit {
-            span: found.span,
-            replacement: spaced(spelled, neighbors),
-        }],
-    )
+        SyntaxKind::ShlKw | SyntaxKind::ShrKw => {
+            "an integer's bits shift with the keywords `shl` and `shr`: `a shl n` is `a` times 2 to the power `n`, and `a shr n` is `a` divided by it, rounded down"
+        }
+        _ => "`not`, `and`, `or` and `xor` are the operators of booleans, and of integers, bit by bit; `implies` is of booleans",
+    });
+    // Where other languages give the symbol other meanings, only the
+    // program knows which it means.
+    match found.text {
+        "^" => d.with_help(
+            "write `xor` for the exclusive or; trendy has no operator for a power, which multiplication computes",
+        ),
+        ">>>" => d.with_help(
+            "trendy's integers have no unsigned shift: write `shr`, which rounds down, for a non-negative integer, or `(a and 0xFFFF_FFFF) shr n` for JavaScript's of a 32-bit one",
+        ),
+        _ => d.with_suggestion(
+            format!("write `{spelled}`"),
+            vec![Edit {
+                span: found.span,
+                replacement: spaced(spelled, neighbors),
+            }],
+        ),
+    }
 }
 
 /// Python's `all` or `any`, `found`, of a list, which trendy writes as a

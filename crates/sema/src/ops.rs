@@ -33,6 +33,10 @@ pub(crate) enum Operator {
     Divide,
     Div,
     Mod,
+    /// `shl`
+    ShiftLeft,
+    /// `shr`
+    ShiftRight,
     /// `||`
     Concatenate,
     Compare(hir::Comparison),
@@ -83,6 +87,8 @@ impl Operator {
             (SyntaxKind::Slash, _) => Operator::Divide,
             (SyntaxKind::DivKw, _) => Operator::Div,
             (SyntaxKind::ModKw, _) => Operator::Mod,
+            (SyntaxKind::ShlKw, _) => Operator::ShiftLeft,
+            (SyntaxKind::ShrKw, _) => Operator::ShiftRight,
             (SyntaxKind::PipePipe, _) => Operator::Concatenate,
             (SyntaxKind::Eq, _) => Operator::Compare(hir::Comparison::Equal),
             (SyntaxKind::LtGt, _) => Operator::Compare(hir::Comparison::NotEqual),
@@ -94,8 +100,9 @@ impl Operator {
         })
     }
 
-    /// Whether the operator is a connective of booleans: `and`, `or`,
-    /// `xor` or `implies`.
+    /// Whether the operator is a connective: `and`, `or`, `xor` or
+    /// `implies`, of booleans, or, but for `implies`, of integers, bit by
+    /// bit.
     fn is_connective(self) -> bool {
         matches!(
             self,
@@ -107,16 +114,21 @@ impl Operator {
         matches!(self, Operator::Not | Operator::Negate | Operator::Plus)
     }
 
-    /// What the operands must be. Every operator but the boolean ones takes
-    /// its type from the operands, so that an operator applied to a type it
+    /// What the operands must be. Every operator but `implies` takes its
+    /// type from the operands, so that an operator applied to a type it
     /// doesn't take, such as `+` to texts, is reported at the operator, with
-    /// the one that fits.
+    /// the one that fits: `not`, `and`, `or` and `xor` take booleans, or
+    /// integers, bit by bit.
     pub(crate) fn operands(self) -> Operands {
         match self {
-            Operator::Not | Operator::And | Operator::Or | Operator::Xor | Operator::Implies => {
-                Operands::Fixed(hir::Scalar::Boolean)
-            }
-            Operator::Negate
+            Operator::Implies => Operands::Fixed(hir::Scalar::Boolean),
+            Operator::Not
+            | Operator::And
+            | Operator::Or
+            | Operator::Xor
+            | Operator::ShiftLeft
+            | Operator::ShiftRight
+            | Operator::Negate
             | Operator::Plus
             | Operator::Add
             | Operator::Subtract
@@ -151,6 +163,8 @@ impl Operator {
             | Operator::Divide
             | Operator::Div
             | Operator::Mod
+            | Operator::ShiftLeft
+            | Operator::ShiftRight
             | Operator::Concatenate => None,
             Operator::Compare(_) => Some(hir::Requirement::Order),
             Operator::Plus | Operator::Add => Some(hir::Requirement::Addition),
@@ -170,16 +184,19 @@ impl Operator {
     /// The types the operator takes, as written in an error message.
     pub(crate) fn takes(self) -> &'static str {
         match self {
-            Operator::Not | Operator::And | Operator::Or | Operator::Xor | Operator::Implies => {
-                "booleans"
+            Operator::Not | Operator::And | Operator::Or | Operator::Xor => {
+                "booleans, or integers, bit by bit"
             }
+            Operator::Implies => "booleans",
             Operator::Negate
             | Operator::Plus
             | Operator::Add
             | Operator::Subtract
             | Operator::Multiply => "integers or approximate numbers",
             Operator::Divide => "approximate numbers",
-            Operator::Div | Operator::Mod => "integers",
+            Operator::Div | Operator::Mod | Operator::ShiftLeft | Operator::ShiftRight => {
+                "integers"
+            }
             Operator::Concatenate => "text",
             Operator::Compare(hir::Comparison::Equal | hir::Comparison::NotEqual) => {
                 "two values of the same type"
@@ -248,12 +265,21 @@ impl Operator {
             connective,
             not_left,
         };
+        let boolean = scalar == hir::Scalar::Boolean;
+        let integer = numeric == Some(hir::Numeric::Integer);
+        let bitwise = |op| Resolved::Binary(B::Bitwise(op));
         Some(match (self, numeric) {
-            (Operator::Not, _) => Resolved::Unary(hir::UnaryOp::Not),
-            (Operator::And, _) => connective(hir::Connective::And, false),
-            (Operator::Or, _) => connective(hir::Connective::Or, false),
-            (Operator::Xor, _) => connective(hir::Connective::Xor, false),
-            (Operator::Implies, _) => connective(hir::Connective::Or, true),
+            (Operator::Not, _) if boolean => Resolved::Unary(hir::UnaryOp::Not),
+            (Operator::And, _) if boolean => connective(hir::Connective::And, false),
+            (Operator::Or, _) if boolean => connective(hir::Connective::Or, false),
+            (Operator::Xor, _) if boolean => connective(hir::Connective::Xor, false),
+            (Operator::Implies, _) if boolean => connective(hir::Connective::Or, true),
+            (Operator::Not, _) if integer => Resolved::Unary(hir::UnaryOp::Complement),
+            (Operator::And, _) if integer => bitwise(hir::Bitwise::And),
+            (Operator::Or, _) if integer => bitwise(hir::Bitwise::Or),
+            (Operator::Xor, _) if integer => bitwise(hir::Bitwise::Xor),
+            (Operator::ShiftLeft, _) if integer => Resolved::Binary(B::ShiftLeft),
+            (Operator::ShiftRight, _) if integer => Resolved::Binary(B::ShiftRight),
             (Operator::Plus, Some(_)) => Resolved::Identity,
             (Operator::Negate, Some(n)) => Resolved::Unary(hir::UnaryOp::Negate(n)),
             (Operator::Add, Some(n)) => Resolved::Binary(B::Add(n)),
@@ -273,10 +299,109 @@ impl Operator {
     }
 }
 
-/// Checks one operand against an expectation, giving its checked form and
-/// its type, or `None` after reporting why it has none.
-pub(crate) type CheckOperand<'a> = dyn FnMut(&Expr, Option<&Expected>, &mut Vec<Diagnostic>) -> Option<(hir::Expr, hir::Type)>
+/// Checks the operand at an index against an expectation, giving its
+/// checked form and its type, or `None` after reporting why it has none.
+pub(crate) type CheckOperand<'a> = dyn FnMut(usize, &Expr, Option<&Expected>, &mut Vec<Diagnostic>) -> Option<(hir::Expr, hir::Type)>
     + 'a;
+
+/// An operator's operands, each checked on its own, without a type
+/// expected of it.
+pub(crate) struct OnTheirOwn {
+    /// Each operand's check, up to the first one missing.
+    pub(crate) checked: Vec<Option<types::Alone<(hir::Expr, hir::Type)>>>,
+    /// The type the operands valid on their own meet in, if any.
+    pub(crate) met: Option<Expected>,
+    /// The first operand valid on its own, which set that type.
+    pub(crate) first: Option<Expr>,
+}
+
+impl OnTheirOwn {
+    /// `operands`, each checked on its own by `check`. The operands valid
+    /// on their own meet in the most specific common supertype of theirs,
+    /// whatever their order: as of an empty relation, whose heading can't
+    /// be known on its own (see [`types::Alone`] and [`types::widen`]).
+    /// Operands of types with no value in common, as two subtypes of a
+    /// union type, have no value in common either, so one of them is
+    /// reported, as never equal to the other (IM Prescription 12).
+    pub(crate) fn of(operands: &[Option<Expr>], check: &mut CheckOperand<'_>) -> OnTheirOwn {
+        let mut met: Option<Expected> = None;
+        let mut first = None;
+        let mut checked = Vec::new();
+        for (i, operand) in operands.iter().enumerate() {
+            let Some(operand) = operand else {
+                break;
+            };
+            let mut own_errors = Vec::new();
+            let out = check(i, operand, None, &mut own_errors);
+            let out = types::Alone::of(out, own_errors, operand.span());
+            if let types::Alone::Valid((_, ty)) = &out
+                && met.as_ref().is_none_or(|e| e.ty.overlaps(ty))
+            {
+                types::widen(&mut met, ty.clone(), operand);
+                first.get_or_insert_with(|| operand.clone());
+            }
+            checked.push(Some(out));
+        }
+        checked.resize_with(operands.len(), || None);
+        OnTheirOwn {
+            checked,
+            met,
+            first,
+        }
+    }
+
+    /// The type of each operand valid on its own.
+    pub(crate) fn types(&self) -> impl Iterator<Item = &hir::Type> {
+        self.checked.iter().filter_map(|checked| match checked {
+            Some(types::Alone::Valid((_, ty))) => Some(ty),
+            _ => None,
+        })
+    }
+}
+
+/// Each of `operands`, checked by `check` against `expectation`, or, if it
+/// was checked on its own as `alone` has it, fitted to it (see
+/// [`types::Alone::fit`]), with its own errors. A missing operand has none
+/// of its own: the parser reported it. If `wrong_type`, the operator
+/// doesn't take the type expected, which is reported, so that an operand
+/// of that type is left out, and the others' errors are their own.
+pub(crate) fn fitted(
+    operands: Vec<Option<Expr>>,
+    alone: Vec<Option<types::Alone<(hir::Expr, hir::Type)>>>,
+    expectation: Option<&Expected>,
+    wrong_type: bool,
+    check: &mut CheckOperand<'_>,
+) -> Vec<(Option<hir::Expr>, Vec<Diagnostic>)> {
+    let alone = alone.into_iter().chain(std::iter::repeat_with(|| None));
+    operands
+        .into_iter()
+        .zip(alone)
+        .enumerate()
+        .map(|(i, (operand, alone))| {
+            let mut own = Vec::new();
+            let Some(operand) = operand else {
+                return (None, own);
+            };
+            let mut against = |errors: &mut Vec<Diagnostic>| {
+                check(i, &operand, expectation, errors).map(|(value, _)| value)
+            };
+            let result = match alone {
+                // An operand that set a type the operator doesn't take.
+                Some(types::Alone::Valid(_)) if wrong_type => return (None, own),
+                Some(alone) => alone.fit(expectation, operand.span(), &mut own, against),
+                None => against(&mut own),
+            };
+            if wrong_type {
+                // The operand was checked against a type the operator
+                // doesn't take, which is already reported; only its own
+                // errors remain.
+                let span = operand.span();
+                own.retain(|d| !(d.code == trendy_diag::Code::TypeMismatch && d.span() == span));
+            }
+            (result, own)
+        })
+        .collect()
+}
 
 /// Check the operands of `op`, written `token`, in an expression whose
 /// value is `expected` to have a type. `check` checks one operand against
@@ -305,86 +430,39 @@ pub(crate) fn check_operands(
             origin: e.origin.operand(token),
         }),
     };
-    let mut ok = true;
+    let mut alone = Vec::new();
     // Whether the operator was reported as not taking the operands' type.
     let mut wrong_type = false;
     // Without an expected type, the operands valid on their own set it for
-    // the rest, as the most specific common supertype of theirs, whatever
-    // their order: as of an empty relation, whose heading can't be known
-    // on its own (see [`types::Alone`] and [`types::widen`]). Operands of
-    // types with no value in common, as two subtypes of a union type, have
-    // no value in common either, so one of them is reported, as never
-    // equal to the other (IM Prescription 12).
-    let mut alone: Vec<Option<types::Alone<(hir::Expr, hir::Type)>>> =
-        operands.iter().map(|_| None).collect();
+    // the rest.
     if expectation.is_none() {
-        let mut first = None;
-        for (operand, alone) in operands.iter().zip(&mut alone) {
-            let Some(operand) = operand else {
-                break;
-            };
-            let mut own_errors = Vec::new();
-            let checked = check(operand, None, &mut own_errors);
-            let checked = types::Alone::of(checked, own_errors, operand.span());
-            if let types::Alone::Valid((_, ty)) = &checked
-                && expectation.as_ref().is_none_or(|e| e.ty.overlaps(ty))
-            {
-                types::widen(&mut expectation, ty.clone(), operand);
-                first.get_or_insert(operand);
-            }
-            *alone = Some(checked);
-        }
+        let own = OnTheirOwn::of(&operands, check);
         // An operator that doesn't take this type is reported once; the
         // other operands are still checked against it, so that an empty
         // relation gets its heading and a mismatch is still reported.
-        if let Some(expected) = &expectation
-            && op.resolve(&expected.ty).is_none()
+        if let Some(met) = &own.met
+            && op.resolve(&met.ty).is_none()
         {
             errors.push(errors::wrong_operand_type(
                 op,
                 token,
-                &expected.ty,
-                first,
+                &met.ty,
+                own.first.as_ref(),
                 kinds,
             ));
-            ok = false;
             wrong_type = true;
         }
+        expectation = own.met;
+        alone = own.checked;
     }
+    let mut ok = !wrong_type;
     let mut checked = Vec::new();
-    for (operand, alone) in operands.into_iter().zip(alone) {
-        let Some(operand) = operand else {
-            ok = false;
-            continue;
-        };
-        let before = errors.len();
-        let mut against = |errors: &mut Vec<Diagnostic>| {
-            check(&operand, expectation.as_ref(), errors).map(|(value, _)| value)
-        };
-        let result = match alone {
-            // An operand that set a type the operator doesn't take.
-            Some(types::Alone::Valid(_)) if wrong_type => continue,
-            Some(alone) => alone.fit(expectation.as_ref(), operand.span(), errors, against),
-            None => against(errors),
-        };
-        if wrong_type {
-            // The operand was checked against a type the operator doesn't
-            // take, which is already reported; only its own errors remain.
-            let span = operand.span();
-            let mut i = before;
-            while i < errors.len() {
-                if errors[i].code == trendy_diag::Code::TypeMismatch && errors[i].span() == span {
-                    errors.remove(i);
-                } else {
-                    i += 1;
-                }
-            }
+    for (value, own) in fitted(operands, alone, expectation.as_ref(), wrong_type, check) {
+        errors.extend(own);
+        match value {
+            Some(value) => checked.push(value),
+            None => ok = false,
         }
-        let Some(value) = result else {
-            ok = false;
-            continue;
-        };
-        checked.push(value);
     }
     let Expected { ty, .. } = expectation?;
     if !ok {
@@ -395,6 +473,61 @@ pub(crate) fn check_operands(
         return None;
     };
     Some((resolved, checked, op.result(ty)))
+}
+
+/// The type the operands of `op`, a connective written `token`, are
+/// expected to have, given what they are on their own, `own`: booleans,
+/// or integers, bit by bit, but for `implies`, which takes only booleans.
+/// It is the context's, `expected`, if the operator takes it and an
+/// operand valid on its own has it, or none has a type the operator takes.
+/// Otherwise it is the operands', so that operands that agree are
+/// reported together, as the result, and not one by one: booleans, if one
+/// is a boolean, as an integer among booleans is likelier a boolean
+/// written as in C, and else integers if one is an integer. Of none, as
+/// of `and{}`, it is booleans.
+pub(crate) fn connected(
+    op: Operator,
+    token: &SyntaxToken,
+    operands: &[Option<Expr>],
+    own: &OnTheirOwn,
+    expected: Option<&Expected>,
+) -> Expected {
+    let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
+    let integer = hir::Type::Scalar(hir::Scalar::Integer);
+    if let Operands::Fixed(_) = op.operands() {
+        return Expected {
+            ty: boolean,
+            origin: Origin::Operator(token.clone()),
+        };
+    }
+    // The first operand valid on its own of type `ty`, as what expects it.
+    let first = |ty: &hir::Type| {
+        operands
+            .iter()
+            .zip(&own.checked)
+            .find_map(|(operand, checked)| match checked {
+                Some(types::Alone::Valid((_, of))) if of == ty => Some(Expected {
+                    ty: ty.clone(),
+                    origin: Origin::Value(operand.clone()?),
+                }),
+                _ => None,
+            })
+    };
+    let (booleans, integers) = (first(&boolean), first(&integer));
+    let context = expected.filter(|e| {
+        op.resolve(&e.ty).is_some()
+            && (own.types().any(|ty| *ty == e.ty) || (booleans.is_none() && integers.is_none()))
+    });
+    match context {
+        Some(context) => Expected {
+            ty: context.ty.clone(),
+            origin: context.origin.operand(token),
+        },
+        None => booleans.or(integers).unwrap_or(Expected {
+            ty: boolean,
+            origin: Origin::Operator(token.clone()),
+        }),
+    }
 }
 
 /// A projection, `r{a, b}`, or its complement, `r remove {c}`.

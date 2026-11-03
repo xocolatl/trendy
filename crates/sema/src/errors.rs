@@ -987,11 +987,6 @@ pub(crate) fn type_mismatch(
         ));
     }
 
-    // `not n = 0`: `not` binds tightest, so this negates `n`; the comparison
-    // was meant.
-    if let Some((message, edits)) = negated_comparison(origin, expr) {
-        d = d.with_suggestion(message, edits);
-    }
     // Rewriting the literal is the likelier fix when it is mechanical, so it
     // comes first, and then converting the value; changing the declared type
     // comes last.
@@ -1283,44 +1278,36 @@ pub(crate) fn not_of_kind(
     d
 }
 
-/// The fix for `not` applied to a non-boolean `operand` that starts the left
-/// side of a comparison, as in `not n = 0`: negate the comparison instead,
-/// `not (n = 0)`, as SQL and Python read it.
-fn negated_comparison(origin: &Origin, operand: &Expr) -> Option<(String, Vec<Edit>)> {
-    let Origin::Operator(token) = origin else {
-        return None;
-    };
-    if token.kind() != trendy_syntax::SyntaxKind::NotKw {
-        return None;
-    }
-    // Up from `not`, through operators that bind tighter than a comparison,
-    // as long as `not` stays leftmost: `not n + 1 < 2` is
-    // `((not n) + 1) < 2`.
+/// The comparison whose left operand the prefix operator `token` begins,
+/// through operators that bind tighter than a comparison, if it is one:
+/// `not n + 1 < 2` is `((not n) + 1) < 2`.
+pub(crate) fn begun_comparison(token: &SyntaxToken) -> Option<ast::BinaryExpr> {
     let mut node = token.parent()?;
-    let comparison = loop {
-        let parent = trendy_syntax::ast::BinaryExpr::cast(node.parent()?)?;
+    loop {
+        let parent = ast::BinaryExpr::cast(node.parent()?)?;
         if parent.lhs().is_none_or(|lhs| *lhs.syntax() != node) {
             return None;
         }
         let kind = parent.operator()?.kind();
         if kind.is_comparison() {
-            break parent;
+            return Some(parent);
         }
-        let tighter = matches!(
-            kind,
-            trendy_syntax::SyntaxKind::Plus
-                | trendy_syntax::SyntaxKind::Minus
-                | trendy_syntax::SyntaxKind::Star
-                | trendy_syntax::SyntaxKind::Slash
-                | trendy_syntax::SyntaxKind::DivKw
-                | trendy_syntax::SyntaxKind::ModKw
-                | trendy_syntax::SyntaxKind::PipePipe
-        );
-        if !tighter {
+        if kind
+            .precedence()
+            .is_none_or(|p| p <= trendy_syntax::Precedence::COMPARISON)
+        {
             return None;
         }
         node = parent.syntax().clone();
-    };
+    }
+}
+
+/// The fix for `not`, written `token`, applied to `operand`, neither a
+/// boolean nor an integer, that begins the left operand of a comparison,
+/// as in `not name = "Lagos"`: negate the comparison instead, `not (name =
+/// "Lagos")`, as SQL and Python read it.
+fn negated_comparison(token: &SyntaxToken, operand: &Expr) -> Option<(String, Vec<Edit>)> {
+    let comparison = begun_comparison(token)?;
     let start = operand.span().start;
     let end = comparison.span().end;
     let whole = comparison.syntax().text().to_string();
@@ -1338,6 +1325,92 @@ fn negated_comparison(origin: &Origin, operand: &Expr) -> Option<(String, Vec<Ed
             },
         ],
     ))
+}
+
+/// `not` of an integer, `operand`, written `token`, that begins the left
+/// operand of `comparison`, as in `not n = 0`: the complement of `n`
+/// compared, `(not n) = 0`, which SQL and Python read as the comparison
+/// negated, `not (n = 0)`, and C as `~n == 0`; so neither is assumed.
+pub(crate) fn complement_compared(
+    token: &SyntaxToken,
+    operand: &Expr,
+    comparison: &ast::BinaryExpr,
+) -> Diagnostic {
+    let whole = comparison.syntax().text().to_string();
+    let offset = |at: usize| at - comparison.span().start;
+    let compared = &whole[offset(operand.span().start)..];
+    let lhs_end = comparison
+        .lhs()
+        .map_or(whole.len(), |lhs| offset(lhs.span().end));
+    let (lhs, rest) = whole.split_at(lhs_end);
+    let not = trendy_syntax::span(token.text_range());
+    Diagnostic::error(
+        Code::BitGrouping,
+        format!("`{whole}` compares the complement of an integer"),
+        Span::new(not.start, comparison.span().end),
+        format!("this is `({lhs}){rest}`"),
+    )
+    .with_note("`not` binds tightest, as every prefix operator does, and of an integer it is the complement, bit by bit, so a `not` of an integer that begins a comparison is written in parentheses, whichever is meant: SQL and Python read `not n = 0` as `not (n = 0)`")
+    .with_help(format!(
+        "write `not ({compared})` to negate the comparison, or `({lhs}){rest}` to compare the complement"
+    ))
+}
+
+/// A connective of an integer and a comparison, `binary`, as in `x and 1
+/// = 1`, which a comparison's binding tighter makes `x and (1 = 1)`, where
+/// a comparison of bits was meant: of `inner`, the comparison's operand
+/// next to the integer, with it, `(x and 1) = 1`, as in C, which groups
+/// `x & 1 == 1` the same way.
+pub(crate) fn misgrouped_bits(
+    binary: &ast::BinaryExpr,
+    comparison: &ast::BinaryExpr,
+    inner: &Expr,
+) -> Diagnostic {
+    let span = binary.span();
+    let whole = binary.syntax().text().to_string();
+    let offset = |at: usize| at - span.start;
+    // The connective and the comparison's operand next to it, parenthesized.
+    let grouped = if comparison.span().start == span.start {
+        Span::new(inner.span().start, span.end)
+    } else {
+        Span::new(span.start, inner.span().end)
+    };
+    let fixed = format!(
+        "{}({}){}",
+        &whole[..offset(grouped.start)],
+        &whole[offset(grouped.start)..offset(grouped.end)],
+        &whole[offset(grouped.end)..],
+    );
+    let compared = comparison.syntax().text().to_string();
+    let read = whole.replacen(&compared, &format!("({compared})"), 1);
+    let op = binary
+        .operator()
+        .map_or_else(String::new, |t| t.text().to_string());
+    let cmp = comparison
+        .operator()
+        .map_or_else(String::new, |t| t.text().to_string());
+    Diagnostic::error(
+        Code::BitGrouping,
+        format!("`{whole}` is `{read}`, `{op}` of an integer and a boolean"),
+        grouped,
+        format!("these are `{op}`'s operands only in parentheses"),
+    )
+    .with_note(format!(
+        "a comparison binds tighter than `and`, `or` and `xor`, which are of booleans, or of integers, bit by bit, so `{cmp}` takes the operand next to it, as `==` does in C"
+    ))
+    .with_suggestion(
+        format!("compare the bits: `{fixed}`"),
+        vec![
+            Edit {
+                span: Span::empty(grouped.start),
+                replacement: "(".to_string(),
+            },
+            Edit {
+                span: Span::empty(grouped.end),
+                replacement: ")".to_string(),
+            },
+        ],
+    )
 }
 
 /// A literal of type `ty` for the same value as `value`, written `written`,
@@ -6854,6 +6927,13 @@ pub(crate) fn wrong_operand_type(
     {
         let subject = format!("`{}`", first.syntax().text());
         return with_conversion(d, &subject, builtin, first);
+    }
+    // `not name = "Lagos"`: `not` binds tightest, so this is `not` of
+    // `name`; the comparison was meant.
+    if op == Operator::Not
+        && let Some((message, edits)) = first.and_then(|first| negated_comparison(token, first))
+    {
+        return d.with_suggestion(message, edits);
     }
     let hir::Type::Scalar(scalar) = *ty else {
         return match (op, ty) {

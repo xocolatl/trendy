@@ -688,6 +688,7 @@ dependencies = [
  "trendy_lexer",
  "trendy_load",
  "trendy_lower",
+ "trendy_numeric",
  "trendy_opt",
  "trendy_parser",
  "trendy_prelude",

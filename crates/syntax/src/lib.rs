@@ -81,6 +81,10 @@ pub enum SyntaxKind {
     ImpliesKw,
     DivKw,
     ModKw,
+    /// `shl`: an integer times 2 to the power of another.
+    ShlKw,
+    /// `shr`: an integer divided by 2 to the power of another, rounded down.
+    ShrKw,
     RemoveKw,
     RenameKw,
     ExtendKw,
@@ -468,7 +472,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 181] = [
+    pub const ALL: [SyntaxKind; 183] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -488,6 +492,8 @@ impl SyntaxKind {
         SyntaxKind::ImpliesKw,
         SyntaxKind::DivKw,
         SyntaxKind::ModKw,
+        SyntaxKind::ShlKw,
+        SyntaxKind::ShrKw,
         SyntaxKind::RemoveKw,
         SyntaxKind::RenameKw,
         SyntaxKind::ExtendKw,
@@ -677,6 +683,8 @@ impl SyntaxKind {
                 | SyntaxKind::ImpliesKw
                 | SyntaxKind::DivKw
                 | SyntaxKind::ModKw
+                | SyntaxKind::ShlKw
+                | SyntaxKind::ShrKw
                 | SyntaxKind::RemoveKw
                 | SyntaxKind::RenameKw
                 | SyntaxKind::ExtendKw
@@ -727,6 +735,8 @@ impl SyntaxKind {
                 | SyntaxKind::ImpliesKw
                 | SyntaxKind::DivKw
                 | SyntaxKind::ModKw
+                | SyntaxKind::ShlKw
+                | SyntaxKind::ShrKw
                 | SyntaxKind::RemoveKw
                 | SyntaxKind::RenameKw
                 | SyntaxKind::ExtendKw
@@ -827,9 +837,12 @@ impl SyntaxKind {
                 Precedence::JOIN
             }
             SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => Precedence::ADDITION,
-            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => {
-                Precedence::MULTIPLICATION
-            }
+            SyntaxKind::Star
+            | SyntaxKind::Slash
+            | SyntaxKind::DivKw
+            | SyntaxKind::ModKw
+            | SyntaxKind::ShlKw
+            | SyntaxKind::ShrKw => Precedence::MULTIPLICATION,
             _ => return None,
         })
     }
@@ -896,6 +909,8 @@ impl SyntaxKind {
             SyntaxKind::ImpliesKw => "implies",
             SyntaxKind::DivKw => "div",
             SyntaxKind::ModKw => "mod",
+            SyntaxKind::ShlKw => "shl",
+            SyntaxKind::ShrKw => "shr",
             SyntaxKind::RemoveKw => "remove",
             SyntaxKind::RenameKw => "rename",
             SyntaxKind::ExtendKw => "extend",
@@ -993,6 +1008,8 @@ impl SyntaxKind {
             SyntaxKind::ImpliesKw => "`implies`",
             SyntaxKind::DivKw => "`div`",
             SyntaxKind::ModKw => "`mod`",
+            SyntaxKind::ShlKw => "`shl`",
+            SyntaxKind::ShrKw => "`shr`",
             SyntaxKind::RemoveKw => "`remove`",
             SyntaxKind::RenameKw => "`rename`",
             SyntaxKind::ExtendKw => "`extend`",

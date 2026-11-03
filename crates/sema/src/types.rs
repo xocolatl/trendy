@@ -197,7 +197,8 @@ impl Origin {
             {
                 "`if` takes a boolean condition".to_string()
             }
-            // Only operators with a fixed operand type are origins.
+            // Operators with a fixed operand type, and a connective of
+            // operands that don't say which of its types they are.
             Origin::Operator(token) => match Operator::of(token).map(|op| (op, op.operands())) {
                 Some((op, Operands::Fixed(scalar))) if op.is_prefix() => {
                     let ty = scalar.name();
@@ -211,7 +212,8 @@ impl Origin {
                 Some((_, Operands::Fixed(scalar))) => {
                     format!("`{}` takes {} operands", token.text(), scalar.name())
                 }
-                _ => "expected because of this operator".to_string(),
+                Some((op, Operands::Inferred)) => format!("`{}` takes {}", token.text(), op.takes()),
+                None => "expected because of this operator".to_string(),
             },
         }
     }

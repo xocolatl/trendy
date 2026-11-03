@@ -4740,29 +4740,95 @@ operator main{{}} [ var lines: array text; {main} ];"
     }
 
     #[test]
-    fn operands_must_be_boolean() {
+    fn operands_are_booleans_or_integers() {
         let source = format!(
-            "var i := 1;\nvar a := not i;\nvar b := true and 0;\nvar c: integer := true or false;{MAIN}"
+            "var a := not \"x\";\nvar b := true and 0;\nvar c: integer := true or false;\noperator d{{t: text}} [ call debug_value{{v: t and t}}; ];{MAIN}"
         );
         let errors = errors(&source);
         assert_eq!(
             errors.iter().map(|e| &e.message[..]).collect::<Vec<_>>(),
             [
+                "`not` can't be applied to text",
                 "mismatched types: expected `boolean`, found `integer`",
-                "mismatched types: expected `boolean`, found `integer`",
+                // Booleans agree, so the result is reported, not each.
                 "mismatched types: expected `integer`, found `boolean`",
+                "mismatched types: expected `boolean`, found `text`",
+                "mismatched types: expected `boolean`, found `text`",
             ]
         );
-        let origin = &errors[0].secondary[0];
-        assert_eq!(&source[origin.span.start..origin.span.end], "not");
-        assert_eq!(origin.message, "`not` takes a boolean operand");
+        assert_eq!(
+            errors[0].primary.message,
+            "`not` takes booleans, or integers, bit by bit"
+        );
+        // Operands of no type `and` takes are booleans.
+        let origin = &errors[3].secondary[0];
+        assert_eq!(&source[origin.span.start..origin.span.end], "and");
+        assert_eq!(
+            origin.message,
+            "`and` takes booleans, or integers, bit by bit"
+        );
+        let fixed = fix(&source);
+        assert!(
+            fixed.contains(
+                "var b := true and false;\nvar c: boolean := true or false;\noperator d{t: text} [ call debug_value{v: parse_boolean{from: t} and parse_boolean{from: t}}; ];"
+            ),
+            "`0` is rewritten as `false`: {fixed}"
+        );
+    }
+
+    #[test]
+    fn bits_of_integers() {
+        let values = |source: &str| -> Vec<hir::Value> {
+            let program = analyze_str(source).unwrap();
+            program.variables.iter().map(|v| v.init.clone()).collect()
+        };
+        assert_eq!(
+            values(&format!(
+                "var a := 0xF0 and 0x3C;\nvar b := 0xF0 or 0x0F;\nvar c := xor{{1, 2, 3}};\nvar d := not 0;\nvar e := 1 shl 3 + 1;\nvar f := -9 shr 1;\nvar g := 1 shl -1;\nvar h: integer := and{{}};\nvar i := 0b1010 and not 0b10;{MAIN}"
+            )),
+            [0x30, 0xFF, 0, -1, 9, -5, 0, -1, 8].map(hir::Value::Integer)
+        );
+        let errors = errors(&format!("var a := 1 shl 63;{MAIN}"));
+        assert_eq!(errors[0].code, Code::Overflow, "{errors:#?}");
+        // Integers that agree are reported as the result.
+        let errors = self::errors(&format!(
+            "var flags := 3;\nvar r := relation {{ {{ a: 1 }} }} where flags and a;{MAIN}"
+        ));
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(
+            errors[0].message,
+            "mismatched types: expected `boolean`, found `integer`"
+        );
+        assert_eq!(errors[0].primary.message, "this is `integer`");
+    }
+
+    #[test]
+    fn bits_compared() {
+        let source = format!(
+            "var flags := 6;\nvar a := flags and 4 = 4;\nvar b := 4 = flags and 4;\nvar c := flags xor 1 shl 2 <> 0 or true;{MAIN}"
+        );
+        let errors = errors(&source);
+        let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::BitGrouping; 3], "{errors:#?}");
+        assert_eq!(
+            errors[0].message,
+            "`flags and 4 = 4` is `flags and (4 = 4)`, `and` of an integer and a boolean"
+        );
+        assert_eq!(
+            errors[0].suggestions[0].message,
+            "compare the bits: `(flags and 4) = 4`"
+        );
         assert_eq!(
             fix(&source),
             format!(
-                "var i := 1;\nvar a := not i;\nvar b := true and false;\nvar c: boolean := true or false;{MAIN}"
-            ),
-            "`0` is rewritten as `false`; nothing to fix on a name"
+                "var flags := 6;\nvar a := (flags and 4) = 4;\nvar b := 4 = (flags and 4);\nvar c := (flags xor 1 shl 2) <> 0 or true;{MAIN}"
+            )
         );
+        // Not when the comparison's operand next to the integer isn't one.
+        let errors = self::errors(&format!(
+            "var flags := 6;\nvar a := flags and \"x\" = \"y\";{MAIN}"
+        ));
+        assert_eq!(errors[0].code, Code::TypeMismatch, "{errors:#?}");
     }
 
     /// `expr` without the sites in it, which only
@@ -4894,7 +4960,7 @@ operator main{{}} [ var lines: array text; {main} ];"
     #[test]
     fn integer_operand_types() {
         let source = format!(
-            "var a := 1 + true;\nvar b := -\"x\";\nvar c: boolean := 1 * 2;\nvar d := not 1;\nvar e := 1.5e0 + 1;\nvar r: approximate := -1;{MAIN}"
+            "var a := 1 + true;\nvar b := -\"x\";\nvar c: boolean := 1 * 2;\nvar d := not 1.5e0;\nvar e := 1.5e0 + 1;\nvar r: approximate := -1;{MAIN}"
         );
         let errors = errors(&source);
         let labels: Vec<_> = errors
@@ -4909,7 +4975,8 @@ operator main{{}} [ var lines: array text; {main} ];"
                 // `-` doesn't take text: reported at the operator.
                 "",
                 "expected because of this type",
-                "`not` takes a boolean operand",
+                // `not` doesn't take approximate numbers.
+                "",
                 "expected because of this value",
                 "expected because of this type",
             ]
@@ -6659,7 +6726,7 @@ operator main{{}} [ var lines: array text; {main} ];"
     fn guards_decide_which_operands_are_computed() {
         // A constant that decides the result: the other isn't computed.
         let vars = variables(
-            "var a := false and 1 div 0 = 1;\nvar b := 1 div 0 = 1 and false;\nvar c := true or 1 div 0 = 1;\nvar d := false implies 1 div 0 = 1;\nvar e := 1 div 0 = 1 implies true;\nvar g := and{1 div 0 = 1, true, false};\nvar h := or{1 div 0 = 1, 1 div 0 = 2, true};\nvar points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };\nvar steep := points where y div x > 1 and x <> 0;\nvar expected := relation { { x: 2, y: 6 } };",
+            "var a := false and 1 div 0 = 1;\nvar b := 1 div 0 = 1 and false;\nvar c := true or 1 div 0 = 1;\nvar d := false implies 1 div 0 = 1;\nvar e := 1 div 0 = 1 implies true;\nvar g := and{1 div 0 = 1, true, false};\nvar h := or{1 div 0 = 1, 1 div 0 = 2, true};\nvar points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };\nvar steep := points where y div x > 1 and x <> 0;\nvar masked := points where y div x > 1 and (x and 0xFF) <> 0;\nvar expected := relation { { x: 2, y: 6 } };",
         );
         let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
         for (name, result) in [
@@ -6673,8 +6740,10 @@ operator main{{}} [ var lines: array text; {main} ];"
         ] {
             assert_eq!(value(name), &hir::Value::Boolean(result), "{name}");
         }
-        // A guard after what it guards guards it too.
+        // A guard after what it guards guards it too, and the bits of an
+        // integer can't fail, so a comparison of them is one.
         assert_eq!(value("steep"), value("expected"));
+        assert_eq!(value("masked"), value("expected"));
         // One that doesn't decide it leaves the division to be made, and
         // one known only when running leaves one known to fail an error.
         for source in [
@@ -6966,27 +7035,30 @@ operator main{{}} [ var lines: array text; {main} ];"
 
     #[test]
     fn not_before_a_comparison() {
-        let source =
-            format!("var n := 1;\nvar a := not n = 0 and true;\nvar b := not n + 1 < 2;{MAIN}");
+        let source = format!(
+            "var t := \"Kraków\";\nvar a := not t = \"Lagos\" and true;\nvar b := not t || \"!\" < \"x\";{MAIN}"
+        );
         let errors = errors(&source);
         assert_eq!(errors.len(), 2, "{errors:#?}");
-        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert_eq!(errors[0].code, Code::WrongOperandType);
         assert_eq!(
             errors[0].suggestions[0].message,
-            "negate the comparison: `not (n = 0)`"
+            "negate the comparison: `not (t = \"Lagos\")`"
         );
         assert_eq!(
             fix(&source),
-            format!("var n := 1;\nvar a := not (n = 0) and true;\nvar b := not (n + 1 < 2);{MAIN}")
+            format!(
+                "var t := \"Kraków\";\nvar a := not (t = \"Lagos\") and true;\nvar b := not (t || \"!\" < \"x\");{MAIN}"
+            )
         );
         // In a body too, and not when `not` isn't the comparison's left side.
         let body =
-            "operator f{n: integer} [ call debug_value{v: not n = 0}; ];\noperator main{} [];";
+            "operator f{t: text} [ call debug_value{v: not t = \"Lagos\"}; ];\noperator main{} [];";
         assert_eq!(
             fix(body),
-            "operator f{n: integer} [ call debug_value{v: not (n = 0)}; ];\noperator main{} [];"
+            "operator f{t: text} [ call debug_value{v: not (t = \"Lagos\")}; ];\noperator main{} [];"
         );
-        let errors = self::errors(&format!("var a := true = not 1;{MAIN}"));
+        let errors = self::errors(&format!("var a := true = not \"x\";{MAIN}"));
         assert!(
             errors[0]
                 .suggestions
@@ -6994,6 +7066,27 @@ operator main{{}} [ var lines: array text; {main} ];"
                 .all(|s| !s.message.starts_with("negate the comparison")),
             "{errors:#?}"
         );
+        // Of an integer, either could be meant.
+        let source = format!(
+            "var n := 1;\nvar a := not n = 0;\nvar b := not n + 1 < 2;\nvar c := (not n) = 0;\nvar d := 0 = not n;{MAIN}"
+        );
+        let errors = self::errors(&source);
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::BitGrouping; 2],
+            "{errors:#?}"
+        );
+        assert_eq!(
+            errors[0].message,
+            "`not n = 0` compares the complement of an integer"
+        );
+        assert_eq!(
+            errors[1].help,
+            [
+                "write `not (n + 1 < 2)` to negate the comparison, or `(not n + 1) < 2` to compare the complement"
+            ]
+        );
+        assert!(errors.iter().all(|e| e.suggestions.is_empty()));
     }
 
     #[test]
@@ -7109,9 +7202,14 @@ operator main{{}} [ var lines: array text; {main} ];"
         );
         let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
         assert_eq!(codes, [Code::TypeMismatch, Code::TypeMismatch]);
+        // Of an integer and a boolean, the boolean sets the type.
+        assert_eq!(
+            errors[0].message,
+            "mismatched types: expected `boolean`, found `integer`"
+        );
         assert_eq!(
             errors[0].secondary[0].message,
-            "`or` takes boolean operands"
+            "expected because of this value"
         );
     }
 

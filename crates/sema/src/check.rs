@@ -362,7 +362,9 @@ impl<'a> Checker<'a> {
     }
 
     /// `unary`, written `expr`, an operator before its operand: a negative
-    /// literal, or `not`, `-` or `+` of an operand.
+    /// literal, or `not`, `-` or `+` of an operand. A `not` of an integer
+    /// that begins a comparison is an error, as other languages read it
+    /// differently (A0076).
     fn prefixed(
         &mut self,
         unary: &ast::UnaryExpr,
@@ -379,6 +381,16 @@ impl<'a> Checker<'a> {
             self.operands(&token, vec![unary.operand()], expected, errors)?;
         types::result_type(expected, &result, expr, errors)?;
         let [operand] = <[hir::Expr; 1]>::try_from(operands).ok()?;
+        if resolved == Resolved::Unary(hir::UnaryOp::Complement)
+            && let Some(comparison) = errors::begun_comparison(&token)
+        {
+            errors.push(errors::complement_compared(
+                &token,
+                &unary.operand()?,
+                &comparison,
+            ));
+            return None;
+        }
         match resolved {
             Resolved::Identity => Some(operand),
             Resolved::Unary(op) => types::evaluated(ops::unary(op, operand), expr, None, errors),
@@ -2162,13 +2174,11 @@ impl<'a> Checker<'a> {
         self.matched(expected, result, expr, errors)
     }
 
-    /// An `and`, an `or`, an `xor` or an `implies`, written `expr`, each
-    /// operand checked as a boolean with its own errors: two, or, of a list
-    /// such as `and{a, b, c}`, any number. Where an operand is known when
-    /// compiling and decides the result, the others aren't computed (see
-    /// `hir::Connective::And`), so their failures aren't reported, as for
-    /// an `if`'s branch not taken; otherwise one known to fail is an error,
-    /// since it fails whenever it is computed.
+    /// An `and`, an `or`, an `xor` or an `implies`, written `expr`, of two
+    /// operands, or, of a list such as `and{a, b, c}`, any number: of
+    /// booleans, or, but for `implies`, of integers, bit by bit, as the
+    /// operands, checked on their own, and the context say (see
+    /// [`ops::connected`]), each with its own errors.
     fn connective(
         &mut self,
         expr: &Expr,
@@ -2176,22 +2186,18 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let ops::Connecting { token, operands } = ops::Connecting::of(expr)?;
-        let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
+        let op = Operator::of(&token)?;
         let Some(Resolved::Connective {
             connective,
             not_left,
-        }) = Operator::of(&token)?.resolve(&boolean)
+        }) = op.resolve(&hir::Type::Scalar(hir::Scalar::Boolean))
         else {
             unreachable!("`and`, `or`, `xor` and `implies` are connectives of booleans");
         };
-        let operand_expected = Expected {
-            ty: boolean.clone(),
-            origin: types::Origin::Operator(token),
-        };
-        // What each operand's tests show where the others are computed: of
-        // an `and`'s, if it is true, and of an `or`'s, if it is false, as
-        // the guard rule computes the others only then (see
-        // [`narrowed::Facts`]).
+        // What the others' tests show where each operand is computed: of
+        // an `and`'s, if they are true, and of an `or`'s, if they are false,
+        // as the guard rule computes the others only then (see
+        // [`narrowed::Facts`]). An integer has no tests.
         let shown: Vec<Facts> = operands
             .iter()
             .enumerate()
@@ -2206,59 +2212,129 @@ impl<'a> Checker<'a> {
                     .map_or_else(Facts::default, |o| Facts::of(o, truth, self))
             })
             .collect();
-        let checked: Vec<(Option<hir::Expr>, Vec<Diagnostic>)> = operands
-            .into_iter()
-            .enumerate()
-            .map(|(i, operand)| {
-                let facts = shown
+        let facts: Vec<Facts> = (0..operands.len())
+            .map(|i| {
+                shown
                     .iter()
                     .enumerate()
                     .filter(|(j, _)| *j != i)
-                    .fold(Facts::default(), |all, (_, facts)| all.and(facts));
-                let mut own = Vec::new();
-                let out = operand
-                    .and_then(|o| self.narrowed(&o, &facts, Some(&operand_expected), &mut own));
-                (out, own)
+                    .fold(Facts::default(), |all, (_, facts)| all.and(facts))
             })
             .collect();
-        // The result, if a constant operand decides it, and that operand:
-        // the others then aren't computed.
-        let decided = checked
-            .iter()
-            .enumerate()
-            .find_map(|(i, (out, _))| match out {
-                Some(hir::Expr::Constant(hir::Value::Boolean(value))) => {
-                    let negated = i == 0 && not_left;
-                    Some((connective.decided(*value != negated)?, i))
-                }
-                _ => None,
-            });
-        let mut ok = true;
-        let mut operands = Vec::new();
-        for (i, (out, own)) in checked.into_iter().enumerate() {
-            if decided.is_some_and(|(_, decider)| decider != i) {
-                let before = errors.len();
-                errors.extend(own.into_iter().filter(|d| d.code.kind() != CodeKind::Run));
-                ok &= out.is_some() || errors.len() == before;
-            } else {
-                ok &= out.is_some();
-                errors.extend(own);
-            }
-            operands.push(out);
-        }
-        if !ok {
+        let own = ops::OnTheirOwn::of(&operands, &mut self.narrowing(&facts));
+        if let Some(error) = self.misgrouped(expr, op, &own, &facts) {
+            errors.push(error);
             return None;
         }
-        types::result_type(expected, &boolean, expr, errors)?;
-        if let Some((result, _)) = decided {
-            return Some(hir::Expr::Constant(hir::Value::Boolean(result)));
+        let expectation = ops::connected(op, &token, &operands, &own, expected);
+        let checked = ops::fitted(
+            operands,
+            own.checked,
+            Some(&expectation),
+            false,
+            &mut self.narrowing(&facts),
+        );
+        match op.resolve(&expectation.ty)? {
+            Resolved::Connective {
+                connective,
+                not_left,
+            } => connected_booleans(connective, not_left, checked, expr, expected, errors),
+            Resolved::Binary(hir::BinaryOp::Bitwise(bitwise)) => {
+                let mut operands = Vec::new();
+                for (out, own) in checked {
+                    errors.extend(own);
+                    operands.push(out);
+                }
+                let operands: Vec<hir::Expr> = operands.into_iter().collect::<Option<_>>()?;
+                types::result_type(expected, &expectation.ty, expr, errors)?;
+                let identity = hir::Expr::Constant(hir::Value::Integer(bitwise.identity()));
+                operands
+                    .into_iter()
+                    .map(Ok)
+                    .reduce(|lhs, rhs| {
+                        ops::binary(hir::BinaryOp::Bitwise(bitwise), lhs?, rhs?, self.bindings())
+                    })
+                    .unwrap_or(Ok(identity))
+                    .map_err(|failed| {
+                        errors.push(match failed {
+                            ops::Failed::Scalar(failure) => errors::failure(failure, expr, None),
+                            failed => errors::failed(&failed, expr),
+                        });
+                    })
+                    .ok()
+            }
+            Resolved::Identity | Resolved::Unary(_) | Resolved::Binary(_) => {
+                unreachable!("a connective is of booleans or of integers")
+            }
         }
-        let operands = operands
-            .into_iter()
-            .enumerate()
-            .map(|(i, operand)| operand.map(|o| if i == 0 && not_left { o.negated() } else { o }))
-            .collect::<Option<_>>()?;
-        Some(connective.of(operands))
+    }
+
+    /// Checks an operand of a connective, the one at an index, narrowed by
+    /// what `facts` at that index show, giving its checked form and its
+    /// type.
+    fn narrowing<'c>(
+        &'c mut self,
+        facts: &'c [Facts],
+    ) -> impl FnMut(
+        usize,
+        &Expr,
+        Option<&Expected>,
+        &mut Vec<Diagnostic>,
+    ) -> Option<(hir::Expr, hir::Type)>
+    + 'c {
+        move |i, operand, expected, errors| {
+            let checked = self.narrowed(operand, &facts[i], expected, errors)?;
+            let ty = self.ty(&checked);
+            Some((checked, ty))
+        }
+    }
+
+    /// The error for a connective `op` of two operands, written `expr`,
+    /// one an integer and the other a comparison of one, as `own` has
+    /// them, checked on their own, which `facts` narrow: `x and 1 = 1` is
+    /// `x and (1 = 1)`, as a comparison binds tighter, where the comparison
+    /// of bits, `(x and 1) = 1`, was surely meant.
+    fn misgrouped(
+        &mut self,
+        expr: &Expr,
+        op: Operator,
+        own: &ops::OnTheirOwn,
+        facts: &[Facts],
+    ) -> Option<Diagnostic> {
+        let Expr::Binary(binary) = expr else {
+            return None;
+        };
+        if op == Operator::Implies {
+            return None;
+        }
+        let integer = hir::Type::Scalar(hir::Scalar::Integer);
+        let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
+        let ty = |i: usize| match &own.checked[i] {
+            Some(types::Alone::Valid((_, ty))) => Some(ty),
+            _ => None,
+        };
+        let comparison = |operand: Option<Expr>| match operand? {
+            Expr::Binary(b) if b.operator()?.kind().is_comparison() => Some(b),
+            _ => None,
+        };
+        // The comparison's operand next to the other, which is an integer.
+        let (i, comparison, inner) = if ty(0) == Some(&integer) && ty(1) == Some(&boolean) {
+            let comparison = comparison(binary.rhs())?;
+            let lhs = comparison.lhs()?;
+            (1, comparison, lhs)
+        } else if ty(0) == Some(&boolean) && ty(1) == Some(&integer) {
+            let comparison = comparison(binary.lhs())?;
+            let rhs = comparison.rhs()?;
+            (0, comparison, rhs)
+        } else {
+            return None;
+        };
+        let mut scratch = Vec::new();
+        let inner_ty = self
+            .narrowed(&inner, &facts[i], None, &mut scratch)
+            .map(|checked| self.ty(&checked));
+        (inner_ty == Some(integer) && scratch.is_empty())
+            .then(|| errors::misgrouped_bits(binary, &comparison, &inner))
     }
 
     /// `test`, `x is t`, written `expr`: whether the value of `x` is of the
@@ -2686,7 +2762,7 @@ impl<'a> Checker<'a> {
             token,
             operands,
             expected,
-            &mut |operand, expected, errors| {
+            &mut |_, operand, expected, errors| {
                 let checked = self.expr(operand, expected, errors)?;
                 let ty = self.ty(&checked);
                 Some((checked, ty))
@@ -2695,6 +2771,66 @@ impl<'a> Checker<'a> {
             errors,
         )
     }
+}
+
+/// The connective `connective` of booleans, written `expr`, of the
+/// operands `checked`, each with its own errors, the left one negated
+/// if `not_left`. Where an operand is known when compiling and decides
+/// the result, the others aren't computed (see `hir::Connective::And`),
+/// so their failures aren't reported, as for an `if`'s branch not
+/// taken; otherwise one known to fail is an error, since it fails
+/// whenever it is computed.
+fn connected_booleans(
+    connective: hir::Connective,
+    not_left: bool,
+    checked: Vec<(Option<hir::Expr>, Vec<Diagnostic>)>,
+    expr: &Expr,
+    expected: Option<&Expected>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    // The result, if a constant operand decides it, and that operand:
+    // the others then aren't computed.
+    let decided = checked
+        .iter()
+        .enumerate()
+        .find_map(|(i, (out, _))| match out {
+            Some(hir::Expr::Constant(hir::Value::Boolean(value))) => {
+                let negated = i == 0 && not_left;
+                Some((connective.decided(*value != negated)?, i))
+            }
+            _ => None,
+        });
+    let mut ok = true;
+    let mut operands = Vec::new();
+    for (i, (out, own)) in checked.into_iter().enumerate() {
+        if decided.is_some_and(|(_, decider)| decider != i) {
+            let before = errors.len();
+            errors.extend(own.into_iter().filter(|d| d.code.kind() != CodeKind::Run));
+            ok &= out.is_some() || errors.len() == before;
+        } else {
+            ok &= out.is_some();
+            errors.extend(own);
+        }
+        operands.push(out);
+    }
+    if !ok {
+        return None;
+    }
+    types::result_type(
+        expected,
+        &hir::Type::Scalar(hir::Scalar::Boolean),
+        expr,
+        errors,
+    )?;
+    if let Some((result, _)) = decided {
+        return Some(hir::Expr::Constant(hir::Value::Boolean(result)));
+    }
+    let operands = operands
+        .into_iter()
+        .enumerate()
+        .map(|(i, operand)| operand.map(|o| if i == 0 && not_left { o.negated() } else { o }))
+        .collect::<Option<_>>()?;
+    Some(connective.of(operands))
 }
 
 /// Whether `assignments`, of `list`, with their values, `values`, give

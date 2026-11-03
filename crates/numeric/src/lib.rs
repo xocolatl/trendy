@@ -534,6 +534,43 @@ pub fn atan2(y: f64, x: f64) -> f64 {
     one_zero(libm::atan2(y, x))
 }
 
+/// `a shl n`: `a` times 2 to the power `n`, or, for a negative `n`, `a shr
+/// -n`, as Haskell's `shift` has it; `None` if that is out of an integer's
+/// range.
+#[must_use]
+pub fn shifted_left(a: i64, n: i64) -> Option<i64> {
+    if n < 0 {
+        return Some(right(a, n.unsigned_abs()));
+    }
+    if a == 0 {
+        return Some(0);
+    }
+    // Beyond 63 places, every bit but a zero's is out of range.
+    let places = u32::try_from(n).ok().filter(|&p| p < 64)?;
+    i64::try_from(i128::from(a) << places).ok()
+}
+
+/// `a shr n`: `a` divided by 2 to the power `n`, rounded down, as each bit
+/// moves `n` places towards the least significant, or, for a negative
+/// `n`, `a shl -n`; `None` if that is out of an integer's range.
+#[must_use]
+pub fn shifted_right(a: i64, n: i64) -> Option<i64> {
+    if n < 0 {
+        // `-n` is beyond 63 for the smallest integer, as its count is.
+        return shifted_left(a, n.checked_neg().unwrap_or(i64::MAX));
+    }
+    Some(right(a, n.unsigned_abs()))
+}
+
+/// `a` divided by 2 to the power `places`, rounded down: 0, or -1 for a
+/// negative `a`, beyond 63.
+fn right(a: i64, places: u64) -> i64 {
+    match u32::try_from(places) {
+        Ok(places) if places < 64 => a >> places,
+        _ => a >> 63,
+    }
+}
+
 /// `x`, but `0.0` for `-0.0`: approximate numbers have one zero.
 fn one_zero(x: f64) -> f64 {
     // Adding `0.0` turns `-0.0` into `0.0` (IEEE 754, 6.3).
@@ -543,6 +580,27 @@ fn one_zero(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifts_multiply_and_divide_by_powers_of_two() {
+        assert_eq!(shifted_left(1, 3), Some(8));
+        assert_eq!(shifted_left(-3, 2), Some(-12));
+        assert_eq!(shifted_left(1, 62), Some(1 << 62));
+        assert_eq!(shifted_left(1, 63), None);
+        assert_eq!(shifted_left(-1, 63), Some(i64::MIN));
+        assert_eq!(shifted_left(0, 1000), Some(0));
+        assert_eq!(shifted_left(3, 64), None);
+        // Rounded down, so a negative number stays negative.
+        assert_eq!(shifted_right(13, 2), Some(3));
+        assert_eq!(shifted_right(-13, 2), Some(-4));
+        assert_eq!(shifted_right(-1, 1000), Some(-1));
+        assert_eq!(shifted_right(5, 1000), Some(0));
+        // A negative count shifts the other way.
+        assert_eq!(shifted_left(12, -2), Some(3));
+        assert_eq!(shifted_right(3, -2), Some(12));
+        assert_eq!(shifted_right(1, i64::MIN), None);
+        assert_eq!(shifted_left(-8, i64::MIN), Some(-1));
+    }
 
     #[test]
     fn square_roots_and_trigonometry() {

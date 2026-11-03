@@ -3866,9 +3866,9 @@ impl<'a> FunctionBuilder<'a> {
             return self.conditional(expr, first, branches, cx);
         }
         let op = match connective {
-            hir::Connective::And => lir::BinaryOp::And,
-            hir::Connective::Or => lir::BinaryOp::Or,
-            hir::Connective::Xor => lir::BinaryOp::Xor,
+            hir::Connective::And => lir::BinaryOp::And(lir::Bits::Boolean),
+            hir::Connective::Or => lir::BinaryOp::Or(lir::Bits::Boolean),
+            hir::Connective::Xor => lir::BinaryOp::Xor(lir::Bits::Boolean),
         };
         let mut result = self.place(first, cx);
         for operand in rest {
@@ -4075,7 +4075,7 @@ impl<'a> FunctionBuilder<'a> {
         let outside = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Binary {
             dst: outside.clone(),
-            op: lir::BinaryOp::Or,
+            op: lir::BinaryOp::Or(lir::Bits::Boolean),
             lhs: below,
             rhs: beyond,
         });
@@ -4190,7 +4190,7 @@ impl<'a> FunctionBuilder<'a> {
                             let both = self.slot(lir::Layout::U8);
                             self.insts.push(lir::Inst::Binary {
                                 dst: both.clone(),
-                                op: lir::BinaryOp::And,
+                                op: lir::BinaryOp::And(lir::Bits::Boolean),
                                 lhs: so_far,
                                 rhs: same,
                             });
@@ -5611,7 +5611,8 @@ impl<'a> FunctionBuilder<'a> {
     /// `op src`, computed into a new stack slot.
     fn unary(&mut self, op: hir::UnaryOp, src: lir::Place) -> lir::Place {
         let op = match op {
-            hir::UnaryOp::Not => lir::UnaryOp::Not,
+            hir::UnaryOp::Not => lir::UnaryOp::Not(lir::Bits::Boolean),
+            hir::UnaryOp::Complement => lir::UnaryOp::Not(lir::Bits::Integer),
             hir::UnaryOp::Negate(numeric) => lir::UnaryOp::Negate(lower_numeric(numeric)),
         };
         let dst = self.slot(operand_layout(op.operand()));
@@ -5693,7 +5694,7 @@ impl<'a> FunctionBuilder<'a> {
                 let dst = self.slot(lir::Layout::U8);
                 self.insts.push(lir::Inst::Unary {
                     dst: dst.clone(),
-                    op: lir::UnaryOp::Not,
+                    op: lir::UnaryOp::Not(lir::Bits::Boolean),
                     src: equal,
                 });
                 return dst;
@@ -5898,6 +5899,11 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
         hir::BinaryOp::Divide => lir::BinaryOp::Divide,
         hir::BinaryOp::Div => lir::BinaryOp::Div,
         hir::BinaryOp::Mod => lir::BinaryOp::Mod,
+        hir::BinaryOp::Bitwise(hir::Bitwise::And) => lir::BinaryOp::And(lir::Bits::Integer),
+        hir::BinaryOp::Bitwise(hir::Bitwise::Or) => lir::BinaryOp::Or(lir::Bits::Integer),
+        hir::BinaryOp::Bitwise(hir::Bitwise::Xor) => lir::BinaryOp::Xor(lir::Bits::Integer),
+        hir::BinaryOp::ShiftLeft => lir::BinaryOp::ShiftLeft,
+        hir::BinaryOp::ShiftRight => lir::BinaryOp::ShiftRight,
         hir::BinaryOp::Compare(comparison, scalar) => lir::BinaryOp::Compare(
             lower_comparison(comparison),
             match scalar {
@@ -7042,13 +7048,13 @@ mod tests {
             [
                 lir::Inst::Binary {
                     dst: slot(0),
-                    op: lir::BinaryOp::And,
+                    op: lir::BinaryOp::And(lir::Bits::Boolean),
                     lhs: data(0),
                     rhs: data(1),
                 },
                 lir::Inst::Unary {
                     dst: slot(1),
-                    op: lir::UnaryOp::Not,
+                    op: lir::UnaryOp::Not(lir::Bits::Boolean),
                     src: slot(0),
                 },
             ]

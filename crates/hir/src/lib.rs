@@ -2245,9 +2245,9 @@ impl Expr {
             Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
             Expr::Binary(op, lhs, rhs) => {
-                // Arithmetic and concatenation can fail themselves;
-                // comparisons can't.
-                let itself = !matches!(op, BinaryOp::Compare(..));
+                // Arithmetic, shifts and concatenation can fail
+                // themselves; comparisons and the bits of integers can't.
+                let itself = !matches!(op, BinaryOp::Compare(..) | BinaryOp::Bitwise(_));
                 itself || lhs.can_fail() || rhs.can_fail()
             }
             Expr::Let(_, value, body) => value.can_fail() || body.can_fail(),
@@ -2852,6 +2852,9 @@ fn finite(r: f64) -> Result<Value, Failure> {
 pub enum UnaryOp {
     /// `not`, of a boolean.
     Not,
+    /// `not`, of an integer: each of its bits flipped, as its two's
+    /// complement, so `-n - 1`. It never fails.
+    Complement,
     /// `-`. It never fails for an approximate number, and only for the
     /// smallest integer.
     Negate(Numeric),
@@ -2864,6 +2867,7 @@ impl UnaryOp {
     pub fn operand(self) -> Option<Scalar> {
         match self {
             UnaryOp::Not => Some(Scalar::Boolean),
+            UnaryOp::Complement => Some(Scalar::Integer),
             UnaryOp::Negate(numeric) => numeric.scalar(),
         }
     }
@@ -2873,7 +2877,7 @@ impl UnaryOp {
     pub fn instantiated(self, types: &[Type]) -> UnaryOp {
         match self {
             UnaryOp::Negate(numeric) => UnaryOp::Negate(numeric.instantiated(types)),
-            UnaryOp::Not => self,
+            UnaryOp::Not | UnaryOp::Complement => self,
         }
     }
 
@@ -2890,6 +2894,7 @@ impl UnaryOp {
     pub fn apply(self, operand: &Value) -> Result<Value, Failure> {
         match (self, operand) {
             (UnaryOp::Not, Value::Boolean(b)) => Ok(Value::Boolean(!b)),
+            (UnaryOp::Complement, Value::Integer(n)) => Ok(Value::Integer(!n)),
             (UnaryOp::Negate(Numeric::Integer), Value::Integer(n)) => n
                 .checked_neg()
                 .map(Value::Integer)
@@ -3056,6 +3061,46 @@ pub enum BinaryOp {
     /// A comparison of two values of the same type, whose result is a
     /// boolean.
     Compare(Comparison, Compared),
+    /// `and`, `or` or `xor` of integers, bit by bit, each as its two's
+    /// complement, with as many bits as it takes, so that it never fails.
+    Bitwise(Bitwise),
+    /// `shl`, of integers: the left times 2 to the power of the right (see
+    /// `trendy_numeric::shifted_left`).
+    ShiftLeft,
+    /// `shr`, of integers: the left divided by 2 to the power of the right,
+    /// rounded down (see `trendy_numeric::shifted_right`).
+    ShiftRight,
+}
+
+/// An operator of integers bit by bit, as its keyword spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bitwise {
+    And,
+    Or,
+    Xor,
+}
+
+impl Bitwise {
+    /// Its result, for `a` and `b`.
+    #[must_use]
+    pub fn apply(self, a: i64, b: i64) -> i64 {
+        match self {
+            Bitwise::And => a & b,
+            Bitwise::Or => a | b,
+            Bitwise::Xor => a ^ b,
+        }
+    }
+
+    /// The result of none: every bit set for `and`, `-1`, and none for `or`
+    /// and `xor`. An operand with this value leaves the result as the others
+    /// make it.
+    #[must_use]
+    pub fn identity(self) -> i64 {
+        match self {
+            Bitwise::And => -1,
+            Bitwise::Or | Bitwise::Xor => 0,
+        }
+    }
 }
 
 /// What a comparison compares. Scalars are ordered; tuples only have `=`
@@ -3238,7 +3283,11 @@ impl BinaryOp {
                 numeric.scalar()
             }
             BinaryOp::Divide => Some(Scalar::Approximate),
-            BinaryOp::Div | BinaryOp::Mod => Some(Scalar::Integer),
+            BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Bitwise(_)
+            | BinaryOp::ShiftLeft
+            | BinaryOp::ShiftRight => Some(Scalar::Integer),
             BinaryOp::Concatenate => Some(Scalar::Text),
             BinaryOp::Compare(_, Compared::Scalar(scalar)) => Some(scalar),
             BinaryOp::Compare(
@@ -3332,6 +3381,9 @@ impl BinaryOp {
                     // The smallest integer `mod -1` is 0, though the matching
                     // `div` overflows.
                     BinaryOp::Mod => Some(a.wrapping_rem(b)),
+                    BinaryOp::Bitwise(op) => Some(op.apply(a, b)),
+                    BinaryOp::ShiftLeft => trendy_numeric::shifted_left(a, b),
+                    BinaryOp::ShiftRight => trendy_numeric::shifted_right(a, b),
                     _ => panic!("`{self:?}` of integers"),
                 };
                 result

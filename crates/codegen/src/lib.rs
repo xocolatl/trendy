@@ -324,7 +324,8 @@ impl Functions {
         b: &mut FunctionBuilder,
     ) -> Result<Value, String> {
         Ok(match op {
-            lir::UnaryOp::Not => b.ins().bxor_imm_u(value, 1),
+            lir::UnaryOp::Not(lir::Bits::Boolean) => b.ins().bxor_imm_u(value, 1),
+            lir::UnaryOp::Not(lir::Bits::Integer) => b.ins().bnot(value),
             lir::UnaryOp::Negate(lir::Numeric::Integer) => {
                 let zero = b.ins().iconst(types::I64, 0);
                 let (result, overflow) = b.ins().ssub_overflow(zero, value);
@@ -388,9 +389,11 @@ impl Functions {
                     b.ins().fcmp(float_condition(comparison), lhs, rhs)
                 }
             },
-            lir::BinaryOp::And => b.ins().band(lhs, rhs),
-            lir::BinaryOp::Or => b.ins().bor(lhs, rhs),
-            lir::BinaryOp::Xor => b.ins().bxor(lhs, rhs),
+            lir::BinaryOp::And(_) => b.ins().band(lhs, rhs),
+            lir::BinaryOp::Or(_) => b.ins().bor(lhs, rhs),
+            lir::BinaryOp::Xor(_) => b.ins().bxor(lhs, rhs),
+            lir::BinaryOp::ShiftLeft => self.shifted(A::ShiftLeft, lhs, rhs, b)?,
+            lir::BinaryOp::ShiftRight => self.shifted(A::ShiftRight, lhs, rhs, b)?,
             lir::BinaryOp::Add(Integer) => {
                 let sum = b.ins().sadd_overflow(lhs, rhs);
                 checked(self, A::Add, sum, b)?
@@ -442,6 +445,45 @@ impl Functions {
                 b.ins().srem(lhs, rhs)
             }
         })
+    }
+
+    /// `a shl n` or `a shr n`, as `op` says: `a` shifted `n` places, left
+    /// for `shl` and right for `shr`, or the other way for a negative `n`,
+    /// failing the program where a left shift's result is out of range, as
+    /// `trendy_numeric::shifted_left` and `trendy_numeric::shifted_right`
+    /// have it.
+    fn shifted(
+        &mut self,
+        op: lir::Arithmetic,
+        a: Value,
+        n: Value,
+        b: &mut FunctionBuilder,
+    ) -> Result<Value, String> {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        let negative = b.ins().icmp_imm_s(IntCC::SignedLessThan, n, 0);
+        let left = match op {
+            lir::Arithmetic::ShiftLeft => b.ins().bxor_imm_u(negative, 1),
+            _ => negative,
+        };
+        // The number of places, as an unsigned integer: 2^63 for the
+        // smallest integer.
+        let negated = b.ins().ineg(n);
+        let places = b.ins().select(negative, negated, n);
+        // Beyond 63 places, a right shift leaves the sign in every bit, and
+        // a left one any bit but a zero's out of range.
+        let sixty_three = b.ins().iconst(types::I64, 63);
+        let within = b.ins().umin(places, sixty_three);
+        let too_far = b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, places, 63);
+        let right = b.ins().sshr(a, within);
+        let shifted = b.ins().ishl(a, within);
+        let back = b.ins().sshr(shifted, within);
+        let lost = b.ins().icmp(IntCC::NotEqual, back, a);
+        let lost = b.ins().bor(lost, too_far);
+        let nonzero = b.ins().icmp_imm_s(IntCC::NotEqual, a, 0);
+        let lost = b.ins().band(lost, nonzero);
+        let overflow = b.ins().band(lost, left);
+        self.fail_if(overflow, Operation::integer(op, a, n), b)?;
+        Ok(b.ins().select(left, shifted, right))
     }
 
     /// Fail when `condition` is nonzero, because `operation` has no result,

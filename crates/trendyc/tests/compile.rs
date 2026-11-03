@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -503,19 +504,23 @@ fn integers() {
     let (code, stderr) = run_example("integers");
     assert_eq!(code, 0, "{stderr}");
     let lines: Vec<&str> = stderr.lines().collect();
-    // Evaluated when compiling.
+    // Evaluated when compiling, and literals in other radixes.
     assert_eq!(
-        lines[..5],
+        lines[..9],
         [
             "7",
             "9",
             "-9223372036854775808",
             "9223372036854775807",
-            "-42"
+            "-42",
+            "37468000",
+            "493",
+            "65535",
+            "165",
         ]
     );
     // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a div b`, `a mod b`.
-    let rows: Vec<_> = lines[5..29].chunks(6).collect();
+    let rows: Vec<_> = lines[9..33].chunks(6).collect();
     assert_eq!(
         rows,
         [
@@ -533,7 +538,63 @@ fn integers() {
         ]
     );
     // Parsed when running.
-    assert_eq!(lines[29..], ["7", "-9223372036854775808"]);
+    assert_eq!(lines[33..35], ["7", "-9223372036854775808"]);
+    // Each row: `not a`, `a and b`, `a or b`, `a xor b`.
+    let rows: Vec<_> = lines[35..43].chunks(4).collect();
+    assert_eq!(
+        rows,
+        [["-13", "8", "14", "6"], ["0", "65535", "-1", "-65536"]]
+    );
+    // Each row: `a shl n`, `a shr n`.
+    let rows: Vec<_> = lines[43..49].chunks(2).collect();
+    assert_eq!(rows, [["20", "1"], ["-18", "-5"], ["1", "6"]]);
+    // `0x8000_0001` rotated 4 places as a 32-bit word.
+    assert_eq!(lines[49..], ["24"]);
+}
+
+/// `shl` and `shr` computed when running are what they are when compiling,
+/// which `trendy_numeric` computes: of the smallest and largest integers,
+/// and of counts beyond 63 places, and negative ones, which shift the other
+/// way.
+#[test]
+fn shifts_when_running_are_as_when_compiling() {
+    let values = [0, 1, -1, 5, -9, i64::MAX, i64::MIN];
+    let counts = [
+        0,
+        1,
+        62,
+        63,
+        64,
+        100,
+        -1,
+        -62,
+        -63,
+        -64,
+        -100,
+        i64::MAX,
+        i64::MIN,
+    ];
+    let mut calls = String::new();
+    let mut expected = String::new();
+    for a in values {
+        for n in counts {
+            let shifts = [
+                ("left", trendy_numeric::shifted_left(a, n)),
+                ("right", trendy_numeric::shifted_right(a, n)),
+            ];
+            for (operator, shifted) in shifts {
+                if let Some(shifted) = shifted {
+                    writeln!(calls, "    call {operator}{{a: {a}, n: {n}}};").unwrap();
+                    writeln!(expected, "{shifted}").unwrap();
+                }
+            }
+        }
+    }
+    let source = format!(
+        "operator left{{a: integer, n: integer}} [ call debug_value{{v: a shl n}}; ];\n\noperator right{{a: integer, n: integer}} [ call debug_value{{v: a shr n}}; ];\n\noperator main{{}} [\n{calls}];\n"
+    );
+    let (code, stderr) = run_source("shifts", &source);
+    assert_eq!((code, stderr), (0, expected));
 }
 
 #[test]
@@ -3158,6 +3219,21 @@ fn run_time_failures_stop_the_program() {
             division("9223372036854775807 div 0"),
         ),
         ("mod_zero", "a mod b", division("9223372036854775807 mod 0")),
+        (
+            "shift_left",
+            "a shl 1",
+            overflow("9223372036854775807 shl 1"),
+        ),
+        (
+            "shift_right_by_negative",
+            "a shr (b - 1)",
+            overflow("9223372036854775807 shr (-1)"),
+        ),
+        (
+            "shift_far",
+            "(b + 1) shl a",
+            overflow("1 shl 9223372036854775807"),
+        ),
         // In a condition, computed for each tuple.
         (
             "where",

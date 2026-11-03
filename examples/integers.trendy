@@ -3,6 +3,10 @@ var nine := (1 + 2) * 3;
 var smallest := -9223372036854775808;
 var largest := -(smallest + 1);
 var parsed := parse_integer{from: "-42"};
+var population := 37_468_000;
+var mode := 0o755;
+var mask := 0xFF_FF;
+var flags := 0b1010_0101;
 
 operator arithmetic{a: integer, b: integer} [
     call debug_value{v: -a};
@@ -11,6 +15,29 @@ operator arithmetic{a: integer, b: integer} [
     call debug_value{v: a * b};
     call debug_value{v: a div b};
     call debug_value{v: a mod b};
+];
+
+/* `not`, `and`, `or` and `xor` of integers take their bits, in two's
+   complement, as if it went on to the left forever: `not a` is `-a - 1`. */
+operator bits{a: integer, b: integer} [
+    call debug_value{v: not a};
+    call debug_value{v: a and b};
+    call debug_value{v: a or b};
+    call debug_value{v: a xor b};
+];
+
+/* `a shl n` is `a` times 2 to the power `n`, failing out of range, and
+   `a shr n` is `a` divided by it, rounded down; a negative `n` shifts the
+   other way. */
+operator shifts{a: integer, n: integer} [
+    call debug_value{v: a shl n};
+    call debug_value{v: a shr n};
+];
+
+/* `x`, a 32-bit word, its bits rotated `n` places to the left, as MD5
+   rotates them. */
+operator rotated{x: integer, n: integer}: integer [
+    (x shl n or x shr (32 - n)) and 0xFFFF_FFFF
 ];
 
 /* The integer `t` writes: digits, with a `-` before them if it is
@@ -25,10 +52,20 @@ operator main{} [
     call debug_value{v: smallest};
     call debug_value{v: largest};
     call debug_value{v: parsed};
+    call debug_value{v: population};
+    call debug_value{v: mode};
+    call debug_value{v: mask};
+    call debug_value{v: flags};
     call arithmetic{a: 7, b: 2};
     call arithmetic{a: -7, b: 2};
     call arithmetic{a: 7, b: -2};
     call arithmetic{a: smallest + 1, b: -1};
     call parse{t: "007"};
     call parse{t: "-9223372036854775808"};
+    call bits{a: 0b1100, b: 0b1010};
+    call bits{a: -1, b: mask};
+    call shifts{a: 5, n: 2};
+    call shifts{a: -9, n: 1};
+    call shifts{a: 3, n: -1};
+    call debug_value{v: rotated{x: 0x8000_0001, n: 4}};
 ];

@@ -10384,6 +10384,24 @@ type rule { { constraint: text } };",
     }
 
     #[test]
+    fn other_languages_bit_operators() {
+        // C's, fixed to the words; `^`, a power in some languages, and
+        // JavaScript's unsigned `>>>` get help.
+        assert_eq!(
+            fix("var x := ~a & b | c << 2 >> 1;"),
+            "var x := not a and b or c shl 2 shr 1;"
+        );
+        assert_eq!(shape("a shl 1 + b"), "((a shl 1) + b)");
+        for source in ["var x := a ^ b;", "var x := a >>> 1;"] {
+            let errors = parse_str(source).errors;
+            assert_eq!(errors.len(), 1, "{source}");
+            assert_eq!(errors[0].code, Code::ForeignOperator);
+            assert!(errors[0].suggestions.is_empty(), "{source}");
+            assert!(!errors[0].help.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
     fn foreign_and_miscased_operators() {
         let source = "var x := a && !b | c -> d;";
         let codes: Vec<_> = parse_str(source).errors.iter().map(|e| e.code).collect();
@@ -11096,7 +11114,7 @@ type rule { { constraint: text } };",
 
     #[test]
     fn malformed_literal_is_one_error() {
-        let errors = parse_str("var i := 1_000;").errors;
+        let errors = parse_str("var i := 1__000;").errors;
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, Code::InvalidInteger);
         assert_eq!(parse_str("var t := \"abc;").errors.len(), 1);

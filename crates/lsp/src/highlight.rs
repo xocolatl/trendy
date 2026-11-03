@@ -311,6 +311,23 @@ mod tests {
     }
 
     #[test]
+    fn bit_operators() {
+        assert_eq!(
+            highlight("var a := b shl 0x1F and not 0b1_0;"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("shl", Class::ExprOperator, false),
+                ("0x1F", Class::Number, false),
+                ("and", Class::ExprOperator, false),
+                ("not", Class::ExprOperator, false),
+                ("0b1_0", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
     fn projections() {
         assert_eq!(
             highlight("var a := b{c};"),
