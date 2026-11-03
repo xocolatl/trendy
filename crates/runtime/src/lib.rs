@@ -23,7 +23,12 @@
 //! and of the [`Scope`] of the statement that made it, which gives its own
 //! up when the statement ends. A buffer is freed when its last reference
 //! is given up, so a value lasts as long as something holds it, and no
-//! longer, however many a loop makes.
+//! longer, however many a loop makes. Scopes nest, as a relational
+//! database's memory contexts do: the work on each tuple of a relational
+//! operation, and each
+//! call of a read-only operator, has a scope of its own, which hands what
+//! outlives it to the one it is in ([`trendy_rt_hand_out`]) before it ends,
+//! so that an operation over many tuples frees each one's work as it goes.
 //!
 //! # Failures
 //!
@@ -265,9 +270,11 @@ const HEADER: usize = size_of::<Header>();
 /// releasing on its own, however many times a loop made one.
 ///
 /// Scopes nest as calls do: a statement that calls an update operator holds
-/// its arguments while the operator's statements run. Compiled code keeps
-/// each scope in a stack slot laid out as this struct, which only the
-/// runtime reads.
+/// its arguments while the operator's statements run. Within a statement,
+/// the work on one tuple, and a read-only operator's call, has a scope of
+/// its own in the statement's, which what outlives it is handed out to
+/// ([`trendy_rt_hand_out`]). Compiled code keeps each scope in a stack slot
+/// laid out as this struct, which only the runtime reads.
 #[cfg(not(test))]
 #[repr(C)]
 pub struct Scope {
@@ -385,12 +392,25 @@ pub unsafe extern "C" fn trendy_rt_end_since(saved: *const *mut Scope) {
 #[cfg(not(test))]
 unsafe fn reserve(more: usize) -> Fallible {
     use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller.
+    unsafe { reserve_in(CURRENT.load(Relaxed), more) }
+}
+
+/// Make room in `scope` for `more` references more, as [`reserve`] does in
+/// the current one.
+///
+/// # Safety
+///
+/// `scope` must point to a scope that has begun and not ended, if `more`
+/// isn't 0.
+#[cfg(not(test))]
+unsafe fn reserve_in(scope: *mut Scope, more: usize) -> Fallible {
     if more == 0 {
         return Ok(());
     }
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let scope = &mut *CURRENT.load(Relaxed);
+        let scope = &mut *scope;
         let Some(needed) = scope.len.checked_add(more) else {
             return Err(out_of_memory());
         };
@@ -423,11 +443,23 @@ unsafe fn reserve(more: usize) -> Fallible {
 unsafe fn hold_reserved(buffer: *mut u8) {
     use core::sync::atomic::Ordering::Relaxed;
     // SAFETY: guaranteed by the caller.
+    unsafe { hold_reserved_in(CURRENT.load(Relaxed), buffer) }
+}
+
+/// Have `scope` hold a reference to `buffer`, in room [`reserve_in`] made,
+/// as [`hold_reserved`] does the current one.
+///
+/// # Safety
+///
+/// As for [`hold_reserved`], of `scope`.
+#[cfg(not(test))]
+unsafe fn hold_reserved_in(scope: *mut Scope, buffer: *mut u8) {
+    // SAFETY: guaranteed by the caller.
     unsafe {
         if header(buffer).count == IMMORTAL {
             return;
         }
-        let scope = &mut *CURRENT.load(Relaxed);
+        let scope = &mut *scope;
         *scope.buffers.add(scope.len) = buffer;
         scope.len += 1;
     }
@@ -701,6 +733,35 @@ pub unsafe extern "C" fn trendy_rt_keep(value: *const u8, desc: *const TypeDesc)
         reserve(buffers(value, desc))?;
         retain(value, desc);
         each_buffer(value, desc, &mut |buffer| hold_reserved(buffer));
+        Ok(())
+    })
+}
+
+/// Have the scope the innermost one is in hold a reference to each buffer
+/// the value at `value`, of the type `desc` describes, points to, until it
+/// ends: what the innermost scope's work made that outlives it, as a
+/// tuple's computed attributes do the scope of the work on that tuple, or a
+/// read-only operator's result the scope of its call. Ending the innermost
+/// scope then frees only what nothing else holds, so that a relational
+/// operation's memory is its operands' and its result's, not its work's.
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, and
+/// `desc` to a valid descriptor. The innermost scope must be in another.
+/// Fails, handing out nothing, if there is no memory for that one to hold
+/// them.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_hand_out(value: *const u8, desc: *const TypeDesc) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let desc = &*desc;
+        let outer = (*CURRENT.load(Relaxed)).outer;
+        reserve_in(outer, buffers(value, desc))?;
+        retain(value, desc);
+        each_buffer(value, desc, &mut |buffer| hold_reserved_in(outer, buffer));
         Ok(())
     })
 }
@@ -1817,12 +1878,16 @@ pub unsafe extern "C" fn trendy_rt_allocate(
 
 /// Put the tuples of the relation at `relation`, of the type `desc`
 /// describes, in the canonical order, without duplicates: it then holds
-/// them, in memory the statement owns.
+/// them, in memory the statement owns. The buffer it had is freed at once
+/// if only the current scope holds it, as the one compiled code filled
+/// has nothing else pointing into it once it is replaced, so that a
+/// relation sorted isn't two of it until the statement ends.
 ///
 /// # Safety
 ///
 /// `relation` must point to a valid relation of the type `desc` describes,
-/// whose tuples may be in any order.
+/// whose tuples may be in any order, and nothing but `relation` may point
+/// into its buffer, if only the current scope holds that.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDesc) -> bool {
@@ -1831,8 +1896,40 @@ pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDe
         let (tuples, count) = read_slice(relation.cast());
         let (bytes, len) = canonical(tuples, count, &*desc)?;
         relation.write_unaligned(Text { bytes, len });
+        release_replaced(tuples.cast_mut());
         Ok(())
     })
+}
+
+/// Give up the current scope's reference to `buffer`, if it is the only
+/// one, freeing it: a buffer the statement made, and has replaced, which
+/// nothing points into any more. One that anything else holds, or that
+/// the scope doesn't, is left as it is.
+///
+/// # Safety
+///
+/// `buffer` must be a buffer, just past its header, or null, and nothing
+/// may point into it once it is freed but what holds a reference to it.
+#[cfg(not(test))]
+unsafe fn release_replaced(buffer: *mut u8) {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller; the scope's list holds its `len`
+    // buffers.
+    unsafe {
+        if buffer.is_null() || header(buffer).count != 1 {
+            return;
+        }
+        let scope = &mut *CURRENT.load(Relaxed);
+        // From the end, where a buffer the statement made recently is.
+        for i in (0..scope.len).rev() {
+            if *scope.buffers.add(i) == buffer {
+                scope.len -= 1;
+                *scope.buffers.add(i) = *scope.buffers.add(scope.len);
+                release_buffer(buffer);
+                return;
+            }
+        }
+    }
 }
 
 /// An attribute [`trendy_rt_load`] orders tuples by: its offset in a tuple,

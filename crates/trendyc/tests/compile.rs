@@ -2813,6 +2813,33 @@ fn csv_files_that_cant_be_read_stop_the_program() {
 }
 
 #[test]
+fn what_the_work_on_each_tuple_makes_is_freed_but_what_it_gives() {
+    // Each tuple's work, and each call's, in a scope of its own: what they
+    // give, the tuples an `extend` builds and the values calls return,
+    // outlives them, through calls that make relations of texts. A local
+    // variable's value is freed after its last use, but what a later one,
+    // or the body's value, still points into.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tuple_scopes_input");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lines.txt");
+    std::fs::write(&path, "a\nb\n").unwrap();
+    let source = format!(
+        "uses {{ trendy.files }};\n\noperator shout{{t: text}}: text [\n    var loud := t || \"!\";\n    var same := loud;\n    same\n];\n\noperator echoes{{t: text}}: relation {{ e: text }} [\n    var first := shout{{t: t}} || \"1\";\n    var both := relation {{ {{ e: first }}, {{ e: t || \"2\" }} }};\n    var unused := both union both;\n    both\n];\n\noperator main{{}} [\n    var lines: array text;\n    call load_text_file{{path: {:?}, out lines: lines}};\n    var listed: relation {{ n: integer, line: text }};\n    load listed from lines as line numbered n;\n    call debug_value{{v: listed extend {{ loud := shout{{t: line}} || \"?\" }}}};\n    call debug_value{{v: (listed where shout{{t: line}} = \"b!\"){{n}}}};\n    call debug_value{{v: (listed extend {{ heard := echoes{{t: line}} }}){{n, heard}}}};\n];\n",
+        path.to_str().unwrap()
+    );
+    let (code, stderr) = run_source("tuple_scopes", &source);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr,
+        concat!(
+            "relation { line: text, loud: text, n: integer } { { line: \"a\", loud: \"a!?\", n: 1 }, { line: \"b\", loud: \"b!?\", n: 2 } }\n",
+            "relation { n: integer } { { n: 2 } }\n",
+            "relation { heard: relation { e: text }, n: integer } { { heard: relation { e: text } { { e: \"a!1\" }, { e: \"a2\" } }, n: 1 }, { heard: relation { e: text } { { e: \"b!1\" }, { e: \"b2\" } }, n: 2 } }\n",
+        )
+    );
+}
+
+#[test]
 fn load_text_file_reads_a_files_lines() {
     use trendy_diag::Code;
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("load_text_file");

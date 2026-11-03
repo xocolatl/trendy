@@ -1883,7 +1883,8 @@ them up. That holds however many values a loop made. Scopes nest as
 calls do. A buffer that compiled code fills (`trendy_rt_allocate`) holds
 no references through its tuples or elements until `trendy_rt_adopt`
 takes them for it, or `trendy_rt_sort` copies its tuples into a buffer
-that takes them. A buffer compiled into the program is never released,
+that takes them, and frees the one it replaces, which only the
+statement's scope holds, at once rather than as the statement ends. A buffer compiled into the program is never released,
 so sharing it costs nothing.
 
 Only a variable's references outlive a statement. `trendy_rt_assign`
@@ -1905,6 +1906,23 @@ its block, when every statement that could point into its buffers has
 ended, and makes its pointers null again, so a block run again starts as
 the first time did.
 
+A read-only operator's local variable, and a value block's, is a `Let`,
+which binds it for the rest of the chain of them the expression is
+(`FunctionBuilder::let_chain`). Its value is computed once, in a scope of
+its own, and copied to a slot of the binding's own, which takes
+references to what it points to (`trendy_rt_retain`) before that scope
+ends; one that points to nothing is copied only out of a buffer. The
+binding is given up (`trendy_rt_release`) once nothing after it in the
+chain reads it: after the value of the next binding that does, or else
+at the chain's end, whose value, which may point into the bindings still
+alive, is copied out and kept by the scope it is in (`trendy_rt_keep`)
+first. So a relation a read-only operator declares lasts no longer than
+its last use, as a statement's values do: a relation of ten million
+tuples that a later binding only extends is freed, with what was made on
+the way to it, before what comes after that runs. The slots start null as the
+function is entered, and its failure exit, and a transaction's rollback
+of its statements, release them too.
+
 An `if` statement has no scope of its own: its condition is computed in
 one, which ends before either block runs, and copied out first, and each
 statement in its blocks has its own, as any statement does. Then it
@@ -1925,13 +1943,26 @@ so a variable's value stays put; an array the expression makes is kept by
 a scope of the loop's own, in a slot of its own, since the statements in
 the block each begin theirs in the one they share.
 
-A read-only operator's function begins no scope: what it makes, such as
-its result's texts, is the calling statement's, as if the caller had
-computed the value itself, which is what sema does when it evaluates a
-call. So a statement that calls one that makes a text, relation or array
-has a scope. Lowering knows whether one does from its function, lowered at
-its first call, before the caller's statement ends; read-only operators
-don't call themselves, so that ends.
+A relational operation's memory is its operands' and its result's, not
+its work's: what the work on one tuple makes is freed once that tuple is
+done, as a PostgreSQL executor resets its per-tuple memory, so a
+restriction or an extension over ten million tuples needs no more than a
+loop doing the same work. Scopes nest
+(`FunctionBuilder::nested_scope`): the work on each tuple of a `where`,
+its condition, and of an `extend`, its tuple's new attributes, is lowered
+in a scope of its own, nested in the statement's, if it makes anything,
+and so is each call of a read-only operator that makes something, as its
+function begins and ends one. What outlives the work, the tuple an
+`extend` builds, which its result's sort then copies, or the call's
+result, is handed to the enclosing scope before the nested one ends
+(`trendy_rt_hand_out`), which takes a reference to each buffer it points
+to; ending the nested scope then frees the rest. A value is never copied
+out of a scope, as a reference costs less than a copy. So a statement
+that calls a read-only operator whose result points to a text, relation
+or array it made has a scope, for the result handed to it. Lowering knows
+whether one does from its function, lowered at its first call, before
+the caller's statement ends; read-only operators don't call themselves,
+so that ends.
 
 A failure doesn't stop the program where it happens. Its runtime
 function writes its error, and the function it is in fails, then each
@@ -1955,9 +1986,10 @@ holds, as the ends of its statements and blocks would have:
   recording can't fail.
 - It returns, failing (`Terminator::Failed`).
 
-A read-only operator's function begins no scope and holds nothing, so
-its exit only fails. The program's variables, and a caller's variables
-that a `var` or `out` parameter updates, keep what they hold.
+A read-only operator's function holds no variables, so its exit ends the
+scopes it began, if it began any, and fails. The program's variables,
+and a caller's variables that a `var` or `out` parameter updates, keep
+what they hold.
 
 A block's failures go to the innermost block that takes them as it is
 built (`FunctionBuilder::catches`, `catching`), and else to the failure

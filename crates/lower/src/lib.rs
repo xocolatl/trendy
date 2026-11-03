@@ -1152,6 +1152,11 @@ struct FunctionBuilder<'a> {
     /// The function's failure exit, made when a block that can fail first
     /// sends its failures there.
     exit: Option<lir::BlockId>,
+    /// The slot of each binding of a `Let` whose value points to a text,
+    /// relation or array, which holds references to them from the `Let` on,
+    /// until its last use, with its type: null before and after, from the
+    /// function's entry on, so that its failure exit releases each.
+    lets: Vec<(lir::Place, hir::Type)>,
 }
 
 /// A variable a transaction keeps as it begins: where it is, the slot its
@@ -1292,6 +1297,7 @@ impl<'a> FunctionBuilder<'a> {
             catches: Vec::new(),
             handlers: vec![None],
             exit: None,
+            lets: Vec::new(),
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -1345,9 +1351,8 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The local variables `locals` of a read-only operator, each placed
-    /// where its `Let`'s value is: computed once, by the expression, whose
-    /// values its calling statement owns, or a variable's or a parameter's
-    /// own place, which nothing changes while the expression is computed.
+    /// where its `Let` puts its value, as each binding is lowered
+    /// ([`FunctionBuilder::let_chain`]).
     fn bind(&mut self, locals: Vec<hir::Local>) {
         self.local_places = vec![None; locals.len()];
         self.locals = locals;
@@ -1356,7 +1361,9 @@ impl<'a> FunctionBuilder<'a> {
     /// The function whose result is `value`, of the type `result`, with the
     /// local variables `locals`, which its `Let`s give values, as a
     /// read-only operator's is: and whether a call of it makes a text,
-    /// relation or array.
+    /// relation or array. What it makes on the way is its call's, in a
+    /// scope of the call's own, which hands its result out to its caller's
+    /// (see [`FunctionBuilder::nested_scope`]).
     fn valued(
         mut self,
         locals: Vec<hir::Local>,
@@ -1365,14 +1372,18 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> (lir::Function, bool) {
         self.bind(locals);
-        let src = self.place(value, cx);
         let layout = cx.layout(result);
-        self.insts.push(lir::Inst::Copy {
-            dst: lir::Place::whole(lir::Base::Result),
-            src,
-            layout: layout.clone(),
+        self.nested_scope(cx, |this, cx| {
+            let src = this.place(value, cx);
+            let dst = lir::Place::whole(lir::Base::Result);
+            this.insts.push(lir::Inst::Copy {
+                dst: dst.clone(),
+                src,
+                layout: layout.clone(),
+            });
+            vec![(dst, result.clone())]
         });
-        let makes = self.scoped;
+        let makes = self.scoped && cx.points(result);
         (self.finish(Some(layout), cx), makes)
     }
 
@@ -1387,11 +1398,16 @@ impl<'a> FunctionBuilder<'a> {
     ) -> (lir::Function, bool) {
         self.bind(locals);
         let ty = self.type_of(value);
-        let src = self.place(value, cx);
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::ToText,
-            args: vec![lir::Place::whole(lir::Base::Result), src, descriptor],
+        self.nested_scope(cx, |this, cx| {
+            let src = this.place(value, cx);
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+            let dst = lir::Place::whole(lir::Base::Result);
+            this.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::ToText,
+                args: vec![dst.clone(), src, descriptor],
+            });
+            this.scoped = true;
+            vec![(dst, hir::Type::Scalar(hir::Scalar::Text))]
         });
         let layout = scalar_layout(hir::Scalar::Text);
         (self.finish(Some(layout), cx), true)
@@ -1467,6 +1483,181 @@ impl<'a> FunctionBuilder<'a> {
         place
     }
 
+    /// The value of `expr`, a chain of `Let`s, each binding a local
+    /// variable for the rest, the sites they are at among them, and the
+    /// expression the chain ends with: a read-only operator's body, or a
+    /// value block's. A binding's value is computed in a scope of its own
+    /// and copied to a slot of its own, which holds references to it
+    /// (`let_bound`), so that the binding frees it once nothing after it in
+    /// the chain reads it: the value of the next binding that does, or else
+    /// the end's, which may point into it, and which the scope it is in
+    /// then keeps. So a relation a body declares lasts no longer than its
+    /// last use, as a statement's values do.
+    fn let_chain(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        // The chain's sites and bindings, in order, then its end.
+        enum Part<'e> {
+            Site(hir::Site),
+            Let(hir::LocalId, &'e hir::Expr),
+        }
+        let mut parts = Vec::new();
+        let mut end = expr;
+        loop {
+            match end {
+                hir::Expr::At(site, inner) if matches!(**inner, hir::Expr::Let(..)) => {
+                    parts.push(Part::Site(*site));
+                    end = inner;
+                }
+                hir::Expr::Let(id, value, body) => {
+                    parts.push(Part::Let(*id, value));
+                    end = body;
+                }
+                _ => break,
+            }
+        }
+        // Whether the binding of `id` is read after the part at `k`: by a
+        // later binding's value, before one binds it again, or by the end.
+        let read_after = |k: usize, id: hir::LocalId| {
+            for part in &parts[k + 1..] {
+                if let Part::Let(bound, value) = part {
+                    if value.reads_local(id) {
+                        return true;
+                    }
+                    if *bound == id {
+                        return false;
+                    }
+                }
+            }
+            end.reads_local(id)
+        };
+        let outer = self.site;
+        let mut alive: Vec<(hir::LocalId, lir::Place, hir::Type)> = Vec::new();
+        for (k, part) in parts.iter().enumerate() {
+            match part {
+                Part::Site(site) => self.at(Some(*site), cx),
+                Part::Let(id, value) => {
+                    let (slot, ty) = self.let_bound(*id, value, cx);
+                    if cx.points(&ty) {
+                        alive.push((*id, slot, ty));
+                    }
+                    let (dead, live): (Vec<_>, Vec<_>) = alive
+                        .into_iter()
+                        .partition(|(bound, ..)| !read_after(k, *bound));
+                    for (_, slot, ty) in dead {
+                        self.release_place(&slot, &ty, cx);
+                    }
+                    alive = live;
+                }
+            }
+        }
+        let mut value = self.place(end, cx);
+        if !alive.is_empty() {
+            // The end's value may point into the bindings still alive, so
+            // the scope keeps it, copied out of them first, before they are
+            // released.
+            let ty = self.type_of(end);
+            let layout = cx.layout(&ty);
+            let copy = self.slot(layout.clone());
+            self.insts.push(lir::Inst::Copy {
+                dst: copy.clone(),
+                src: value,
+                layout,
+            });
+            if cx.points(&ty) {
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Keep,
+                    args: vec![copy.clone(), descriptor],
+                });
+                self.scoped = true;
+            }
+            for (_, slot, ty) in alive {
+                self.release_place(&slot, &ty, cx);
+            }
+            value = copy;
+        }
+        if outer.is_some() && self.site != outer {
+            self.at(outer, cx);
+        }
+        value
+    }
+
+    /// Bind the local variable `id` to `value`: computed in a scope of its
+    /// own, nested in the one it is in, and copied to a slot of the
+    /// binding's own, which takes references to what it points to, if it
+    /// points to anything, as the scope ends, so that only the binding
+    /// holds what the computation made for it. A value that points to
+    /// nothing is copied only if it is in a buffer, which another
+    /// binding's release could free, and is otherwise where it is
+    /// computed. The binding's place, and its type, are given; one that
+    /// points to anything is null from the function's entry on, until then.
+    fn let_bound(
+        &mut self,
+        id: hir::LocalId,
+        value: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> (lir::Place, hir::Type) {
+        let ty = self.locals[id.0].ty.clone();
+        let points = cx.points(&ty);
+        if !points {
+            let mut place = None;
+            self.nested_scope(cx, |this, cx| {
+                let src = this.place(value, cx);
+                this.check_keys(&hir::Target::Local(id), &src, cx);
+                place = Some(if matches!(src.base, lir::Base::Indirect { .. }) {
+                    let copy = this.slot(cx.layout(&ty));
+                    this.insts.push(lir::Inst::Copy {
+                        dst: copy.clone(),
+                        src,
+                        layout: cx.layout(&ty),
+                    });
+                    copy
+                } else {
+                    src
+                });
+                Vec::new()
+            });
+            let place = place.expect("the value is placed");
+            self.local_places[id.0] = Some(LocalPlace {
+                value: place.clone(),
+                holds: false,
+            });
+            return (place, ty);
+        }
+        let layout = cx.layout(&ty);
+        let slot = self.slot(layout.clone());
+        self.lets.push((slot.clone(), ty.clone()));
+        self.nested_scope(cx, |this, cx| {
+            let src = this.place(value, cx);
+            this.check_keys(&hir::Target::Local(id), &src, cx);
+            this.insts.push(lir::Inst::Copy {
+                dst: slot.clone(),
+                src,
+                layout,
+            });
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+            this.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Retain,
+                args: vec![slot.clone(), descriptor],
+            });
+            Vec::new()
+        });
+        self.local_places[id.0] = Some(LocalPlace {
+            value: slot.clone(),
+            holds: false,
+        });
+        (slot, ty)
+    }
+
+    /// Give up the references the value at `place`, of type `ty`, holds,
+    /// making its pointers null (see [`lir::RuntimeFn::Release`]).
+    fn release_place(&mut self, place: &lir::Place, ty: &hir::Type, cx: &mut Lowering) {
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Release,
+            args: vec![place.clone(), descriptor],
+        });
+    }
+
     /// The function, its last block ended with a return, with a result
     /// laid out as `result`, if it has one: each block that can fail sends
     /// its failures to the block that took them as it was built, or else
@@ -1493,6 +1684,20 @@ impl<'a> FunctionBuilder<'a> {
             let save = lir::Inst::SaveSite { dst: entered };
             self.blocks[0].insts.insert(0, save);
         }
+        // Each `Let`'s binding that holds references starts null, as the
+        // function is entered, once nothing else is inserted before.
+        for (slot, ty) in &self.lets {
+            let layout = cx.layout(ty);
+            let zero = zero_constant(&layout, cx);
+            self.blocks[0].insts.insert(
+                0,
+                lir::Inst::Copy {
+                    dst: slot.clone(),
+                    src: zero,
+                    layout,
+                },
+            );
+        }
         lir::Function {
             name: self.name,
             params: params_layout(&self.params, &cx.families),
@@ -1506,9 +1711,10 @@ impl<'a> FunctionBuilder<'a> {
     /// what the function holds, as the end of its statements and blocks
     /// would, then returns, failing: it ends the scopes begun since the
     /// function was entered, the innermost then, saved as it starts, and
-    /// then releases its local variables' references. A local variable
-    /// holds none before its declaration or after its block, so one
-    /// released there gives up only what it holds. Before it returns, it
+    /// then releases its local variables' references, and its `Let`s'
+    /// bindings'. A local variable holds none before its declaration or
+    /// after its block, nor a binding before its `Let` or after its last
+    /// use, so one released there gives up only what it holds. Before it returns, it
     /// records in the failure's trace that the failure passed through the
     /// call of it, at the site it was entered at.
     fn failure_exit(&mut self, exit: lir::BlockId, cx: &mut Lowering) {
@@ -1533,6 +1739,7 @@ impl<'a> FunctionBuilder<'a> {
                 let place = place.as_ref().filter(|place| place.holds)?;
                 Some((place.value.clone(), local.ty.clone()))
             })
+            .chain(self.lets.iter().cloned())
             .collect();
         for (value, ty) in held {
             let descriptor = cx.descriptor(&ty);
@@ -1743,7 +1950,8 @@ impl<'a> FunctionBuilder<'a> {
     /// given.
     ///
     /// The rollback ends the scopes the block began, releases its local
-    /// variables, and gives each variable kept its value back, with its
+    /// variables, and its statements' `Let`s' bindings, and gives each
+    /// variable kept its value back, with its
     /// references, which can't fail: nothing reads what the block left
     /// there, as every statement of it has ended. Its block's warnings
     /// survive. Then, with `collecting`, it adds them to `collecting`, and
@@ -1777,6 +1985,7 @@ impl<'a> FunctionBuilder<'a> {
             kept.keep(self, cx);
         }
         let (rollback, after) = (self.new_block(), self.new_block());
+        let lets = self.lets.len();
         self.catching(rollback, |this| this.block(body, cx));
         for kept in &kept {
             kept.give_up(self, cx);
@@ -1793,6 +2002,12 @@ impl<'a> FunctionBuilder<'a> {
         });
         for id in body.declared() {
             self.release_local(id, cx);
+        }
+        // The bindings of the block's statements' `Let`s, those of the
+        // statement that failed holding their values.
+        for i in lets..self.lets.len() {
+            let (slot, ty) = self.lets[i].clone();
+            self.release_place(&slot, &ty, cx);
         }
         for kept in &kept {
             kept.restore(self, cx);
@@ -2159,6 +2374,51 @@ impl<'a> FunctionBuilder<'a> {
             self.block(branch, cx);
             self.end_block(lir::Terminator::Jump(after), next);
         }
+    }
+
+    /// What `lower` adds, the work of one tuple of a relational operation
+    /// or of one call of a read-only operator, in a scope of its own, nested
+    /// in the one it is in, if it makes a text, relation or array, as a
+    /// relational database's executor resets its per-tuple memory: the scope ends after
+    /// the work, freeing what it made, but for the values `lower` gives,
+    /// each with its type, which outlive it, and which the scope it is in
+    /// is handed first ([`lir::RuntimeFn::HandOut`]). That one needs a
+    /// scope then too. So a relational operation's memory is its operands'
+    /// and its result's, not its work's, however many tuples it has.
+    fn nested_scope(
+        &mut self,
+        cx: &mut Lowering,
+        lower: impl FnOnce(&mut Self, &mut Lowering) -> Vec<(lir::Place, hir::Type)>,
+    ) {
+        let outer = std::mem::take(&mut self.scoped);
+        let start = self.position();
+        let kept = lower(self, cx);
+        let makes = std::mem::take(&mut self.scoped);
+        if makes {
+            let scope = self.new_scope();
+            self.insert(
+                start,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Begin,
+                    args: vec![scope.clone()],
+                },
+            );
+            for (value, ty) in &kept {
+                if !cx.points(ty) {
+                    continue;
+                }
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::HandOut,
+                    args: vec![value.clone(), descriptor],
+                });
+            }
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::End,
+                args: vec![scope],
+            });
+        }
+        self.scoped = outer || makes;
     }
 
     /// What `lower` adds, in a scope of its own if it needs one, which
@@ -3465,15 +3725,7 @@ impl<'a> FunctionBuilder<'a> {
                 .value
                 .clone(),
             hir::Expr::At(site, expr) => self.place_at(*site, expr, cx),
-            hir::Expr::Let(id, value, body) => {
-                let value = self.place(value, cx);
-                self.check_keys(&hir::Target::Local(*id), &value, cx);
-                self.local_places[id.0] = Some(LocalPlace {
-                    value,
-                    holds: false,
-                });
-                self.place(body, cx)
-            }
+            hir::Expr::Let(..) => self.let_chain(expr, cx),
             hir::Expr::Parameter(name) if self.pointers.contains_key(name) => {
                 self.pointee(name, cx)
             }
@@ -4121,9 +4373,15 @@ impl<'a> FunctionBuilder<'a> {
         let mut count = src.clone();
         count.path.push(1);
         let dst = self.allocated(&result_ty, count, cx);
+        let built = hir::Type::Tuple(result.clone());
         self.each_tuple(src, tuple, cx, |this, at_hand, index, cx| {
             let to = this.element(&dst, index, result_tuple);
-            this.extended(heading, &at_hand, attributes, result, &to, cx);
+            // The work on each tuple in a scope of its own, which the
+            // tuple built outlives.
+            this.nested_scope(cx, |this, cx| {
+                this.extended(heading, &at_hand, attributes, result, &to, cx);
+                vec![(to.clone(), built.clone())]
+            });
         });
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
         self.insts.push(lir::Inst::CallRuntime {
@@ -4160,9 +4418,20 @@ impl<'a> FunctionBuilder<'a> {
             layout: lir::Layout::Usize,
         });
         self.each_tuple(&src, tuple.clone(), cx, |this, at_hand, _, cx| {
-            this.tuples.push(at_hand.clone());
-            let keep = this.place(condition, cx);
-            this.tuples.pop();
+            // The condition, computed in a scope of its own for each tuple,
+            // which nothing it made outlives.
+            let keep = this.slot(lir::Layout::U8);
+            this.nested_scope(cx, |this, cx| {
+                this.tuples.push(at_hand.clone());
+                let computed = this.place(condition, cx);
+                this.tuples.pop();
+                this.insts.push(lir::Inst::Copy {
+                    dst: keep.clone(),
+                    src: computed,
+                    layout: lir::Layout::U8,
+                });
+                Vec::new()
+            });
             let (copy, next) = (this.new_block(), this.new_block());
             this.end_block(
                 lir::Terminator::Branch {
@@ -7304,6 +7573,87 @@ mod tests {
         assert_eq!(done.terminator, lir::Terminator::Return);
     }
 
+    /// The runtime functions each block of `f` calls, in order.
+    fn runtime_calls(f: &lir::Function) -> Vec<Vec<lir::RuntimeFn>> {
+        f.blocks
+            .iter()
+            .map(|block| {
+                block
+                    .insts
+                    .iter()
+                    .filter_map(|inst| match inst {
+                        lir::Inst::CallRuntime { function, .. } => Some(*function),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_work_on_each_tuple_is_in_a_scope_of_its_own() {
+        use lir::RuntimeFn::{Begin, Concat, End, HandOut};
+        // `r extend { u := t || "!" }` and `r where t || "!" = "a!"`.
+        let text = || hir::Type::Scalar(hir::Scalar::Text);
+        let heading = hir::Heading::new([("t".to_string(), text())].into());
+        let shouted = || {
+            let t = hir::Expr::Extract(
+                Box::new(hir::Expr::Current(0, heading.clone())),
+                "t".to_string(),
+            );
+            let bang = hir::Expr::Constant(hir::Value::Text("!".to_string()));
+            hir::Expr::Binary(hir::BinaryOp::Concatenate, Box::new(t), Box::new(bang))
+        };
+        let r = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        let extend = hir::Expr::Extend(
+            r(),
+            hir::Heading::new([("u".to_string(), text())].into()),
+            [("u".to_string(), shouted())].into(),
+        );
+        let condition = hir::Expr::Binary(
+            hir::BinaryOp::Compare(
+                hir::Comparison::Equal,
+                hir::Compared::Scalar(hir::Scalar::Text),
+            ),
+            Box::new(shouted()),
+            Box::new(hir::Expr::Constant(hir::Value::Text("a!".to_string()))),
+        );
+        let restrict = hir::Expr::Restrict(r(), Box::new(condition));
+        let lowered = |value: hir::Expr| {
+            lower_program(&program(
+                vec![
+                    debug_value(),
+                    user("main", &[], vec![call(0, vec![("v", value)])]),
+                ],
+                vec![variable(
+                    "r",
+                    hir::Value::Relation(hir::RelationValue {
+                        heading: heading.clone(),
+                        tuples: std::collections::BTreeSet::new(),
+                    }),
+                )],
+            ))
+        };
+        // The tuple's text is made in its scope, which hands out the tuple
+        // built before it ends, inside the statement's.
+        let extended = lowered(extend);
+        let blocks = runtime_calls(&extended.functions[0]);
+        assert!(
+            blocks.contains(&vec![Begin, Concat, HandOut, End]),
+            "{blocks:?}"
+        );
+        // The condition's is made in its scope, which nothing outlives.
+        let restricted = lowered(restrict);
+        let blocks = runtime_calls(&restricted.functions[0]);
+        let per_tuple = blocks
+            .iter()
+            .find(|block| block.contains(&Concat))
+            .expect("a block computes the condition");
+        assert_eq!(per_tuple.first(), Some(&Begin), "{blocks:?}");
+        assert_eq!(per_tuple.last(), Some(&End), "{blocks:?}");
+        assert!(!per_tuple.contains(&HandOut), "{blocks:?}");
+    }
+
     #[test]
     fn calls_build_the_argument_tuple_in_a_slot() {
         let lowered = lower_program(&program(
@@ -7469,36 +7819,49 @@ mod tests {
         ));
         let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["main", "shout", "__entry", "message"]);
-        // `shout` stores its value where the caller says, in no scope of
-        // its own.
+        // `shout` stores its value where the caller says, made in a scope
+        // of the call's own, which hands it out to the caller's before it
+        // ends, so that it frees whatever else the call made.
         let shout = &lowered.functions[1];
         assert_eq!(shout.result, Some(scalar_layout(hir::Scalar::Text)));
-        let runtime = |insts: &[lir::Inst]| -> Vec<lir::RuntimeFn> {
-            insts
-                .iter()
-                .filter_map(|inst| match inst {
-                    lir::Inst::CallRuntime { function, .. } => Some(*function),
-                    _ => None,
-                })
-                .collect()
-        };
         let insts = &shout.blocks[0].insts;
-        assert_eq!(runtime(insts), [lir::RuntimeFn::Concat]);
-        assert!(matches!(
-            insts.last(),
-            Some(lir::Inst::Copy {
-                dst: lir::Place {
-                    base: lir::Base::Result,
+        assert_eq!(
+            runtime_calls(shout)[0],
+            [
+                lir::RuntimeFn::Innermost,
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::Concat,
+                lir::RuntimeFn::HandOut,
+                lir::RuntimeFn::End
+            ]
+        );
+        let stored = insts.iter().position(|inst| {
+            matches!(
+                inst,
+                lir::Inst::Copy {
+                    dst: lir::Place {
+                        base: lir::Base::Result,
+                        ..
+                    },
                     ..
-                },
-                ..
-            })
-        ));
+                }
+            )
+        });
+        let handed = insts.iter().position(|inst| {
+            matches!(
+                inst,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::HandOut,
+                    ..
+                }
+            )
+        });
+        assert!(stored < handed, "{insts:#?}");
         // The call passes a slot for the result, and the calling
-        // statement's scope owns what `shout` makes.
+        // statement's scope owns what `shout` hands it.
         let insts = &lowered.functions[0].blocks[0].insts;
         assert_eq!(
-            runtime(insts),
+            runtime_calls(&lowered.functions[0])[0],
             [
                 lir::RuntimeFn::Innermost,
                 lir::RuntimeFn::Begin,
@@ -8037,6 +8400,73 @@ mod tests {
             panic!("{binaries:#?}");
         };
         assert_eq!((lhs, rhs), (sum, sum));
+    }
+
+    #[test]
+    fn a_let_frees_its_value_after_its_last_use() {
+        // `f{t: text}: text [ var a := t || "!"; var b := a || "?"; b ]`.
+        use lir::RuntimeFn::{Begin, Concat, End, HandOut, Innermost, Keep, Release, Retain};
+        let text = || hir::Type::Scalar(hir::Scalar::Text);
+        let local = |i| Box::new(hir::Expr::Local(hir::LocalId(i)));
+        let concat = |lhs, bang: &str| {
+            let bang = hir::Expr::Constant(hir::Value::Text(bang.to_string()));
+            Box::new(hir::Expr::Binary(
+                hir::BinaryOp::Concatenate,
+                lhs,
+                Box::new(bang),
+            ))
+        };
+        let value = hir::Expr::Let(
+            hir::LocalId(0),
+            concat(Box::new(hir::Expr::Parameter("t".to_string())), "!"),
+            Box::new(hir::Expr::Let(
+                hir::LocalId(1),
+                concat(local(0), "?"),
+                local(1),
+            )),
+        );
+        let named = |name: &str| hir::Local {
+            name: name.to_string(),
+            ty: text(),
+            keys: Vec::new(),
+        };
+        let f = hir::Operator {
+            versions: Vec::new(),
+            name: "f".to_string(),
+            types: Vec::new(),
+            params: [("t".to_string(), hir::Parameter::constant(text()))].into(),
+            kind: hir::OperatorKind::ReadOnly {
+                result: text(),
+                locals: vec![named("a"), named("b")],
+                value,
+            },
+        };
+        let called = hir::Expr::Call(hir::Call {
+            operator: hir::OperatorId(1),
+            types: Vec::new(),
+            args: [("t".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+            updated: BTreeMap::new(),
+        });
+        let lowered = lower_program(&program(
+            vec![
+                debug_value(),
+                f,
+                user("main", &[], vec![call(0, vec![("v", called)])]),
+            ],
+            vec![variable("x", hir::Value::Text("x".to_string()))],
+        ));
+        let f = lowered.functions.iter().find(|f| f.name == "f").unwrap();
+        // Each binding's value made in a scope of its own, which it takes
+        // references from; `a` given up once `b` is bound, as nothing
+        // after reads it; and `b`, which the value is, kept by the call's
+        // scope, then given up, before the call hands the value out.
+        assert_eq!(
+            runtime_calls(f)[0],
+            [
+                Innermost, Begin, Begin, Concat, Retain, End, Begin, Concat, Retain, End, Release,
+                Keep, Release, HandOut, End
+            ]
+        );
     }
 
     #[test]

@@ -480,6 +480,13 @@ pub enum RuntimeFn {
     /// describes, points to: an update operator's argument, which a
     /// variable the operator assigns may hold the only other reference to.
     Keep,
+    /// `trendy_rt_hand_out(value, descriptor)`: have the scope the
+    /// innermost one is in hold a reference to each buffer a value, of the
+    /// type the descriptor describes, points to: what the work of a
+    /// tuple, or of a read-only operator's call, made in a scope of its own
+    /// that outlives it, its result, so that the scope's end frees the
+    /// rest.
+    HandOut,
     /// `trendy_rt_retain(value, descriptor)`: take a reference to each
     /// buffer that a value, of the type the descriptor describes, points
     /// to, for a copy of it that is to hold them: a `fail`'s error, which
@@ -577,7 +584,8 @@ pub enum RuntimeFn {
     /// `trendy_rt_sort(relation, descriptor)`: replace the relation at
     /// `relation`, of the type the descriptor describes, with one of its
     /// tuples in the canonical order, without duplicates, in memory the
-    /// statement owns.
+    /// statement owns, freeing the buffer it had if only the statement's
+    /// scope holds it.
     Sort,
     /// `trendy_rt_load(dst, src, source, result, items, count, parts,
     /// part_count)`: store at `dst` the array, of the type the descriptor
@@ -627,7 +635,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 74] = [
+    pub const ALL: [RuntimeFn; 75] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -683,6 +691,7 @@ impl RuntimeFn {
         RuntimeFn::WriteTrace,
         RuntimeFn::Failures,
         RuntimeFn::Keep,
+        RuntimeFn::HandOut,
         RuntimeFn::Retain,
         RuntimeFn::Adopt,
         RuntimeFn::Reshape,
@@ -734,6 +743,7 @@ impl RuntimeFn {
             | RuntimeFn::KeyShared
             | RuntimeFn::Concat
             | RuntimeFn::Keep
+            | RuntimeFn::HandOut
             | RuntimeFn::Reshape
             | RuntimeFn::Relation
             | RuntimeFn::And
@@ -850,6 +860,7 @@ impl RuntimeFn {
             RuntimeFn::WriteTrace => "trendy_rt_write_trace",
             RuntimeFn::Failures => "trendy_rt_failures",
             RuntimeFn::Keep => "trendy_rt_keep",
+            RuntimeFn::HandOut => "trendy_rt_hand_out",
             RuntimeFn::Retain => "trendy_rt_retain",
             RuntimeFn::Adopt => "trendy_rt_adopt",
             RuntimeFn::Reshape => "trendy_rt_reshape",

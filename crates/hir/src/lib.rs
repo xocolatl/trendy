@@ -2531,6 +2531,24 @@ impl Expr {
         }
     }
 
+    /// Whether the expression reads the local variable `id` as it is bound
+    /// where the expression is: a `Let` of `id` in it binds it again for
+    /// its body, which reads that binding instead.
+    #[must_use]
+    pub fn reads_local(&self, id: LocalId) -> bool {
+        match self {
+            Expr::Local(read) => *read == id,
+            Expr::Let(bound, value, body) => {
+                value.reads_local(id) || (*bound != id && body.reads_local(id))
+            }
+            _ => {
+                let mut reads = false;
+                self.for_each_child(|child, _| reads |= child.reads_local(id));
+                reads
+            }
+        }
+    }
+
     /// What the expression reads of the tuple at hand `depth` of them out
     /// from it (see [`Expr::Current`]).
     #[must_use]
