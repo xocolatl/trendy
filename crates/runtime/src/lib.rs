@@ -1391,10 +1391,7 @@ unsafe fn product(
     // of the value it describes, and each tuple written has room.
     unsafe {
         let element = result.element();
-        let total = lhs.count.checked_mul(rhs.count);
-        let Some((total, bytes)) =
-            total.and_then(|total| Some((total, total.checked_mul(element.size)?)))
-        else {
+        let Some(total) = lhs.count.checked_mul(rhs.count) else {
             return Err(out_of_memory());
         };
         let rhs_first = sources.first().is_some_and(|source| source.from == 1);
@@ -1425,11 +1422,7 @@ unsafe fn product(
         if changes > 1 {
             return made_canonical(total, result, write);
         }
-        let out = allocate_buffer(bytes, result)?;
-        core::ptr::write_bytes(out, 0, bytes);
-        write(out);
-        adopt(out, total, element);
-        Ok((out, total))
+        made_in_order(total, result, write)
     }
 }
 
@@ -2396,9 +2389,9 @@ pub unsafe extern "C" fn trendy_rt_matching(
 /// statement owns: a tuple for each path through its tuples, each an arc
 /// from its first attribute's value, in name order, to its second's, from
 /// the path's first value to its last, as the compiler computes it
-/// (`hir::Value::tclose`). The closure grows a step at a time, each step's
-/// new pairs joined to the arcs, until a step adds none. Fails if the
-/// memory can't be allocated.
+/// (`hir::Value::tclose`). Each value reaches what `reaching` says, in order,
+/// so the tuples are written in canonical order, once each, with nothing to
+/// sort. Fails if the memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -2422,58 +2415,29 @@ pub unsafe extern "C" fn trendy_rt_tclose(
         };
         let value = &*from.desc;
         let (tuples, count) = read_slice(src);
-        // Each pair is of the values its tuple has, where they are in the
-        // operand, which outlives the call. The operand's tuples are in
-        // canonical order, so its arcs are in the pairs' order.
-        let mut arcs = Pairs::new(count)?;
-        for i in 0..count {
-            let tuple = tuples.add(i * element.size);
-            arcs.push([tuple.add(from.offset), tuple.add(to.offset)])?;
-        }
-        let by_pair = |a: &[*const u8; 2], b: &[*const u8; 2]| {
-            order(a[0], b[0], value).then_with(|| order(a[1], b[1], value))
+        let arcs = Arcs::of(tuples, count, element.size, [from.offset, to.offset], value)?;
+        let reached = reaching(&arcs)?;
+        let numbered = arcs.into_values();
+        let values = numbered.values();
+        let total = (0..values.len()).try_fold(0_usize, |sum, number| {
+            sum.checked_add(reached.of(number).len())
+        });
+        let Some(total) = total else {
+            return Err(out_of_memory());
         };
-        let arcs = arcs.values();
-        let mut closure = Pairs::of(arcs)?;
-        let mut step = Pairs::of(arcs)?;
-        loop {
-            let mut found = Pairs::new(step.len)?;
-            for pair in step.values() {
-                // The arcs from where the pair ends.
-                let first = arcs.partition_point(|arc| order(arc[0], pair[1], value).is_lt());
-                for arc in arcs[first..]
-                    .iter()
-                    .take_while(|arc| order(arc[0], pair[1], value).is_eq())
-                {
-                    let made = [pair[0], arc[1]];
-                    if closure
-                        .values()
-                        .binary_search_by(|p| by_pair(p, &made))
-                        .is_err()
-                    {
-                        found.push(made)?;
-                    }
+        let (bytes, len) = made_in_order(total, desc, |made| {
+            let mut k = 0;
+            for (number, start) in values.iter().enumerate() {
+                for &end in reached.of(number) {
+                    let tuple = made.add(k * element.size);
+                    core::ptr::copy_nonoverlapping(*start, tuple.add(from.offset), value.size);
+                    core::ptr::copy_nonoverlapping(
+                        values[end as usize],
+                        tuple.add(to.offset),
+                        value.size,
+                    );
+                    k += 1;
                 }
-            }
-            if found.len == 0 {
-                break;
-            }
-            let found = found.values_mut();
-            found.sort_unstable_by(by_pair);
-            let mut new = Pairs::new(found.len())?;
-            for (i, pair) in found.iter().enumerate() {
-                if i == 0 || by_pair(&found[i - 1], pair).is_ne() {
-                    new.push(*pair)?;
-                }
-            }
-            closure = closure.merged(&new, by_pair)?;
-            step = new;
-        }
-        let (bytes, len) = made_canonical(closure.len, desc, |made| {
-            for (i, pair) in closure.values().iter().enumerate() {
-                let tuple = made.add(i * element.size);
-                core::ptr::copy_nonoverlapping(pair[0], tuple.add(from.offset), value.size);
-                core::ptr::copy_nonoverlapping(pair[1], tuple.add(to.offset), value.size);
             }
         })?;
         dst.write_unaligned(Text { bytes, len });
@@ -2481,80 +2445,387 @@ pub unsafe extern "C" fn trendy_rt_tclose(
     })
 }
 
-/// Pairs of values, each by where it is, as [`trendy_rt_tclose`] makes its
-/// closure's tuples: in memory of a function's own, which grows as they are
-/// added.
+/// The arcs of a relation of two attributes of one type, with its values
+/// numbered in canonical order, so that in that order is how they compare. Its
+/// numbers take 32 bits, as there are many, as a relation with more values takes
+/// more memory for them than is likely to be there: it fails for lack of it.
 #[cfg(not(test))]
-struct Pairs {
-    memory: Temp<[*const u8; 2]>,
+struct Arcs {
+    /// How many values there are.
+    count: usize,
+    /// Each value, by where it is in the relation, which outlives this.
+    values: Temp<*const u8>,
+    /// Where each value's arcs begin in `ends`, and then where the last ends.
+    starts: Temp<usize>,
+    /// The value each arc ends at, each value's in order.
+    ends: Temp<u32>,
+}
+
+#[cfg(not(test))]
+impl Arcs {
+    /// The arcs of the `len` tuples at `tuples`, each `size` bytes, in canonical
+    /// order, from the value of the type `value` describes at the first of
+    /// `offsets` in each to the one at the second. Fails if there is no memory.
+    ///
+    /// # Safety
+    ///
+    /// `tuples` must point to those tuples, and the relation must outlive this.
+    unsafe fn of(
+        tuples: *const u8,
+        len: usize,
+        size: usize,
+        offsets: [usize; 2],
+        value: &TypeDesc,
+    ) -> Fallible<Arcs> {
+        let Some(both) = len.checked_mul(2) else {
+            return Err(out_of_memory());
+        };
+        // SAFETY: guaranteed by the caller; each is a value of that type, and
+        // there are at most `both` of them, which the memory has room for.
+        unsafe {
+            let first_end = tuples.add(offsets[1]);
+            let mut by_end = pointers(first_end, len, size)?;
+            let by_end = by_end.values();
+            by_end.sort_unstable_by(|a, b| order(*a, *b, value));
+            let start_of = |i: usize| tuples.add(i * size + offsets[0]);
+            let values = Temp::<*const u8>::new(both.max(1))?;
+            let starts = Temp::<usize>::new(both + 1)?;
+            let ends = Temp::<u32>::new(len.max(1))?;
+            // The tuples' first values are in order, as the relation's are, and
+            // the ends now are: the two go through the values together.
+            let (mut count, mut i, mut j) = (0, 0, 0);
+            while i < len || j < len {
+                let next = if j == len || (i < len && order(start_of(i), by_end[j], value).is_le())
+                {
+                    start_of(i)
+                } else {
+                    by_end[j]
+                };
+                let Some(number) = u32::try_from(count).ok().filter(|n| *n < u32::MAX) else {
+                    return Err(out_of_memory());
+                };
+                values.ptr().add(count).write(next);
+                starts.ptr().add(count).write(i);
+                while i < len && order(start_of(i), next, value).is_eq() {
+                    i += 1;
+                }
+                while j < len && order(by_end[j], next, value).is_eq() {
+                    // A value that takes no memory has one tuple, the first.
+                    let arc = by_end[j].offset_from_unsigned(first_end);
+                    let arc = arc.checked_div(size).unwrap_or(0);
+                    ends.ptr().add(arc).write(number);
+                    j += 1;
+                }
+                count += 1;
+            }
+            starts.ptr().add(count).write(len);
+            Ok(Arcs {
+                count,
+                values,
+                starts,
+                ends,
+            })
+        }
+    }
+
+    /// Each value, by its number, those of the arcs given up.
+    fn into_values(self) -> Numbered {
+        Numbered {
+            count: self.count,
+            values: self.values,
+        }
+    }
+
+    /// The values the arcs from `value` end at, in order.
+    fn ends_of(&self, value: u32) -> &[u32] {
+        let value = value as usize;
+        // SAFETY: each value's arcs are written, and `starts` says where.
+        unsafe {
+            let (start, end) = (
+                *self.starts.ptr().add(value),
+                *self.starts.ptr().add(value + 1),
+            );
+            core::slice::from_raw_parts(self.ends.ptr().add(start), end - start)
+        }
+    }
+}
+
+/// Each value of a relation's arcs, by its number (see [`Arcs`]).
+#[cfg(not(test))]
+struct Numbered {
+    count: usize,
+    values: Temp<*const u8>,
+}
+
+#[cfg(not(test))]
+impl Numbered {
+    /// Each value, by its number.
+    fn values(&self) -> &[*const u8] {
+        // SAFETY: the first `count` are written.
+        unsafe { core::slice::from_raw_parts(self.values.ptr(), self.count) }
+    }
+}
+
+/// Which values a path through arcs reaches from each, by the strongly
+/// connected component each is in, as all of a component's reach the same.
+#[cfg(not(test))]
+struct Reached {
+    /// The component of each value, and one more.
+    components: Temp<u32>,
+    /// Where each component's values begin in `values`, and then where the last
+    /// ends.
+    starts: Temp<usize>,
+    /// The values each component's reach, in order.
+    values: Numbers,
+}
+
+#[cfg(not(test))]
+impl Reached {
+    /// The values that `value` reaches, in order.
+    fn of(&self, value: usize) -> &[u32] {
+        // SAFETY: each value's component is written, and each component's values,
+        // and `starts` says where.
+        unsafe {
+            let component = *self.components.ptr().add(value) as usize - 1;
+            let (start, end) = (
+                *self.starts.ptr().add(component),
+                *self.starts.ptr().add(component + 1),
+            );
+            core::slice::from_raw_parts(self.values.memory.ptr().add(start), end - start)
+        }
+    }
+}
+
+/// Numbers, in memory of a function's own, which grows as they are added.
+#[cfg(not(test))]
+struct Numbers {
+    memory: Temp<u32>,
     len: usize,
 }
 
 #[cfg(not(test))]
-impl Pairs {
-    /// None yet, with room for `capacity`. Fails if there is no memory for
-    /// them.
-    fn new(capacity: usize) -> Fallible<Pairs> {
-        Ok(Pairs {
-            memory: Temp::new(capacity.max(1))?,
-            len: 0,
-        })
-    }
-
-    /// `pairs`, copied. Fails if there is no memory for them.
-    fn of(pairs: &[[*const u8; 2]]) -> Fallible<Pairs> {
-        let mut copied = Pairs::new(pairs.len())?;
-        for pair in pairs {
-            copied.push(*pair)?;
-        }
-        Ok(copied)
-    }
-
-    /// Add `pair`, after those so far. Fails if there is no memory for it.
-    fn push(&mut self, pair: [*const u8; 2]) -> Fallible {
+impl Numbers {
+    /// Add `number`, after those so far. Fails if there is no memory for it.
+    fn push(&mut self, number: u32) -> Fallible {
         if self.len == self.memory.len {
             self.memory.grow(self.len.saturating_mul(2).max(4))?;
         }
         // SAFETY: the memory has room for one more.
-        unsafe { self.memory.ptr().add(self.len).write(pair) };
+        unsafe { self.memory.ptr().add(self.len).write(number) };
         self.len += 1;
         Ok(())
     }
 
-    /// Those added.
-    fn values(&self) -> &[[*const u8; 2]] {
+    /// The number at `index`, one of those added.
+    fn at(&self, index: usize) -> u32 {
         // SAFETY: the first `len` are written.
-        unsafe { core::slice::from_raw_parts(self.memory.ptr(), self.len) }
+        unsafe { *self.memory.ptr().add(index) }
     }
+}
 
-    /// Those added, to reorder.
-    fn values_mut(&mut self) -> &mut [[*const u8; 2]] {
-        // SAFETY: the first `len` are written.
-        unsafe { core::slice::from_raw_parts_mut(self.memory.ptr(), self.len) }
-    }
+/// `n`, which counts values, of which [`Arcs`] has made sure a number can be.
+#[cfg(not(test))]
+fn number_of(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or_else(|_| internal_error("too many values"))
+}
 
-    /// These and `more`, both in the order `order` gives, merged in it.
-    /// Fails if there is no memory for them.
-    fn merged(
-        &self,
-        more: &Pairs,
-        order: impl Fn(&[*const u8; 2], &[*const u8; 2]) -> core::cmp::Ordering,
-    ) -> Fallible<Pairs> {
-        let (left, right) = (self.values(), more.values());
-        let mut merged = Pairs::new(left.len() + right.len())?;
-        let (mut i, mut j) = (0, 0);
-        while i < left.len() || j < right.len() {
-            let next = if j == right.len() || (i < left.len() && order(&left[i], &right[j]).is_le())
-            {
-                i += 1;
-                left[i - 1]
-            } else {
-                j += 1;
-                right[j - 1]
-            };
-            merged.push(next)?;
+/// What each value reaches by `arcs`, by the components of the graph (Tarjan's
+/// algorithm, without recursion of its own, so that no path is too long for the
+/// stack), found as those they lead to are done: Nuutila's. A component reaches
+/// what its arcs' ends are in, and what those reach, itself among them if a cycle
+/// is in it. An end already among those a component reaches needs no looking through,
+/// as it got there with all it reaches, so the work is about what is written, and
+/// no more if arcs go round in cycles or by many ways to one value. Fails if there
+/// is no memory for them.
+#[cfg(not(test))]
+fn reaching(arcs: &Arcs) -> Fallible<Reached> {
+    let count = arcs.count;
+    let Some(fields) = count.checked_mul(8) else {
+        return Err(out_of_memory());
+    };
+    let mut memory = Temp::<u32>::zeroed(fields + 1)?;
+    // SAFETY: they are written, as zeros.
+    let memory = unsafe { memory.values() };
+    let (number, memory) = memory.split_at_mut(count);
+    let (low, memory) = memory.split_at_mut(count);
+    let (next, memory) = memory.split_at_mut(count);
+    let (calls, memory) = memory.split_at_mut(count);
+    let (waiting, memory) = memory.split_at_mut(count);
+    let (seen, memory) = memory.split_at_mut(count);
+    let (members, member_starts) = memory.split_at_mut(count);
+    let mut components = Temp::<u32>::zeroed(count.max(1))?;
+    let mut starts = Temp::<usize>::zeroed(count + 1)?;
+    let mut found = Components {
+        arcs,
+        // SAFETY: they are written, as zeros.
+        of_value: unsafe { components.values() },
+        seen,
+        members,
+        member_starts,
+        // SAFETY: as above.
+        starts: unsafe { starts.values() },
+        values: Numbers {
+            memory: Temp::new(count.max(4))?,
+            len: 0,
+        },
+        count: 0,
+    };
+    let mut walk = Walk {
+        number,
+        low,
+        calls,
+        waiting,
+        numbered: 0,
+        depth: 0,
+        waits: 0,
+    };
+    for root in 0..count {
+        if walk.number[root] != 0 {
+            continue;
         }
-        Ok(merged)
+        walk.visit(number_of(root));
+        while walk.depth > 0 {
+            let at = walk.calls[walk.depth - 1];
+            let here = at as usize;
+            if let Some(&end) = arcs.ends_of(at).get(next[here] as usize) {
+                next[here] += 1;
+                let reached = end as usize;
+                if walk.number[reached] == 0 {
+                    walk.visit(end);
+                } else if found.of_value[reached] == 0 {
+                    walk.low[here] = walk.low[here].min(walk.number[reached]);
+                }
+                continue;
+            }
+            walk.depth -= 1;
+            if walk.depth > 0 {
+                let caller = walk.calls[walk.depth - 1] as usize;
+                walk.low[caller] = walk.low[caller].min(walk.low[here]);
+            }
+            if walk.low[here] == walk.number[here] {
+                let first = walk.waiting[..walk.waits]
+                    .iter()
+                    .rposition(|&value| value == at)
+                    .unwrap_or_else(|| internal_error("a value that isn't waiting"));
+                found.component(&walk.waiting[first..walk.waits])?;
+                walk.waits = first;
+            }
+        }
+    }
+    let Components { values, .. } = found;
+    Ok(Reached {
+        components,
+        starts,
+        values,
+    })
+}
+
+/// Where [`reaching`]'s walk through the arcs is.
+#[cfg(not(test))]
+struct Walk<'a> {
+    /// The order each value was first come to in, from 1, or 0 if it hasn't been.
+    number: &'a mut [u32],
+    /// Of each value, the lowest number of a value it is known to lead back to,
+    /// that has no component yet.
+    low: &'a mut [u32],
+    /// The values being walked from, `depth` of them, each by an arc from the one
+    /// before.
+    calls: &'a mut [u32],
+    /// The values that have been come to and have no component yet, `waits` of
+    /// them.
+    waiting: &'a mut [u32],
+    numbered: u32,
+    depth: usize,
+    waits: usize,
+}
+
+#[cfg(not(test))]
+impl Walk<'_> {
+    /// Come to `value`, for the first time.
+    fn visit(&mut self, value: u32) {
+        self.numbered += 1;
+        self.number[value as usize] = self.numbered;
+        self.low[value as usize] = self.numbered;
+        self.calls[self.depth] = value;
+        self.depth += 1;
+        self.waiting[self.waits] = value;
+        self.waits += 1;
+    }
+}
+
+/// The components [`reaching`] has found, and what they reach.
+#[cfg(not(test))]
+struct Components<'a> {
+    arcs: &'a Arcs,
+    /// The component each value is in, and one more, or 0 if it hasn't one yet.
+    of_value: &'a mut [u32],
+    /// Of each value, the last component to reach it, and one more.
+    seen: &'a mut [u32],
+    /// The values of each component, one after another.
+    members: &'a mut [u32],
+    /// Where each component's begin in `members`, and then where the last ends.
+    member_starts: &'a mut [u32],
+    /// Where each component's reached values begin in `values`, and then where
+    /// the last ends.
+    starts: &'a mut [usize],
+    values: Numbers,
+    /// How many there are.
+    count: usize,
+}
+
+#[cfg(not(test))]
+impl Components<'_> {
+    /// `members`, a component, every other component it leads to having been
+    /// found: what it reaches, in order. Fails if there is no memory for them.
+    fn component(&mut self, members: &[u32]) -> Fallible {
+        let component = self.count;
+        let stamp = number_of(component + 1);
+        let member_start = self.member_starts[component] as usize;
+        let member_end = member_start + members.len();
+        self.members[member_start..member_end].copy_from_slice(members);
+        self.member_starts[component + 1] = number_of(member_end);
+        for &member in members {
+            self.of_value[member as usize] = stamp;
+        }
+        let start = self.values.len;
+        let arcs = self.arcs;
+        for &member in members {
+            for &end in arcs.ends_of(member) {
+                if self.seen[end as usize] == stamp {
+                    continue;
+                }
+                // Its own, if a cycle is in it, with nothing yet that it reaches.
+                let of = self.of_value[end as usize] as usize - 1;
+                let (first, last) = (self.member_starts[of], self.member_starts[of + 1]);
+                for i in first as usize..last as usize {
+                    self.add(self.members[i], stamp)?;
+                }
+                for i in self.starts[of]..self.starts[of + 1] {
+                    self.add(self.values.at(i), stamp)?;
+                }
+            }
+        }
+        self.starts[component + 1] = self.values.len;
+        // SAFETY: those from `start` on are written.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.values.memory.ptr().add(start),
+                self.values.len - start,
+            )
+        }
+        .sort_unstable();
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Add `value` to what the component with the mark `stamp` reaches, unless it
+    /// is there. Fails if there is no memory for it.
+    fn add(&mut self, value: u32, stamp: u32) -> Fallible {
+        if self.seen[value as usize] != stamp {
+            self.seen[value as usize] = stamp;
+            self.values.push(value)?;
+        }
+        Ok(())
     }
 }
 
@@ -3056,6 +3327,34 @@ unsafe fn made_canonical(
         let made = Temp::<u8>::zeroed(bytes)?;
         write(made.ptr());
         canonical(made.ptr(), count, desc)
+    }
+}
+
+/// The relation `desc` describes of the `count` tuples that `write` writes at
+/// the address it is given, zeroed, as everywhere, so that the padding in them is
+/// zero, in canonical order and without duplicates, in memory the current
+/// statement owns, which takes references to what they point to.
+///
+/// # Safety
+///
+/// `write` must write `count` valid tuples of that relation, in that order.
+#[cfg(not(test))]
+unsafe fn made_in_order(
+    count: usize,
+    desc: &TypeDesc,
+    write: impl FnOnce(*mut u8),
+) -> Fallible<(*mut u8, usize)> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let element = desc.element();
+        let Some(bytes) = count.checked_mul(element.size) else {
+            return Err(out_of_memory());
+        };
+        let out = allocate_buffer(bytes, desc)?;
+        core::ptr::write_bytes(out, 0, bytes);
+        write(out);
+        adopt(out, count, element);
+        Ok((out, count))
     }
 }
 

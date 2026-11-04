@@ -7734,3 +7734,214 @@ operator main{{}} [
     );
     assert!(last + (32 << 20) < held, "{last} bytes, and {held} held");
 }
+
+/// The closure of random graphs, each the arcs of `arcs` random pairs of `nodes`
+/// values, against one computed here, as how many tuples it has and a sum that
+/// depends on which they are: every shape of cycles, loops, values that only
+/// start arcs or only end them, and many ways to one value.
+#[test]
+fn a_transitive_closure_has_every_path_of_any_graph() {
+    let mut random = 20_261_104_u64;
+    let mut next = |below: u64| {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (random >> 33) % below
+    };
+    let mut body = String::from("    var one := 1;\n");
+    let mut expected = Vec::new();
+    for graph in 0..60 {
+        let nodes: u64 = [1, 2, 3, 5, 8, 13, 21, 34][usize::try_from(next(8)).unwrap()];
+        let count = next(nodes * nodes / 2 + 2);
+        let mut arcs = std::collections::BTreeSet::new();
+        for _ in 0..count {
+            arcs.insert((next(nodes), next(nodes)));
+        }
+        let mut closure = arcs.clone();
+        loop {
+            let more: Vec<(u64, u64)> = closure
+                .iter()
+                .flat_map(|&(a, b)| {
+                    arcs.iter()
+                        .filter(move |&&(c, _)| c == b)
+                        .map(move |&(_, d)| (a, d))
+                })
+                .filter(|pair| !closure.contains(pair))
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            closure.extend(more);
+        }
+        let tuples: Vec<String> = arcs
+            .iter()
+            .map(|(a, b)| format!("{{ a: one * {a}, b: one * {b} }}"))
+            .collect();
+        writeln!(
+            body,
+            "    var g{graph}: relation {{ a: integer, b: integer }} := relation {{ {} }};",
+            tuples.join(", ")
+        )
+        .unwrap();
+        writeln!(
+            body,
+            "    call debug_value{{v: tuple {{ c: count{{r: g{graph} tclose}}, s: sum{{r: g{graph} tclose, of: a * 100 + b}} }}}};",
+        )
+        .unwrap();
+        let sum: u64 = closure.iter().map(|(a, b)| a * 100 + b).sum();
+        expected.push(format!("tuple {{ c: {}, s: {sum} }}", closure.len()));
+    }
+    let (code, stderr) = run_source("tclose_graphs", &format!("operator main{{}} [\n{body}];\n"));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), expected);
+}
+
+/// Values of each kind a closure can be of, whose order is the order its tuples
+/// are in, each read after the operand has gone, freed memory being scribbled
+/// over, and those that take no memory, or that a tuple arcs to itself.
+const CLOSURES: &str = r#"
+type mark { { n: integer } };
+
+operator main{} [
+    var one := 1;
+    var names := relation {
+        { from: "c" || "c", to: "a" || "a" },
+        { from: "a" || "a", to: "b" || "b" },
+        { from: "b" || "b", to: "a" || "a" },
+        { from: "d" || "d", to: "c" || "c" },
+    };
+    call debug_table{r: (names where from <> "") tclose};
+    var flags := relation { { p: one = 1, q: one = 2 }, { p: one = 2, q: one = 2 } };
+    call debug_table{r: flags tclose};
+    var pairs := relation {
+        { x: tuple { t: "b" || "", n: one }, y: tuple { t: "a" || "", n: one } },
+        { x: tuple { t: "a" || "", n: one }, y: tuple { t: "a" || "", n: 2 * one } },
+    };
+    call debug_table{r: pairs tclose};
+    var marks := relation { { a: mark{n: 2 * one}, b: mark{n: one} }, { a: mark{n: one}, b: mark{n: 0 * one} } };
+    call debug_table{r: marks tclose};
+    var sets := relation {
+        { a: relation { { n: 2 * one } }, b: relation { { n: one } } },
+        { a: relation { { n: one } }, b: relation { { n: 0 * one } } },
+    };
+    call debug_table{r: sets tclose};
+    var nothing: relation { a: tuple {}, b: tuple {} } := relation { { a: tuple {}, b: tuple {} } } where one = 1;
+    call debug_table{r: nothing tclose};
+    var none: relation { a: integer, b: integer } := relation { { a: 1, b: 2 } } where one = 2;
+    call debug_table{r: none tclose};
+    var loops := relation { { a: one, b: one } };
+    call debug_table{r: loops tclose};
+    /* The same closure after, and an operation on it. */
+    var stops := relation { { a: 3 * one, b: 2 * one }, { a: 2 * one, b: one } };
+    call debug_table{r: (stops tclose) where a = 3};
+];
+"#;
+
+/// What `CLOSURES` writes.
+const CLOSURES_WRITTEN: [&str; 60] = [
+    "┌──────┬────┐",
+    "│ from │ to │",
+    "├──────┼────┤",
+    "│ aa   │ aa │",
+    "│ aa   │ bb │",
+    "│ bb   │ aa │",
+    "│ bb   │ bb │",
+    "│ cc   │ aa │",
+    "│ cc   │ bb │",
+    "│ dd   │ aa │",
+    "│ dd   │ bb │",
+    "│ dd   │ cc │",
+    "└──────┴────┘",
+    "┌───────┬───────┐",
+    "│ p     │ q     │",
+    "├───────┼───────┤",
+    "│ false │ false │",
+    "│ true  │ false │",
+    "└───────┴───────┘",
+    "┌────────────────────────┬────────────────────────┐",
+    "│ x                      │ y                      │",
+    "├────────────────────────┼────────────────────────┤",
+    "│ tuple { n: 1, t: \"a\" } │ tuple { n: 2, t: \"a\" } │",
+    "│ tuple { n: 1, t: \"b\" } │ tuple { n: 1, t: \"a\" } │",
+    "│ tuple { n: 1, t: \"b\" } │ tuple { n: 2, t: \"a\" } │",
+    "└────────────────────────┴────────────────────────┘",
+    "┌────────────┬────────────┐",
+    "│ a          │ b          │",
+    "├────────────┼────────────┤",
+    "│ mark{n: 1} │ mark{n: 0} │",
+    "│ mark{n: 2} │ mark{n: 0} │",
+    "│ mark{n: 2} │ mark{n: 1} │",
+    "└────────────┴────────────┘",
+    "┌──────────────────────────────────────┬──────────────────────────────────────┐",
+    "│ a                                    │ b                                    │",
+    "├──────────────────────────────────────┼──────────────────────────────────────┤",
+    "│ relation { n: integer } { { n: 1 } } │ relation { n: integer } { { n: 0 } } │",
+    "│ relation { n: integer } { { n: 2 } } │ relation { n: integer } { { n: 0 } } │",
+    "│ relation { n: integer } { { n: 2 } } │ relation { n: integer } { { n: 1 } } │",
+    "└──────────────────────────────────────┴──────────────────────────────────────┘",
+    "┌──────────┬──────────┐",
+    "│ a        │ b        │",
+    "├──────────┼──────────┤",
+    "│ tuple {} │ tuple {} │",
+    "└──────────┴──────────┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 1 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 3 │ 1 │",
+    "│ 3 │ 2 │",
+    "└───┴───┘",
+];
+
+#[test]
+fn a_transitive_closure_is_of_values_of_any_kind() {
+    let (code, stderr) = run_source("closures", CLOSURES);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), CLOSURES_WRITTEN);
+}
+
+/// A closure takes about what its result does: 16 bytes for each of its two
+/// million tuples, however many steps its paths take, and it took 40 times that
+/// with each step keeping a merged copy of all so far.
+#[test]
+fn a_transitive_closure_takes_about_what_its_result_does() {
+    let source = "operator main{} [
+    var n := 2000;
+    var edges := (series{from: 1, to: n} rename {value as a}) extend { b := a + 1 };
+    call debug_value{v: count{r: edges tclose}};
+];";
+    let peak = peak_memory_of("tclose_memory", source, 0);
+    assert!(peak < 100 << 20, "{peak} bytes");
+}
+
+/// An arc to a value already reached is passed over, as all that it reaches came
+/// with it: here, with all 4.5 million arcs that go forward among 3000 values, that
+/// takes 40 times less time, which only a wide margin of it can tell.
+#[test]
+fn a_transitive_closure_goes_each_way_to_a_value_once() {
+    let source = "operator main{} [
+    var n := 3000;
+    var a := series{from: 1, to: n} rename {value as a};
+    var b := series{from: 1, to: n} rename {value as b};
+    var edges := (a times b) where a < b;
+    call debug_value{v: count{r: edges tclose}};
+];";
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let input = dir.join("tclose_ways.trendy");
+    std::fs::write(&input, source).unwrap();
+    let output = dir.join("tclose_ways");
+    let (code, stderr) = build_and_run(&input, &output, &workspace_root());
+    assert_eq!((code, stderr.as_str()), (0, "4498500\n"));
+    let start = std::time::Instant::now();
+    Command::new(&output).output().unwrap();
+    let taken = start.elapsed();
+    assert!(taken.as_secs() < 4, "{taken:?}");
+}

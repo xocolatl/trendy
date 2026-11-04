@@ -1793,10 +1793,17 @@ checks the operand's heading (`check::closed`): two attributes of one
 type (A0069), whichever is an arc's start, since closing the arcs the
 other way round gives the same tuples. A constant operand is folded
 (`Value::tclose`, a search from each value), and lowering calls
-`trendy_rt_tclose` otherwise, which grows the closure semi-naively: each
-step joins only the pairs the last one found to the arcs, whose canonical
-order lets it find a value's arcs by binary search, until a step finds
-no pair the closure lacks.
+`trendy_rt_tclose` otherwise. That numbers the operand's values in canonical
+order (`Arcs`), finds the graph's strongly connected components as Tarjan's
+algorithm does, without recursion of its own, and what each reaches as it is
+found, after all those it leads to (`reaching`, as Nuutila's algorithm does): all
+of a component's values reach the same, so those are kept once, and an arc to a
+value already reached is skipped, since it came with all it reaches, so that the
+work is about the size of the result, however many ways lead to a value. Each
+value's list is then in order, and written as it is, with nothing to sort or take
+duplicates from. The numbers take 32 bits, which halves the memory they need; more
+values than that fail as being out of memory, since those arrays would take over
+160 GB as it is.
 
 The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
