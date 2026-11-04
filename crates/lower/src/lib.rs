@@ -3786,6 +3786,13 @@ impl<'a> FunctionBuilder<'a> {
     /// values first, which take a reference to what they point to, so that
     /// a change in place copies any buffer they hold.
     fn assign(&mut self, assignments: &[hir::Assignment], cx: &mut Lowering) {
+        // An `insert` alone: with others, they read the variable as it was.
+        if let [assignment] = assignments
+            && let Some((tuples, combination)) = self.inserted(assignment)
+        {
+            self.insert_tuples(&assignment.target, tuples, combination, cx);
+            return;
+        }
         let mut values: Vec<(hir::Target, lir::Place)> = Vec::new();
         let mut changed: Vec<(hir::Target, Vec<Computed>)> = Vec::new();
         for assignment in assignments {
@@ -3829,6 +3836,57 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
+    /// The tuples `assignment` adds to its variable, as what kind of union,
+    /// if that is all it does: its value is the variable's, of the same type
+    /// as the tuples are, in a union with them.
+    fn inserted<'v>(
+        &self,
+        assignment: &'v hir::Assignment,
+    ) -> Option<(&'v hir::Expr, hir::Combination)> {
+        let hir::Expr::Combine(
+            combination @ (hir::Combination::Union | hir::Combination::DisjointUnion),
+            variable,
+            tuples,
+        ) = &assignment.value
+        else {
+            return None;
+        };
+        let ty = self.assigned(&assignment.target).0;
+        (**variable == assignment.target.read()
+            && self.type_of(variable) == *ty
+            && self.type_of(tuples) == *ty)
+            .then_some((&**tuples, *combination))
+    }
+
+    /// Add `tuples` to the relation variable `target`, in its own buffer if
+    /// nothing else holds it (see [`lir::RuntimeFn::Insert`]). Its keys are
+    /// then checked of what was added alone, as it held for the others, and
+    /// a failure leaves it as it is, as that stops the program, or a
+    /// transaction, which restores it.
+    fn insert_tuples(
+        &mut self,
+        target: &hir::Target,
+        tuples: &hir::Expr,
+        combination: hir::Combination,
+        cx: &mut Lowering,
+    ) {
+        let tuples = self.place(tuples, cx);
+        let ty = self.assigned(target).0.clone();
+        let holder = self.holder(target, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let combination = match combination {
+            hir::Combination::DisjointUnion => lir::Combination::DisjointUnion,
+            _ => lir::Combination::Union,
+        };
+        let combination = usize_constant(combination.code(), cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Insert,
+            args: vec![holder.clone(), tuples.clone(), descriptor, combination],
+        });
+        self.scoped = true;
+        self.check_keys_of(target, &holder, Some(&tuples), cx);
+    }
+
     /// The type and keys of the variable `target`, of the program or local,
     /// or of a `var` or `out` parameter, which has none: its variable's are checked
     /// where it is passed.
@@ -3851,6 +3909,18 @@ impl<'a> FunctionBuilder<'a> {
     /// of its keys, writing the variable, the key and the tuples. A key of
     /// the whole heading always holds.
     fn check_keys(&mut self, target: &hir::Target, value: &lir::Place, cx: &mut Lowering) {
+        self.check_keys_of(target, value, None, cx);
+    }
+
+    /// As [`FunctionBuilder::check_keys`], of what the tuples `added` alone
+    /// could have broken, if it says.
+    fn check_keys_of(
+        &mut self,
+        target: &hir::Target,
+        value: &lir::Place,
+        added: Option<&lir::Place>,
+        cx: &mut Lowering,
+    ) {
         let (ty, keys) = self.assigned(target);
         let (ty, keys) = (ty.clone(), keys.to_vec());
         if !matches!(ty, hir::Type::Relation(_)) {
@@ -3858,7 +3928,7 @@ impl<'a> FunctionBuilder<'a> {
         }
         let variable = self.target_name(target).to_string();
         for key in &keys {
-            self.key_checked(value, &ty, key, cx, |this, failed, cx| {
+            self.key_checked(value, added, &ty, key, cx, |this, failed, cx| {
                 Broken::Fail(Box::new(lir::Failure::Key(lir::KeyFailure::Variable {
                     value: failed.value,
                     descriptor: failed.descriptor,
@@ -5117,7 +5187,7 @@ impl<'a> FunctionBuilder<'a> {
                 .expect("a representation has its components")
                 .clone();
             for key in keys {
-                self.key_checked(&relation, &ty, key, cx, |this, failed, cx| {
+                self.key_checked(&relation, None, &ty, key, cx, |this, failed, cx| {
                     let Failed {
                         value,
                         descriptor,
@@ -5297,6 +5367,7 @@ impl<'a> FunctionBuilder<'a> {
     fn key_checked(
         &mut self,
         relation: &lir::Place,
+        added: Option<&lir::Place>,
         ty: &hir::Type,
         key: &hir::Key,
         cx: &mut Lowering,
@@ -5318,16 +5389,21 @@ impl<'a> FunctionBuilder<'a> {
             lir::Layout::Usize,
             lir::Layout::Usize,
         ]));
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::KeyShared,
-            args: vec![
-                shared.clone(),
-                pair.clone(),
-                relation.clone(),
-                descriptor.clone(),
-                projected.clone(),
-            ],
-        });
+        let mut args = vec![
+            shared.clone(),
+            pair.clone(),
+            relation.clone(),
+            descriptor.clone(),
+            projected.clone(),
+        ];
+        let function = match added {
+            Some(added) => {
+                args.push(added.clone());
+                lir::RuntimeFn::KeyAdded
+            }
+            None => lir::RuntimeFn::KeyShared,
+        };
+        self.insts.push(lir::Inst::CallRuntime { function, args });
         let (kept, failed) = (self.new_block(), self.new_block());
         self.end_block(
             lir::Terminator::Branch {
@@ -7756,6 +7832,41 @@ mod tests {
                 copy(data(1), slot(1)),
             ]
         );
+    }
+
+    #[test]
+    fn an_insert_alone_changes_its_variable() {
+        let var = |i| hir::Expr::Variable(hir::VariableId(i));
+        let empty = || {
+            variable(
+                "r",
+                hir::Value::Relation(hir::RelationValue {
+                    heading: hir::Heading::new(BTreeMap::new()),
+                    tuples: BTreeSet::new(),
+                }),
+            )
+        };
+        let calls = |statement: hir::Statement| {
+            let lowered = lower_program(&program(
+                vec![user("main", &[], vec![statement])],
+                vec![empty(), empty()],
+            ));
+            runtime_calls(&lowered.functions[0]).concat()
+        };
+        let union =
+            |lhs, rhs| hir::Expr::Combine(hir::Combination::Union, Box::new(lhs), Box::new(rhs));
+        // `insert r s;`, whichever way it is written.
+        let inserts = calls(assign(vec![(0, union(var(0), var(1)))]));
+        assert!(inserts.contains(&lir::RuntimeFn::Insert), "{inserts:?}");
+        assert!(!inserts.contains(&lir::RuntimeFn::Combine), "{inserts:?}");
+        // The other way round, it is a new relation.
+        let unions = calls(assign(vec![(0, union(var(1), var(0)))]));
+        assert!(unions.contains(&lir::RuntimeFn::Combine), "{unions:?}");
+        assert!(!unions.contains(&lir::RuntimeFn::Insert), "{unions:?}");
+        // With others at once, which read it as it was, so is it.
+        let both = calls(assign(vec![(0, union(var(0), var(1))), (1, var(0))]));
+        assert!(both.contains(&lir::RuntimeFn::Combine), "{both:?}");
+        assert!(!both.contains(&lir::RuntimeFn::Insert), "{both:?}");
     }
 
     #[test]

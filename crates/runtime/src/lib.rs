@@ -259,6 +259,9 @@ pub struct Header {
     /// The type of the relation or array whose tuples or elements the buffer
     /// holds, or null for a text's bytes, which point to nothing.
     pub desc: *const TypeDesc,
+    /// How many bytes it has room for, so that a relation's holder can add
+    /// tuples to it where nothing else holds it ([`trendy_rt_insert`]).
+    pub room: usize,
 }
 
 /// [`Header::count`] of a buffer compiled into the program.
@@ -562,6 +565,7 @@ fn new_buffer(bytes: usize, desc: *const TypeDesc) -> Fallible<*mut u8> {
                 count: 1,
                 len: 0,
                 desc,
+                room: bytes,
             },
         );
         Ok(buffer)
@@ -936,10 +940,28 @@ pub unsafe extern "C" fn trendy_rt_duplicate(
 unsafe fn copied(buffer: *const u8, len: usize, desc: &TypeDesc) -> Fallible<*mut u8> {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let element = desc.element();
-        let Some(bytes) = len.checked_mul(element.size) else {
+        let Some(bytes) = len.checked_mul(desc.element().size) else {
             return Err(out_of_memory());
         };
+        copied_with_room(buffer, len, desc, bytes)
+    }
+}
+
+/// As [`copied`], with room for `bytes` bytes in all.
+///
+/// # Safety
+///
+/// As for [`copied`], and `bytes` must be room for the `len` elements.
+#[cfg(not(test))]
+unsafe fn copied_with_room(
+    buffer: *const u8,
+    len: usize,
+    desc: &TypeDesc,
+    bytes: usize,
+) -> Fallible<*mut u8> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let element = desc.element();
         let copy = new_buffer(bytes, desc)?;
         for i in 0..len {
             let at = i * element.size;
@@ -1895,6 +1917,201 @@ pub unsafe extern "C" fn trendy_rt_combine(
         dst.write_unaligned(Text {
             bytes: out,
             len: count,
+        });
+        Ok(())
+    })
+}
+
+/// Where `tuple` goes among the first `end` of the `tuples`, of a relation
+/// `desc` describes: the place of the first that isn't less, and whether it
+/// is equal. Looks back from the end, one tuple, then two, then four, and so
+/// on, then between the last two it looked at, so finding the place of a tuple
+/// that goes last takes one comparison, and of `n` tuples in order among `m`
+/// no more than a merge would.
+///
+/// # Safety
+///
+/// `tuples` must point to at least `end` valid tuples, in canonical order, and
+/// `tuple` to a valid one.
+#[cfg(not(test))]
+unsafe fn place_from_end(
+    tuples: *const u8,
+    end: usize,
+    tuple: *const u8,
+    desc: &TypeDesc,
+) -> (usize, bool) {
+    use core::cmp::Ordering;
+    // Those before `lower` are less, and those from `upper` greater.
+    let (mut lower, mut upper) = (0, end);
+    let mut step = 1;
+    // SAFETY: guaranteed by the caller; each place compared is below `end`.
+    unsafe {
+        let size = desc.element().size;
+        while upper > 0 {
+            let at = upper.saturating_sub(step);
+            match compare_tuples(tuples.add(at * size), tuple, desc) {
+                Ordering::Less => {
+                    lower = at + 1;
+                    break;
+                }
+                Ordering::Equal => return (at, true),
+                Ordering::Greater => upper = at,
+            }
+            step = step.saturating_mul(2);
+        }
+        while lower < upper {
+            let at = lower + (upper - lower) / 2;
+            match compare_tuples(tuples.add(at * size), tuple, desc) {
+                Ordering::Less => lower = at + 1,
+                Ordering::Equal => return (at, true),
+                Ordering::Greater => upper = at,
+            }
+        }
+    }
+    (lower, false)
+}
+
+/// Make the relation at `value`, of the type `desc` describes, with `len`
+/// tuples, the only holder of a buffer with room for `bytes` bytes: as it is,
+/// if nothing else holds it and it has the room; grown, if nothing else
+/// holds it; or else a copy, whose tuples take references to what they point
+/// to, and the holder's reference to the old buffer goes to the current
+/// statement's scope, which may still point into it. It gets more room than
+/// that as it grows, so that adding one tuple after another moves each a few
+/// times at most.
+///
+/// # Safety
+///
+/// `value` must point to a valid relation of the type `desc` describes that
+/// holds a reference to its buffer, or a null pointer. The statement must
+/// have begun a scope. Fails, changing nothing, if there is no memory.
+#[cfg(not(test))]
+unsafe fn with_room(
+    value: *mut Text,
+    len: usize,
+    bytes: usize,
+    desc: &TypeDesc,
+) -> Fallible<*mut u8> {
+    // SAFETY: guaranteed by the caller; a block's memory starts with the
+    // header, before the buffer.
+    unsafe {
+        let size = desc.element().size;
+        let now = len.saturating_mul(size);
+        let room = bytes.max(now.saturating_mul(2)).max(size.saturating_mul(4));
+        let (buffer, _) = read_slice(value.cast());
+        let buffer = buffer.cast_mut();
+        if buffer.is_null() {
+            return new_buffer(room, desc);
+        }
+        let held = header(buffer);
+        if held.count != 1 {
+            reserve(1)?;
+            let copy = copied_with_room(buffer, len, desc, room)?;
+            hold_reserved(buffer);
+            return Ok(copy);
+        }
+        if held.room >= bytes {
+            return Ok(buffer);
+        }
+        let Some(total) = room.checked_add(HEADER) else {
+            return Err(out_of_memory());
+        };
+        let grown = realloc(buffer.sub(HEADER).cast(), total);
+        if grown.is_null() {
+            return Err(out_of_memory());
+        }
+        let buffer = grown.cast::<u8>().add(HEADER);
+        set_header(buffer, Header { room, ..held });
+        Ok(buffer)
+    }
+}
+
+/// Add the tuples of the relation `tuples` to the relation variable at
+/// `value`, both of the type `desc` describes, as `*combination`, a
+/// `COMBINE_` constant of a union or a disjoint union, says: in the variable's
+/// own buffer if nothing else holds it, moving only the tuples after each one
+/// added, so that adding a few tuples doesn't copy the others, and in a copy
+/// of it otherwise, as a value something else holds doesn't change. Tuples
+/// `value` already has aren't added. Fails, changing nothing, if a disjoint
+/// union's operands share a tuple, or there is no memory.
+///
+/// `tuples` can be in the variable's own buffer, as all of them are then in
+/// the variable already, so nothing is added.
+///
+/// # Safety
+///
+/// `value` must point to a valid relation of the type `desc` describes that
+/// holds a reference to its buffer, or a null pointer, `tuples` to a valid
+/// relation of the type, and `combination` to a `COMBINE_` constant. The
+/// statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_insert(
+    value: *mut Text,
+    tuples: *const u8,
+    desc: *const TypeDesc,
+    combination: *const usize,
+) -> bool {
+    /// In a tuple's place, one the relation has already.
+    const THERE: usize = usize::MAX;
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let desc = &*desc;
+        let element = desc.element();
+        let size = element.size;
+        let (have, count) = read_slice(value.cast());
+        let (added, added_count) = read_slice(tuples);
+        // Where each goes, from the last, as they are in canonical order.
+        let places = Temp::<usize>::new(added_count)?;
+        let mut end = count;
+        let mut new = 0;
+        for j in (0..added_count).rev() {
+            let tuple = added.add(j * size);
+            let (at, equal) = place_from_end(have, end, tuple, desc);
+            if equal && combination.read_unaligned() == COMBINE_DISJOINT_UNION {
+                return Err(tuple_failed(SHARED_TUPLE, tuple, element));
+            }
+            places.ptr().add(j).write(if equal { THERE } else { at });
+            new += usize::from(!equal);
+            end = at;
+        }
+        if new == 0 {
+            return Ok(());
+        }
+        let Some(bytes) = count
+            .checked_add(new)
+            .and_then(|total| total.checked_mul(size))
+        else {
+            return Err(out_of_memory());
+        };
+        let buffer = with_room(value, count, bytes, desc)?;
+        // From the end, each to its place, and those after it to theirs.
+        let mut end = count;
+        let mut to = count + new;
+        for j in (0..added_count).rev() {
+            let at = places.ptr().add(j).read();
+            if at == THERE {
+                continue;
+            }
+            let after = end - at;
+            to -= after;
+            core::ptr::copy(buffer.add(at * size), buffer.add(to * size), after * size);
+            to -= 1;
+            let tuple = added.add(j * size);
+            core::ptr::copy_nonoverlapping(tuple, buffer.add(to * size), size);
+            retain(tuple, element);
+            end = at;
+        }
+        set_header(
+            buffer,
+            Header {
+                len: count + new,
+                ..header(buffer)
+            },
+        );
+        value.write_unaligned(Text {
+            bytes: buffer,
+            len: count + new,
         });
         Ok(())
     })
@@ -3333,6 +3550,89 @@ pub unsafe extern "C" fn trendy_rt_key_shared(
             shared.write(1);
             pair.write_unaligned(first);
             pair.add(1).write_unaligned(second);
+        }
+        Ok(())
+    })
+}
+
+/// As [`trendy_rt_key_shared`], of a relation that has been without two such
+/// tuples but for the tuples of the relation `added`, which it has now: only
+/// they can share a key's values with another, so only they are looked for,
+/// by a binary search where the key's attributes are the first in the tuples'
+/// order, as those that share them are together then, and otherwise by going
+/// through the tuples, either way without sorting them all.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_key_shared`], and `added` must point to a valid relation
+/// of the type `desc` describes, each of whose tuples `value` has.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_key_added(
+    shared: *mut u8,
+    pair: *mut usize,
+    value: *const u8,
+    desc: *const TypeDesc,
+    key: *const TypeDesc,
+    added: *const u8,
+) -> bool {
+    // SAFETY: guaranteed by the caller; the key's attributes are written
+    // before they are read.
+    status(|| unsafe {
+        shared.write(0);
+        let (tuples, count) = read_slice(value);
+        let (added, added_count) = read_slice(added);
+        let (desc, key) = (&*desc, attributes(&*key));
+        let element = desc.element();
+        let found = Temp::<*const Attr>::new(key.len())?;
+        let mut len = 0;
+        // Whether they are the first attributes, in the tuples' order.
+        let mut first = true;
+        let mut others = false;
+        for attr in attributes(element) {
+            if key.iter().any(|k| name(k) == name(attr)) {
+                found.ptr().add(len).write(attr);
+                len += 1;
+                first &= !others;
+            } else {
+                others = true;
+            }
+        }
+        let compared = array(found.ptr(), len);
+        let size = element.size;
+        let on_key = |a: *const u8, b: *const u8| {
+            compared
+                .iter()
+                .map(|&attr| order(a.add((*attr).offset), b.add((*attr).offset), &*(*attr).desc))
+                .find(|o| o.is_ne())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        };
+        for j in 0..added_count {
+            let tuple = added.add(j * size);
+            let two = if first {
+                // The first of those with its values for the key.
+                let (mut lower, mut upper) = (0, count);
+                while lower < upper {
+                    let at = lower + (upper - lower) / 2;
+                    if on_key(tuples.add(at * size), tuple).is_lt() {
+                        lower = at + 1;
+                    } else {
+                        upper = at;
+                    }
+                }
+                (lower + 1 < count && on_key(tuples.add((lower + 1) * size), tuple).is_eq())
+                    .then_some((lower, lower + 1))
+            } else {
+                let mut sharing =
+                    (0..count).filter(|&i| on_key(tuples.add(i * size), tuple).is_eq());
+                sharing.next().zip(sharing.next())
+            };
+            if let Some((a, b)) = two {
+                shared.write(1);
+                pair.write_unaligned(a);
+                pair.add(1).write_unaligned(b);
+                return Ok(());
+            }
         }
         Ok(())
     })

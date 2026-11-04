@@ -1422,7 +1422,7 @@ mod tests {
             ])])
             .unwrap();
         assert_eq!(value.addresses, [(0, lir::DataId(0), Some(1))]);
-        assert_eq!(layout.field_offset(&buffer, 1), Ok(24));
+        assert_eq!(layout.field_offset(&buffer, 1), Ok(32));
         let laid_out = layout.lay_out(&buffer).unwrap();
         assert_eq!(
             laid_out.bytes[..8],

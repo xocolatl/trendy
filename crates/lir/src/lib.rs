@@ -402,6 +402,16 @@ pub enum RuntimeFn {
     /// descriptor describes, which break the constraint written
     /// `constraint`, a text, with them.
     BrokenCallConstraint,
+    /// `trendy_rt_insert(relation, tuples, descriptor, combination)`: add
+    /// the tuples of the relation `tuples` to the relation variable at
+    /// `relation`, both of the type the descriptor describes, in its own
+    /// buffer if nothing else holds it, as `combination`, a
+    /// [`Combination::code`] of a union or a disjoint union, says.
+    Insert,
+    /// `trendy_rt_key_added(shared, pair, src, descriptor, key, added)`: as
+    /// [`RuntimeFn::KeyShared`], of a relation that was without two such
+    /// tuples before the tuples of the relation `added` were added to it.
+    KeyAdded,
     /// `trendy_rt_key_shared(shared, pair, src, descriptor, key)`: store at
     /// `shared`, a [`Layout::U8`], 1 if the relation `src`, of the type the
     /// descriptor describes, has two tuples with the same values for the
@@ -668,7 +678,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 79] = [
+    pub const ALL: [RuntimeFn; 81] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -708,6 +718,8 @@ impl RuntimeFn {
         RuntimeFn::BrokenConstraintInFile,
         RuntimeFn::OverlappingSubtypes,
         RuntimeFn::BrokenCallConstraint,
+        RuntimeFn::Insert,
+        RuntimeFn::KeyAdded,
         RuntimeFn::KeyShared,
         RuntimeFn::KeyViolated,
         RuntimeFn::ComponentKeyViolated,
@@ -778,6 +790,8 @@ impl RuntimeFn {
             | RuntimeFn::Sum
             | RuntimeFn::Product
             | RuntimeFn::KeyShared
+            | RuntimeFn::KeyAdded
+            | RuntimeFn::Insert
             | RuntimeFn::Concat
             | RuntimeFn::Keep
             | RuntimeFn::HandOut
@@ -885,6 +899,8 @@ impl RuntimeFn {
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::BrokenCallConstraint => "trendy_rt_broken_call_constraint",
+            RuntimeFn::Insert => "trendy_rt_insert",
+            RuntimeFn::KeyAdded => "trendy_rt_key_added",
             RuntimeFn::KeyShared => "trendy_rt_key_shared",
             RuntimeFn::KeyViolated => "trendy_rt_key_violated",
             RuntimeFn::ComponentKeyViolated => "trendy_rt_component_key_violated",
@@ -1598,6 +1614,11 @@ impl Field {
     /// right after it is aligned.
     #[must_use]
     pub fn immortal_header() -> Field {
-        Field::Struct(vec![Field::I64(-1), Field::Usize(0), Field::Usize(0)])
+        Field::Struct(vec![
+            Field::I64(-1),
+            Field::Usize(0),
+            Field::Usize(0),
+            Field::Usize(0),
+        ])
     }
 }

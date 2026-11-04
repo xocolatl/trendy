@@ -2148,6 +2148,25 @@ of a constant array, or of a selector whose other elements can't fail, and
 reports a position out of range when compiling where it can: one below 1
 always, and one beyond the count where the count is known (`ops::index`).
 
+An `insert`, an assignment alone of `Combine(Union, r, s)` or
+`Combine(DisjointUnion, r, s)` to `r`, of one type (`FunctionBuilder::inserted`),
+changes `r`'s buffer rather than making a new one (`trendy_rt_insert`). As an
+array's elements do, it relies on the count: a buffer with one reference is its
+holder's, so nothing can tell, and otherwise `with_room` copies it, and gives the
+holder's reference to the statement's scope. A buffer's header says how many
+bytes it has room for (`Header::room`), which grows by doubling, so appending
+is amortized. Where each tuple goes is found from the end (`place_from_end`),
+first looking back one, then two, then four, so a tuple that goes last takes one
+comparison, and places are found before anything moves, so a `d_insert` that
+fails leaves it as it was, and tuples that come from its own buffer, all of
+which it has, add nothing. With other assignments, which read the variable as it
+was, it is an ordinary union. Keys are checked after, of what was added alone
+(`trendy_rt_key_added`), as nothing else can have broken them: by a binary search
+where the key's attributes come first in the tuples' order, and otherwise by
+going through them. A failure there leaves the variable changed, which only
+stops the program, or a transaction, which holds the old value, so its first
+`insert` copied, and restores it.
+
 An assignment of an array's elements, `a := WithElements(a, …)`, changes
 them in place. Each change's positions and value are computed into slots
 of their own, with the statement's other values (`computed`), and two

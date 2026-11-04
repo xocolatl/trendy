@@ -4177,6 +4177,15 @@ operator main{} [
 | `load a from r order [asc x];` | `a :=` the array of the tuples of `r`, in order (see [Loading a relation](#loading-a-relation)) |
 | `a[i] := x;` | `a :=` the array `a` with its element at position `i` changed to `x` (see [Changing an element](#changing-an-element)) |
 
+- **`insert` changes the variable's own buffer where it can,** as a value
+  nothing else holds can't be told from a new one. So adding a few tuples takes
+  no copy of the others, whichever is written, `insert r s;` or
+  `r := r union s;`, and one that goes last takes one comparison, however many
+  there are; a tuple that goes elsewhere moves those after it. A value another
+  variable, a parameter or a transaction holds doesn't change: the first
+  `insert` makes the variable a copy of its own. So does an `insert` with other
+  changes at once, in an `assign` block, as they read the variable as it was.
+  Only what it adds is checked against its keys.
 - **`delete` needs `where` and a condition** (P0023), so that every tuple
   isn't deleted by accident. To delete them all, assign the empty relation:
   `r := relation {};`, whose heading comes from the variable.

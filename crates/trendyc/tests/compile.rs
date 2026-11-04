@@ -710,6 +710,258 @@ fn a_series_with_a_step_of_zero_fails() {
     assert!(stderr.contains("series_known_zero.trendy:3:25"), "{stderr}");
 }
 
+/// `insert`, which changes a variable's own buffer where nothing else holds
+/// it, is the same as `r := relation { … } union r`, which never does: for
+/// tuples in order, out of it and repeated, by the thousand, of integers, and
+/// of texts, which their buffers hold references to.
+const INSERTS: &str = r#"operator main{} [
+    var r: relation { a: integer, t: text };
+    var s: relation { a: integer, t: text };
+    var x := 1;
+    var i := 0;
+    var wrong := 0;
+    while i < 3000 loop [
+        x := x * 48271 mod 2147483647;
+        var a := x mod 500;
+        var t := to_text{from: x mod 7};
+        var more := relation { { a, t } };
+        /* Two at a time, some of them. */
+        if i mod 5 = 0 then [
+            more := more union relation { { a: a + 1, t: "two" } };
+        ];
+        insert r more;
+        s := more union s;
+        if r <> s then [
+            wrong := wrong + 1;
+        ];
+        i := i + 1;
+    ];
+    /* In order, which goes last, and back, which goes first. */
+    var up: relation { n: integer };
+    var down: relation { n: integer };
+    i := 1;
+    while i <= 2000 loop [
+        insert up relation { { n: i } };
+        insert down relation { { n: 2001 - i } };
+        i := i + 1;
+    ];
+    call debug_value{v: wrong};
+    call debug_value{v: count{r}};
+    call debug_value{v: up = down};
+    call debug_value{v: sum{r: up, of: n}};
+    call debug_value{v: min{r: down, of: n}};
+];
+"#;
+
+#[test]
+fn inserts_are_what_unions_are() {
+    let (code, stderr) = run_source("inserts", INSERTS);
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[0], "0", "{stderr}");
+    let count: usize = lines[1].parse().unwrap();
+    assert!(count > 500, "{stderr}");
+    assert_eq!(lines[2..], ["true", "2001000", "1"], "{stderr}");
+}
+
+/// A value something else holds doesn't change when its variable's `insert`
+/// does: another variable's, a parameter's, a transaction's that it restores,
+/// a constant's, and a statement's own, which reads the variable as it was.
+const INSERTS_AND_VALUES: &str = r"var constant := relation { { n: 1 } };
+var global: relation { n: integer };
+
+operator grown{r: relation { n: integer }, n: integer}: relation { n: integer } [
+    var mine := r;
+    insert mine relation { { n } };
+    mine
+];
+
+operator into{var r: relation { n: integer }, n: integer} [
+    insert r relation { { n } };
+];
+
+operator given_then_changed{r: relation { n: integer }} [
+    insert global relation { { n: 0 } };
+    call debug_value{v: min{r, of: n}};
+];
+
+operator made{out r: relation { n: integer }} [
+    r := relation { { n: 7 } };
+    insert r relation { { n: 8 } };
+];
+
+operator main{} [
+    /* Built as it runs, so that the buffer is no constant's, and each holds
+       the same one, where a tuple that goes first or between would show. */
+    var built: relation { n: integer };
+    insert built relation { { n: 10 } };
+    insert built relation { { n: 20 } };
+    var shared := built;
+    insert built relation { { n: 5 } };
+    call debug_value{v: shared};
+    call debug_value{v: built};
+    var between := grown{r: shared, n: 15};
+    call debug_value{v: shared};
+    call debug_value{v: between};
+    var a := relation { { n: 1 }, { n: 2 } };
+    var b := a;
+    insert a relation { { n: 3 } };
+    call debug_value{v: tuple { a: count{r: a}, b: count{r: b} }};
+    /* Each again, now that each is the only holder. */
+    insert b relation { { n: 4 } };
+    insert a relation { { n: 5 } };
+    call debug_value{v: a};
+    call debug_value{v: b};
+    /* A constant isn't changed. */
+    insert constant relation { { n: 2 } };
+    var fresh := relation { { n: 9 } };
+    insert fresh relation { { n: 10 } };
+    call debug_value{v: tuple { c: count{r: constant}, f: count{r: fresh} }};
+    /* Through an operator that keeps its own copy, or changes the caller's. */
+    var c := grown{r: a, n: 6};
+    call debug_value{v: tuple { a: count{r: a}, c: count{r: c} }};
+    call into{var r: a, n: 6};
+    call debug_value{v: count{r: a}};
+    var o: relation { n: integer };
+    call made{out r: o};
+    call debug_value{v: o};
+    /* An argument kept while what it came from changes. */
+    insert global relation { { n: 1 } };
+    call given_then_changed{r: global};
+    call debug_value{v: count{r: global}};
+    /* What it holds already, and what comes from itself. */
+    var same := a;
+    insert a same;
+    insert a a where n > 2;
+    insert a a replace { n := n + 100 };
+    call debug_value{v: count{r: a}};
+    /* With others at once, each reads it as it was. */
+    var d := relation { { n: 1 } };
+    var e: relation { n: integer };
+    assign {
+        insert d relation { { n: 2 } };
+        e := d;
+    };
+    call debug_value{v: tuple { d: count{r: d}, e: count{r: e} }};
+    /* A failure undoes it, once and after the first has its own buffer. */
+    var f := relation { { n: 1 } };
+    var failed: relation transaction_collection;
+    transaction collecting failed [
+        insert f relation { { n: 2 } };
+        insert f relation { { n: 3 } };
+        d_insert f relation { { n: 3 } };
+    ];
+    call debug_value{v: f};
+    call debug_value{v: count{r: failed}};
+    var g: relation { n: integer };
+    insert g relation { { n: 2 } };
+    transaction collecting failed [
+        insert g relation { { n: 1 } };
+        d_insert g relation { { n: 1 } };
+    ];
+    call debug_value{v: g};
+    /* A relation without attributes. */
+    var dum: relation {};
+    insert dum relation { {} };
+    insert dum relation { {} };
+    call debug_value{v: dum};
+    /* Of relations, of texts made as it runs. */
+    var nested: relation { r: relation { n: integer }, t: text };
+    var i := 0;
+    while i < 50 loop [
+        var inner: relation { n: integer };
+        insert inner relation { { n: i + 1 } };
+        insert nested relation { { r: inner, t: to_text{from: i} } };
+        insert inner relation { { n: i } };
+        i := i + 1;
+    ];
+    call debug_value{v: count{r: nested}};
+    call debug_value{v: count{r: nested where count{r: r} = 1}};
+    call debug_value{v: every{r: nested, of: min{r: r, of: n} = parse_integer{from: t} + 1}};
+];
+";
+
+#[test]
+fn inserts_leave_what_else_holds_a_value_alone() {
+    let (code, stderr) = run_source("inserts_and_values", INSERTS_AND_VALUES);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "relation { n: integer } { { n: 10 }, { n: 20 } }",
+            "relation { n: integer } { { n: 5 }, { n: 10 }, { n: 20 } }",
+            "relation { n: integer } { { n: 10 }, { n: 20 } }",
+            "relation { n: integer } { { n: 10 }, { n: 15 }, { n: 20 } }",
+            "tuple { a: 3, b: 2 }",
+            "relation { n: integer } { { n: 1 }, { n: 2 }, { n: 3 }, { n: 5 } }",
+            "relation { n: integer } { { n: 1 }, { n: 2 }, { n: 4 } }",
+            "tuple { c: 2, f: 2 }",
+            "tuple { a: 4, c: 5 }",
+            "5",
+            "relation { n: integer } { { n: 7 }, { n: 8 } }",
+            "1",
+            "2",
+            "10",
+            "tuple { d: 2, e: 1 }",
+            "relation { n: integer } { { n: 1 } }",
+            "1",
+            "relation { n: integer } { { n: 2 } }",
+            "relation {} { {} }",
+            "50",
+            "50",
+            "true",
+        ],
+        "{stderr}"
+    );
+}
+
+/// What `insert` adds is checked against a variable's keys: by its first
+/// attributes or others, among the tuples or between what is added, and what
+/// is there already doesn't share a key's values with itself. The error writes
+/// the tuples as a key checked whole does.
+#[test]
+fn inserts_check_keys_of_what_they_add() {
+    for (key, first, second) in [
+        ("a", "{ a: 2, z: 5 }", "{ a: 2, z: 9 }"),
+        ("z", "{ a: 2, z: 7 }", "{ a: 4, z: 7 }"),
+    ] {
+        // Fine, then not, by what's added alone.
+        let tuple = if key == "a" {
+            "{ a: 2, z: 9 }"
+        } else {
+            "{ a: 4, z: 7 }"
+        };
+        let source = format!(
+            "var r: relation {{ a: integer, z: integer }} key {{ {key} }};\n\noperator main{{}} [\n    insert r relation {{ {{ a: 1, z: 1 }} }};\n    insert r relation {{ {} }};\n    insert r relation {{ {} }};\n    insert r relation {{ {} }};\n    call debug_value{{v: count{{r}}}};\n    insert r relation {{ {tuple} }};\n    call debug_value{{v: 0}};\n];\n",
+            if key == "a" {
+                "{ a: 2, z: 5 }"
+            } else {
+                "{ a: 2, z: 7 }"
+            },
+            if key == "a" {
+                "{ a: 2, z: 5 }"
+            } else {
+                "{ a: 2, z: 7 }"
+            },
+            "{ a: 3, z: 3 }",
+        );
+        let (code, stderr) = run_source(&format!("insert_key_{key}"), &source);
+        assert_eq!(code, 1, "{stderr}");
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert_eq!(lines[0], "3", "{stderr}");
+        assert!(lines[1].starts_with("error[R0008]"), "{stderr}");
+        assert!(lines[1].contains(first), "{stderr}");
+        assert!(lines[1].contains(second), "{stderr}");
+    }
+    // Between what is added, and undone by a transaction.
+    let (code, stderr) = run_source(
+        "insert_key_between",
+        "var r: relation { a: integer, z: integer } key { z };\n\noperator main{} [\n    insert r relation { { a: 1, z: 1 } };\n    var failed: relation transaction_collection;\n    transaction collecting failed [\n        insert r relation { { a: 2, z: 2 }, { a: 3, z: 2 } };\n    ];\n    call debug_value{v: count{r}};\n    call debug_value{v: count{r: failed}};\n];\n",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), ["1", "1"], "{stderr}");
+}
+
 /// A name alone, in each place one can be, computes what the same thing
 /// written out does, when the program runs.
 #[test]
