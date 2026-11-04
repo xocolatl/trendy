@@ -2167,6 +2167,21 @@ going through them. A failure there leaves the variable changed, which only
 stops the program, or a transaction, which holds the old value, so its first
 `insert` copied, and restores it.
 
+A `delete` is the same, of `Restrict(r, c)`, `Combine(Minus, r, s)` or
+`Combine(IncludedMinus, r, s)` assigned alone to `r`
+(`FunctionBuilder::delete_unless`, `FunctionBuilder::changed_by_tuples`). What
+goes is known before anything moves, so a failure changes nothing, and what a
+condition reads of `r` is as it was. `delete_unless` takes what is to go to be
+the opposite of what's kept (`Expr::negated`), so `equal_runs` finds a run of it:
+if that is all the condition says, the run goes (`trendy_rt_remove_run`), and
+otherwise a byte for each tuple of the run says which do, computed as a
+restriction's condition is (`trendy_rt_remove_marked`). `trendy_rt_remove` finds
+places as `trendy_rt_insert` does, and fails if an `i_delete`'s tuple isn't
+there. All of them come to `removed_from`, which gives up what those tuples hold
+and moves the rest down the buffer, which keeps its room, or copies the rest
+where something else holds it. A key can't be broken by taking tuples, so none is
+checked.
+
 An assignment of an array's elements, `a := WithElements(a, …)`, changes
 them in place. Each change's positions and value are computed into slots
 of their own, with the statement's other values (`computed`), and two

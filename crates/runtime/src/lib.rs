@@ -2117,6 +2117,242 @@ pub unsafe extern "C" fn trendy_rt_insert(
     })
 }
 
+/// Take `gone` tuples from the relation variable at `value`, of the type
+/// `desc` describes, those at the places of `ranges`, each from its first to
+/// before its last, in order, none of them empty or touching: in the variable's
+/// own buffer if nothing else holds it, which keeps its room, giving up what
+/// they point to and moving those after them, and otherwise in a copy of the
+/// others, as a value something else holds doesn't change, and the holder's
+/// reference to the old buffer goes to the current statement's scope, which may
+/// still point into it.
+///
+/// # Safety
+///
+/// `value` must point to a valid relation of the type `desc` describes that
+/// holds a reference to its buffer, and `ranges` be of its places. The statement
+/// must have begun a scope. Fails, changing nothing, if there is no memory for
+/// a copy.
+#[cfg(not(test))]
+unsafe fn removed_from(
+    value: *mut Text,
+    desc: &TypeDesc,
+    gone: usize,
+    ranges: impl Iterator<Item = (usize, usize)>,
+) -> Fallible {
+    if gone == 0 {
+        return Ok(());
+    }
+    // SAFETY: guaranteed by the caller; those moved are moved to where tuples
+    // are given up or moved from already.
+    unsafe {
+        let element = desc.element();
+        let size = element.size;
+        let (buffer, count) = read_slice(value.cast());
+        let buffer = buffer.cast_mut();
+        let len = count - gone;
+        let held = header(buffer);
+        if held.count == 1 {
+            let (mut kept, mut from) = (0, 0);
+            for (first, last) in ranges {
+                let before = first - from;
+                core::ptr::copy(
+                    buffer.add(from * size),
+                    buffer.add(kept * size),
+                    before * size,
+                );
+                kept += before;
+                if element.points {
+                    for i in first..last {
+                        release(buffer.add(i * size), element);
+                    }
+                }
+                from = last;
+            }
+            core::ptr::copy(
+                buffer.add(from * size),
+                buffer.add(kept * size),
+                (count - from) * size,
+            );
+            set_header(buffer, Header { len, ..held });
+            value.write_unaligned(Text { bytes: buffer, len });
+            return Ok(());
+        }
+        let Some(bytes) = len.checked_mul(size) else {
+            return Err(out_of_memory());
+        };
+        reserve(1)?;
+        let copy = new_buffer(bytes, desc)?;
+        let (mut kept, mut from) = (0, 0);
+        let mut keep = |from: usize, to: usize| {
+            for i in from..to {
+                copy_element(copy, copy.add(kept * size), buffer.add(i * size), element);
+                kept += 1;
+            }
+        };
+        for (first, last) in ranges {
+            keep(from, first);
+            from = last;
+        }
+        keep(from, count);
+        hold_reserved(buffer);
+        value.write_unaligned(Text { bytes: copy, len });
+        Ok(())
+    }
+}
+
+/// Take the tuples of the relation `tuples` from the relation variable at
+/// `value`, both of the type `desc` describes, as `*combination`, a `COMBINE_`
+/// constant of a minus or an included minus, says (see `removed_from`).
+/// Tuples `value` hasn't got aren't taken. Fails, changing nothing, if an
+/// included minus's right operand has one, or there is no memory. The places
+/// are found before anything moves, so `tuples` can be `value`'s own.
+///
+/// # Safety
+///
+/// `value` must point to a valid relation of the type `desc` describes that
+/// holds a reference to its buffer, or a null pointer, `tuples` to a valid
+/// relation of the type, and `combination` to a `COMBINE_` constant. The
+/// statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_remove(
+    value: *mut Text,
+    tuples: *const u8,
+    desc: *const TypeDesc,
+    combination: *const usize,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let desc = &*desc;
+        let element = desc.element();
+        let size = element.size;
+        let (have, count) = read_slice(value.cast());
+        let (taken, taken_count) = read_slice(tuples);
+        // Each one's place, from the last, in the room from its end.
+        let places = Temp::<usize>::new(taken_count)?;
+        let mut end = count;
+        let mut gone = 0;
+        for j in (0..taken_count).rev() {
+            let tuple = taken.add(j * size);
+            let (at, equal) = place_from_end(have, end, tuple, desc);
+            if equal {
+                gone += 1;
+                places.ptr().add(taken_count - gone).write(at);
+            } else if combination.read_unaligned() == COMBINE_INCLUDED_MINUS {
+                return Err(tuple_failed(MISSING_TUPLE, tuple, element));
+            }
+            end = at;
+        }
+        let places = array(places.ptr().add(taken_count - gone), gone);
+        removed_from(value, desc, gone, ranges_of(places))
+    })
+}
+
+/// The places `places`, in order, as ranges, each from its first to before its
+/// last, with those side by side in one.
+#[cfg(not(test))]
+fn ranges_of(places: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let mut at = 0;
+    core::iter::from_fn(move || {
+        let first = *places.get(at)?;
+        let mut last = first + 1;
+        at += 1;
+        while places.get(at) == Some(&last) {
+            last += 1;
+            at += 1;
+        }
+        Some((first, last))
+    })
+}
+
+/// The place in the relation at `value` of the first tuple of `run`, a run of
+/// it, as [`trendy_rt_equal_run`] makes one or the relation itself, of tuples of
+/// `size` bytes.
+///
+/// # Safety
+///
+/// `run`'s tuples must be in `value`'s buffer, or both empty.
+#[cfg(not(test))]
+unsafe fn place_of_run(value: *const u8, run: *const u8, size: usize) -> usize {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (buffer, _) = read_slice(value);
+        let (first, _) = read_slice(run);
+        if size == 0 || first.is_null() {
+            0
+        } else {
+            first.offset_from(buffer).unsigned_abs() / size
+        }
+    }
+}
+
+/// Take from the relation variable at `value`, of the type `desc` describes,
+/// the tuples of `run`, a run of them (see `removed_from`).
+///
+/// # Safety
+///
+/// `value` must point to a valid relation of the type `desc` describes that
+/// holds a reference to its buffer, or a null pointer, and `run` to a run of
+/// its tuples, as for `place_of_run`. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_remove_run(
+    value: *mut Text,
+    run: *const u8,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let desc = &*desc;
+        let (_, gone) = read_slice(run);
+        if gone == 0 {
+            return Ok(());
+        }
+        let first = place_of_run(value.cast(), run, desc.element().size);
+        removed_from(value, desc, gone, core::iter::once((first, first + gone)))
+    })
+}
+
+/// Take from the relation variable at `value`, of the type `desc` describes,
+/// the tuples of `run`, a run of them, with a non-zero byte at their position
+/// in `marks` (see `removed_from`).
+///
+/// # Safety
+///
+/// As for [`trendy_rt_remove_run`], and `marks` must point to an array of as
+/// many bytes as `run` has tuples.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_remove_marked(
+    value: *mut Text,
+    run: *const u8,
+    marks: *const u8,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let desc = &*desc;
+        let (marked, count) = read_slice(marks);
+        let marks = array(marked, count);
+        let gone = marks.iter().filter(|&&mark| mark != 0).count();
+        if gone == 0 {
+            return Ok(());
+        }
+        let first = place_of_run(value.cast(), run, desc.element().size);
+        let mut at = 0;
+        let ranges = core::iter::from_fn(|| {
+            at += marks[at..].iter().position(|&mark| mark != 0)?;
+            let start = at;
+            at += marks[at..]
+                .iter()
+                .position(|&mark| mark == 0)
+                .unwrap_or(count - at);
+            Some((first + start, first + at))
+        });
+        removed_from(value, desc, gone, ranges)
+    })
+}
+
 /// Store at `dst` the tuples of the relation `lhs`, which `lhs_desc`
 /// describes, that have a match in the relation `rhs`, which `rhs_desc`
 /// describes, on the `*common_count` attributes in `common`, or, if

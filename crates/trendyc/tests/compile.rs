@@ -962,6 +962,271 @@ fn inserts_check_keys_of_what_they_add() {
     assert_eq!(stderr.lines().collect::<Vec<_>>(), ["1", "1"], "{stderr}");
 }
 
+/// `delete`, `i_delete` and `minus`, which change a variable's own buffer where
+/// nothing else holds it, are the same as an operator computing what is left,
+/// which never does: by the first attribute, by it and another, by another
+/// alone, of tuples that are there and aren't, of integers and of texts, which
+/// buffers hold references to.
+const DELETES: &str = r#"operator without{r: relation { a: integer, t: text }, a_is: integer}: relation { a: integer, t: text } [
+    r where not (a = a_is)
+];
+
+operator without_both{r: relation { a: integer, t: text }, a_is: integer, t_is: text}: relation { a: integer, t: text } [
+    r where not (a = a_is and t = t_is)
+];
+
+operator without_text{r: relation { a: integer, t: text }, t_is: text}: relation { a: integer, t: text } [
+    r where not (t = t_is)
+];
+
+operator without_those{r: relation { a: integer, t: text }, m: integer, v: integer}: relation { a: integer, t: text } [
+    r where not (a mod m = v)
+];
+
+operator less{r: relation { a: integer, t: text }, gone: relation { a: integer, t: text }}: relation { a: integer, t: text } [
+    r minus gone
+];
+
+operator main{} [
+    var r: relation { a: integer, t: text };
+    var s: relation { a: integer, t: text };
+    var x := 1;
+    var i := 0;
+    var wrong := 0;
+    var most := 0;
+    while i < 6000 loop [
+        x := x * 48271 mod 2147483647;
+        var a := x mod 300;
+        var t := to_text{from: x mod 5};
+        insert r relation { { a, t }, { a: a + 1, t: to_text{from: a} } };
+        s := relation { { a, t }, { a: a + 1, t: to_text{from: a} } } union s;
+        most := if count{r} > most then count{r} else most;
+        x := x * 48271 mod 2147483647;
+        var b := x mod 300;
+        var kind := x mod 6;
+        if kind = 0 then [
+            delete r where a = b;
+            s := without{r: s, a_is: b};
+        ] else if kind = 1 then [
+            delete r where a = b and t = "1";
+            s := without_both{r: s, a_is: b, t_is: "1"};
+        ] else if kind = 2 then [
+            delete r where t = to_text{from: b mod 40};
+            s := without_text{r: s, t_is: to_text{from: b mod 40}};
+        ] else if kind = 3 then [
+            delete r where a mod 97 = b mod 97;
+            s := without_those{r: s, m: 97, v: b mod 97};
+        ] else if kind = 4 then [
+            var gone := relation { { a: b, t: "2" }, { a: b + 1, t: "3" } };
+            r := r minus gone;
+            s := less{r: s, gone};
+        ] else [
+            var there := r where a < b mod 20;
+            i_delete r there;
+            s := less{r: s, gone: there};
+        ];
+        if r <> s then [
+            wrong := wrong + 1;
+        ];
+        i := i + 1;
+    ];
+    call debug_value{v: wrong};
+    call debug_value{v: most > 100};
+];
+"#;
+
+#[test]
+fn deletes_are_what_computing_the_rest_is() {
+    let (code, stderr) = run_source("deletes", DELETES);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["0", "true"],
+        "{stderr}"
+    );
+}
+
+/// A value something else holds doesn't change when its variable's `delete`
+/// does: another variable's, a parameter's, a transaction's it restores, a
+/// constant's, and a tuple's, each built as the program runs where it can be,
+/// as a constant is always copied. A condition sees the relation whole, and a
+/// failure in it changes nothing.
+const DELETES_AND_VALUES: &str = r#"var constant := relation { { n: 1 }, { n: 2 } };
+var global: relation { n: integer };
+
+operator built{}: relation { n: integer } [
+    var r: relation { n: integer };
+    var i := 1;
+    while i <= 4 loop [
+        insert r relation { { n: i * 10 } };
+        i := i + 1;
+    ];
+    r
+];
+
+operator less{r: relation { n: integer }, gone: integer}: relation { n: integer } [
+    var mine := r;
+    delete mine where n = gone;
+    mine
+];
+
+operator out_of{var r: relation { n: integer }, n: integer} [
+    i_delete r relation { { n } };
+];
+
+operator given_then_changed{r: relation { n: integer }} [
+    delete global where n = 10;
+    call debug_value{v: min{r, of: n}};
+];
+
+operator main{} [
+    var a := built{};
+    var b := a;
+    delete a where n = 10;
+    call debug_value{v: a};
+    call debug_value{v: b};
+    /* Each again, now that each is the only holder. */
+    delete b where n = 20;
+    delete a where n = 30;
+    call debug_value{v: a};
+    call debug_value{v: b};
+    /* A constant isn't changed. */
+    delete constant where n = 1;
+    call debug_value{v: count{r: constant}};
+    var other := relation { { n: 1 }, { n: 2 } };
+    var another := relation { { n: 1 }, { n: 2 } };
+    delete other where n = 2;
+    call debug_value{v: tuple { o: count{r: other}, a: count{r: another} }};
+    /* An operator keeps its own, or changes the caller's. */
+    var c := built{};
+    var d := less{r: c, gone: 10};
+    call debug_value{v: tuple { c: count{r: c}, d: count{r: d} }};
+    call out_of{var r: c, n: 40};
+    call debug_value{v: c};
+    /* An argument kept while what it came from changes. */
+    global := built{};
+    call given_then_changed{r: global};
+    call debug_value{v: count{r: global}};
+    /* What is decided from the relation is decided of it as it was. */
+    var e := built{};
+    delete e where n = max{r: e, of: n} or n = min{r: e, of: n};
+    call debug_value{v: e};
+    /* With others at once, each reads it as it was. */
+    var f := built{};
+    var g: relation { n: integer };
+    assign {
+        delete f where n = 10;
+        g := f;
+    };
+    call debug_value{v: tuple { f: count{r: f}, g: count{r: g} }};
+    /* A failure in the condition changes nothing, and a transaction restores
+       what was changed before it. */
+    var h := built{};
+    var failed: relation transaction_collection;
+    var zero := 0;
+    transaction collecting failed [
+        delete h where n = 10;
+        delete h where 1 div (n - 20 + zero) > 5;
+    ];
+    call debug_value{v: count{r: h}};
+    transaction collecting failed [
+        i_delete h relation { { n: 20 }, { n: 99 } };
+    ];
+    call debug_value{v: count{r: h}};
+    call debug_value{v: count{r: failed}};
+    /* All of them, then more into the room. */
+    delete h where n > zero;
+    call debug_value{v: h};
+    delete h where n > zero;
+    insert h relation { { n: 7 } };
+    call debug_value{v: h};
+    /* A relation without attributes. */
+    var dee := relation { {} };
+    var yes := zero = 0;
+    delete dee where yes;
+    call debug_value{v: dee};
+    /* A tuple holds its relation and its text, as it did. */
+    var inner := built{};
+    var nested := relation { { r: inner, t: to_text{from: zero} }, { r: inner, t: "other" } };
+    delete inner where n = 10;
+    delete nested where t = "other";
+    call debug_value{v: count{r: nested where min{r: r, of: n} = 10}};
+    call debug_value{v: count{r: inner}};
+];
+"#;
+
+#[test]
+fn deletes_leave_what_else_holds_a_value_alone() {
+    let (code, stderr) = run_source("deletes_and_values", DELETES_AND_VALUES);
+    assert_eq!(code, 0, "{stderr}");
+    let all = "relation { n: integer } { { n: 10 }, { n: 20 }, { n: 30 }, { n: 40 } }";
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "relation { n: integer } { { n: 20 }, { n: 30 }, { n: 40 } }",
+            all,
+            "relation { n: integer } { { n: 20 }, { n: 40 } }",
+            "relation { n: integer } { { n: 10 }, { n: 30 }, { n: 40 } }",
+            "1",
+            "tuple { a: 2, o: 1 }",
+            "tuple { c: 4, d: 3 }",
+            "relation { n: integer } { { n: 10 }, { n: 20 }, { n: 30 } }",
+            "10",
+            "3",
+            "relation { n: integer } { { n: 20 }, { n: 30 } }",
+            "tuple { f: 3, g: 4 }",
+            "4",
+            "4",
+            "2",
+            "relation { n: integer } {}",
+            "relation { n: integer } { { n: 7 } }",
+            "relation {} {}",
+            "1",
+            "3",
+        ],
+        "{stderr}"
+    );
+}
+
+/// A failure in a `delete`'s condition, outside any transaction, and an
+/// `i_delete` of what isn't there, stop the program as they did; and a key still
+/// holds of what's added after a `delete`.
+#[test]
+fn deletes_fail_as_they_did() {
+    let run = |name: &str, body: &str| {
+        run_source(
+            name,
+            &format!(
+                "operator main{{}} [\n    var r := series{{from: 1, to: 3}};\n    var zero := 0;\n{body}\n];\n"
+            ),
+        )
+    };
+    let (code, stderr) = run(
+        "delete_divides",
+        "    delete r where 1 div (value - 2 + zero) > 5;",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with("error[R0002]: division by zero: 1 div 0"),
+        "{stderr}"
+    );
+    let (code, stderr) = run(
+        "delete_missing",
+        "    i_delete r relation { { value: 9 } };",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.starts_with("error[R0007]"), "{stderr}");
+    assert!(stderr.contains("value: 9"), "{stderr}");
+    let (code, stderr) = run_source(
+        "delete_then_key",
+        "var r: relation { k: integer, v: integer } key { k };\n\noperator main{} [\n    insert r relation { { k: 1, v: 1 }, { k: 2, v: 2 } };\n    delete r where k = 1;\n    insert r relation { { k: 1, v: 3 } };\n    call debug_value{v: count{r}};\n    insert r relation { { k: 1, v: 4 } };\n];\n",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[0], "2", "{stderr}");
+    assert!(lines[1].starts_with("error[R0008]"), "{stderr}");
+}
+
 /// A name alone, in each place one can be, computes what the same thing
 /// written out does, when the program runs.
 #[test]

@@ -3786,12 +3786,17 @@ impl<'a> FunctionBuilder<'a> {
     /// values first, which take a reference to what they point to, so that
     /// a change in place copies any buffer they hold.
     fn assign(&mut self, assignments: &[hir::Assignment], cx: &mut Lowering) {
-        // An `insert` alone: with others, they read the variable as it was.
-        if let [assignment] = assignments
-            && let Some((tuples, combination)) = self.inserted(assignment)
-        {
-            self.insert_tuples(&assignment.target, tuples, combination, cx);
-            return;
+        // An `insert` or a `delete` alone: with others, they read the
+        // variable as it was.
+        if let [assignment] = assignments {
+            if let Some((tuples, combination)) = self.combined_with_itself(assignment) {
+                self.changed_by_tuples(&assignment.target, tuples, combination, cx);
+                return;
+            }
+            if let Some(condition) = self.restricted_itself(assignment) {
+                self.delete_unless(&assignment.target, condition, cx);
+                return;
+            }
         }
         let mut values: Vec<(hir::Target, lir::Place)> = Vec::new();
         let mut changed: Vec<(hir::Target, Vec<Computed>)> = Vec::new();
@@ -3836,15 +3841,18 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// The tuples `assignment` adds to its variable, as what kind of union,
-    /// if that is all it does: its value is the variable's, of the same type
-    /// as the tuples are, in a union with them.
-    fn inserted<'v>(
+    /// The tuples `assignment` adds to its variable or takes from it, as
+    /// what kind of combination, if that is all it does: its value is the
+    /// variable's, of the same type as the tuples are, combined with them.
+    fn combined_with_itself<'v>(
         &self,
         assignment: &'v hir::Assignment,
     ) -> Option<(&'v hir::Expr, hir::Combination)> {
         let hir::Expr::Combine(
-            combination @ (hir::Combination::Union | hir::Combination::DisjointUnion),
+            combination @ (hir::Combination::Union
+            | hir::Combination::DisjointUnion
+            | hir::Combination::Minus
+            | hir::Combination::IncludedMinus),
             variable,
             tuples,
         ) = &assignment.value
@@ -3858,12 +3866,26 @@ impl<'a> FunctionBuilder<'a> {
             .then_some((&**tuples, *combination))
     }
 
-    /// Add `tuples` to the relation variable `target`, in its own buffer if
-    /// nothing else holds it (see [`lir::RuntimeFn::Insert`]). Its keys are
-    /// then checked of what was added alone, as it held for the others, and
-    /// a failure leaves it as it is, as that stops the program, or a
-    /// transaction, which restores it.
-    fn insert_tuples(
+    /// What `assignment` keeps of its variable, if that is all it does: its
+    /// value is the variable's, of the type it is, restricted by this
+    /// condition, which the tuple at hand is what it is true of.
+    fn restricted_itself<'v>(&self, assignment: &'v hir::Assignment) -> Option<&'v hir::Expr> {
+        let hir::Expr::Restrict(variable, condition) = &assignment.value else {
+            return None;
+        };
+        (**variable == assignment.target.read()
+            && self.type_of(variable) == *self.assigned(&assignment.target).0)
+            .then_some(&**condition)
+    }
+
+    /// Add `tuples` to the relation variable `target`, or take them from it,
+    /// in its own buffer if nothing else holds it (see
+    /// [`lir::RuntimeFn::Insert`] and [`lir::RuntimeFn::Remove`]). After adding
+    /// them, its keys are checked of what was added alone, as they held for
+    /// the others, and a failure leaves it as it is, as that stops the
+    /// program, or a transaction, which restores it. Taking them can't break a
+    /// key.
+    fn changed_by_tuples(
         &mut self,
         target: &hir::Target,
         tuples: &hir::Expr,
@@ -3874,17 +3896,94 @@ impl<'a> FunctionBuilder<'a> {
         let ty = self.assigned(target).0.clone();
         let holder = self.holder(target, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-        let combination = match combination {
-            hir::Combination::DisjointUnion => lir::Combination::DisjointUnion,
-            _ => lir::Combination::Union,
+        let (function, code) = match combination {
+            hir::Combination::Union => (lir::RuntimeFn::Insert, lir::Combination::Union),
+            hir::Combination::DisjointUnion => {
+                (lir::RuntimeFn::Insert, lir::Combination::DisjointUnion)
+            }
+            hir::Combination::Minus => (lir::RuntimeFn::Remove, lir::Combination::Minus),
+            hir::Combination::IncludedMinus => {
+                (lir::RuntimeFn::Remove, lir::Combination::IncludedMinus)
+            }
+            hir::Combination::ExclusiveUnion | hir::Combination::DisjointChanges => {
+                unreachable!("a variable changes in place by adding or taking tuples")
+            }
         };
-        let combination = usize_constant(combination.code(), cx);
+        let code = usize_constant(code.code(), cx);
         self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Insert,
-            args: vec![holder.clone(), tuples.clone(), descriptor, combination],
+            function,
+            args: vec![holder.clone(), tuples.clone(), descriptor, code],
         });
         self.scoped = true;
-        self.check_keys_of(target, &holder, Some(&tuples), cx);
+        if function == lir::RuntimeFn::Insert {
+            self.check_keys_of(target, &holder, Some(&tuples), cx);
+        }
+    }
+
+    /// Take from the relation variable `target` the tuples `kept` is false
+    /// of, in its own buffer if nothing else holds it. It is found what goes
+    /// before anything does, so a condition that fails, or reads the variable,
+    /// finds it as it was. What goes is what the opposite of `kept` is true of,
+    /// so a run of it can be found rather than gone through (see
+    /// [`FunctionBuilder::equal_runs`]), and if that is all it says, it goes
+    /// with no condition computed. Taking tuples can't break a key.
+    fn delete_unless(&mut self, target: &hir::Target, kept: &hir::Expr, cx: &mut Lowering) {
+        let ty = self.assigned(target).0.clone();
+        let hir::Type::Relation(heading) = &ty else {
+            unreachable!("sema restricts only relations");
+        };
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
+        let holder = self.holder(target, cx);
+        let gone = kept.clone().negated();
+        let (run, rest) = self.equal_runs(holder.clone(), &ty, heading, &gone, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        self.scoped = true;
+        if rest == hir::Expr::Constant(hir::Value::Boolean(true)) {
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::RemoveRun,
+                args: vec![holder, run, descriptor],
+            });
+            return;
+        }
+        let mut count = run.clone();
+        count.path.push(1);
+        let marks_ty = hir::Type::Array(Box::new(hir::Type::Scalar(hir::Scalar::Boolean)));
+        let marks = self.allocated(&marks_ty, count, cx);
+        let marked = u8_constant(1, cx);
+        self.each_at_hand(&run, tuple, cx, |this, _, index, cx| {
+            // The condition, computed in a scope of its own for each tuple,
+            // which nothing it made outlives.
+            let goes = this.slot(lir::Layout::U8);
+            this.nested_scope(cx, |this, cx| {
+                let computed = this.place(&rest, cx);
+                this.insts.push(lir::Inst::Copy {
+                    dst: goes.clone(),
+                    src: computed,
+                    layout: lir::Layout::U8,
+                });
+                Vec::new()
+            });
+            let (mark, next) = (this.new_block(), this.new_block());
+            this.end_block(
+                lir::Terminator::Branch {
+                    condition: goes,
+                    then: mark,
+                    otherwise: next,
+                },
+                mark,
+            );
+            let to = this.element(&marks, index, lir::Layout::U8);
+            this.insts.push(lir::Inst::Copy {
+                dst: to,
+                src: marked,
+                layout: lir::Layout::U8,
+            });
+            this.end_block(lir::Terminator::Jump(next), next);
+        });
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::RemoveMarked,
+            args: vec![holder, run, marks, descriptor],
+        });
     }
 
     /// The type and keys of the variable `target`, of the program or local,
@@ -7867,6 +7966,86 @@ mod tests {
         let both = calls(assign(vec![(0, union(var(0), var(1))), (1, var(0))]));
         assert!(both.contains(&lir::RuntimeFn::Combine), "{both:?}");
         assert!(!both.contains(&lir::RuntimeFn::Insert), "{both:?}");
+    }
+
+    #[test]
+    fn a_delete_alone_changes_its_variable() {
+        let var = |i| hir::Expr::Variable(hir::VariableId(i));
+        let heading = || {
+            hir::Heading::new(BTreeMap::from([(
+                "a".to_string(),
+                hir::Type::Scalar(hir::Scalar::Integer),
+            )]))
+        };
+        let empty = || {
+            variable(
+                "r",
+                hir::Value::Relation(hir::RelationValue {
+                    heading: heading(),
+                    tuples: BTreeSet::new(),
+                }),
+            )
+        };
+        let calls = |statement: hir::Statement| {
+            let lowered = lower_program(&program(
+                vec![user("main", &[], vec![statement])],
+                vec![empty(), empty()],
+            ));
+            runtime_calls(&lowered.functions[0]).concat()
+        };
+        let attribute =
+            || hir::Expr::Extract(Box::new(hir::Expr::Current(0, heading())), "a".to_string());
+        let compared = |comparison, value: i64| {
+            hir::Expr::Binary(
+                hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Integer)),
+                Box::new(attribute()),
+                Box::new(hir::Expr::Constant(hir::Value::Integer(value))),
+            )
+        };
+        let restrict =
+            |variable, condition| hir::Expr::Restrict(Box::new(variable), Box::new(condition));
+        // `delete r where a = 1;`: its tuples are found, with nothing to
+        // compute for each.
+        let by_key = calls(assign(vec![(
+            0,
+            restrict(var(0), compared(hir::Comparison::NotEqual, 1)),
+        )]));
+        assert!(by_key.contains(&lir::RuntimeFn::EqualRun), "{by_key:?}");
+        assert!(by_key.contains(&lir::RuntimeFn::RemoveRun), "{by_key:?}");
+        assert!(!by_key.contains(&lir::RuntimeFn::Allocate), "{by_key:?}");
+        // `delete r where a > 1;`: gone through, and then taken.
+        let through = calls(assign(vec![(
+            0,
+            restrict(var(0), compared(hir::Comparison::LessOrEqual, 1)),
+        )]));
+        assert!(
+            through.contains(&lir::RuntimeFn::RemoveMarked),
+            "{through:?}"
+        );
+        assert!(!through.contains(&lir::RuntimeFn::EqualRun), "{through:?}");
+        // `i_delete r s;`.
+        let included = calls(assign(vec![(
+            0,
+            hir::Expr::Combine(
+                hir::Combination::IncludedMinus,
+                Box::new(var(0)),
+                Box::new(var(1)),
+            ),
+        )]));
+        assert!(included.contains(&lir::RuntimeFn::Remove), "{included:?}");
+        assert!(!included.contains(&lir::RuntimeFn::Combine), "{included:?}");
+        // Another's value, or with others at once, is a new relation.
+        let other = calls(assign(vec![(
+            0,
+            restrict(var(1), compared(hir::Comparison::NotEqual, 1)),
+        )]));
+        assert!(!other.contains(&lir::RuntimeFn::RemoveRun), "{other:?}");
+        let both = calls(assign(vec![
+            (0, restrict(var(0), compared(hir::Comparison::NotEqual, 1))),
+            (1, var(0)),
+        ]));
+        assert!(!both.contains(&lir::RuntimeFn::RemoveRun), "{both:?}");
+        assert!(!both.contains(&lir::RuntimeFn::RemoveMarked), "{both:?}");
     }
 
     #[test]

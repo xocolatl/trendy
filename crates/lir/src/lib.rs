@@ -408,6 +408,21 @@ pub enum RuntimeFn {
     /// buffer if nothing else holds it, as `combination`, a
     /// [`Combination::code`] of a union or a disjoint union, says.
     Insert,
+    /// `trendy_rt_remove(relation, tuples, descriptor, combination)`: take
+    /// the tuples of the relation `tuples` from the relation variable at
+    /// `relation`, both of the type the descriptor describes, in its own
+    /// buffer if nothing else holds it, as `combination`, a
+    /// [`Combination::code`] of a minus or an included minus, says.
+    Remove,
+    /// `trendy_rt_remove_run(relation, run, descriptor)`: take from the
+    /// relation variable at `relation`, of the type the descriptor describes,
+    /// the tuples of `run`, a run of its own, as [`RuntimeFn::EqualRun`]
+    /// makes one, in its own buffer if nothing else holds it.
+    RemoveRun,
+    /// `trendy_rt_remove_marked(relation, run, marks, descriptor)`: as
+    /// [`RuntimeFn::RemoveRun`], of those of the run with a non-zero byte at
+    /// their position in `marks`, an array of bytes as long as it.
+    RemoveMarked,
     /// `trendy_rt_key_added(shared, pair, src, descriptor, key, added)`: as
     /// [`RuntimeFn::KeyShared`], of a relation that was without two such
     /// tuples before the tuples of the relation `added` were added to it.
@@ -678,7 +693,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 81] = [
+    pub const ALL: [RuntimeFn; 84] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -719,6 +734,9 @@ impl RuntimeFn {
         RuntimeFn::OverlappingSubtypes,
         RuntimeFn::BrokenCallConstraint,
         RuntimeFn::Insert,
+        RuntimeFn::Remove,
+        RuntimeFn::RemoveRun,
+        RuntimeFn::RemoveMarked,
         RuntimeFn::KeyAdded,
         RuntimeFn::KeyShared,
         RuntimeFn::KeyViolated,
@@ -792,6 +810,9 @@ impl RuntimeFn {
             | RuntimeFn::KeyShared
             | RuntimeFn::KeyAdded
             | RuntimeFn::Insert
+            | RuntimeFn::Remove
+            | RuntimeFn::RemoveRun
+            | RuntimeFn::RemoveMarked
             | RuntimeFn::Concat
             | RuntimeFn::Keep
             | RuntimeFn::HandOut
@@ -900,6 +921,9 @@ impl RuntimeFn {
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::BrokenCallConstraint => "trendy_rt_broken_call_constraint",
             RuntimeFn::Insert => "trendy_rt_insert",
+            RuntimeFn::Remove => "trendy_rt_remove",
+            RuntimeFn::RemoveRun => "trendy_rt_remove_run",
+            RuntimeFn::RemoveMarked => "trendy_rt_remove_marked",
             RuntimeFn::KeyAdded => "trendy_rt_key_added",
             RuntimeFn::KeyShared => "trendy_rt_key_shared",
             RuntimeFn::KeyViolated => "trendy_rt_key_violated",

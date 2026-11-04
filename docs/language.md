@@ -4186,6 +4186,12 @@ operator main{} [
   `insert` makes the variable a copy of its own. So does an `insert` with other
   changes at once, in an `assign` block, as they read the variable as it was.
   Only what it adds is checked against its keys.
+- **So do `delete` and `i_delete`,** written so or as `r := r where p;` and
+  `r := r minus s;`. What goes is found before anything does, so a condition
+  reads the relation whole, and one that fails changes nothing. A condition
+  that says what the first attributes equal, as `delete r where k = x;` does,
+  finds its tuples rather than going through them all, so that it takes the
+  time of moving those after them, and none if they are last.
 - **`delete` needs `where` and a condition** (P0023), so that every tuple
   isn't deleted by accident. To delete them all, assign the empty relation:
   `r := relation {};`, whose heading comes from the variable.
