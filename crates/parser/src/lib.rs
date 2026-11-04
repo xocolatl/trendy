@@ -38,6 +38,8 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
         missing: None,
         paren_calls: true,
         previous_item: None,
+        params_end: None,
+        body_front: None,
         headers: Vec::new(),
         builder: TreeBuilder::new(),
         errors: lexed.errors,
@@ -75,6 +77,13 @@ struct Parser<'a> {
     /// Where the top-level definition before the one being parsed ends, if
     /// there is one: where a definition written inside this one goes.
     previous_item: Option<usize>,
+    /// Where the braces of the operator being parsed end, which a constraint
+    /// written in its body moves to.
+    params_end: Option<errors::ParamsEnd>,
+    /// Where a constraint written in the body of the operator being parsed
+    /// would be its first statement, which is what can be moved out: it
+    /// reads nothing the body has declared.
+    body_front: Option<usize>,
     /// The sections' headers so far, each with its word: where a unit's
     /// sections go out of order.
     headers: Vec<(Section, Found<'a>)>,
@@ -122,10 +131,34 @@ enum KeySpelling {
     Unique,
 }
 
+/// Whether a token of this kind starts a constraint's condition, as written
+/// after `constraint`.
+fn starts_condition(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::Ident
+            | SyntaxKind::IntLiteral
+            | SyntaxKind::ApproximateLiteral
+            | SyntaxKind::TextLiteral
+            | SyntaxKind::TrueKw
+            | SyntaxKind::FalseKw
+            | SyntaxKind::LParen
+            | SyntaxKind::TupleKw
+            | SyntaxKind::RelationKw
+            | SyntaxKind::ArrayKw
+            | SyntaxKind::NotKw
+            | SyntaxKind::IfKw
+    )
+}
+
 /// What a statement starting at the next token is, by its first tokens:
 /// trendy's statements, and other languages' that are reported.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatementStart {
+    /// `constraint condition;`, which belongs in the operator's braces.
+    BodyConstraint,
+    /// Another language's `assert condition;`.
+    Assertion,
     If,
     While,
     Loop,
@@ -962,23 +995,8 @@ impl<'a> Parser<'a> {
         let found = |p: &mut Self, n: usize| if n == 0 { p.found() } else { p.found_after(n) };
         found(self, at).is_some_and(|f| f.kind == SyntaxKind::Ident)
             && found(self, at + 1).is_some_and(|f| {
-                matches!(
-                    f.kind,
-                    SyntaxKind::ColonEq
-                        | SyntaxKind::Colon
-                        | SyntaxKind::Ident
-                        | SyntaxKind::IntLiteral
-                        | SyntaxKind::ApproximateLiteral
-                        | SyntaxKind::TextLiteral
-                        | SyntaxKind::TrueKw
-                        | SyntaxKind::FalseKw
-                        | SyntaxKind::LParen
-                        | SyntaxKind::TupleKw
-                        | SyntaxKind::RelationKw
-                        | SyntaxKind::ArrayKw
-                        | SyntaxKind::NotKw
-                        | SyntaxKind::IfKw
-                )
+                matches!(f.kind, SyntaxKind::ColonEq | SyntaxKind::Colon)
+                    || starts_condition(f.kind)
             })
     }
 
@@ -1464,7 +1482,7 @@ impl<'a> Parser<'a> {
                 .push(errors::version_name(Span::new(from, name.span.end)));
         }
         let angled = self.angled_type_parameters();
-        let written = self.params();
+        let written = self.params(true);
         self.updates_clause(&written);
         let valued = self.result_type();
         let declared = self.type_parameters();
@@ -1489,6 +1507,7 @@ impl<'a> Parser<'a> {
                 (SyntaxKind::LParen, SyntaxKind::RParen),
             ],
             |p| {
+                p.body_front = p.last_end;
                 if valued {
                     p.valued_statements();
                 } else {
@@ -1496,6 +1515,7 @@ impl<'a> Parser<'a> {
                 }
             },
         );
+        self.body_front = None;
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
     }
@@ -1533,7 +1553,7 @@ impl<'a> Parser<'a> {
             "add a name after `operator`",
             &[SyntaxKind::LBrace, SyntaxKind::LParen],
         );
-        self.params();
+        self.params(false);
         self.result_type();
         self.type_parameters();
         self.expect(SyntaxKind::Semicolon);
@@ -1684,7 +1704,7 @@ impl<'a> Parser<'a> {
     /// An operator's parameters: a heading, which C-style `()` is accepted
     /// for and reported. Each one's name, where it starts, and whether it
     /// has a mode, which an `updates` clause after them is fixed to.
-    fn params(&mut self) -> Vec<errors::Written> {
+    fn params(&mut self, constrained: bool) -> Vec<errors::Written> {
         let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
         let written = std::cell::RefCell::new(Vec::new());
         self.delimited(
@@ -1694,6 +1714,13 @@ impl<'a> Parser<'a> {
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
             |p| {
                 p.items(Self::at_heading_attribute, |p| {
+                    // What the arguments of a call must satisfy, as a
+                    // possible representation's constraints are written
+                    // with its components.
+                    if constrained && p.constraint_at(0) {
+                        p.constraint();
+                        return;
+                    }
                     let moded = p.mode_at(0).is_some();
                     let name = p.nth_found(usize::from(moded));
                     if let Some(name) = name.filter(|n| n.kind == SyntaxKind::Ident) {
@@ -1708,6 +1735,14 @@ impl<'a> Parser<'a> {
             },
         );
         self.form = outer_form;
+        self.params_end = self.closed_at().map(|end| {
+            let before = self.source[..end - 1].trim_end();
+            errors::ParamsEnd {
+                close: end - 1,
+                comma: before.ends_with(','),
+                empty: before.ends_with('{'),
+            }
+        });
         written.into_inner()
     }
 
@@ -2057,6 +2092,10 @@ impl<'a> Parser<'a> {
             StatementStart::Type
         } else if self.at_constraint_decl(true) {
             StatementStart::Constraint
+        } else if self.at_body_constraint() {
+            StatementStart::BodyConstraint
+        } else if self.at_assertion() {
+            StatementStart::Assertion
         } else if found.kind == SyntaxKind::VarKw && self.prefixed_at(1) {
             StatementStart::PartVar
         } else if exit {
@@ -2126,6 +2165,54 @@ impl<'a> Parser<'a> {
         ));
     }
 
+    /// Whether a condition in a constraint's place starts here, in a body:
+    /// `constraint`, in any case, before what starts an expression, not an
+    /// assignment of a local variable of that name.
+    fn at_body_constraint(&mut self) -> bool {
+        self.found().is_some_and(|f| {
+            f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("constraint")
+        }) && self
+            .found_after(1)
+            .is_some_and(|f| starts_condition(f.kind))
+    }
+
+    /// Whether another language's assertion starts here: `assert` or
+    /// `require`, in any case, before what starts an expression.
+    fn at_assertion(&mut self) -> bool {
+        self.found().is_some_and(|f| {
+            f.kind == SyntaxKind::Ident
+                && (f.text.eq_ignore_ascii_case("assert") || f.text.eq_ignore_ascii_case("require"))
+        }) && self
+            .found_after(1)
+            .is_some_and(|f| starts_condition(f.kind))
+    }
+
+    /// `constraint condition;`, in a body, which [`Parser::at_body_constraint`]
+    /// found, reported: it belongs in the operator's braces, as a fix moves
+    /// one that is the body's first statement, or follows only others.
+    fn body_constraint(&mut self, found: Found) {
+        let before = self.last_end.unwrap_or(found.span.start);
+        let front = self.last_end == self.body_front;
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        let condition = self.found().map_or(found.span.end, |f| f.span.start);
+        self.expression();
+        let condition = Span::new(condition, self.last_end.unwrap_or(found.span.end));
+        self.end_statement();
+        self.builder.finish_node();
+        let end = self.last_end.unwrap_or(found.span.end);
+        let moved = self.params_end.filter(|end| front && !end.empty);
+        self.errors.push(errors::constraint_in_body(
+            found.span,
+            &self.source[condition.start..condition.end],
+            Span::new(before, end),
+            moved,
+        ));
+        if front {
+            self.body_front = self.last_end;
+        }
+    }
+
     /// A statement: a call, an assignment statement, a local variable's
     /// declaration, an `if`, a loop, or a `return`, for leaving early.
     /// Anything else is reported, and an expression, as C and JavaScript
@@ -2160,6 +2247,11 @@ impl<'a> Parser<'a> {
                 | StatementStart::Constraint
                 | StatementStart::PartVar),
             ) => self.nested_definition(start, found),
+            Some(StatementStart::BodyConstraint) => self.body_constraint(found),
+            Some(StatementStart::Assertion) => {
+                self.skip_statement(&STATEMENT_STOPS);
+                self.errors.push(errors::assertion(found));
+            }
             Some(StatementStart::Exit) => {
                 self.errors.push(errors::loop_exit(found));
                 self.skip_statement(&STATEMENT_STOPS);
@@ -7442,6 +7534,100 @@ SourceFile
             let parse = parse_str(source);
             assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
         }
+    }
+
+    #[test]
+    fn constraints_in_an_operators_braces() {
+        // With its parameters, in any order, a parameter of the name too.
+        for source in [
+            "operator f{n: integer, constraint n > 0} [];",
+            "operator f{constraint n > 0, n: integer,} [];",
+            "operator f{n: integer, constraint n > 0, constraint n < 9}: integer [ n ];",
+            "operator f{constraint: integer, check: boolean} [];",
+            "operator f{n: integer, constraint n > 0}: integer;",
+        ] {
+            assert!(
+                parse_str(source).errors.is_empty(),
+                "{source}: {:#?}",
+                parse_str(source).errors
+            );
+        }
+        // SQL's word, and another case.
+        assert_eq!(
+            fix("operator f{n: integer, CHECK n > 0} [];"),
+            "operator f{n: integer, constraint n > 0} [];"
+        );
+        assert_eq!(
+            fix("operator f{n: integer, CONSTRAINT n > 0} [];"),
+            "operator f{n: integer, constraint n > 0} [];"
+        );
+    }
+
+    #[test]
+    fn a_constraint_in_a_body_moves_to_the_braces() {
+        for (source, moved) in [
+            (
+                "operator f{n: integer}: integer [\n    constraint n > 0;\n    n\n];",
+                "operator f{n: integer, constraint n > 0}: integer [\n    n\n];",
+            ),
+            (
+                "operator f{n: integer,}: integer [\n    constraint n > 0;\n    n\n];",
+                "operator f{n: integer, constraint n > 0,}: integer [\n    n\n];",
+            ),
+        ] {
+            let d = &parse_str(source).errors[0];
+            assert_eq!(d.code, Code::ConstraintForm, "{source}");
+            assert_eq!(fix(source), moved, "{source}");
+        }
+        // Each of several at the front, whose order in braces means nothing.
+        assert_eq!(
+            fix("operator f{n: integer} [\n    constraint n > 0;\n    constraint n < 9;\n];"),
+            "operator f{n: integer, constraint n < 9, constraint n > 0} [\n];"
+        );
+        // What might read what the body declares, or with nothing to be
+        // about, only gets help.
+        for source in [
+            "operator f{n: integer} [\n    var m := n;\n    constraint m > 0;\n];",
+            "operator f{n: integer} [\n    if n > 0 then [\n        constraint n > 1;\n    ];\n];",
+            "operator f{} [\n    constraint 1 > 0;\n];",
+        ] {
+            let d = &parse_str(source).errors[0];
+            assert_eq!(d.code, Code::ConstraintForm, "{source}");
+            assert!(d.suggestions.is_empty(), "{source}");
+            assert_eq!(d.help.len(), 2, "{source}");
+        }
+        // A local variable of the name is one.
+        let source = "operator f{n: integer}: integer [\n    var constraint := n;\n    constraint := constraint + 1;\n    constraint\n];";
+        assert!(
+            parse_str(source).errors.is_empty(),
+            "{:#?}",
+            parse_str(source).errors
+        );
+    }
+
+    #[test]
+    fn other_languages_assertions() {
+        for (source, word) in [
+            ("operator f{n: integer} [ assert n > 0; ];", "assert"),
+            ("operator f{n: integer} [ ASSERT(n > 0); ];", "ASSERT"),
+            ("operator f{n: integer} [ require n > 0; ];", "require"),
+        ] {
+            let errors = parse_str(source).errors;
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(errors[0].code, Code::Assertion, "{source}");
+            assert_eq!(
+                errors[0].message,
+                format!("`{word}` isn't a statement in trendy")
+            );
+            assert!(errors[0].suggestions.is_empty(), "{source}");
+        }
+        // Names, otherwise.
+        let source = "operator f{}: integer [\n    var assert := 1;\n    assert := assert + 1;\n    assert\n];";
+        assert!(
+            parse_str(source).errors.is_empty(),
+            "{:#?}",
+            parse_str(source).errors
+        );
     }
 
     #[test]

@@ -36,9 +36,14 @@ builtin operator length{a: any array}: integer;
 /* The integers from `from` to `to`, `step` apart, as PostgreSQL's
    `generate_series`: `from`, then `from + step`, and on as far as `to`,
    which is one of them only if a step lands on it. A negative step counts
-   down. A `to` the other way from `from` gives no tuples, and a step of 0,
-   which would get nowhere, fails (R0021). */
-operator series{from: integer, to: integer, step: integer}: relation { value: integer };
+   down. A `to` the other way from `from` gives no tuples. A step of 0 would
+   get nowhere, so no call has one. */
+operator series{
+    from: integer,
+    to: integer,
+    step: integer,
+    constraint step <> 0,
+}: relation { value: integer };
 
 /* The integers from `from` to `to`, one apart: none if `to` is less. */
 operator series{from: integer, to: integer}: relation { value: integer };
@@ -235,6 +240,11 @@ type not_of_type is error { { value: text, type: text } };
    has one most specific type (R0020). */
 type overlapping_subtypes is error { { value: text, first: text, second: text } };
 
+/* `called`, a call written with the arguments the constraint written
+   `constraint`, in the braces of the operator it calls, reads, breaks that
+   constraint (R0024). */
+type broken_call_constraint is error { { called: text, constraint: text } };
+
 /* A statement left the variables so that the constraint named
    `constraint` is false: its condition, or the operand of its `and` that
    is, written `condition` (R0023). */
@@ -284,34 +294,21 @@ operator last_step{from: integer, to: integer, step: integer}: integer [
 ];
 
 operator series{from: integer, to: integer, step: integer}: relation { value: integer } [
-    if step = 0
-        then fail failure{
-            message: "series{from: "
-                || to_text{from: from}
-                || ", to: "
-                || to_text{from: to}
-                || ", step: 0} has no result: a step of 0 would get nowhere",
-        }
-        else [
-            var last := last_step{from: from, to: to, step: step};
-            /* The positions from 0 to `last`, each round adding as many
-               again, as adding one at a time would copy all the others each
-               time. */
-            var positions := relation { { value: 0 } } where value <= last;
-            var size := 1;
-            while size <= last loop [
-                positions := positions
-                    union ((positions where value <= last - size) replace {
-                        value := value + size,
-                    });
-                size := size * 2;
-            ];
-            /* In halves, as `value * step` alone can be out of range where
-               the value it reaches isn't, when the series crosses zero. */
-            positions replace {
-                value := from + (value div 2) * step + (value div 2) * step + (value mod 2) * step,
-            }
-        ]
+    var last := last_step{from: from, to: to, step: step};
+    /* The positions from 0 to `last`, each round adding as many again, as
+       adding one at a time would copy all the others each time. */
+    var positions := relation { { value: 0 } } where value <= last;
+    var size := 1;
+    while size <= last loop [
+        positions := positions
+            union ((positions where value <= last - size) replace { value := value + size });
+        size := size * 2;
+    ];
+    /* In halves, as `value * step` alone can be out of range where the
+       value it reaches isn't, when the series crosses zero. */
+    positions replace {
+        value := from + (value div 2) * step + (value div 2) * step + (value mod 2) * step,
+    }
 ];
 
 operator series{from: integer, to: integer}: relation { value: integer } [
@@ -441,6 +438,10 @@ operator message{error: no_square_root}: text [
 
 operator message{error: not_of_type}: text [
     error.value || " isn't a value of `" || error.type || "`"
+];
+
+operator message{error: broken_call_constraint}: text [
+    error.called || " can't be called: it breaks the constraint `" || error.constraint || "`"
 ];
 
 operator message{error: overlapping_subtypes}: text [

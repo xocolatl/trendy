@@ -476,6 +476,71 @@ pub(crate) fn sql_check(found: Found) -> Diagnostic {
     )
 }
 
+/// Where an operator's braces end, for what a fix adds to them: the `}`,
+/// whether a comma comes right before it, and whether they have nothing.
+#[derive(Clone, Copy)]
+pub(crate) struct ParamsEnd {
+    pub(crate) close: usize,
+    pub(crate) comma: bool,
+    pub(crate) empty: bool,
+}
+
+const CONSTRAINT_IN_BRACES: &str = "a constraint on what an operator is called with is part of what its callers see, so it goes in its braces, with its parameters, as `operator f{n: integer, constraint n > 0}`; a call checks it first, and fails where it is if it is false";
+const FAIL_INSTEAD: &str = "to check what a body has computed, write `if not (condition) then [ fail failure{message: \"…\"}; ];`";
+
+/// `constraint condition;` at `keyword`, of the source `removed`, in an
+/// operator's body: the fix moves it to the operator's braces, if `moved`
+/// says where they end.
+pub(crate) fn constraint_in_body(
+    keyword: Span,
+    condition: &str,
+    removed: Span,
+    moved: Option<ParamsEnd>,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ConstraintForm,
+        "a constraint goes in the operator's braces, not its body",
+        keyword,
+        "in the operator's body",
+    )
+    .with_note(CONSTRAINT_IN_BRACES);
+    match moved {
+        Some(end) => d.with_suggestion(
+            "move it to the operator's braces",
+            vec![
+                Edit {
+                    span: Span::empty(end.close),
+                    replacement: if end.comma {
+                        format!(" constraint {condition},")
+                    } else {
+                        format!(", constraint {condition}")
+                    },
+                },
+                Edit {
+                    span: removed,
+                    replacement: String::new(),
+                },
+            ],
+        ),
+        None => d
+            .with_help("if it reads only the operator's parameters, move it to its braces")
+            .with_help(FAIL_INSTEAD),
+    }
+}
+
+/// Another language's assertion, `found`, as a statement.
+pub(crate) fn assertion(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::Assertion,
+        format!("`{}` isn't a statement in trendy", found.text),
+        found.span,
+        "another language's assertion",
+    )
+    .with_note(CONSTRAINT_IN_BRACES)
+    .with_help("if it says what the operator's arguments must be, write `constraint condition` in the operator's braces")
+    .with_help(FAIL_INSTEAD)
+}
+
 /// A declaration of `what`, a heading, a type or a constraint, in a body, whose keyword is
 /// `keyword`, written `text`, where `span` deletes it with the whitespace
 /// before: it goes after the top-level definition that ends at

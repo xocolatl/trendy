@@ -1169,6 +1169,29 @@ wherever its name is used, and each other one is a `Let`, so a block in
 an initial value is evaluated whole, but for values computed for each
 tuple of a relation, which are substituted when each tuple is.
 
+A constraint in an operator's braces (`ast::Operator::constraints`) says
+which arguments a call can have, as a type's says which components a value
+can have, and is made the same way: a read-only operator, named for its
+operator and its place, which no call can name, added to the list after the
+families are known (`operators::call_constraints`), so that an operator its
+interface declares takes the declaration's, which callers see (A0078, with the
+definition's moved), and a version has none. Its parameters are those of its
+operator whose names it has, which over-counts an attribute of the name but
+never misses one, and neither an `out` nor a `per` parameter, which
+`ReadOnlyNames` reports where it is read (A0078). It is checked in `Globals` as
+any operator is, by `Globals::call_constraint`, and a call counts as a call of
+each of them too (`Checker::written_call`), so one that calls its operator
+closes a cycle (A0036, `Global::CallConstraint`). `ops::constraints_hold`,
+which `ops::call` starts with and an update call checks too, computes each whose
+own arguments are known, so a false one is an error at the call whether or not
+the operator can be computed and whatever else isn't known (R0024,
+`Failed::CallConstraint`); one it can't compute is left for the program, as is
+a failure of the condition itself. Lowering checks them in the caller, so that
+the failure's site is the call's (`FunctionBuilder::call_constraints_checked`):
+the arguments it reads, copied from the call's own into a tuple, are what the
+constraint's function is given, and, if it says false, what
+`trendy_rt_broken_call_constraint` writes.
+
 The kinds, which only the prelude declares (A0013), are in `Namespaces`,
 each with the built-in types that declare it. Loading the prelude reads the
 kinds first, then the types, checking that each has what its kinds

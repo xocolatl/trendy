@@ -242,6 +242,8 @@ const OPERATORS: &[&str] = &[
     "│     9 │",
     "│    27 │",
     "└───────┘",
+    // A call its operator's constraint is true of.
+    "400",
     // A value block's, for each tuple.
     "┌─────────┬─────────────┬───────┬───────┐",
     "│ country │ dish        │ price │ rises │",
@@ -674,50 +676,139 @@ relation { value: integer } {}
     assert_eq!((code, stderr), (0, expected));
 }
 
-/// A step of 0 fails: when the program runs, saying the call's values and
-/// where it was made, which a transaction can take, and when compiling, if
-/// the step is known then.
+/// A step of 0 breaks `series`'s constraint: when the program runs, saying
+/// the argument it reads and where the call is, which a transaction can take,
+/// and when compiling, if the step is known then, whatever else isn't.
 #[test]
 fn a_series_with_a_step_of_zero_fails() {
     let (code, stderr) = run_source(
         "series_zero",
-        "var zero := 0;
-
-operator main{} [
-    var failed: relation transaction_collection;
-    var n := 0;
-    transaction collecting failed [
-        n := count{r: series{from: 1, to: 5, step: zero}};
-    ];
-    call debug_value{v: count{r: failed}};
-    call debug_value{v: series{from: 1, to: 5, step: zero}};
-];
-",
+        "var zero := 0;\n\noperator main{} [\n    var failed: relation transaction_collection;\n    var n := 0;\n    transaction collecting failed [\n        n := count{r: series{from: 1, to: 5, step: zero}};\n    ];\n    call debug_value{v: count{r: failed}};\n    call debug_value{v: series{from: 1, to: 5, step: zero}};\n];\n",
     );
     let lines: Vec<&str> = stderr.lines().collect();
     assert_eq!(code, 1, "{stderr}");
     assert_eq!(lines[0], "1", "{stderr}");
     assert_eq!(
         lines[1],
-        "error[R0021]: series{from: 1, to: 5, step: 0} has no result: a step of 0 would get nowhere",
+        "error[R0024]: series{step: 0} can't be called: it breaks the constraint `step <> 0`",
         "{stderr}"
     );
-    assert!(stderr.contains("series_zero.trendy:10:"), "{stderr}");
+    assert!(lines[2].contains("series_zero.trendy:10:"), "{stderr}");
 
     let (ok, _, stderr) = trendyc(
         "series_known_zero",
-        "operator main{} [
-    call debug_value{v: series{from: 1, to: 5, step: 0}};
-];
-",
+        "operator main{} [\n    var last := 5;\n    call debug_value{v: series{from: 1, to: last, step: 0}};\n];\n",
         &[],
     );
     assert!(!ok);
     assert!(
-        stderr.contains("error[R0021]: series{from: 1, to: 5, step: 0} has no result"),
+        stderr.contains("error[R0024]: `series{step: 0}` can't be called"),
         "{stderr}"
     );
-    assert!(stderr.contains("series_known_zero.trendy:2:25"), "{stderr}");
+    assert!(stderr.contains("series_known_zero.trendy:3:25"), "{stderr}");
+}
+
+/// Constraints in operators' braces, checked of arguments of each kind: a
+/// text before an integer, as offsets matter in what the failure writes, of a
+/// generic operator's, a `var` parameter's value as the call starts, of a
+/// specification's, whichever version is computed, and for each tuple.
+const CALL_CONSTRAINTS: &str = r#"var zero := 0;
+
+operator repeated{s: text, n: integer, constraint n >= 0, constraint s <> ""}: text [
+    var r := "";
+    var i := 0;
+    while i < n loop [
+        r := r || s;
+        i := i + 1;
+    ];
+    r
+];
+
+operator first_of{a: array E, constraint length{a: a} > 0}: E
+    types { E: any type }
+[
+    a[1]
+];
+
+operator last_of{var a: array integer, out last: integer, constraint length{a: a} > 0} [
+    last := a[length{a: a}];
+];
+
+type figure union;
+type round is figure { { r: integer } };
+type square is figure { { s: integer } };
+
+operator area{f: figure, constraint f is round}: integer;
+operator area{f: round}: integer [ 3 * f.r * f.r ];
+operator area{f: square}: integer [ f.s * f.s ];
+
+operator area_of{f: figure}: integer [ area{f: f} ];
+
+operator main{} [
+    call debug_value{v: repeated{s: "ab", n: 2}};
+    call debug_value{v: first_of{a: array ["x"]}};
+    var a := array [1, 2];
+    var last := 0;
+    call last_of{var a: a, out last: last};
+    call debug_value{v: last};
+    call debug_value{v: relation { { s: "x", n: 1 }, { s: "y", n: 0 } } extend { t := repeated{s: s, n: n} }};
+    call debug_value{v: area_of{f: round{r: 2}}};
+    var failed: relation transaction_collection;
+    var empty: array integer;
+    transaction collecting failed [
+        call last_of{var a: empty, out last: last};
+    ];
+    transaction collecting failed [
+        last := length{a: array [first_of{a: empty}]};
+    ];
+    var figure_given: figure := square{s: 2};
+    transaction collecting failed [
+        last := area_of{f: figure_given};
+    ];
+    call debug_value{v: failed{error}};
+    var nothing := "";
+    call debug_value{v: repeated{s: nothing, n: zero}};
+];
+"#;
+
+#[test]
+fn calls_check_the_constraints_in_their_operators_braces() {
+    let (code, stderr) = run_source("call_constraints", CALL_CONSTRAINTS);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(
+        lines[..5],
+        [
+            r#""abab""#,
+            r#""x""#,
+            "2",
+            r#"relation { n: integer, s: text, t: text } { { n: 0, s: "y", t: "" }, { n: 1, s: "x", t: "x" } }"#,
+            "12",
+        ],
+        "{stderr}"
+    );
+    // A transaction takes each, as an error it can tell apart.
+    assert!(
+        lines[5].contains(r#"broken_call_constraint{called: "last_of{a: array integer []}", constraint: "length{a: a} > 0"}"#),
+        "{stderr}"
+    );
+    assert!(
+        lines[5].contains(r#"broken_call_constraint{called: "first_of{a: array integer []}", constraint: "length{a: a} > 0"}"#),
+        "{stderr}"
+    );
+    assert!(
+        lines[5].contains(
+            r#"broken_call_constraint{called: "area{f: square{s: 2}}", constraint: "f is round"}"#
+        ),
+        "{stderr}"
+    );
+    // Written where the call is, with what the constraint reads.
+    assert_eq!(
+        lines[6],
+        r#"error[R0024]: repeated{s: ""} can't be called: it breaks the constraint `s <> ""`"#,
+        "{stderr}"
+    );
+    assert!(lines[7].contains("call_constraints.trendy:56:"), "{stderr}");
 }
 
 /// `shl` and `shr` computed when running are what they are when compiling,

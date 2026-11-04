@@ -2846,6 +2846,46 @@ fn indentation(node: &trendy_syntax::SyntaxNode) -> String {
 /// The rule that a read-only operator is a function, for notes.
 const READ_ONLY_FUNCTION: &str = "a read-only operator is a function of its arguments: its calls with the same arguments have the same value, whenever they are made (TTM, RM Prescription 3), so it reads only its parameters and its own local variables, and a variable of the program's it needs is passed to it, as a `const` parameter";
 
+/// The variable of the program's `name`, read at `span` in `operator`, if it
+/// is made from a type's declaration: a constraint of the type, or a possible
+/// representation's `to` or `from`.
+fn variable_in_type_operator(name: &str, span: Span, operator: &Signature) -> Option<Diagnostic> {
+    if let Some((defined, _)) = operator.constrains() {
+        return Some(
+            Diagnostic::error(
+                Code::VariableInReadOnly,
+                format!(
+                    "`{}`'s constraint can't read the variable `{name}`",
+                    defined.name
+                ),
+                span,
+                "a variable of the program's",
+            )
+            .with_note(CONSTRAINT_OF_COMPONENTS)
+            .with_help(format!(
+                "write the condition with the components and constants, without `{name}`"
+            )),
+        );
+    }
+    // A possible representation's `to` or `from`.
+    if let Some(from) = &operator.from_type {
+        return Some(Diagnostic::error(
+            Code::VariableInReadOnly,
+            format!(
+                "a conversion of `{}` can't read the variable `{name}`",
+                from.defined.name
+            ),
+            span,
+            "a variable of the program's",
+        )
+        .with_note("a conversion computes a representation's components from another's alone, so that a value is the same whichever it is written in")
+        .with_help(format!(
+            "write it with the components and constants, without `{name}`"
+        )));
+    }
+    None
+}
+
 /// The variable of the program's `name`, of type `ty` if it is known, read
 /// at `span` in the read-only operator `operator`, one of `operators`: the
 /// fix passes it as a parameter of that name, which each call of the
@@ -2858,36 +2898,11 @@ pub(crate) fn variable_in_read_only(
     operators: &Operators,
     ty: Option<String>,
 ) -> Diagnostic {
-    if let Some((defined, _)) = operator.constrains() {
-        return Diagnostic::error(
-            Code::VariableInReadOnly,
-            format!(
-                "`{}`'s constraint can't read the variable `{name}`",
-                defined.name
-            ),
-            span,
-            "a variable of the program's",
-        )
-        .with_note(CONSTRAINT_OF_COMPONENTS)
-        .with_help(format!(
-            "write the condition with the components and constants, without `{name}`"
-        ));
+    if let Some(call) = &operator.constrains_call {
+        return variable_in_call_constraint(name, span, &operators.get(call.of).name);
     }
-    // A possible representation's `to` or `from`.
-    if let Some(from) = &operator.from_type {
-        return Diagnostic::error(
-            Code::VariableInReadOnly,
-            format!(
-                "a conversion of `{}` can't read the variable `{name}`",
-                from.defined.name
-            ),
-            span,
-            "a variable of the program's",
-        )
-        .with_note("a conversion computes a representation's components from another's alone, so that a value is the same whichever it is written in")
-        .with_help(format!(
-            "write it with the components and constants, without `{name}`"
-        ));
+    if let Some(d) = variable_in_type_operator(name, span, operator) {
+        return d;
     }
     let op = &operator.name;
     let d = Diagnostic::error(
@@ -5188,6 +5203,7 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
         }
         crate::ops::Failed::Constraint(broken) => broken_constraint(broken, expr),
         crate::ops::Failed::Overlapping(overlapping) => overlapping_subtypes(overlapping, expr),
+        crate::ops::Failed::CallConstraint(broken) => broken_call_constraint(broken, expr.span()),
         crate::ops::Failed::Key(broken) => {
             let keyed = Keyed::Component {
                 ty: &broken.value.ty.name,
@@ -5639,6 +5655,185 @@ fn broken_constraint(broken: &crate::ops::BrokenConstraint, expr: &Expr) -> Diag
     d.with_note(CONSTRAINT_RULE)
 }
 
+/// The cycle that starts at `first`, a constraint in an operator's braces,
+/// through the globals `names`, itself the first.
+fn call_constraint_cycle(first: &Pending, names: &[String]) -> Diagnostic {
+    let operator = &first.name;
+    let message = match names {
+        [_] => format!("`{operator}`'s constraint calls `{operator}`"),
+        [_, rest @ ..] => format!(
+            "`{operator}`'s constraint calls `{operator}` through {}",
+            trendy_diag::conjoin(rest)
+        ),
+        [] => unreachable!("a cycle has a global in it"),
+    };
+    Diagnostic::error(Code::Recursion, message, first.defined, "this constraint")
+        .with_note(
+            "a constraint in an operator's braces is checked at every call of it, so one that calls the operator, directly or through others, would check itself again",
+        )
+        .with_help("compute the condition from the parameters without calling the operator")
+}
+
+/// The variable of the program's `name`, read at `span` in a constraint of
+/// the operator named `operator`.
+fn variable_in_call_constraint(name: &str, span: Span, operator: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::VariableInReadOnly,
+        format!("`{operator}`'s constraint can't read the variable `{name}`"),
+        span,
+        "a variable of the program's",
+    )
+    .with_note(CALL_CONSTRAINT)
+    .with_help(format!(
+        "write the condition with `{operator}`'s parameters and constants, without `{name}`; to depend on it, add a parameter for it"
+    ))
+}
+
+/// What a constraint in an operator's braces is.
+const CALL_CONSTRAINT: &str = "a constraint in an operator's braces says which arguments a call of it can have: a condition on its parameters, which each call checks first, and which fails where the call is, when it is false";
+
+/// A call at `at`, whose arguments break a constraint of the operator's, as
+/// `broken` says.
+pub(crate) fn broken_call_constraint(
+    broken: &crate::ops::BrokenCallConstraint,
+    at: Span,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::BrokenCallConstraint,
+        format!("`{}` can't be called", broken.called),
+        at,
+        format!("it breaks the constraint `{}`", broken.text),
+    );
+    let d = match broken.at {
+        Some(written) => d.with_secondary(written, "false of these arguments"),
+        None => d,
+    };
+    d.with_note(CALL_CONSTRAINT)
+}
+
+/// A constraint of a version of `spec`.
+pub(crate) fn constraint_of_version(
+    constraint: &trendy_syntax::ast::Constraint,
+    spec: &Signature,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::CallConstraint,
+        format!("a version of `{}` has no constraint of its own", spec.name),
+        constraint.span(),
+        "in a version's braces",
+    )
+    .with_note("a call of a specification can't say which version it will compute, so what it can be called with is the specification's to say, of all of them")
+    .with_help(format!("write it in the braces of `{}`'s specification", spec.text()))
+}
+
+/// A constraint of the definition of an operator whose unit's interface
+/// declares it, `declared`: the fix moves it there, or removes it if it says
+/// the same.
+pub(crate) fn constraint_of_definition(
+    constraint: &trendy_syntax::ast::Constraint,
+    declared: &trendy_syntax::ast::Operator,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::CallConstraint,
+        "a constraint goes in the operator's declaration in its unit's interface",
+        constraint.span(),
+        "in its definition's braces",
+    )
+    .with_note("other units see only the interface, and what a call can be given is for its callers to see, so the interface's declaration says it, and the definition doesn't repeat it");
+    let removed = Edit {
+        span: constraint.removal(),
+        replacement: String::new(),
+    };
+    let written = constraint.syntax().text().to_string();
+    let same = declared
+        .constraints()
+        .any(|c| c.syntax().text().to_string() == written);
+    if same {
+        return d.with_suggestion("remove it: the declaration says it", vec![removed]);
+    }
+    match declared.params() {
+        Some(heading) => {
+            let (at, before, after) = heading.insertion();
+            let added = Edit {
+                span: Span::empty(at),
+                replacement: format!("{before}{written}{after}"),
+            };
+            d.with_suggestion("move it to the declaration", vec![added, removed])
+        }
+        None => d.with_help("move it to the declaration in the unit's interface"),
+    }
+}
+
+/// A constraint of the operator named `operator` that reads none of its
+/// parameters.
+pub(crate) fn constraint_reads_no_parameter(
+    constraint: &trendy_syntax::ast::Constraint,
+    operator: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::CallConstraint,
+        format!("this constraint reads none of `{operator}`'s parameters"),
+        constraint.span(),
+        "says nothing of a call's arguments",
+    )
+    .with_note(CALL_CONSTRAINT)
+    .with_help("write it with the parameters whose arguments it is about, or remove it")
+}
+
+/// The parameter `name`, read at `span` in a constraint of `operator`, which
+/// has no one value when a call is checked.
+pub(crate) fn constraint_reads_no_value(
+    name: &str,
+    span: Span,
+    operator: &Signature,
+) -> Diagnostic {
+    let (label, why) = match operator.per_relation(name) {
+        Some(relation) => (
+            "a `per` parameter",
+            format!("`{name}` has a value for each tuple of `{relation}`, not one for the call"),
+        ),
+        None => (
+            "an `out` parameter",
+            format!("`{name}` has no value until `{}` assigns it", operator.name),
+        ),
+    };
+    Diagnostic::error(
+        Code::CallConstraint,
+        format!("`{}`'s constraint can't read `{name}`", operator.name),
+        span,
+        label,
+    )
+    .with_note(why)
+    .with_note(CALL_CONSTRAINT)
+    .with_help("write it with the parameters whose arguments have a value when the call is made")
+}
+
+/// A constraint of the operator named `operator` that is always `holds`.
+pub(crate) fn constant_call_constraint(
+    holds: bool,
+    constraint: &trendy_syntax::ast::Constraint,
+    operator: &str,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::CallConstraint,
+        format!("this constraint is always {holds}"),
+        constraint.span(),
+        "whatever the arguments",
+    )
+    .with_note(CALL_CONSTRAINT);
+    if holds {
+        d.with_suggestion(
+            "remove it: it checks nothing",
+            vec![Edit {
+                span: constraint.removal(),
+                replacement: String::new(),
+            }],
+        )
+    } else {
+        d.with_help(format!("no call of `{operator}` could satisfy it: write what its arguments must be, or remove it"))
+    }
+}
+
 /// `expr`, which selects a value that is of two subtypes of its type
 /// defined by constraints, as `overlapping` says.
 fn overlapping_subtypes(overlapping: &crate::ops::Overlapping, expr: &Expr) -> Diagnostic {
@@ -5987,7 +6182,12 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
         (Global::Constraint(_), Some(representation)) => {
             format!("`{representation}`'s constraint")
         }
-        (Global::Constraint(_), None) => format!("`{}`'s constraint", p.name),
+        (Global::Constraint(_) | Global::CallConstraint(_), None) => {
+            format!("`{}`'s constraint", p.name)
+        }
+        (Global::CallConstraint(_), Some(_)) => {
+            unreachable!("only a type's constraint is of a representation")
+        }
         (Global::Variable(_) | Global::Operator(_), _) => format!("`{}`", p.name),
     };
     // What selecting a value that checks it is, if it is a constraint.
@@ -6028,6 +6228,7 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
                 )
                 .with_help("compute the condition from the components without selecting a value of the type")
         }
+        Global::CallConstraint(_) => call_constraint_cycle(first, &names),
         Global::Operator(_) => {
             let message = match names.as_slice() {
                 [_] => format!("`{}` calls itself", first.name),
@@ -6446,9 +6647,13 @@ pub(crate) fn call_failure(
     expr: &Expr,
     signature: &Signature,
 ) -> Diagnostic {
-    // A built-in's value is the compiler's, with nothing to point at, and
-    // a selector's is the selection that fails.
-    if signature.builtin.is_some() || signature.selects().is_some() {
+    // A built-in's value is the compiler's, with nothing to point at, a
+    // selector's is the selection that fails, and arguments that break a
+    // constraint of the operator never reach its value.
+    if signature.builtin.is_some()
+        || signature.selects().is_some()
+        || matches!(failed, crate::ops::Failed::CallConstraint(broken) if broken.operator == signature.id)
+    {
         return self::failed(failed, expr);
     }
     let d = self::failed(failed, expr).with_note(format!(

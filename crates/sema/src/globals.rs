@@ -15,7 +15,7 @@ use crate::assign::{self, Assignee, Assigning};
 use crate::body::Around;
 use crate::check::{Checker, Lookup, Names};
 use crate::locals::{self, Declaration, Declaring, Local, Locals};
-use crate::operators::{FromType, Made, Operators, Signature};
+use crate::operators::{CallConstraint, FromType, Made, Operators, Signature};
 use crate::types::{self, Expected, Origin};
 use crate::{Files, Namespaces, Sites, errors, keys, ops, scope};
 
@@ -71,6 +71,8 @@ pub(crate) enum Global {
     /// A constraint of a type of the program's own, which selecting one of
     /// its values checks.
     Constraint(hir::OperatorId),
+    /// A constraint in an operator's braces, which a call of it checks.
+    CallConstraint(hir::OperatorId),
 }
 
 /// Where a global's evaluation is.
@@ -290,9 +292,13 @@ impl<'a> Globals<'a> {
         match self.operator_states.get(&id) {
             Some(State::Done(done)) => return done.is_some(),
             Some(State::Evaluating) => {
-                if let Some(start) = self.stack.iter().position(
-                    |p| matches!(p.global, Global::Operator(o) | Global::Constraint(o) if o == id),
-                ) {
+                if let Some(start) = self.stack.iter().position(|p| {
+                    matches!(
+                        p.global,
+                        Global::Operator(o) | Global::Constraint(o) | Global::CallConstraint(o)
+                            if o == id
+                    )
+                }) {
                     self.cycle(start, at, errors);
                 }
                 return false;
@@ -304,9 +310,13 @@ impl<'a> Globals<'a> {
         }
         let defined = signature.defined().unwrap_or(at);
         self.operator_states.insert(id, State::Evaluating);
-        let (global, name) = match signature.constrains() {
-            Some((ty, _)) => (Global::Constraint(id), ty.name.clone()),
-            None => (Global::Operator(id), signature.name.clone()),
+        let (global, name) = match (signature.constrains(), &signature.constrains_call) {
+            (Some((ty, _)), _) => (Global::Constraint(id), ty.name.clone()),
+            (None, Some(call)) => (
+                Global::CallConstraint(id),
+                self.operators.get(call.of).name.clone(),
+            ),
+            (None, None) => (Global::Operator(id), signature.name.clone()),
         };
         // A representation's own constraint, as its selector is written.
         let representation = signature
@@ -347,7 +357,7 @@ impl<'a> Globals<'a> {
         }
         if let Some(constraint) = cycle
             .iter()
-            .position(|p| matches!(p.global, Global::Constraint(_)))
+            .position(|p| matches!(p.global, Global::Constraint(_) | Global::CallConstraint(_)))
         {
             cycle.rotate_left(constraint);
         }
@@ -372,6 +382,9 @@ impl<'a> Globals<'a> {
     ) -> Option<(Vec<hir::Local>, hir::Expr)> {
         if let Some((defined, constraint)) = signature.constrains() {
             return self.constraint(signature, defined, constraint, errors);
+        }
+        if let Some(call) = &signature.constrains_call {
+            return self.call_constraint(signature, call, errors);
         }
         if let Some(from) = &signature.from_type {
             return self.converted(signature, from, errors);
@@ -738,6 +751,43 @@ impl<'a> Globals<'a> {
         }
         Some((locals.finish(), hir::Expr::at(site, value)))
     }
+
+    /// The value of the read-only operator `signature`, the constraint
+    /// `call` in another operator's braces: its condition, of the parameters
+    /// it reads, and its local variables.
+    fn call_constraint(
+        &mut self,
+        signature: &Signature,
+        call: &CallConstraint,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(Vec<hir::Local>, hir::Expr)> {
+        let constraint = &call.constraint;
+        let condition = constraint.condition()?;
+        let boolean = Expected {
+            ty: hir::Type::Scalar(hir::Scalar::Boolean),
+            origin: Origin::Operator(constraint.keyword()?),
+        };
+        let mut locals = Locals::default();
+        let mut names = ReadOnlyNames {
+            globals: self,
+            within: signature.id,
+            locals: &mut locals,
+        };
+        let site = names.site(condition.span());
+        let value = Checker::new(&mut names).expr(&condition, Some(&boolean), errors)?;
+        let operator = &self.operators.get(call.of).name;
+        if signature.params.is_empty() && signature.unresolved.is_empty() {
+            errors.push(errors::constraint_reads_no_parameter(constraint, operator));
+            return None;
+        }
+        if let hir::Expr::Constant(hir::Value::Boolean(holds)) = value {
+            errors.push(errors::constant_call_constraint(
+                holds, constraint, operator,
+            ));
+            return None;
+        }
+        Some((locals.finish(), hir::Expr::at(site, value)))
+    }
 }
 
 /// Whether `assigned`, an assignment statement in a read-only operator, of
@@ -887,6 +937,16 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             Some(Local::Invalid) => return Lookup::Reported,
             None => {}
         }
+        // In a constraint in an operator's braces, a parameter that has no
+        // one value a call can be checked with.
+        if let Some(call) = &self.signature().constrains_call {
+            let operator = self.globals.operators.get(call.of);
+            if operator.mode(name) == Some(hir::Mode::Out) || operator.per_relation(name).is_some()
+            {
+                errors.push(errors::constraint_reads_no_value(name, span, operator));
+                return Lookup::Reported;
+            }
+        }
         // In a representation's own constraint, a component of another,
         // which its components, as given, don't have: the stored one's,
         // though of every value, read as the others' do, so that they don't
@@ -958,7 +1018,12 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
-        self.signature()
+        // A constraint can read any of its operator's parameters.
+        let parameters = match &self.signature().constrains_call {
+            Some(call) => self.globals.operators.get(call.of),
+            None => self.signature(),
+        };
+        parameters
             .parameter_names()
             .chain(self.locals.names())
             .chain(self.globals.declared.names(at))

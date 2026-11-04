@@ -58,6 +58,11 @@ pub(crate) struct Signature {
     /// The type of the program's own it is made from, if it is a
     /// selector, a constraint or a conversion of it.
     pub(crate) from_type: Option<FromType>,
+    /// The constraints in its braces, each a read-only operator of the
+    /// parameters it reads, which a call checks of its arguments.
+    pub(crate) constraints: Vec<hir::Constraint>,
+    /// The constraint in another operator's braces it is, if it is one.
+    pub(crate) constrains_call: Option<CallConstraint>,
     /// Whether the parameters and the result type are valid. Calls of an
     /// operator with errors in them aren't checked, because those errors
     /// are already reported.
@@ -68,6 +73,15 @@ pub(crate) struct Signature {
     /// A specification's versions, each before those it is more specific
     /// than (see [`hir::Operator::versions`]).
     pub(crate) versions: Vec<hir::Version>,
+}
+
+/// A constraint in an operator's braces, as the read-only operator of the
+/// parameters it reads that a call of the operator calls.
+#[derive(Clone)]
+pub(crate) struct CallConstraint {
+    /// The operator it is a constraint of.
+    pub(crate) of: hir::OperatorId,
+    pub(crate) constraint: ast::Constraint,
 }
 
 /// What an operator is among those of its name and its parameters' names
@@ -292,6 +306,9 @@ impl Signature {
                 .find(|c| c.direction() == Some(d))
                 .and_then(|c| c.keyword())
         };
+        if let Some(call) = &self.constrains_call {
+            return Some(trendy_syntax::span(call.constraint.keyword()?.text_range()));
+        }
         let ident = match &self.from_type {
             Some(from) => match &from.made {
                 Made::Constraint { constraint, .. } => constraint.keyword()?,
@@ -367,7 +384,10 @@ impl Operators {
         // A version is called through its specification, and a duplicate
         // not at all.
         let named = |s: &&Signature| {
-            s.constrains().is_none() && s.converts().is_none() && s.family == Family::Own
+            s.constrains().is_none()
+                && s.constrains_call.is_none()
+                && s.converts().is_none()
+                && s.family == Family::Own
         };
         for signature in list.iter().filter(named) {
             by_name
@@ -416,6 +436,7 @@ impl Operators {
         match &signature.from_type {
             Some(from) if from.selects().is_some() => return from.defined.name.clone(),
             Some(_) => return signature.name.clone(),
+            None if signature.constrains_call.is_some() => return signature.name.clone(),
             None => {}
         }
         let family = self.get(self.family_of(id));
@@ -734,6 +755,8 @@ impl Signature {
             builtin_name: None,
             source,
             from_type: Some(from),
+            constraints: Vec::new(),
+            constrains_call: None,
             family: Family::Own,
             versions: Vec::new(),
             valid,
@@ -774,6 +797,8 @@ impl Signature {
             builtin_name: Some(at),
             source,
             from_type: None,
+            constraints: Vec::new(),
+            constrains_call: None,
             family: Family::Own,
             versions: Vec::new(),
             valid: true,
@@ -837,11 +862,98 @@ pub(crate) fn signatures(
         }
     }
     families(&mut list, namespaces, errors);
+    call_constraints(&mut list, errors);
     Operators::new(
         list,
         namespaces.units().clone(),
         (*namespaces.library().error).clone(),
     )
+}
+
+/// The constraints in the braces of each operator in `list`, added to it as
+/// read-only operators, each named for its operator and its place among them,
+/// a name no source can write or call, whose parameters are those of the
+/// operator it reads, so that a call whose other arguments aren't known yet
+/// can be checked, and what the error shows is what it reads. Callers see the
+/// constraints of what its unit's interface declares, if it does, so its
+/// definition has none, and a version has none, as a call of it is one of its
+/// specification.
+fn call_constraints(list: &mut Vec<Signature>, errors: &mut Vec<Diagnostic>) {
+    for i in 0..list.len() {
+        let Some(decl) = list[i].decl.clone() else {
+            continue;
+        };
+        let own: Vec<ast::Constraint> = decl.constraints().collect();
+        let declared = list[i].declared.clone();
+        let declared_constraints: Vec<ast::Constraint> = declared
+            .iter()
+            .flat_map(ast::Operator::constraints)
+            .collect();
+        let constraints = match list[i].family {
+            Family::Duplicate | Family::Declaration(_) => continue,
+            Family::Version(spec) => {
+                for constraint in own.iter().chain(&declared_constraints) {
+                    errors.push(errors::constraint_of_version(constraint, &list[spec.0]));
+                }
+                continue;
+            }
+            Family::Own => match &declared {
+                Some(declared) => {
+                    for constraint in &own {
+                        errors.push(errors::constraint_of_definition(constraint, declared));
+                    }
+                    declared_constraints
+                }
+                None => own,
+            },
+        };
+        for (place, constraint) in constraints.into_iter().enumerate() {
+            let Some(condition) = constraint.condition() else {
+                continue;
+            };
+            let parent = &list[i];
+            // Some are parameters', and others attributes' or local variables'.
+            let names = constraint.names();
+            let params: BTreeMap<String, hir::Parameter> = parent
+                .params
+                .iter()
+                .filter(|(name, param)| names.contains(*name) && param.mode != hir::Mode::Out)
+                .map(|(name, param)| (name.clone(), hir::Parameter::constant(param.ty.clone())))
+                .collect();
+            let id = hir::OperatorId(list.len());
+            let signature = Signature {
+                id,
+                name: format!("{} constraint {}", parent.name, place + 1),
+                unit: parent.unit,
+                section: ast::section_of(constraint.syntax()),
+                types: parent.types.clone(),
+                written: written(&params),
+                params,
+                unresolved: parent.unresolved.intersection(&names).cloned().collect(),
+                read_only: true,
+                result: Some(hir::Type::Scalar(hir::Scalar::Boolean)),
+                decl: None,
+                declared: None,
+                builtin: None,
+                builtin_name: None,
+                source: parent.source,
+                from_type: None,
+                constraints: Vec::new(),
+                constrains_call: Some(CallConstraint {
+                    of: parent.id,
+                    constraint,
+                }),
+                family: Family::Own,
+                versions: Vec::new(),
+                valid: parent.valid,
+            };
+            list.push(signature);
+            list[i].constraints.push(hir::Constraint {
+                operator: id,
+                text: condition.syntax().text().to_string(),
+            });
+        }
+    }
 }
 
 /// The operators in `list` written in trendy, each by its place in it, in
@@ -1398,6 +1510,8 @@ fn operator(
         builtin_name: None,
         source,
         from_type: None,
+        constraints: Vec::new(),
+        constrains_call: None,
         family: if duplicate {
             Family::Duplicate
         } else {

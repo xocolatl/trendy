@@ -785,6 +785,84 @@ var size := doubling{n: 100};
 operator main{} [];
 ```
 
+### What a call can be given
+
+A constraint in an operator's braces says which arguments a call of it can
+have: `constraint condition`, with its parameters, a condition they satisfy.
+Each call checks it first, before the operator runs. It says of a call what a
+type's constraint says of a value: which of those its parameters' types allow
+are the ones it takes (TTM RM Prescription 23).
+
+```trendy
+operator share{total: integer, people: integer, constraint people > 0}: integer [
+    total div people
+];
+
+operator repeated{word: text, times_over: integer, constraint times_over >= 0, constraint word <> ""}: text [
+    var result := "";
+    var left := times_over;
+    while left > 0 loop [
+        result := result || word;
+        left := left - 1;
+    ];
+    result
+];
+
+operator main{} [
+    call debug_value{v: share{total: 1200, people: 3}};
+    call debug_value{v: repeated{word: "na", times_over: 2}};
+];
+```
+
+- **It reads the parameters it is about,** at least one (A0078), and whatever
+  a read-only operator's value can: other read-only operators, a value block,
+  and statements that decide what runs next. It reads no variable of the
+  program's (A0050), and neither an `out` parameter, which has no value yet,
+  nor a `per` parameter, which has one for each tuple (A0078). A `var`
+  parameter's value is its variable's as the call starts. It can't call its
+  operator, directly or through another (A0036).
+- **A call that breaks it fails where the call is** (R0024), not in the
+  operator, as the fix goes in the call. The error writes the call with the
+  arguments the constraint reads: `share{people: 0} can't be called: it breaks
+  the constraint `people > 0``. A transaction can take it, a
+  `broken_call_constraint { called, constraint }`.
+- **It is checked when compiling where what it reads is known,** whatever else
+  isn't, so `share{total: t, people: 0}` is an error, with `t` a variable, and
+  when the program runs where it isn't. That holds whichever statements the
+  operator's body has, as the constraint is its own expression.
+- **Callers see it.** An operator its unit's interface declares has its
+  constraints there, and its definition doesn't repeat them (A0078, which
+  fixes it). A specification's apply to every call, whichever version is
+  computed, and a version has none of its own (A0078).
+- **It is for what a call is given.** What a body computes is checked with an
+  `if` and a `fail`, whose message says it in its own words (see
+  [Failures](#failures)). A constraint written in a body is moved to the
+  braces (P0055), and `assert` and `require`, as other languages write them,
+  are errors that say which of the two to write (P0059). SQL's `CHECK` is
+  fixed to `constraint`.
+- **In braces, order means nothing,** so it can come before the parameters it
+  reads, though the formatter keeps what is written, and `constraint` is a
+  contextual keyword: a parameter can have the name, before a `:`.
+
+```trendy,error
+operator share{total: integer, people: integer, constraint people > 0}: integer [
+    total div people
+];
+
+var each := share{total: 1200, people: 0};
+
+operator main{} [];
+```
+
+```trendy,error
+operator share{total: integer, people: integer}: integer [
+    constraint people > 0;
+    total div people
+];
+
+operator main{} [];
+```
+
 ### Generic operators
 
 A parameter's type can be `any type`, `any tuple`, `any relation` or
@@ -1165,9 +1243,14 @@ builtin operator length{a: any array}: integer;
 /* The integers from `from` to `to`, `step` apart, as PostgreSQL's
    `generate_series`: `from`, then `from + step`, and on as far as `to`,
    which is one of them only if a step lands on it. A negative step counts
-   down. A `to` the other way from `from` gives no tuples, and a step of 0,
-   which would get nowhere, fails (R0021). */
-operator series{from: integer, to: integer, step: integer}: relation { value: integer };
+   down. A `to` the other way from `from` gives no tuples. A step of 0 would
+   get nowhere, so no call has one. */
+operator series{
+    from: integer,
+    to: integer,
+    step: integer,
+    constraint step <> 0,
+}: relation { value: integer };
 
 /* The integers from `from` to `to`, one apart: none if `to` is less. */
 operator series{from: integer, to: integer}: relation { value: integer };
@@ -1364,6 +1447,11 @@ type not_of_type is error { { value: text, type: text } };
    has one most specific type (R0020). */
 type overlapping_subtypes is error { { value: text, first: text, second: text } };
 
+/* `called`, a call written with the arguments the constraint written
+   `constraint`, in the braces of the operator it calls, reads, breaks that
+   constraint (R0024). */
+type broken_call_constraint is error { { called: text, constraint: text } };
+
 /* A statement left the variables so that the constraint named
    `constraint` is false: its condition, or the operand of its `and` that
    is, written `condition` (R0023). */
@@ -1465,8 +1553,10 @@ operator main{} [
 - **A `to` the other way from `from` gives no tuples,** whatever the
   step's size: `series{from: 5, to: 1}` has none, as a count down needs
   its `step: -1`, and `series{from: 3, to: 3}` is 3.
-- **A step of 0 would get nowhere, and fails** (R0021), when compiling if
-  it is known then, and otherwise when the program runs.
+- **A step of 0 would get nowhere,** so `series` has a constraint that
+  says so, in its braces (see [What a call can be given](#what-a-call-can-be-given)): a call
+  with one is an error when compiling, if the step is known then, whatever
+  else isn't, and otherwise fails when the program runs (R0024).
 - **Every integer can be an end,** as nothing is computed beyond `to`:
   `series{from: 9223372036854775806, to: 9223372036854775807}` is those
   two, with no overflow, and the largest steps reach across zero.
@@ -6267,6 +6357,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a[-1]`, the last element | `a[length{a: a}]` |
 | `len(a)`, `a.length`, `a.length()`, `CARDINALITY(a)`, `size(a)` | `length{a: a}` |
 | `generate_series(1, 9, 2)`, `range(1, 10, 2)` | `series{from: 1, to: 9, step: 2}` |
+| `assert n > 0;`, `require(n > 0);`, `CHECK (n > 0)`, Ada's `with Pre => N > 0`, Eiffel's `require` | `operator f{n: integer, constraint n > 0} …`, of what a call is given; `if not (n > 0) then [ fail failure{message: "…"}; ];`, of what a body computes |
 | `r.sum(of: price)`, a method call | `sum{r: r, of: price}`: the value is an argument, named as the others are |
 | `ORDER BY x DESC`, `LOAD A FROM R ORDER (DESC X)`, `orderby x descending` | `load a from r order [desc x];` |
 | `unnest(a) WITH ORDINALITY AS t(x, n)`, `enumerate(a)`, `LOAD R FROM A` | `load r from a as x numbered n;` |

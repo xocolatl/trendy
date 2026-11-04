@@ -184,7 +184,15 @@ impl Origin {
                     .parent()
                     .is_some_and(|p| p.kind() == trendy_syntax::SyntaxKind::Constraint) =>
             {
-                "a type's constraint is a boolean condition".to_string()
+                // In an operator's braces, or else a type's.
+                let of_operator = token
+                    .parent_ancestors()
+                    .any(|p| p.kind() == trendy_syntax::SyntaxKind::Operator);
+                if of_operator {
+                    "a constraint in an operator's braces is a boolean condition".to_string()
+                } else {
+                    "a type's constraint is a boolean condition".to_string()
+                }
             }
             // An `if`'s keyword, or another language's `elif` for one.
             Origin::Operator(token)

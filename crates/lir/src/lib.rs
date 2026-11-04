@@ -396,6 +396,12 @@ pub enum RuntimeFn {
     /// descriptor describes, which is of both of its subtypes defined by
     /// constraints named `first` and `second`, texts, with them.
     OverlappingSubtypes,
+    /// `trendy_rt_broken_call_constraint(value, descriptor, operator,
+    /// constraint)`: write the error of a call of the operator named
+    /// `operator`, a text, with the arguments at `value`, a tuple the
+    /// descriptor describes, which break the constraint written
+    /// `constraint`, a text, with them.
+    BrokenCallConstraint,
     /// `trendy_rt_key_shared(shared, pair, src, descriptor, key)`: store at
     /// `shared`, a [`Layout::U8`], 1 if the relation `src`, of the type the
     /// descriptor describes, has two tuples with the same values for the
@@ -662,7 +668,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 78] = [
+    pub const ALL: [RuntimeFn; 79] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -701,6 +707,7 @@ impl RuntimeFn {
         RuntimeFn::Report,
         RuntimeFn::BrokenConstraintInFile,
         RuntimeFn::OverlappingSubtypes,
+        RuntimeFn::BrokenCallConstraint,
         RuntimeFn::KeyShared,
         RuntimeFn::KeyViolated,
         RuntimeFn::ComponentKeyViolated,
@@ -811,6 +818,7 @@ impl RuntimeFn {
             | RuntimeFn::Report
             | RuntimeFn::BrokenConstraintInFile
             | RuntimeFn::OverlappingSubtypes
+            | RuntimeFn::BrokenCallConstraint
             | RuntimeFn::KeyViolated
             | RuntimeFn::ComponentKeyViolated
             | RuntimeFn::ComponentKeyViolatedInFile
@@ -876,6 +884,7 @@ impl RuntimeFn {
             RuntimeFn::Report => "trendy_rt_report",
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
+            RuntimeFn::BrokenCallConstraint => "trendy_rt_broken_call_constraint",
             RuntimeFn::KeyShared => "trendy_rt_key_shared",
             RuntimeFn::KeyViolated => "trendy_rt_key_violated",
             RuntimeFn::ComponentKeyViolated => "trendy_rt_component_key_violated",
@@ -1254,22 +1263,36 @@ pub enum Failure {
         first: Place,
         second: Place,
     },
-    /// The tuples at `pair` of the relation `value`, of the type
-    /// `descriptor` describes, about to be assigned to the variable named
-    /// `variable`, a text, share their values for the key `key`, the
-    /// descriptor of its projection on the key, as
-    /// [`RuntimeFn::KeyShared`] found.
-    KeyViolated {
+    /// The arguments at `value`, a tuple `descriptor` describes, of a call
+    /// of the operator named `operator`, a text, break the constraint
+    /// written `constraint`, a text.
+    BrokenCallConstraint {
+        value: Place,
+        descriptor: Place,
+        operator: Place,
+        constraint: Place,
+    },
+    /// Two tuples of a relation share their values for a key.
+    Key(KeyFailure),
+}
+
+/// Two tuples at `pair` of the relation `value`, of the type `descriptor`
+/// describes, that share their values for the key `key`, the descriptor of
+/// its projection on the key, as [`RuntimeFn::KeyShared`] found: each of
+/// these says what the relation is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyFailure {
+    /// About to be assigned to the variable named `variable`, a text.
+    Variable {
         value: Place,
         descriptor: Place,
         key: Place,
         pair: Place,
         variable: Place,
     },
-    /// As [`Failure::KeyViolated`], of the relation that is the component
-    /// named `component`, a text, of a value selected of the type named
-    /// `ty`, a text.
-    ComponentKeyViolated {
+    /// The component named `component`, a text, of a value selected of the
+    /// type named `ty`, a text.
+    Component {
         value: Place,
         descriptor: Place,
         key: Place,
@@ -1277,9 +1300,9 @@ pub enum Failure {
         ty: Place,
         component: Place,
     },
-    /// As [`Failure::ComponentKeyViolated`], of a value `load_csv` read
-    /// from the record `record` describes, laid out as [`Layout::record`].
-    ComponentKeyViolatedInFile {
+    /// As [`KeyFailure::Component`], of a value `load_csv` read from the
+    /// record `record` describes, laid out as [`Layout::record`].
+    ComponentInFile {
         value: Place,
         descriptor: Place,
         key: Place,
@@ -1288,6 +1311,49 @@ pub enum Failure {
         component: Place,
         record: Place,
     },
+}
+
+impl KeyFailure {
+    /// The runtime function that writes this failure's error, and its
+    /// arguments, each passed by address.
+    #[must_use]
+    pub fn call(&self) -> (RuntimeFn, Vec<&Place>) {
+        match self {
+            KeyFailure::Variable {
+                value,
+                descriptor,
+                key,
+                pair,
+                variable,
+            } => (
+                RuntimeFn::KeyViolated,
+                vec![value, descriptor, key, pair, variable],
+            ),
+            KeyFailure::Component {
+                value,
+                descriptor,
+                key,
+                pair,
+                ty,
+                component,
+            } => (
+                RuntimeFn::ComponentKeyViolated,
+                vec![value, descriptor, key, pair, ty, component],
+            ),
+            KeyFailure::ComponentInFile {
+                value,
+                descriptor,
+                key,
+                pair,
+                ty,
+                component,
+                record,
+            } => (
+                RuntimeFn::ComponentKeyViolatedInFile,
+                vec![value, descriptor, key, pair, ty, component, record],
+            ),
+        }
+    }
 }
 
 impl Failure {
@@ -1361,39 +1427,16 @@ impl Failure {
                 RuntimeFn::OverlappingSubtypes,
                 vec![value, descriptor, first, second],
             ),
-            Failure::KeyViolated {
+            Failure::BrokenCallConstraint {
                 value,
                 descriptor,
-                key,
-                pair,
-                variable,
+                operator,
+                constraint,
             } => (
-                RuntimeFn::KeyViolated,
-                vec![value, descriptor, key, pair, variable],
+                RuntimeFn::BrokenCallConstraint,
+                vec![value, descriptor, operator, constraint],
             ),
-            Failure::ComponentKeyViolated {
-                value,
-                descriptor,
-                key,
-                pair,
-                ty,
-                component,
-            } => (
-                RuntimeFn::ComponentKeyViolated,
-                vec![value, descriptor, key, pair, ty, component],
-            ),
-            Failure::ComponentKeyViolatedInFile {
-                value,
-                descriptor,
-                key,
-                pair,
-                ty,
-                component,
-                record,
-            } => (
-                RuntimeFn::ComponentKeyViolatedInFile,
-                vec![value, descriptor, key, pair, ty, component, record],
-            ),
+            Failure::Key(key) => key.call(),
         }
     }
 }

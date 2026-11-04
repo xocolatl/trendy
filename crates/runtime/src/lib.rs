@@ -2921,6 +2921,36 @@ pub unsafe extern "C" fn trendy_rt_overlapping_subtypes(
     }
 }
 
+/// Fail with the error of a call of the operator named `operator`, a text,
+/// with the arguments at `value`, a tuple `desc` describes, which break the
+/// constraint written `constraint`, a text: a `broken_call_constraint`, the
+/// call written as a call is, as `debug_value` writes a value (R0024).
+///
+/// # Safety
+///
+/// `value` must point to a valid tuple `desc` describes, and `operator` and
+/// `constraint` to valid text values.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_broken_call_constraint(
+    value: *const u8,
+    desc: *const TypeDesc,
+    operator: *const u8,
+    constraint: *const u8,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let name = read_text(operator);
+        let Ok(called) = Made::written(|mut out| write_call(&mut out, name, value, &*desc)) else {
+            return;
+        };
+        let Failed = fail_as(
+            BROKEN_CALL_CONSTRAINT,
+            &[("called", called.at()), ("constraint", constraint)],
+        );
+    }
+}
+
 /// Fail with the error of `value`, of the type in a hierarchy `desc`
 /// describes, which isn't a value of the type named `ty`, a text, that it
 /// was treated as: a `not_of_type`, the value written as `debug_value`
@@ -4530,7 +4560,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 29] = [
+pub const KINDS: [&str; 30] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -4556,6 +4586,7 @@ pub const KINDS: [&str; 29] = [
     "no_square_root",
     "not_of_type",
     "overlapping_subtypes",
+    "broken_call_constraint",
     "column_shared",
     "column_below_one",
     "constraint_violated",
@@ -4641,6 +4672,8 @@ pub const NO_SQUARE_ROOT: usize = place("no_square_root");
 pub const NOT_OF_TYPE: usize = place("not_of_type");
 /// `overlapping_subtypes`'s, as [`UNREADABLE_FILE`] is.
 pub const OVERLAPPING_SUBTYPES: usize = place("overlapping_subtypes");
+/// `broken_call_constraint`'s, as [`UNREADABLE_FILE`] is.
+pub const BROKEN_CALL_CONSTRAINT: usize = place("broken_call_constraint");
 /// `column_shared`'s, as [`UNREADABLE_FILE`] is.
 pub const COLUMN_SHARED: usize = place("column_shared");
 /// `column_below_one`'s, as [`UNREADABLE_FILE`] is.
@@ -6186,21 +6219,15 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
                 write_value(out, components, own)
             }
             // Its selector's invocation, as a call is written.
-            KIND_DEFINED => {
-                out.write_str(core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+            KIND_DEFINED => write_call(
+                out,
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(
                     desc.written,
                     desc.written_len,
-                )))?;
-                out.write_char('{')?;
-                for (i, attr) in attributes(desc).iter().enumerate() {
-                    if i > 0 {
-                        out.write_str(", ")?;
-                    }
-                    write!(out, "{}: ", name(attr))?;
-                    write_value(out, value.add(attr.offset), &*attr.desc)?;
-                }
-                out.write_char('}')
-            }
+                )),
+                value,
+                desc,
+            ),
             KIND_RELATION => {
                 out.write_str("relation ")?;
                 write_heading(out, desc)?;
@@ -6457,6 +6484,34 @@ unsafe fn write_heading(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
     // SAFETY: guaranteed by the caller; a valid descriptor's attributes
     // are valid.
     unsafe { write_attributes(out, desc, |out, attr| write_type(out, &*attr.desc)) }
+}
+
+/// A call of `operator` with the arguments at `value`, as a call is written:
+/// `operator{name: value, …}`, in the attributes' order.
+///
+/// # Safety
+///
+/// As for [`write_value`], with `desc` describing the arguments' heading.
+unsafe fn write_call(
+    out: &mut impl Write,
+    operator: &str,
+    value: *const u8,
+    desc: &TypeDesc,
+) -> fmt::Result {
+    out.write_str(operator)?;
+    out.write_char('{')?;
+    // SAFETY: guaranteed by the caller; each attribute's offset and
+    // descriptor are its layout.
+    unsafe {
+        for (i, attr) in attributes(desc).iter().enumerate() {
+            if i > 0 {
+                out.write_str(", ")?;
+            }
+            write!(out, "{}: ", name(attr))?;
+            write_value(out, value.add(attr.offset), &*attr.desc)?;
+        }
+    }
+    out.write_char('}')
 }
 
 /// `{ name: value, … }` or `{}`, for the tuple at `value`.

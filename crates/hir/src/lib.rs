@@ -217,6 +217,11 @@ pub struct Operator {
     /// whose parameters its arguments' values are of, and otherwise its own
     /// value or body. None for most operators.
     pub versions: Vec<Version>,
+    /// The constraints in its braces, each a read-only operator of the
+    /// parameters it reads, with the condition as it is written: a call
+    /// checks them of its arguments before anything else, and fails, where
+    /// it is, if one is false (R0024). None for most operators.
+    pub constraints: Vec<Constraint>,
 }
 
 /// A version of an operator: another operator, with the same parameters,
@@ -317,6 +322,7 @@ impl Operator {
                 .collect(),
             kind,
             versions: self.versions.clone(),
+            constraints: Vec::new(),
         }
     }
 }
@@ -632,6 +638,9 @@ pub enum LanguageError {
     /// A value is of two subtypes of its type defined by constraints, but a
     /// value has one most specific type (R0020).
     OverlappingSubtypes,
+    /// A call's arguments break a constraint in its operator's braces
+    /// (R0024).
+    BrokenCallConstraint,
     /// A load's `columns` gives two attributes one column (R0016).
     ColumnShared,
     /// A load's `columns` gives an attribute a column below 1 (R0016).
@@ -645,7 +654,7 @@ pub enum LanguageError {
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 29] = [
+    pub const ALL: [LanguageError; 30] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -671,6 +680,7 @@ impl LanguageError {
         LanguageError::NoSquareRoot,
         LanguageError::NotOfType,
         LanguageError::OverlappingSubtypes,
+        LanguageError::BrokenCallConstraint,
         LanguageError::ColumnShared,
         LanguageError::ColumnBelowOne,
         LanguageError::ConstraintViolated,
@@ -697,6 +707,7 @@ impl LanguageError {
             LanguageError::OverlappingSubtypesInFile | LanguageError::OverlappingSubtypes => {
                 Code::OverlappingSubtypes
             }
+            LanguageError::BrokenCallConstraint => Code::BrokenCallConstraint,
             LanguageError::Overflow => Code::Overflow,
             LanguageError::DivisionByZero => Code::DivisionByZero,
             LanguageError::NotOneTuple => Code::NotOneTuple,
@@ -745,6 +756,7 @@ impl LanguageError {
             LanguageError::NoSquareRoot => "no_square_root",
             LanguageError::NotOfType => "not_of_type",
             LanguageError::OverlappingSubtypes => "overlapping_subtypes",
+            LanguageError::BrokenCallConstraint => "broken_call_constraint",
             LanguageError::ColumnShared => "column_shared",
             LanguageError::ColumnBelowOne => "column_below_one",
             LanguageError::ConstraintViolated => "constraint_violated",
@@ -838,6 +850,7 @@ impl LanguageError {
             LanguageError::OverlappingSubtypes => {
                 &[("value", text), ("first", text), ("second", text)]
             }
+            LanguageError::BrokenCallConstraint => &[("called", text), ("constraint", text)],
             LanguageError::ColumnShared => {
                 &[("first", text), ("second", text), ("column", integer)]
             }

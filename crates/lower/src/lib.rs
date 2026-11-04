@@ -2671,6 +2671,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::OperatorKind::Update { .. } | hir::OperatorKind::Specification { .. } => {
                 let params = params_of(callee, &call.types);
                 let args = self.arguments(&params, call, cx);
+                self.call_constraints_checked(call, args.as_ref(), &params, cx);
                 // An assignment the operator makes must not free what an
                 // argument points to, though it can replace the value of
                 // the only variable holding it.
@@ -3304,10 +3305,89 @@ impl<'a> FunctionBuilder<'a> {
             | hir::OperatorKind::Update { .. }
             | hir::OperatorKind::Specification { .. } => {}
         }
-        let args = self.arguments(&params_of(callee, &call.types), call, cx);
+        let params = params_of(callee, &call.types);
+        let args = self.arguments(&params, call, cx);
+        self.call_constraints_checked(call, args.as_ref(), &params, cx);
         let dst = self.slot(cx.layout(&self.program.result(call)));
         self.invoke(call, args, Some(dst.clone()), cx);
         dst
+    }
+
+    /// Stop the program, where `call` is, unless each constraint in the
+    /// braces of the operator it calls is true of its arguments, at `args`,
+    /// for `params`: a call of the read-only operator of the parameters it
+    /// reads, which it is given as a tuple, as the error shows them.
+    fn call_constraints_checked(
+        &mut self,
+        call: &hir::Call,
+        args: Option<&lir::Place>,
+        params: &BTreeMap<String, hir::Parameter>,
+        cx: &mut Lowering,
+    ) {
+        let callee = self.program.operator(call.operator);
+        for constraint in &callee.constraints {
+            let reads = params_of(self.program.operator(constraint.operator), &call.types);
+            let layout =
+                params_layout(&reads, &cx.families).expect("a constraint reads a parameter");
+            let given = self.slot(layout);
+            for (i, (name, param)) in reads.iter().enumerate() {
+                let mut dst = given.clone();
+                dst.path.push(i);
+                // A `var` parameter's is its variable's value as the call
+                // starts, as the operator sees it first.
+                let src = if params[name].mode == hir::Mode::Const {
+                    let index = params
+                        .keys()
+                        .position(|p| p == name)
+                        .expect("a constraint's parameters are its operator's");
+                    let mut arg = args.expect("the operator has parameters").clone();
+                    arg.path.push(index);
+                    arg
+                } else {
+                    self.holder(&call.updated[name], cx)
+                };
+                self.insts.push(lir::Inst::Copy {
+                    dst,
+                    src,
+                    layout: cx.layout(&param.ty),
+                });
+            }
+            let holds = self.slot(lir::Layout::U8);
+            self.call_function(
+                constraint.operator,
+                &call.types,
+                Some(given.clone()),
+                Some(holds.clone()),
+                cx,
+            );
+            let (kept, failed) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: holds,
+                    then: kept,
+                    otherwise: failed,
+                },
+                failed,
+            );
+            let heading = hir::Type::Tuple(hir::Heading::new(
+                reads
+                    .iter()
+                    .map(|(name, p)| (name.clone(), p.ty.clone()))
+                    .collect(),
+            ));
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&heading)));
+            let operator = self.text(&callee.name, cx);
+            let written = self.text(&constraint.text, cx);
+            self.broken(
+                Broken::Fail(Box::new(lir::Failure::BrokenCallConstraint {
+                    value: given,
+                    descriptor,
+                    operator,
+                    constraint: written,
+                })),
+                kept,
+            );
+        }
     }
 
     /// Call the operator `call` names, with the argument struct `args`,
@@ -3779,13 +3859,13 @@ impl<'a> FunctionBuilder<'a> {
         let variable = self.target_name(target).to_string();
         for key in &keys {
             self.key_checked(value, &ty, key, cx, |this, failed, cx| {
-                Broken::Fail(Box::new(lir::Failure::KeyViolated {
+                Broken::Fail(Box::new(lir::Failure::Key(lir::KeyFailure::Variable {
                     value: failed.value,
                     descriptor: failed.descriptor,
                     key: failed.key,
                     pair: failed.pair,
                     variable: this.text(&variable, cx),
-                }))
+                })))
             });
         }
     }
@@ -5073,8 +5153,8 @@ impl<'a> FunctionBuilder<'a> {
                     }
                     let ty = this.text(&defined.name, cx);
                     let component = this.text(component, cx);
-                    Broken::Fail(Box::new(match checking {
-                        Checking::Selected => lir::Failure::ComponentKeyViolated {
+                    Broken::Fail(Box::new(lir::Failure::Key(match checking {
+                        Checking::Selected => lir::KeyFailure::Component {
                             value,
                             descriptor,
                             key,
@@ -5082,7 +5162,7 @@ impl<'a> FunctionBuilder<'a> {
                             ty,
                             component,
                         },
-                        Checking::Read { record, .. } => lir::Failure::ComponentKeyViolatedInFile {
+                        Checking::Read { record, .. } => lir::KeyFailure::ComponentInFile {
                             value,
                             descriptor,
                             key,
@@ -5091,7 +5171,7 @@ impl<'a> FunctionBuilder<'a> {
                             component,
                             record: record.clone(),
                         },
-                    }))
+                    })))
                 });
             }
         }
@@ -7157,6 +7237,7 @@ mod tests {
     fn user(name: &str, params: &[&str], body: Vec<hir::Statement>) -> hir::Operator {
         hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: name.to_string(),
             types: Vec::new(),
             params: params
@@ -7235,6 +7316,7 @@ mod tests {
     fn debug_value() -> hir::Operator {
         hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "debug_value".to_string(),
             types: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).types(),
             params: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params(&library()),
@@ -7290,6 +7372,7 @@ mod tests {
             .collect();
         operators.push(hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "message".to_string(),
             types: Vec::new(),
             params: [(
@@ -8349,6 +8432,7 @@ mod tests {
         // from being freed by an assignment `f` makes to `t`.
         let f = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             types: Vec::new(),
             name: "f".to_string(),
             params: [(
@@ -8402,6 +8486,7 @@ mod tests {
         let text = || hir::Type::Scalar(hir::Scalar::Text);
         let read_only = |name: &str, value| hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: name.to_string(),
             types: Vec::new(),
             params: [("t".to_string(), hir::Parameter::constant(text()))].into(),
@@ -8510,6 +8595,7 @@ mod tests {
         };
         let show = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "show".to_string(),
             types: vec![parameter.clone()],
             params: [(
@@ -8582,6 +8668,7 @@ mod tests {
         // `debug_value{v: count{r: r}}`, of a relation variable.
         let count = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "count".to_string(),
             types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).types(),
             params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).params(&library()),
@@ -8630,6 +8717,7 @@ mod tests {
         // tuples have `of` beside their own attributes, as sema makes it.
         let max = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "max".to_string(),
             types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).types(),
             params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).params(&library()),
@@ -8727,6 +8815,7 @@ mod tests {
         });
         let f = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "f".to_string(),
             types: Vec::new(),
             params: BTreeMap::new(),
@@ -8810,6 +8899,7 @@ mod tests {
         });
         let half = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "half".to_string(),
             types: Vec::new(),
             params: [("n".to_string(), hir::Parameter::constant(integer()))].into(),
@@ -8831,6 +8921,7 @@ mod tests {
         });
         let f = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "f".to_string(),
             types: Vec::new(),
             params: BTreeMap::new(),
@@ -8972,6 +9063,7 @@ mod tests {
         );
         let f = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "f".to_string(),
             types: Vec::new(),
             params: [("p".to_string(), hir::Parameter::constant(integer()))].into(),
@@ -9047,6 +9139,7 @@ mod tests {
         };
         let f = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "f".to_string(),
             types: Vec::new(),
             params: [("t".to_string(), hir::Parameter::constant(text()))].into(),
@@ -9111,6 +9204,7 @@ mod tests {
     fn numbers_calls(builtin: hir::Builtin) -> Vec<(lir::RuntimeFn, usize)> {
         let operator = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: builtin.name().to_string(),
             types: builtin.types(),
             params: builtin.params(&library()),
@@ -9162,6 +9256,7 @@ mod tests {
         // call debug_value{v: to_approximate{from: p}}; ]`.
         let builtin = |builtin: hir::Builtin| hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: builtin.name().to_string(),
             types: builtin.types(),
             params: builtin.params(&library()),
@@ -9654,6 +9749,7 @@ mod tests {
         };
         let f = hir::Operator {
             versions: Vec::new(),
+            constraints: Vec::new(),
             name: "f".to_string(),
             types: Vec::new(),
             params: [("p".to_string(), hir::Parameter::constant(integer()))].into(),

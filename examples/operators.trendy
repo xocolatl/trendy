@@ -141,6 +141,13 @@ operator band{price: integer}: text [
     ]
 ];
 
+/* What a call can be given goes in the operator's braces, where its callers
+   see it, and each call checks it first, so this one can't divide by zero. A
+   call whose `people` is known when compiling is checked then. */
+operator share{total: integer, people: integer, constraint people > 0}: integer [
+    total div people
+];
+
 var special := "ramen";
 var previous := "none";
 
@@ -219,6 +226,7 @@ operator main{} [
     call debug_table{r: affordable};
     call show{label: "half of 1200", value: half{n: 1200}};
     call debug_table{r: powers{base: 3, limit: 30}};
+    call debug_value{v: share{total: 1200, people: 3}};
     /* A value block's statements do the same on its own local variables:
        how many price rises of a tenth each dish has in it, for each tuple. */
     call debug_table{r: dishes extend { rises := [

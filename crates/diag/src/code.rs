@@ -102,6 +102,7 @@ codes! {
     DatabaseForm => "P0056",
     UsesForm => "P0057",
     QualifiedForm => "P0058",
+    Assertion => "P0059",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",
@@ -179,6 +180,7 @@ codes! {
     Qualifier => "A0075",
     BitGrouping => "A0076",
     InitialValueWhenRunning => "A0077",
+    CallConstraint => "A0078",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",
@@ -202,6 +204,7 @@ codes! {
     Failed => "R0021",
     Warned => "R0022",
     ConstraintViolated => "R0023",
+    BrokenCallConstraint => "R0024",
     Internal => "X0000",
 }
 

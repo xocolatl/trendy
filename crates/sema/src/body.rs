@@ -887,6 +887,11 @@ impl Statements<'_, '_> {
         if !self.updated(&call, &args, signature.id, errors) {
             return None;
         }
+        // What it checks of the arguments known now.
+        if let Err(broken) = ops::constraints_hold(&call, cx.bindings()) {
+            errors.push(errors::broken_call_constraint(&broken, stmt.span()));
+            return None;
+        }
         self.defer(&call, signature, span, stmt.span());
         Some(hir::Statement::Call(call))
     }

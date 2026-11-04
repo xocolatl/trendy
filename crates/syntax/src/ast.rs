@@ -4,6 +4,8 @@
 //! Parts are `Option` because a tree with syntax errors can be missing any of
 //! them.
 
+use std::collections::BTreeSet;
+
 use trendy_diag::Span;
 
 use crate::literal;
@@ -395,6 +397,18 @@ impl Operator {
     #[must_use]
     pub fn params(&self) -> Option<Heading> {
         self.0.children().find_map(Heading::cast)
+    }
+
+    /// The constraints inside its braces, after its parameters, which say
+    /// which arguments a call of it can have.
+    pub fn constraints(&self) -> impl Iterator<Item = Constraint> + use<> {
+        self.params().into_iter().flat_map(|heading| {
+            heading
+                .0
+                .children()
+                .filter_map(Constraint::cast)
+                .collect::<Vec<_>>()
+        })
     }
 
     /// The result type, from `: type`: a read-only operator's.
@@ -929,6 +943,18 @@ impl Constraint {
     #[must_use]
     pub fn condition(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
+    }
+
+    /// Every name written in its condition: of what it reads, and of
+    /// attributes and local variables too.
+    #[must_use]
+    pub fn names(&self) -> BTreeSet<String> {
+        self.0
+            .descendants_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .filter(|token| token.kind() == SyntaxKind::Ident)
+            .map(|token| token.text().to_string())
+            .collect()
     }
 
     /// The span to delete to remove it from its type's braces, or its

@@ -453,6 +453,7 @@ impl Checked {
                     params: signature.params.clone(),
                     kind,
                     versions: signature.versions.clone(),
+                    constraints: signature.constraints.clone(),
                 }
             })
             .collect();
@@ -8887,6 +8888,165 @@ operator main{{}} [ var lines: array text; {main} ];"
         let own = "operator series{a: integer, step: integer}: integer [ a + step ];\n";
         let fixed = fix(&format!("{own}var x := series{{a: 1, by: 2}};{MAIN}"));
         assert!(!fixed.contains("step: 2"), "{fixed}");
+    }
+
+    #[test]
+    fn a_constraint_in_an_operators_braces_is_checked_of_what_is_known() {
+        let half =
+            "operator half{n: integer, m: integer, constraint n >= 0}: integer [ n div 2 + m ];\n";
+        for (written, breaks) in [
+            ("var x := half{n: 2, m: 0};", false),
+            ("var x := half{n: -1, m: 0};", true),
+            // Through a call whose value is computed.
+            (
+                "operator twice{n: integer}: integer [ half{n: n, m: 0} * 2 ];\nvar x := twice{n: -1};",
+                true,
+            ),
+            // A parameter's isn't known, but whatever it reads is.
+            (
+                "operator g{m: integer}: integer [ half{n: 2, m: m} ];",
+                false,
+            ),
+            (
+                "operator g{m: integer}: integer [ half{n: -1, m: m} ];",
+                true,
+            ),
+            (
+                "operator g{n: integer}: integer [ half{n: n, m: 0} ];",
+                false,
+            ),
+        ] {
+            let source = format!("{half}{written}{MAIN}");
+            if breaks {
+                assert_eq!(codes(&source), [Code::BrokenCallConstraint], "{written}");
+            } else {
+                assert!(
+                    analyze_str(&source).is_ok(),
+                    "{written}: {:#?}",
+                    errors(&source)
+                );
+            }
+        }
+        // It says what breaks what, and where each is.
+        let source = format!("{half}var x := half{{n: -1, m: 0}};{MAIN}");
+        let broken = &errors(&source)[0];
+        assert_eq!(broken.message, "`half{n: -1}` can't be called");
+        assert_eq!(broken.secondary.len(), 1);
+        // So does an update operator's.
+        let down = "operator down{n: integer, constraint n > 0} [ call debug_value{v: n}; ];\n";
+        for (args, code) in [("n: 1", None), ("n: 0", Some(Code::BrokenCallConstraint))] {
+            let source = format!("{down}operator main{{}} [ call down{{{args}}}; ];");
+            match code {
+                Some(code) => assert_eq!(codes(&source), [code]),
+                None => assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source)),
+            }
+        }
+        // `var` parameters can be read, as the variable is when the call
+        // starts, which isn't known when compiling.
+        let source = "operator f{var a: integer, constraint a > 0} [ a := 1; ];\noperator main{} [ var x := 0; call f{var a: x}; ];";
+        assert!(analyze_str(source).is_ok(), "{:#?}", errors(source));
+        // Generic, and in any order in the braces.
+        let source = format!(
+            "operator f{{constraint length{{a: a}} > 0, a: array E}}: E types {{ E: any type }} [ a[1] ];\nvar x := f{{a: array [1]}};{MAIN}"
+        );
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+    }
+
+    #[test]
+    fn a_constraint_in_an_operators_braces_says_what_arguments_it_takes() {
+        for (source, code) in [
+            // It reads a parameter that has a value when the call is made.
+            (
+                "operator f{n: integer, constraint 1 > 0}: integer [ n ];",
+                Code::CallConstraint,
+            ),
+            (
+                "operator f{} [];\noperator g{constraint 1 > 0} [];",
+                Code::CallConstraint,
+            ),
+            (
+                "operator f{n: integer, out m: integer, constraint m > n} [ m := n; ];",
+                Code::CallConstraint,
+            ),
+            (
+                "operator f{r: any relation, of: boolean per r, constraint of}: boolean [ true ];",
+                Code::CallConstraint,
+            ),
+            // And nothing of the program's.
+            (
+                "var z := 1;\noperator f{n: integer, constraint n > z}: integer [ n ];",
+                Code::VariableInReadOnly,
+            ),
+            // A boolean condition, that depends on them.
+            (
+                "operator f{n: integer, constraint n}: integer [ n ];",
+                Code::TypeMismatch,
+            ),
+            (
+                "operator f{n: integer, constraint false and n > 0}: integer [ n ];",
+                Code::CallConstraint,
+            ),
+            // Not calling its own operator, even through another.
+            (
+                "operator f{n: integer, constraint f{n: n} > 0}: integer [ n ];",
+                Code::Recursion,
+            ),
+            (
+                "operator f{n: integer, constraint g{n: n} > 0}: integer [ n ];\noperator g{n: integer}: integer [ f{n: n} ];",
+                Code::Recursion,
+            ),
+            // A version has none of its own.
+            (
+                "type t union;\ntype a is t { { x: integer } };\ntype b is t { { y: integer } };\noperator f{v: t}: integer;\noperator f{v: a, constraint v.x > 0}: integer [ v.x ];\noperator f{v: b}: integer [ v.y ];",
+                Code::CallConstraint,
+            ),
+        ] {
+            let source = format!("{source}{MAIN}");
+            assert_eq!(codes(&source), [code], "{source}");
+        }
+        // A misspelled parameter is one, not a condition that reads none.
+        assert_eq!(
+            fix(&format!(
+                "operator f{{step: integer, constraint stp <> 0}}: integer [ step ];{MAIN}"
+            )),
+            format!("operator f{{step: integer, constraint step <> 0}}: integer [ step ];{MAIN}")
+        );
+        // One that is always true is removed.
+        assert_eq!(
+            fix(&format!(
+                "operator f{{n: integer, constraint true or n > 0}}: integer [ n ];{MAIN}"
+            )),
+            format!("operator f{{n: integer}}: integer [ n ];{MAIN}")
+        );
+    }
+
+    #[test]
+    fn a_constraint_goes_in_the_declaration_its_callers_see() {
+        // The fix moves it there, or removes it if it says the same.
+        let unit = |declared: &str, defined: &str| {
+            format!(
+                "interface\n\noperator f{{{declared}}}: integer;\n\nimplementation\n\noperator f{{{defined}}}: integer [ n ];\n\noperator main{{}} [];\n"
+            )
+        };
+        let source = unit("n: integer", "n: integer, constraint n > 0");
+        assert_eq!(codes(&source), [Code::CallConstraint]);
+        let fixed = fix(&source);
+        assert_eq!(fixed, unit("n: integer, constraint n > 0", "n: integer"));
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        let source = unit(
+            "n: integer, constraint n > 0",
+            "n: integer, constraint n > 0",
+        );
+        assert_eq!(
+            fix(&source),
+            unit("n: integer, constraint n > 0", "n: integer")
+        );
+        // Where it is, it is checked.
+        let source = format!(
+            "{}var x := f{{n: 0}};\n",
+            unit("n: integer, constraint n > 0", "n: integer")
+        );
+        assert_eq!(codes(&source), [Code::BrokenCallConstraint]);
     }
 
     #[test]

@@ -1336,6 +1336,9 @@ pub(crate) enum Failed {
     /// A value selected of a type of the program's own that is of two of
     /// its subtypes defined by constraints.
     Overlapping(Box<Overlapping>),
+    /// Arguments of a call that break a constraint in its operator's
+    /// braces.
+    CallConstraint(Box<BrokenCallConstraint>),
     /// A value treated as one of a type it isn't of.
     NotOfType(Box<(hir::Value, hir::Type)>),
     /// A `fail`, of the error that writes this message.
@@ -2359,6 +2362,7 @@ impl<'a> Substitution<'a> {
 ///
 /// Returns why evaluating the operator's value for the arguments fails.
 pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Failed> {
+    constraints_hold(&call, bindings).map_err(Failed::CallConstraint)?;
     let known: Option<BTreeMap<String, hir::Value>> = call
         .args
         .iter()
@@ -3215,6 +3219,81 @@ pub(crate) struct BrokenKey {
     pub(crate) shared: hir::TupleValue,
     pub(crate) tuples: [hir::TupleValue; 2],
     pub(crate) at: Option<Span>,
+}
+
+/// A call whose arguments break a constraint in its operator's braces.
+#[derive(Debug, Clone)]
+pub(crate) struct BrokenCallConstraint {
+    /// The operator called.
+    pub(crate) operator: hir::OperatorId,
+    /// The call, written with the arguments the constraint reads.
+    pub(crate) called: String,
+    /// The constraint's condition, as it is written, and where.
+    pub(crate) text: String,
+    pub(crate) at: Option<Span>,
+}
+
+/// Whether each constraint in the braces of the operator `call` calls that
+/// reads only arguments known when compiling isn't false of them: the others,
+/// and those whose condition can't be computed now, are checked when the
+/// program runs, which also reports a condition's own failure.
+///
+/// # Errors
+///
+/// Returns the constraint that is false.
+pub(crate) fn constraints_hold(
+    call: &hir::Call,
+    bindings: Bindings,
+) -> Result<(), Box<BrokenCallConstraint>> {
+    for constraint in &bindings.operators.get(call.operator).constraints {
+        let reads = bindings.operators.get(constraint.operator);
+        let args: Option<BTreeMap<String, hir::Expr>> = reads
+            .params
+            .keys()
+            .map(|name| {
+                let arg = call.args.get(name)?;
+                known_value(arg)?;
+                Some((name.clone(), arg.clone()))
+            })
+            .collect();
+        let Some(args) = args.filter(|_| bindings.values.contains_key(&constraint.operator)) else {
+            continue;
+        };
+        let checked = self::call(
+            hir::Call {
+                operator: constraint.operator,
+                types: call.types.clone(),
+                args,
+                updated: BTreeMap::new(),
+            },
+            bindings,
+        );
+        let Ok(hir::Expr::Constant(hir::Value::Boolean(false))) = checked else {
+            continue;
+        };
+        let written: Vec<String> = reads
+            .params
+            .keys()
+            .filter_map(|name| Some(format!("{name}: {}", known_value(call.args.get(name)?)?)))
+            .collect();
+        return Err(Box::new(BrokenCallConstraint {
+            operator: call.operator,
+            called: format!(
+                "{}{{{}}}",
+                bindings
+                    .operators
+                    .identity(call.operator, bindings.namespaces),
+                written.join(", ")
+            ),
+            text: constraint.text.clone(),
+            at: reads
+                .constrains_call
+                .as_ref()
+                .and_then(|c| c.constraint.condition())
+                .map(|condition| condition.span()),
+        }));
+    }
+    Ok(())
 }
 
 /// A selection of a value of a type of the program's own, named `ty`, whose

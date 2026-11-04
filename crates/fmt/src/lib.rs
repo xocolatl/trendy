@@ -1787,6 +1787,21 @@ mod tests {
     }
 
     #[test]
+    fn constraints_in_an_operators_braces() {
+        assert_eq!(
+            fmt("operator f{ n:integer,constraint n>0 } [];\n"),
+            "operator f{n: integer, constraint n > 0} [];\n"
+        );
+        // Too long for a line, each item has its own.
+        assert_eq!(
+            fmt(
+                "operator a_long_operator_name{a_long_parameter_name: integer, another_long_parameter_name: integer, constraint a_long_parameter_name <> 0} [];\n"
+            ),
+            "operator a_long_operator_name{\n    a_long_parameter_name: integer,\n    another_long_parameter_name: integer,\n    constraint a_long_parameter_name <> 0,\n} [];\n"
+        );
+    }
+
+    #[test]
     fn heading_order_is_as_written_not_alphabetical() {
         assert_eq!(
             fmt("var r: relation { b: integer, a: boolean } := relation { { a: true, b: 3 } };"),

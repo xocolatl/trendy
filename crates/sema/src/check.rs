@@ -989,7 +989,11 @@ impl<'a> Checker<'a> {
         // one that makes values of a type the library defines makes each as
         // selecting it would, which checks what that checks first.
         let checks = match signature.builtin {
-            None => vec![signature.id],
+            // And what it checks of its arguments, which a call is one of
+            // too, so a constraint that calls its operator closes a cycle.
+            None => std::iter::once(signature.id)
+                .chain(signature.constraints.iter().map(|c| c.operator))
+                .collect(),
             Some(builtin) => builtin
                 .makes(self.namespaces().library())
                 .map(|made| self.namespaces().selection_checks(made))
