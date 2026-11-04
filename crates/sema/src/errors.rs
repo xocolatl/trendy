@@ -2248,18 +2248,25 @@ pub(crate) fn unknown_operator(
         span,
         replacement: ours.to_string(),
     }];
-    // `len{r: a}` of an array, or Python's `len(a)`: `length`'s one
-    // parameter is `a`.
-    let named = match (written, params.as_slice()) {
-        (Some(written), [param]) => named_argument(written, param),
-        _ => None,
-    };
-    let named = match named {
-        Some((edit, param)) => {
-            edits.push(edit);
-            format!(", whose parameter is `{param}`")
+    // PostgreSQL's `generate_series(1, 9, 2)`, whose arguments' order says
+    // which each is; or `len{r: a}` of an array, or Python's `len(a)`:
+    // `length`'s one parameter is `a`.
+    let in_order = written.and_then(|written| named_in_order(name, written));
+    let named = if let Some(named) = in_order {
+        edits.extend(named);
+        ", with its arguments named".to_string()
+    } else {
+        let lone = match (written, params.as_slice()) {
+            (Some(written), [param]) => named_argument(written, param),
+            _ => None,
+        };
+        match lone {
+            Some((edit, param)) => {
+                edits.push(edit);
+                format!(", whose parameter is `{param}`")
+            }
+            None => String::new(),
         }
-        None => String::new(),
     };
     let Some((unit, section)) = used else {
         return d.with_suggestion(format!("use `{ours}`, as trendy calls it{named}"), edits);
@@ -2304,6 +2311,11 @@ const ABSENT: &[(&[&str], &str, &str)] = &[
         &["abs", "fabs"],
         MATHEMATICAL,
         "the absolute value of `x` is `if x < 0e0 then -x else x`, with `0` for an integer",
+    ),
+    (
+        &["range"],
+        "the prelude's `series` gives the integers from `from` to `to`, `step` apart, with `to` among them if a step lands on it, where Python's `range` leaves its end out",
+        "`range(a, b)` is `series{from: a, to: b - 1}` and `range(n)` is `series{from: 0, to: n - 1}`; with a step, `to` is `b - 1` going up, and `b + 1` going down",
     ),
     (
         &["pow", "power", "sqr"],
@@ -2462,8 +2474,9 @@ fn spelled_like(
 /// `atoi` and `atof`, as Go's `Atoi`, read numbers, and Java's
 /// `parseBoolean` and Go's `ParseBool` booleans; Rust's `chars` and
 /// Java's `codePoints` give a text's code points, and JavaScript's
-/// `String.fromCodePoint` the text of some; and `sine`, `cosine` and
-/// NumPy's `arctan2` are `sin`, `cos` and `atan2`.
+/// `String.fromCodePoint` the text of some; `sine`, `cosine` and NumPy's
+/// `arctan2` are `sin`, `cos` and `atan2`; and Postgres's
+/// `generate_series` is `series`.
 const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("len", "count", Some("length")),
     ("size", "count", Some("length")),
@@ -2486,6 +2499,7 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("sine", "sin", None),
     ("cosine", "cos", None),
     ("arctan2", "atan2", None),
+    ("generate_series", "series", None),
 ];
 
 /// The prelude's operators that other languages call `name`, in any case:
@@ -2498,27 +2512,62 @@ pub(crate) fn elsewhere(name: &str) -> Option<(&'static str, Option<&'static str
         .map(|&(_, relation, array)| (relation, array))
 }
 
-/// Other languages' names for parameters of the built-in operators, with
-/// the operator and trendy's name: pandas' `read_csv` chooses the
-/// columns to read with `usecols`, or names a file's columns with
-/// `names`, as `load_csv`'s `columns` does both, and Python's
-/// `has_header` says what its `header` does.
-const PARAMETERS_ELSEWHERE: &[(hir::Builtin, &str, &str)] = &[
-    (LOAD_CSV, "usecols", "columns"),
-    (LOAD_CSV, "names", "columns"),
-    (LOAD_CSV, "has_header", "header"),
+/// Other languages' names for parameters of the operators that come with
+/// the compiler, with the operator and trendy's name: pandas' `read_csv`
+/// chooses the columns to read with `usecols`, or names a file's columns
+/// with `names`, as `load_csv`'s `columns` does both, and Python's
+/// `has_header` says what its `header` does; and Postgres's
+/// `generate_series` calls its ends `start` and `stop`, and R's `seq` its
+/// step `by`.
+const PARAMETERS_ELSEWHERE: &[(&str, &str, &str)] = &[
+    ("load_csv", "usecols", "columns"),
+    ("load_csv", "names", "columns"),
+    ("load_csv", "has_header", "header"),
+    ("series", "start", "from"),
+    ("series", "stop", "to"),
+    ("series", "by", "step"),
 ];
 
-const LOAD_CSV: hir::Builtin = hir::Builtin::Update(hir::UpdateBuiltin::LoadCsv);
-
-/// The parameter of the built-in `builtin` that other languages call
-/// `name`, if there is one.
-pub(crate) fn parameter_elsewhere(builtin: hir::Builtin, name: &str) -> Option<&'static str> {
+/// The parameter of the operator `operator`, of those that come with the
+/// compiler, that other languages call `name`, if there is one.
+pub(crate) fn parameter_elsewhere(operator: &str, name: &str) -> Option<&'static str> {
     PARAMETERS_ELSEWHERE
         .iter()
-        // Each overload of it, by its name.
-        .find(|&&(b, other, _)| b.name() == builtin.name() && other == name)
+        .find(|&&(o, other, _)| o == operator && other == name)
         .map(|&(.., ours)| ours)
+}
+
+/// Other languages' operators whose arguments are told apart by their
+/// order, with the names trendy's gives them in that order, so that a call
+/// written their way can name them: Postgres's `generate_series(start,
+/// stop, step)` has the order of `series`'s.
+const ORDER_ELSEWHERE: &[(&str, &[&str])] = &[("generate_series", &["from", "to", "step"])];
+
+/// The edits naming the arguments of a call of the operator another language
+/// calls `name`, each by its place, if that language's order for them is
+/// known and none of them has a name, or more of them than it has.
+fn named_in_order(name: &str, written: Written) -> Option<Vec<Edit>> {
+    let lowercase = name.to_lowercase();
+    let &(_, order) = ORDER_ELSEWHERE
+        .iter()
+        .find(|(other, _)| *other == lowercase)?;
+    let spans: Vec<Span> = match written {
+        Written::Arguments(args) if args.named().next().is_none() => {
+            args.positional().map(|arg| arg.span()).collect()
+        }
+        Written::Arguments(_) => return None,
+        Written::Nothing(list) => list.names().map(|name| name.span()).collect(),
+    };
+    (!spans.is_empty() && spans.len() <= order.len()).then(|| {
+        spans
+            .into_iter()
+            .zip(order)
+            .map(|(span, param)| Edit {
+                span: Span::empty(span.start),
+                replacement: format!("{param}: "),
+            })
+            .collect()
+    })
 }
 
 /// `d`, about the argument written `arg`, of type `actual`, of a call of

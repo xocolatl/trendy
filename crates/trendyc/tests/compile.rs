@@ -566,7 +566,158 @@ fn integers() {
     let rows: Vec<_> = lines[43..49].chunks(2).collect();
     assert_eq!(rows, [["20", "1"], ["-18", "-5"], ["1", "6"]]);
     // `0x8000_0001` rotated 4 places as a 32-bit word.
-    assert_eq!(lines[49..], ["24"]);
+    assert_eq!(lines[49], "24");
+    // The integers from one end to another, one apart and in twos down, and
+    // computed with.
+    assert_eq!(
+        lines[50..],
+        [
+            "relation { value: integer } { { value: 1 }, { value: 2 }, { value: 3 } }",
+            "relation { value: integer } { { value: 1 }, { value: 3 } }",
+            "relation { cube: integer, value: integer } { { cube: 1, value: 1 }, { cube: 8, value: 2 }, { cube: 27, value: 3 } }",
+        ]
+    );
+}
+
+/// `series` gives what Postgres's `generate_series` gives, the integers
+/// `range` gives over wider numbers here: with `to` on the way or not, in
+/// either direction, none where `to` is the other way, and at the limits of
+/// the integers, which `to - from` and `value * step` would each pass.
+#[test]
+fn series_is_generate_series() {
+    let (min, max) = (i64::MIN, i64::MAX);
+    let half = 1i64 << 62;
+    let cases = [
+        (1, 5, 1),
+        (1, 10, 3),
+        (1, 10, 4),
+        (5, 1, -2),
+        (5, 1, 1),
+        (1, 5, -1),
+        (3, 3, 1),
+        (3, 3, -1),
+        (-5, 5, 2),
+        (5, -5, -2),
+        (-5, 5, -2),
+        (5, -5, 2),
+        (-1, 0, 5),
+        (0, -1, -5),
+        (0, 5, 7),
+        (0, 0, 7),
+        (max - 1, max, 1),
+        (min + 1, min, -1),
+        (max - 2, max, 2),
+        (max, max, max),
+        (min, min, min),
+        (max, min, min),
+        (min, max, max),
+        (min, max, half),
+        (max, min, -half),
+        (min, 0, half),
+        (0, min, -half),
+        (0, min, min),
+        (0, max, max),
+        (min, -1, half),
+        (-1, max, max),
+        (-1, min, min),
+        (1, min, min),
+        (min + 1, max, max),
+        (min, max, 3 * (half / 2)),
+        (max, min, -3 * (half / 2)),
+    ];
+    let mut calls = String::new();
+    let mut expected = String::new();
+    for (from, to, step) in cases {
+        writeln!(
+            calls,
+            "    call debug_value{{v: series{{from: {from}, to: {to}, step: {step}}}}};"
+        )
+        .unwrap();
+        let (first, last, by) = (i128::from(from), i128::from(to), i128::from(step));
+        let mut values: Vec<i128> = std::iter::successors(Some(first), |at| Some(at + by))
+            .take_while(|at| if by > 0 { *at <= last } else { *at >= last })
+            .collect();
+        values.sort_unstable();
+        let tuples: Vec<String> = values
+            .iter()
+            .map(|value| format!("{{ value: {value} }}"))
+            .collect();
+        if tuples.is_empty() {
+            writeln!(expected, "relation {{ value: integer }} {{}}").unwrap();
+        } else {
+            writeln!(
+                expected,
+                "relation {{ value: integer }} {{ {} }}",
+                tuples.join(", ")
+            )
+            .unwrap();
+        }
+    }
+    // One apart, and as many as make adding them one at a time show.
+    let source = format!(
+        r"operator main{{}} [
+{calls}    call debug_value{{v: series{{from: 2, to: 4}}}};
+    call debug_value{{v: series{{from: 4, to: 2}}}};
+    call debug_value{{v: count{{r: series{{from: 1, to: 2000000}}}}}};
+    call debug_value{{v: sum{{r: series{{from: 2000000, to: 1, step: -1}}, of: value}}}};
+];
+"
+    );
+    expected.push_str(
+        "relation { value: integer } { { value: 2 }, { value: 3 }, { value: 4 } }
+relation { value: integer } {}
+2000000
+2000001000000
+",
+    );
+    let (code, stderr) = run_source("series", &source);
+    assert_eq!((code, stderr), (0, expected));
+}
+
+/// A step of 0 fails: when the program runs, saying the call's values and
+/// where it was made, which a transaction can take, and when compiling, if
+/// the step is known then.
+#[test]
+fn a_series_with_a_step_of_zero_fails() {
+    let (code, stderr) = run_source(
+        "series_zero",
+        "var zero := 0;
+
+operator main{} [
+    var failed: relation transaction_collection;
+    var n := 0;
+    transaction collecting failed [
+        n := count{r: series{from: 1, to: 5, step: zero}};
+    ];
+    call debug_value{v: count{r: failed}};
+    call debug_value{v: series{from: 1, to: 5, step: zero}};
+];
+",
+    );
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(lines[0], "1", "{stderr}");
+    assert_eq!(
+        lines[1],
+        "error[R0021]: series{from: 1, to: 5, step: 0} has no result: a step of 0 would get nowhere",
+        "{stderr}"
+    );
+    assert!(stderr.contains("series_zero.trendy:10:"), "{stderr}");
+
+    let (ok, _, stderr) = trendyc(
+        "series_known_zero",
+        "operator main{} [
+    call debug_value{v: series{from: 1, to: 5, step: 0}};
+];
+",
+        &[],
+    );
+    assert!(!ok);
+    assert!(
+        stderr.contains("error[R0021]: series{from: 1, to: 5, step: 0} has no result"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("series_known_zero.trendy:2:25"), "{stderr}");
 }
 
 /// `shl` and `shr` computed when running are what they are when compiling,

@@ -595,7 +595,7 @@ impl Operators {
                 .iter()
                 .filter(|a| !signature.written.contains_key(*a))
             {
-                match trendy_diag::renamed(arg, missing.iter().copied()) {
+                match signature.meant(arg, missing.iter().copied()) {
                     Some(meant) => {
                         missing.retain(|m| *m != meant);
                         distance += 1;
@@ -688,6 +688,22 @@ impl Operators {
 }
 
 impl Signature {
+    /// Which of the parameters `missing` an argument named `arg`, which names
+    /// none of them, is for: the one another language calls that, if the
+    /// compiler's own operator has one, or else one it is a misspelling of.
+    pub(crate) fn meant<'a>(
+        &self,
+        arg: &str,
+        missing: impl Iterator<Item = &'a str> + Clone,
+    ) -> Option<&'a str> {
+        let elsewhere = (self.source != Source::Program)
+            .then(|| crate::errors::parameter_elsewhere(&self.name, arg))
+            .flatten();
+        elsewhere
+            .and_then(|ours| missing.clone().find(|m| *m == ours))
+            .or_else(|| trendy_diag::renamed(arg, missing))
+    }
+
     /// The signature of a read-only operator a type's declaration makes,
     /// `from`, whose id is `id`, named `name`, in `unit`, checked as
     /// `source`, with `params` and a value of `result`, valid if the parts

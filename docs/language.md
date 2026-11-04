@@ -1162,6 +1162,16 @@ operator is_empty{r: any relation}: boolean;
 /* The number of elements of `a`. */
 builtin operator length{a: any array}: integer;
 
+/* The integers from `from` to `to`, `step` apart, as PostgreSQL's
+   `generate_series`: `from`, then `from + step`, and on as far as `to`,
+   which is one of them only if a step lands on it. A negative step counts
+   down. A `to` the other way from `from` gives no tuples, and a step of 0,
+   which would get nowhere, fails (R0021). */
+operator series{from: integer, to: integer, step: integer}: relation { value: integer };
+
+/* The integers from `from` to `to`, one apart: none if `to` is less. */
+operator series{from: integer, to: integer}: relation { value: integer };
+
 /* The least value of `of` for a tuple of `r`, by `<`. Of no tuples, there
    is none, and the program fails (R0010). */
 builtin operator min{r: any relation, of: T per r}: T
@@ -1434,6 +1444,42 @@ operator main{} [
     call debug_table{r: counted};
 ];
 ```
+
+**`series{from: integer, to: integer, step: integer}: relation { value:
+integer }`** is the integers from `from` to `to`, `step` apart, as
+PostgreSQL's `generate_series`, written in the prelude in trendy.
+`series{from: integer, to: integer}` is the same one apart. A relation of
+them is often what a program needs to compute with: below, a table of
+squares, a count down, and some leap years.
+
+```trendy
+operator main{} [
+    call debug_table{r: series{from: 1, to: 3} extend { square := value * value }};
+    call debug_table{r: series{from: 9, to: 1, step: -3}};
+    call debug_table{r: series{from: 1996, to: 2008, step: 4} rename {value as year}};
+];
+```
+
+- **`to` is one of them only if a step lands on it,** so `series{from: 1,
+  to: 10, step: 4}` is 1, 5 and 9. A negative step counts down.
+- **A `to` the other way from `from` gives no tuples,** whatever the
+  step's size: `series{from: 5, to: 1}` has none, as a count down needs
+  its `step: -1`, and `series{from: 3, to: 3}` is 3.
+- **A step of 0 would get nowhere, and fails** (R0021), when compiling if
+  it is known then, and otherwise when the program runs.
+- **Every integer can be an end,** as nothing is computed beyond `to`:
+  `series{from: 9223372036854775806, to: 9223372036854775807}` is those
+  two, with no overflow, and the largest steps reach across zero.
+- **A relation has no order,** so it is a set of those values, not a
+  sequence, where SQL's gives rows in order: a load puts them in an array
+  in the order wanted (see [Loading a relation](#loading-a-relation)).
+- **It runs when the program does,** as it has a loop (see
+  [Read-only operators](#read-only-operators)), so an initial value can't
+  call it (A0077).
+- **Other languages' spellings:** `generate_series(1, 9, 2)` is fixed to
+  `series{from: 1, to: 9, step: 2}`, as are `start`, `stop` and R's `by`
+  for its parameters. Python's `range` leaves its end out, so it gets help
+  instead (A0015).
 
 **`is_empty{r: any relation}: boolean`** is whether `r` has no tuples,
 Tutorial D's `IS_EMPTY`, written in the prelude as `count{r: r} = 0`.
@@ -6220,6 +6266,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a[0]`, the first element | `a[1]` |
 | `a[-1]`, the last element | `a[length{a: a}]` |
 | `len(a)`, `a.length`, `a.length()`, `CARDINALITY(a)`, `size(a)` | `length{a: a}` |
+| `generate_series(1, 9, 2)`, `range(1, 10, 2)` | `series{from: 1, to: 9, step: 2}` |
 | `r.sum(of: price)`, a method call | `sum{r: r, of: price}`: the value is an argument, named as the others are |
 | `ORDER BY x DESC`, `LOAD A FROM R ORDER (DESC X)`, `orderby x descending` | `load a from r order [desc x];` |
 | `unnest(a) WITH ORDINALITY AS t(x, n)`, `enumerate(a)`, `LOAD R FROM A` | `load r from a as x numbered n;` |

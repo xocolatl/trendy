@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use trendy_diag::{CodeKind, Diagnostic, Span, renamed};
+use trendy_diag::{CodeKind, Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr, Said};
 use trendy_syntax::{SyntaxKind, SyntaxToken};
@@ -1125,11 +1125,7 @@ impl<'a> Checker<'a> {
             let Some(param) = params.get(name) else {
                 ok = false;
                 // Another language's name for one, or a misspelling.
-                let renamed = signature
-                    .builtin
-                    .and_then(|builtin| errors::parameter_elsewhere(builtin, name))
-                    .filter(|ours| missing.contains(ours))
-                    .or_else(|| renamed(name, missing.iter().copied()));
+                let renamed = signature.meant(name, missing.iter().copied());
                 if let Some(target) = renamed {
                     missing.retain(|m| *m != target);
                 }

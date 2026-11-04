@@ -8826,6 +8826,88 @@ operator main{{}} [ var lines: array text; {main} ];"
     }
 
     #[test]
+    fn other_languages_ways_with_a_series_are_fixed() {
+        let in_main = |call: &str| {
+            format!(
+                "operator f{{low: integer, high: integer}} [ call debug_value{{v: {call}}}; ];{MAIN}"
+            )
+        };
+        for (written, ours) in [
+            // PostgreSQL's, whose arguments' order says which each is, in
+            // any case, whether they look like values or a projection's
+            // attributes, or are named already.
+            (
+                "generate_series{1, 9, 2}",
+                "series{from: 1, to: 9, step: 2}",
+            ),
+            ("GENERATE_SERIES{1, 9}", "series{from: 1, to: 9}"),
+            ("generate_series{low, high}", "series{from: low, to: high}"),
+            ("generate_series{from: 1, to: 9}", "series{from: 1, to: 9}"),
+            // Its parameters' names, and R's for the step, which chooses
+            // the operator with one.
+            ("series{start: 1, stop: 9}", "series{from: 1, to: 9}"),
+            (
+                "series{start: 1, stop: 9, step: 2}",
+                "series{from: 1, to: 9, step: 2}",
+            ),
+            (
+                "series{from: 1, to: 9, by: 2}",
+                "series{from: 1, to: 9, step: 2}",
+            ),
+        ] {
+            let fixed = fix(&in_main(written));
+            assert_eq!(fixed, in_main(ours), "{written}");
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
+        // Nothing says which of its own a call's unnamed arguments are, nor
+        // how many of another operator's there are.
+        assert!(
+            errors(&in_main("series{1, 9}"))
+                .iter()
+                .all(|d| d.suggestions.is_empty())
+        );
+        assert_eq!(
+            fix(&in_main("generate_series{1, 2, 3, 4}")),
+            in_main("series{1, 2, 3, 4}")
+        );
+        // Python's leaves its end out, so that what to write depends on the
+        // values, and it isn't a misspelling of anything.
+        let range = errors(&in_main("range{1, 9}"));
+        assert_eq!(range.len(), 1, "{range:#?}");
+        assert_eq!(range[0].code, Code::UnknownName);
+        assert!(range[0].suggestions.is_empty(), "{range:#?}");
+        assert!(
+            range[0]
+                .help
+                .iter()
+                .any(|h| h.contains("series{from: a, to: b - 1}")),
+            "{range:#?}"
+        );
+        // A program's `series` is its own, with parameters of its own.
+        let own = "operator series{a: integer, step: integer}: integer [ a + step ];\n";
+        let fixed = fix(&format!("{own}var x := series{{a: 1, by: 2}};{MAIN}"));
+        assert!(!fixed.contains("step: 2"), "{fixed}");
+    }
+
+    #[test]
+    fn a_series_is_the_preludes_to_call() {
+        // It has a loop, so an initial value can't wait for it.
+        assert_eq!(
+            codes(&format!("var digits := series{{from: 0, to: 9}};{MAIN}")),
+            [Code::InitialValueWhenRunning]
+        );
+        // Its parts are the implementation's own: not seen, and no clash.
+        assert_eq!(
+            codes(&format!("var x := past{{at: 1, to: 2, step: 1}};{MAIN}")),
+            [Code::UnknownName]
+        );
+        let own = format!(
+            "operator past{{n: integer}}: integer [ n ];\noperator last_step{{n: integer}}: integer [ n ];\nvar x := past{{n: 1}} + last_step{{n: 1}};\noperator f{{}}: relation {{ value: integer }} [ series{{from: 1, to: 2}} ];{MAIN}"
+        );
+        assert!(analyze_str(&own).is_ok(), "{:#?}", errors(&own));
+    }
+
+    #[test]
     fn other_languages_names_for_reading_are_fixed() {
         // A file's lines: R's and Kotlin's, Python's and Ruby's, and .NET's,
         // which they return, fixed to `load_text_file` with its argument

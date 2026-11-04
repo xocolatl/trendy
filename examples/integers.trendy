@@ -40,6 +40,14 @@ operator rotated{x: integer, n: integer}: integer [
     (x shl n or x shr (32 - n)) and 0xFFFF_FFFF
 ];
 
+/* The integers from one end to another, `step` apart if it is given, as a
+   relation to compute with, here a table of cubes. */
+operator ranges{low: integer, high: integer} [
+    call debug_value{v: series{from: low, to: high}};
+    call debug_value{v: series{from: high, to: low, step: -2}};
+    call debug_value{v: series{from: low, to: high} extend { cube := value * value * value }};
+];
+
 /* The integer `t` writes: digits, with a `-` before them if it is
    negative, read when the program runs. */
 operator parse{t: text} [
@@ -68,4 +76,5 @@ operator main{} [
     call shifts{a: -9, n: 1};
     call shifts{a: 3, n: -1};
     call debug_value{v: rotated{x: 0x8000_0001, n: 4}};
+    call ranges{low: 1, high: 3};
 ];
