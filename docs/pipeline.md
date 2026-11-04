@@ -2006,6 +2006,18 @@ a scope even if it makes nothing, unless the operator is in a cycle of calls,
 which holds its arguments itself (see [Recursion](#recursion)). Other values are
 assigned by a copy.
 
+A relational operation's operand made in the same statement lasts no longer than
+the operation (`FunctionBuilder::operand_read`, `trendy_rt_drop_operand`): only the
+operation reads it, and the result holds its own references to what the two share,
+so once the result is made, the current scope gives up the operand, if nothing else
+holds it, so that a chain of operations holds at most one operand and one result at
+a time. A `Let`'s binding is given up the same way when an operation has it as an
+operand, and that is the only read left of it
+(`hir::Expr::reads_last_as_operand`). Only the operand path is followed, as an
+operation computes each operand once, while a condition or a value is computed for
+each tuple, and a statement in a loop many times. A tuple's attributes are shared
+with what is computed from it, by no reference, so a tuple is never given up.
+
 A local variable is a slot in its operator's function, assigned by
 `trendy_rt_assign` as a variable is. One that points to buffers starts
 with null pointers, so that its declaration, the first assignment, has no

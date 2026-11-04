@@ -420,6 +420,10 @@ pub enum RuntimeFn {
     /// buffer if nothing else holds it, as `combination`, a
     /// [`Combination::code`] of a union or a disjoint union, says.
     Insert,
+    /// `trendy_rt_drop_operand(value, descriptor)`: give up the current scope's
+    /// reference to what the operand at `value` points to, if it is the only
+    /// one, as the operation that read it has its result.
+    DropOperand,
     /// `trendy_rt_too_deep()`: write the error of calls that have used up
     /// the stack, each with work left when it returns.
     TooDeep,
@@ -712,7 +716,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 86] = [
+    pub const ALL: [RuntimeFn; 87] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -752,6 +756,7 @@ impl RuntimeFn {
         RuntimeFn::BrokenConstraintInFile,
         RuntimeFn::OverlappingSubtypes,
         RuntimeFn::BrokenCallConstraint,
+        RuntimeFn::DropOperand,
         RuntimeFn::TooDeep,
         RuntimeFn::Run,
         RuntimeFn::Insert,
@@ -896,6 +901,7 @@ impl RuntimeFn {
             | RuntimeFn::EqualRun
             | RuntimeFn::CompareText
             | RuntimeFn::Run
+            | RuntimeFn::DropOperand
             | RuntimeFn::Equal => false,
         }
     }
@@ -943,6 +949,7 @@ impl RuntimeFn {
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::BrokenCallConstraint => "trendy_rt_broken_call_constraint",
+            RuntimeFn::DropOperand => "trendy_rt_drop_operand",
             RuntimeFn::TooDeep => "trendy_rt_too_deep",
             RuntimeFn::Run => "trendy_rt_run",
             RuntimeFn::Insert => "trendy_rt_insert",

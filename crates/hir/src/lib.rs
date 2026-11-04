@@ -2816,6 +2816,53 @@ impl Expr {
         }
     }
 
+    /// Whether the expression reads the local variable `id` in one place only,
+    /// as the operand of a relational operation, directly or of one that is an
+    /// operand itself: which it computes once, and has done with once the
+    /// operation has its result, whatever else the expression goes on to do.
+    #[must_use]
+    pub fn reads_last_as_operand(&self, id: LocalId) -> bool {
+        self.local_reads(id) == 1 && self.has_operand(id)
+    }
+
+    /// In how many places the expression reads the local variable `id`.
+    fn local_reads(&self, id: LocalId) -> usize {
+        if let Expr::Local(read) = self {
+            return usize::from(*read == id);
+        }
+        let mut reads = 0;
+        self.for_each_child(|child, _| reads += child.local_reads(id));
+        reads
+    }
+
+    /// Whether the local variable `id` is an operand of the relational
+    /// operation the expression is, or of one that is an operand of it.
+    fn has_operand(&self, id: LocalId) -> bool {
+        let is_or_has = |operand: &Expr| {
+            let mut operand = operand;
+            while let Expr::At(_, inner) | Expr::Treat(_, inner) = operand {
+                operand = inner;
+            }
+            matches!(operand, Expr::Local(read) if *read == id) || operand.has_operand(id)
+        };
+        match self {
+            Expr::At(_, inner) | Expr::Treat(_, inner) => inner.has_operand(id),
+            Expr::Remove(operand, _)
+            | Expr::Rename(operand, _)
+            | Expr::Ungroup(operand, _)
+            | Expr::Restrict(operand, _)
+            | Expr::Extend(operand, ..)
+            | Expr::Tclose(operand)
+            | Expr::Load(operand, _)
+            | Expr::Unload(operand, _) => is_or_has(operand),
+            Expr::And(lhs, rhs)
+            | Expr::Semijoin(lhs, rhs)
+            | Expr::Antijoin(lhs, rhs)
+            | Expr::Combine(_, lhs, rhs) => is_or_has(lhs) || is_or_has(rhs),
+            _ => false,
+        }
+    }
+
     /// What the expression reads of the tuple at hand `depth` of them out
     /// from it (see [`Expr::Current`]).
     #[must_use]

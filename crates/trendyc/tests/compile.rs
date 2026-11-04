@@ -7326,3 +7326,411 @@ fn sorting_integers_takes_no_memory_but_the_result() {
         "{unsorted} bytes, then {sorted}"
     );
 }
+
+/// What a relational operation reads, as its operand, is given up as it has its
+/// result, and whatever the result shares with it lasts, freed memory being
+/// scribbled over: what a text attribute points to, and a relation-valued one's,
+/// each read after the operand has gone, and what else reads the operand, or
+/// shares its buffer, isn't given up with it.
+const OPERANDS: &str = r#"
+var kept := relation { { name: "a" || "b", n: 1 }, { name: "c" || "d", n: 2 } };
+
+operator same{r: relation { name: text, n: integer }}: relation { name: text, n: integer } [
+    r
+];
+
+operator named{kept: relation { name: text, n: integer }, n: integer}: relation { name: text, n: integer } [
+    /* A binding read once, as an operand, of an operand. */
+    var made := kept replace { name := name || to_text{from: n} };
+    ((made rename {n as m}) extend { n := m + 1 }){name, n}
+];
+
+operator twice{kept: relation { name: text, n: integer }, n: integer}: relation { name: text, n: integer } [
+    /* A binding read as an operand and in a condition, and one read after. */
+    var made := kept replace { name := name || to_text{from: n} };
+    var some := (made where count{r: made} = 2) rename {n as m};
+    var again := made rename {n as m};
+    (some union again) rename {m as n}
+];
+
+operator also{r: relation { name: text, n: integer }}: relation { name: text, n: integer } [
+    /* A binding that another holds too. */
+    var first := r where n > 0;
+    var second := first;
+    var dropped := first rename {n as m};
+    second union (dropped rename {m as n})
+];
+
+operator both{r: relation { name: text, n: integer }}: relation { name: text, n: integer } [
+    /* A binding read as two operands, of the last value that reads it. */
+    var made := r where n > 0;
+    join{made{name}, made}
+];
+
+operator each{r: relation { name: text, n: integer }}: relation { c: integer, name: text, n: integer } [
+    /* One place reads it, for each tuple, and the rest of the time in a loop. */
+    var made := r where n > 0;
+    r extend { c := count{r: made{name}} }
+];
+
+operator looped{r: relation { name: text, n: integer }}: integer [
+    var made := r where n > 0;
+    [
+        var i := 0;
+        while i < 4 loop [
+            i := i + count{r: made{name}};
+        ];
+        i
+    ]
+];
+
+operator tuples{r: relation { name: text, n: integer }}: relation { name: text, n: integer } [
+    /* A tuple's attributes are shared with what is computed from it. */
+    var held := tuple { r: r where n > 0 };
+    (held rename {r as s}).s
+];
+
+operator moved{r: relation { name: text, n: integer }}: relation { name: text, n: integer } [
+    /* A binding of a tuple, the last read of it, whose attribute is shared. */
+    var held := tuple { r: r where n > 0 };
+    var moved := held rename {r as s};
+    moved.s
+];
+
+operator later{r: relation { name: text, n: integer }}: relation { name: text, n: integer } [
+    /* An operand here, and read again after. */
+    var made := r where n > 0;
+    var names := made{name};
+    var numbers := made{name, n};
+    join{names, numbers}
+];
+
+operator main{} [
+    var two := 2;
+    call debug_table{r: moved{r: kept}};
+    call debug_table{r: later{r: kept}};
+    call debug_table{r: both{r: kept}};
+    call debug_table{r: each{r: kept}};
+    call debug_value{v: looped{r: kept}};
+    call debug_table{r: tuples{r: kept}};
+    call debug_table{r: (tuple { r: kept where n > 1 } rename {r as s}).s};
+    /* Texts, and a chain in which each result is the next's operand. */
+    var texts := ((kept replace { name := name || to_text{from: two} }) rename {n as m}){name};
+    call debug_table{r: texts};
+    /* A relation-valued attribute, whose relation is shared with the operand. */
+    var grouped := relation {
+        { g: two, r: relation { { name: "x" || "y" } } },
+        { g: 1 + two, r: relation { { name: "z" || "w" } } },
+    };
+    call debug_table{r: ((grouped where g > 0) rename {g as h}){r}};
+    call debug_table{r: ((grouped where g > 0) rename {g as h}) ungroup {r}};
+    /* Each operand of those with two. */
+    var left := kept replace { name := name || "!" };
+    call debug_table{r: join{left where n > 0, kept rename {name as other} where n > 0}};
+    call debug_table{r: (left where n > 0) union (left where n > 1)};
+    call debug_table{r: (left where n > 0) matching (kept where n > 1){n}};
+    call debug_table{r: (left where n > 0) not matching (kept where n > 1){n}};
+    /* An array's elements, from an operand and into one. */
+    var names: array text;
+    load names value from (left rename {n as m}) order [asc m] keep {name};
+    call debug_value{v: names};
+    var again: relation { name: text };
+    load again from (array [names[1] || "?", names[2] || "?"]) as name;
+    call debug_table{r: again rename {name as called}};
+    /* A transitive closure of an operand. */
+    var edges := relation { { a: two, b: 1 + two }, { a: 1 + two, b: 2 + two } };
+    call debug_table{r: (edges where a > 0) tclose};
+    /* What others hold: a variable's, a parameter's, one a call hands back. */
+    call debug_table{r: kept rename {n as m}};
+    call debug_table{r: kept};
+    call debug_table{r: same{r: kept} rename {n as m}};
+    call debug_table{r: kept};
+    call debug_table{r: same{r: left where n > 1} rename {n as m}};
+    call debug_table{r: if two > 1 then kept else left};
+    call debug_table{r: (if two > 1 then kept else left) rename {n as m}};
+    call debug_table{r: kept};
+    /* Bindings. */
+    call debug_table{r: named{kept, n: two}};
+    call debug_table{r: twice{kept, n: two}};
+    call debug_table{r: also{r: left}};
+    call debug_table{r: left};
+    /* An element of an array, and an attribute of a tuple, as an operand. */
+    var rows := array [kept replace { name := name || "%" }];
+    call debug_table{r: rows[1] rename {n as m}};
+    call debug_table{r: rows[1]};
+    var held := tuple { r: kept replace { name := name || "$" } };
+    call debug_table{r: held.r rename {n as m}};
+    call debug_table{r: held.r};
+    call debug_table{r: tuple { r: kept where n > 1 }.r rename {n as m}};
+    /* In a loop, assigned its own operation's result. */
+    var growing := kept where n > 1;
+    var at := 0;
+    while at < 3 loop [
+        at := at + 1;
+        growing := ((growing replace { name := name || "+" }) rename {n as m}) rename {m as n};
+    ];
+    call debug_table{r: growing};
+    /* For each tuple. */
+    call debug_table{
+        r: kept extend { found := count{r: ((left where n > 0) rename {n as m}){name}} },
+    };
+];
+"#;
+
+/// What `OPERANDS` writes.
+const OPERANDS_WRITTEN: [&str; 201] = [
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬───┬──────┐",
+    "│ c │ n │ name │",
+    "├───┼───┼──────┤",
+    "│ 2 │ 1 │ ab   │",
+    "│ 2 │ 2 │ cd   │",
+    "└───┴───┴──────┘",
+    "4",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌──────┐",
+    "│ name │",
+    "├──────┤",
+    "│ ab2  │",
+    "│ cd2  │",
+    "└──────┘",
+    "┌────────────────────────────────────────────┐",
+    "│ r                                          │",
+    "├────────────────────────────────────────────┤",
+    "│ relation { name: text } { { name: \"xy\" } } │",
+    "│ relation { name: text } { { name: \"zw\" } } │",
+    "└────────────────────────────────────────────┘",
+    "┌───┬──────┐",
+    "│ h │ name │",
+    "├───┼──────┤",
+    "│ 2 │ xy   │",
+    "│ 3 │ zw   │",
+    "└───┴──────┘",
+    "┌───┬──────┬───────┐",
+    "│ n │ name │ other │",
+    "├───┼──────┼───────┤",
+    "│ 1 │ ab!  │ ab    │",
+    "│ 2 │ cd!  │ cd    │",
+    "└───┴──────┴───────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab!  │",
+    "│ 2 │ cd!  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 2 │ cd!  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab!  │",
+    "└───┴──────┘",
+    "array [\"ab!\", \"cd!\"]",
+    "┌────────┐",
+    "│ called │",
+    "├────────┤",
+    "│ ab!?   │",
+    "│ cd!?   │",
+    "└────────┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 2 │ 3 │",
+    "│ 2 │ 4 │",
+    "│ 3 │ 4 │",
+    "└───┴───┘",
+    "┌───┬──────┐",
+    "│ m │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ m │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ m │ name │",
+    "├───┼──────┤",
+    "│ 2 │ cd!  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ m │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab   │",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 2 │ ab1  │",
+    "│ 3 │ cd2  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab1  │",
+    "│ 2 │ cd2  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab!  │",
+    "│ 2 │ cd!  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab!  │",
+    "│ 2 │ cd!  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ m │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab%  │",
+    "│ 2 │ cd%  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab%  │",
+    "│ 2 │ cd%  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ m │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab$  │",
+    "│ 2 │ cd$  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ n │ name │",
+    "├───┼──────┤",
+    "│ 1 │ ab$  │",
+    "│ 2 │ cd$  │",
+    "└───┴──────┘",
+    "┌───┬──────┐",
+    "│ m │ name │",
+    "├───┼──────┤",
+    "│ 2 │ cd   │",
+    "└───┴──────┘",
+    "┌───┬───────┐",
+    "│ n │ name  │",
+    "├───┼───────┤",
+    "│ 2 │ cd+++ │",
+    "└───┴───────┘",
+    "┌───────┬───┬──────┐",
+    "│ found │ n │ name │",
+    "├───────┼───┼──────┤",
+    "│     2 │ 1 │ ab   │",
+    "│     2 │ 2 │ cd   │",
+    "└───────┴───┴──────┘",
+];
+
+#[test]
+fn an_operand_goes_as_soon_as_it_is_read() {
+    let (code, stderr) = run_source("operands", OPERANDS);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), OPERANDS_WRITTEN);
+}
+
+/// A chain of operations holds one operand and one result at a time, each of 24
+/// bytes for each of four million tuples: with every result lasting until the
+/// statement ends, the five in this one would come to 480 MB.
+#[test]
+fn a_chain_of_operations_holds_two_results_at_a_time() {
+    let source = "operator main{} [
+    var n := 40_000;
+    var tuples := times{series{from: 1, to: n} rename {value as a}, series{from: 1, to: 100} rename {value as b}};
+    call debug_value{
+        v: count{
+            r: ((((tuples extend { c := a }) rename {c as d}) rename {d as e}) rename {e as f}) rename {f as g},
+        },
+    };
+];";
+    let peak = peak_memory_of("operand_chain", source, 0);
+    assert!(peak < 300 << 20, "{peak} bytes");
+}
+
+/// A binding that an operation reads last, as its operand, goes as the operation
+/// has its result, rather than as the value it is part of is computed: while the
+/// projection and the renaming go on, `tuples` is gone. With it, this holds 64 MB
+/// more, of 16 bytes for each tuple.
+#[test]
+fn a_binding_goes_as_its_last_operation_has_its_result() {
+    let program = |value: &str| {
+        format!(
+            "operator kept{{n: integer}}: integer [
+    var tuples := times{{series{{from: 1, to: n}} rename {{value as a}}, series{{from: 1, to: 100}} rename {{value as b}}}};
+    var renamed := (({value}) rename {{a as c}}) rename {{b as d}};
+    count{{r: renamed}}
+];
+operator main{{}} [
+    call debug_value{{v: kept{{n: 40_000}}}};
+];"
+        )
+    };
+    // Read once more after, in the second, so that it can't go.
+    let last = peak_memory_of("binding_last", &program("tuples"), 0);
+    let held = peak_memory_of(
+        "binding_held",
+        &program("tuples where a > count{r: tuples} * 0 - 1"),
+        0,
+    );
+    assert!(last + (32 << 20) < held, "{last} bytes, and {held} held");
+}

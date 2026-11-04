@@ -2775,6 +2775,25 @@ unsafe fn release_replaced(buffer: *mut u8) {
     }
 }
 
+/// Give up the current scope's reference to what the value at `value`, of the
+/// type `desc` describes, points to, where that is the only one: the operand of
+/// a relational operation, once it has read it. Its result holds references of
+/// its own to what it shares with the operand, and only the operation read the
+/// operand, so nothing else points into what is freed, and what the operand holds
+/// doesn't last until the statement ends. What anything else holds is left as it
+/// is, as a variable's value is.
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, which
+/// nothing but what holds a reference to it reads from now on.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_drop_operand(value: *const u8, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { each_buffer(value, &*desc, &mut |buffer| release_replaced(buffer)) };
+}
+
 /// Where `buffer` is in the current scope's list, if the scope holds the only
 /// reference to it.
 ///

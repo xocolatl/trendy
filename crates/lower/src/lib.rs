@@ -1217,6 +1217,9 @@ struct FunctionBuilder<'a> {
     /// The slot of the innermost scope as the function starts, once what ends
     /// the scopes it has begun needs it.
     outer_scope: Option<lir::Place>,
+    /// The `Let`s' bindings that the value being computed reads for the last
+    /// time, as an operand (see [`FunctionBuilder::operand_read`]).
+    last_read: Vec<hir::LocalId>,
 }
 
 /// A variable a transaction keeps as it begins: where it is, the slot its
@@ -1427,6 +1430,7 @@ impl<'a> FunctionBuilder<'a> {
             arguments: None,
             tail_blocks: Vec::new(),
             outer_scope: None,
+            last_read: Vec::new(),
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -1598,7 +1602,9 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Treat(_, inner) => self.returned(inner, ty, cx),
             hir::Expr::Let(..) => {
                 let (end, alive) = self.let_bindings(expr, cx);
-                self.returned(end, ty, cx);
+                self.reading_last(end, alive.iter().map(|(id, ..)| *id), |this| {
+                    this.returned(end, ty, cx);
+                });
                 self.keep_past_bindings(&result, ty, alive, cx);
             }
             hir::Expr::Run(block, value) => {
@@ -1912,7 +1918,8 @@ impl<'a> FunctionBuilder<'a> {
     fn let_chain(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
         let outer = self.site;
         let (end, alive) = self.let_bindings(expr, cx);
-        let mut value = self.place(end, cx);
+        let bound = alive.iter().map(|(id, ..)| *id);
+        let mut value = self.reading_last(end, bound, |this| this.place(end, cx));
         if !alive.is_empty() {
             // The end's value may point into the bindings still alive, so
             // it is copied out of them first.
@@ -1940,7 +1947,7 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         value: &lir::Place,
         ty: &hir::Type,
-        alive: Vec<(lir::Place, hir::Type)>,
+        alive: Vec<(hir::LocalId, lir::Place, hir::Type)>,
         cx: &mut Lowering,
     ) {
         if alive.is_empty() {
@@ -1954,19 +1961,77 @@ impl<'a> FunctionBuilder<'a> {
             });
             self.scoped = true;
         }
-        for (slot, ty) in alive {
+        for (_, slot, ty) in alive {
             self.release_place(&slot, &ty, cx);
+        }
+    }
+
+    /// What `lower` adds, which computes `value`, whichever of the bindings
+    /// `bound` have no reads after it being given up by the operation that reads
+    /// them there, if that is all that does (see
+    /// [`FunctionBuilder::operand_read`]).
+    fn reading_last<T>(
+        &mut self,
+        value: &hir::Expr,
+        bound: impl Iterator<Item = hir::LocalId>,
+        lower: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = self.last_read.len();
+        self.last_read
+            .extend(bound.filter(|id| value.reads_last_as_operand(*id)));
+        let lowered = lower(self);
+        self.last_read.truncate(outer);
+        lowered
+    }
+
+    /// The operand `operand`, of type `ty`, at `place`, which the relational
+    /// operation just lowered has read, given up if nothing else can read it, so
+    /// that it doesn't last while the statement goes on: a value made here, which
+    /// only the operation reads, and a `Let`'s binding that this is the last read
+    /// of. The result holds references of its own to what the two share. A
+    /// variable's or a parameter's value is held by what holds it, which goes on
+    /// reading it, and a tuple's attributes are shared with what is computed from
+    /// it, by no reference.
+    fn operand_read(
+        &mut self,
+        operand: &hir::Expr,
+        place: &lir::Place,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) {
+        if !matches!(ty, hir::Type::Relation(_) | hir::Type::Array(_)) {
+            return;
+        }
+        match operand {
+            hir::Expr::At(_, inner) | hir::Expr::Treat(_, inner) => {
+                self.operand_read(inner, place, ty, cx);
+            }
+            hir::Expr::Local(id) if self.last_read.contains(id) => {
+                self.release_place(place, ty, cx);
+            }
+            hir::Expr::Local(_)
+            | hir::Expr::Variable(_)
+            | hir::Expr::Parameter(_)
+            | hir::Expr::Constant(_)
+            | hir::Expr::Current(..) => {}
+            _ => {
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::DropOperand,
+                    args: vec![place.clone(), descriptor],
+                });
+            }
         }
     }
 
     /// The bindings of `expr`, a chain of `Let`s, in order, each given up once
     /// nothing after it in the chain reads it: the end of the chain, which is
-    /// not lowered, and the slots of those it may read, with their types.
+    /// not lowered, and those it may read, with their slots and types.
     fn let_bindings<'e>(
         &mut self,
         expr: &'e hir::Expr,
         cx: &mut Lowering,
-    ) -> (&'e hir::Expr, Vec<(lir::Place, hir::Type)>) {
+    ) -> (&'e hir::Expr, Vec<(hir::LocalId, lir::Place, hir::Type)>) {
         // The chain's sites and bindings, in order, then its end.
         enum Part<'e> {
             Site(hir::Site),
@@ -2007,7 +2072,14 @@ impl<'a> FunctionBuilder<'a> {
             match part {
                 Part::Site(site) => self.at(Some(*site), cx),
                 Part::Let(id, value) => {
-                    let (slot, ty) = self.let_bound(*id, value, cx);
+                    let ending: Vec<hir::LocalId> = alive
+                        .iter()
+                        .map(|(bound, ..)| *bound)
+                        .filter(|bound| !read_after(k, *bound))
+                        .collect();
+                    let (slot, ty) = self.reading_last(value, ending.into_iter(), |this| {
+                        this.let_bound(*id, value, cx)
+                    });
                     if cx.points(&ty) {
                         alive.push((*id, slot, ty));
                     }
@@ -2021,8 +2093,7 @@ impl<'a> FunctionBuilder<'a> {
                 }
             }
         }
-        let alive = alive.into_iter().map(|(_, slot, ty)| (slot, ty));
-        (end, alive.collect())
+        (end, alive)
     }
 
     /// Bind the local variable `id` to `value`: computed in a scope of its
@@ -4649,7 +4720,9 @@ impl<'a> FunctionBuilder<'a> {
             .filter(|(_, name)| !names.contains(*name))
             .map(|(i, _)| i)
             .collect();
-        self.reshape(&ty, &ty.without(names), &sources, src, cx)
+        let dst = self.reshape(&ty, &ty.without(names), &sources, src.clone(), cx);
+        self.operand_read(operand, &src, &ty, cx);
+        dst
     }
 
     /// `operand` with its attributes renamed as `renamings` says, each
@@ -4677,7 +4750,9 @@ impl<'a> FunctionBuilder<'a> {
                     .expect("sema renames only attributes the operand has")
             })
             .collect();
-        self.reshape(&ty, &result_ty, &sources, src, cx)
+        let dst = self.reshape(&ty, &result_ty, &sources, src.clone(), cx);
+        self.operand_read(operand, &src, &ty, cx);
+        dst
     }
 
     /// Copy each of `attributes`, in name order, into a field of the tuple
@@ -5061,7 +5136,9 @@ impl<'a> FunctionBuilder<'a> {
                 dst
             }
             (hir::Type::Relation(heading), hir::Type::Relation(result)) => {
-                self.extend_relation(heading, &src, attributes, result, cx)
+                let dst = self.extend_relation(heading, &src, attributes, result, cx);
+                self.operand_read(operand, &src, &ty, cx);
+                dst
             }
             _ => unreachable!("sema extends only tuples and relations"),
         }
@@ -5154,8 +5231,8 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("sema restricts only relations");
         };
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
-        let src = self.place(operand, cx);
-        let (src, condition) = self.equal_runs(src, &ty, heading, condition, cx);
+        let whole = self.place(operand, cx);
+        let (src, condition) = self.equal_runs(whole.clone(), &ty, heading, condition, cx);
         let mut count = src.clone();
         count.path.push(1);
         let dst = self.allocated(&ty, count, cx);
@@ -5207,6 +5284,7 @@ impl<'a> FunctionBuilder<'a> {
             layout: lir::Layout::Usize,
         });
         self.adopt(&dst, &ty, cx);
+        self.operand_read(operand, &whole, &ty, cx);
         dst
     }
 
@@ -6189,7 +6267,7 @@ impl<'a> FunctionBuilder<'a> {
         let dst = self.slot(cx.layout(&array_ty));
         let args = vec![
             dst.clone(),
-            src,
+            src.clone(),
             lir::Place::whole(lir::Base::Data(cx.descriptor(&relation_ty))),
             lir::Place::whole(lir::Base::Data(cx.descriptor(&array_ty))),
             lir::Place::whole(lir::Base::Data(cx.constant(items))),
@@ -6202,6 +6280,7 @@ impl<'a> FunctionBuilder<'a> {
             args,
         });
         self.scoped = true;
+        self.operand_read(&relation, &src, &relation_ty, cx);
         dst
     }
 
@@ -6272,7 +6351,7 @@ impl<'a> FunctionBuilder<'a> {
         let dst = self.slot(cx.layout(&relation_ty));
         let args = vec![
             dst.clone(),
-            src,
+            src.clone(),
             lir::Place::whole(lir::Base::Data(cx.descriptor(&array_ty))),
             lir::Place::whole(lir::Base::Data(cx.descriptor(&relation_ty))),
             lir::Place::whole(lir::Base::Data(cx.constant(parts))),
@@ -6285,6 +6364,7 @@ impl<'a> FunctionBuilder<'a> {
             args,
         });
         self.scoped = true;
+        self.operand_read(array, &src, &array_ty, cx);
         dst
     }
 
@@ -6301,9 +6381,10 @@ impl<'a> FunctionBuilder<'a> {
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Tclose,
-            args: vec![dst.clone(), src, descriptor],
+            args: vec![dst.clone(), src.clone(), descriptor],
         });
         self.scoped = true;
+        self.operand_read(operand, &src, &ty, cx);
         dst
     }
 
@@ -6324,16 +6405,15 @@ impl<'a> FunctionBuilder<'a> {
         let common = common_attributes(lhs_heading, rhs_heading, cx);
         let common_count = usize_constant(len(common.len()), cx);
         let negated = usize_constant(u64::from(negated), cx);
-        let lhs = self.place(lhs, cx);
-        let rhs = self.place(rhs, cx);
+        let (lhs_place, rhs_place) = (self.place(lhs, cx), self.place(rhs, cx));
         let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
             lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
         };
         let dst = self.slot(cx.layout(&lhs_ty));
         let args = vec![
             dst.clone(),
-            lhs,
-            rhs,
+            lhs_place.clone(),
+            rhs_place.clone(),
             descriptor(&lhs_ty, cx),
             descriptor(&rhs_ty, cx),
             lir::Place::whole(lir::Base::Data(cx.constant(common))),
@@ -6345,6 +6425,8 @@ impl<'a> FunctionBuilder<'a> {
             args,
         });
         self.scoped = true;
+        self.operand_read(lhs, &lhs_place, &lhs_ty, cx);
+        self.operand_read(rhs, &rhs_place, &rhs_ty, cx);
         dst
     }
 
@@ -6359,8 +6441,8 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let ty = combination.combined(&self.type_of(lhs), &self.type_of(rhs));
-        let lhs = self.place(lhs, cx);
-        let rhs = self.place(rhs, cx);
+        let (lhs_ty, rhs_ty) = (self.type_of(lhs), self.type_of(rhs));
+        let (lhs_place, rhs_place) = (self.place(lhs, cx), self.place(rhs, cx));
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         let combination = match combination {
             hir::Combination::Union => lir::Combination::Union,
@@ -6374,9 +6456,17 @@ impl<'a> FunctionBuilder<'a> {
         let dst = self.slot(cx.layout(&ty));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Combine,
-            args: vec![dst.clone(), lhs, rhs, descriptor, combination],
+            args: vec![
+                dst.clone(),
+                lhs_place.clone(),
+                rhs_place.clone(),
+                descriptor,
+                combination,
+            ],
         });
         self.scoped = true;
+        self.operand_read(lhs, &lhs_place, &lhs_ty, cx);
+        self.operand_read(rhs, &rhs_place, &rhs_ty, cx);
         dst
     }
 
@@ -6451,7 +6541,7 @@ impl<'a> FunctionBuilder<'a> {
         let dst = self.slot(cx.layout(&result_ty));
         let args = vec![
             dst.clone(),
-            src,
+            src.clone(),
             descriptor(&result_ty, cx),
             descriptor(ty, cx),
             lir::Place::whole(lir::Base::Data(cx.constant(sources))),
@@ -6466,6 +6556,7 @@ impl<'a> FunctionBuilder<'a> {
             args,
         });
         self.scoped = true;
+        self.operand_read(operand, &src, ty, cx);
         dst
     }
 
@@ -6480,12 +6571,14 @@ impl<'a> FunctionBuilder<'a> {
         }
         let lhs_ty = self.type_of(lhs);
         let rhs_ty = self.type_of(rhs);
-        let lhs = self.place(lhs, cx);
-        let rhs = self.place(rhs, cx);
-        match lhs_ty {
-            hir::Type::Tuple(_) => self.tuple_join(&lhs_ty, &rhs_ty, &lhs, &rhs, cx),
-            _ => self.and(&lhs_ty, &rhs_ty, lhs, rhs, cx),
+        let (lhs_place, rhs_place) = (self.place(lhs, cx), self.place(rhs, cx));
+        if let hir::Type::Tuple(_) = lhs_ty {
+            return self.tuple_join(&lhs_ty, &rhs_ty, &lhs_place, &rhs_place, cx);
         }
+        let dst = self.and(&lhs_ty, &rhs_ty, lhs_place.clone(), rhs_place.clone(), cx);
+        self.operand_read(lhs, &lhs_place, &lhs_ty, cx);
+        self.operand_read(rhs, &rhs_place, &rhs_ty, cx);
+        dst
     }
 
     /// Whether the AND of `operand` and `other` is a lookup in `operand` (see
