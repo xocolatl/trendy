@@ -4190,8 +4190,9 @@ operator main{} [
   `r := r minus s;`. What goes is found before anything does, so a condition
   reads the relation whole, and one that fails changes nothing. A condition
   that says what the first attributes equal, as `delete r where k = x;` does,
-  finds its tuples rather than going through them all, so that it takes the
-  time of moving those after them, and none if they are last.
+  finds its tuples rather than going through them all (see
+  [Restriction](#restriction)), so that it takes the time of moving those after
+  them, and none if they are last.
 - **`delete` needs `where` and a condition** (P0023), so that every tuple
   isn't deleted by accident. To delete them all, assign the empty relation:
   `r := relation {};`, whose heading comes from the variable.
@@ -5447,6 +5448,16 @@ operator main{} [
   that reads both, are joined before anything is multiplied. Either way,
   the parts that can't fail are computed first; the others, for the
   tuples those keep.
+- **A condition that says what the first attributes equal finds its tuples,**
+  by a binary search, rather than going through them all, as a relation's tuples
+  are in the order of their attributes' names: `r where k = x` for `k` first,
+  and `r where k = x and l = y` for `l` next. The values can be any expression
+  that doesn't read the tuple, so `r where k = i - 1` and `r where k =
+  f{n: i}` find them too, computing the value once, if there is a tuple, as it
+  would fail for the first if it fails. If they can fail and something else is
+  left of the condition, the tuples are gone through, as a part that can't fail
+  may keep the value from being computed at all, and one that can may fail for a
+  tuple the key doesn't find.
 - Other languages' operators, such as `==` and `&&`, are fixed, as
   everywhere.
 

@@ -4878,8 +4878,10 @@ impl<'a> FunctionBuilder<'a> {
     /// run, found by binary search ([`lir::RuntimeFn::EqualRun`]), and
     /// among them, so are those for which the next is, and so on, while
     /// `condition` has a conjunct for it (see [`FunctionBuilder::equated`]).
-    /// An equality can't fail, so it guards the other conjuncts, which are
-    /// computed only for the tuples it holds for, as they are in the run.
+    /// An equality of a value that can't fail can't fail, so it guards the
+    /// other conjuncts, which are computed only for the tuples it holds for,
+    /// as they are in the run. If all that is left then is such equalities of
+    /// values that can fail, see [`FunctionBuilder::failable_runs`].
     fn equal_runs(
         &mut self,
         src: lir::Place,
@@ -4890,38 +4892,141 @@ impl<'a> FunctionBuilder<'a> {
     ) -> (lir::Place, hir::Expr) {
         let mut src = src;
         let mut rest: Vec<&hir::Expr> = condition.conjuncts().iter().collect();
-        for (i, (name, attribute)) in heading.attributes().enumerate() {
-            let found = rest
-                .iter()
-                .enumerate()
-                .find_map(|(at, conjunct)| Some((at, self.equated(conjunct, name, attribute)?)));
+        let mut attributes = heading.attributes().enumerate().peekable();
+        while let Some(&(i, (name, attribute))) = attributes.peek() {
+            let found = rest.iter().enumerate().find_map(|(at, conjunct)| {
+                let value = self.equated(conjunct, name, attribute)?;
+                (!value.can_fail()).then_some((at, value))
+            });
             let Some((at, value)) = found else {
                 break;
             };
+            attributes.next();
             rest.remove(at);
             // Computed before the tuples are: `value` reads none of them,
             // but what's further out is further out from it than from here.
             self.tuples.push(AtHand::one(src.clone()));
             let value = self.place(value, cx);
             self.tuples.pop();
-            let run = self.slot(cx.layout(ty));
-            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
-            let attribute = usize_constant(len(i), cx);
-            self.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::EqualRun,
-                args: vec![run.clone(), src, value, descriptor, attribute],
-            });
-            src = run;
+            src = self.equal_run(src, &value, i, ty, cx);
+        }
+        let values = self.failable_equalities(&rest, attributes);
+        if let Some(values) = values {
+            rest.clear();
+            src = self.failable_runs(src, &values, ty, cx);
         }
         let rest = rest.into_iter().cloned().collect();
         (src, hir::Connective::And.of(rest))
     }
 
+    /// The run of tuples of the relation or run at `src`, of type `ty`, whose
+    /// attribute `i`, from the first in name order, is equal to the value at
+    /// `value`, in a new slot.
+    fn equal_run(
+        &mut self,
+        src: lir::Place,
+        value: &lir::Place,
+        i: usize,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let run = self.slot(cx.layout(ty));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        let attribute = usize_constant(len(i), cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::EqualRun,
+            args: vec![run.clone(), src, value.clone(), descriptor, attribute],
+        });
+        run
+    }
+
+    /// The values, each with its attribute's place from the first in name
+    /// order, if each of the `conjuncts` left of a condition says the next of
+    /// `attributes` is equal to a value that can fail.
+    fn failable_equalities<'e, 'h>(
+        &self,
+        conjuncts: &[&'e hir::Expr],
+        mut attributes: impl Iterator<Item = (usize, (&'h str, &'h hir::Type))>,
+    ) -> Option<Vec<(usize, &'e hir::Expr)>> {
+        if conjuncts.is_empty() {
+            return None;
+        }
+        let mut left = conjuncts.to_vec();
+        let mut values = Vec::new();
+        while !left.is_empty() {
+            let (i, (name, attribute)) = attributes.next()?;
+            let (at, value) = left.iter().enumerate().find_map(|(at, conjunct)| {
+                let value = self.equated(conjunct, name, attribute)?;
+                value.can_fail().then_some((at, value))
+            })?;
+            left.remove(at);
+            values.push((i, value));
+        }
+        Some(values)
+    }
+
+    /// The run of tuples of the relation or run at `src`, of type `ty`, whose
+    /// attributes are equal to `values`, each with its place from the first in
+    /// name order, which can fail but read no tuple, and are all that is left
+    /// of a condition. For each tuple every one of them would be computed, as
+    /// nothing is left to guard them (see `language.md`'s "Boolean operators"),
+    /// and each is the same for all of them, so computing them once, if there
+    /// is a tuple, fails just when that would. They are computed before any
+    /// of them narrows the tuples down, as they would be for the first.
+    fn failable_runs(
+        &mut self,
+        src: lir::Place,
+        values: &[(usize, &hir::Expr)],
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let mut count = src.clone();
+        count.path.push(1);
+        let zero = usize_constant(0, cx);
+        let some = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: some.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Less, lir::Operand::Usize),
+            lhs: zero,
+            rhs: count,
+        });
+        let (computed, after) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: some,
+                then: computed,
+                otherwise: after,
+            },
+            computed,
+        );
+        // Each in a slot of its own, which no run reads with no tuple to
+        // compare it to.
+        self.tuples.push(AtHand::one(src.clone()));
+        let places: Vec<(usize, lir::Place)> = values
+            .iter()
+            .map(|(i, value)| {
+                let layout = cx.layout(&self.type_of(value));
+                let computed = self.place(value, cx);
+                let slot = self.slot(layout.clone());
+                self.insts.push(lir::Inst::Copy {
+                    dst: slot.clone(),
+                    src: computed,
+                    layout,
+                });
+                (*i, slot)
+            })
+            .collect();
+        self.tuples.pop();
+        self.end_block(lir::Terminator::Jump(after), after);
+        places.iter().fold(src, |src, (i, value)| {
+            self.equal_run(src, value, *i, ty, cx)
+        })
+    }
+
     /// The value `conjunct`, of a condition on a relation's tuples, says
     /// the tuple at hand's attribute `name`, of type `attribute`, is equal
     /// to, if it says that, of a value of its type, that's the same for
-    /// every tuple and can't fail, so that computing it before them all
-    /// changes nothing.
+    /// every tuple: it reads none of the tuple at hand.
     fn equated<'e>(
         &self,
         conjunct: &'e hir::Expr,
@@ -4945,10 +5050,7 @@ impl<'a> FunctionBuilder<'a> {
             return None;
         };
         let read = value.tuple_read(0);
-        let same = !read.whole
-            && read.attributes.is_empty()
-            && !value.can_fail()
-            && self.type_of(value) == *attribute;
+        let same = !read.whole && read.attributes.is_empty() && self.type_of(value) == *attribute;
         same.then_some(&**value)
     }
 
@@ -8049,6 +8151,109 @@ mod tests {
     }
 
     #[test]
+    fn a_value_that_can_fail_finds_a_run_if_nothing_else_is_left() {
+        let heading = || {
+            hir::Heading::new(BTreeMap::from([
+                ("a".to_string(), hir::Type::Scalar(hir::Scalar::Integer)),
+                ("z".to_string(), hir::Type::Scalar(hir::Scalar::Integer)),
+            ]))
+        };
+        let empty = || {
+            variable(
+                "r",
+                hir::Value::Relation(hir::RelationValue {
+                    heading: heading(),
+                    tuples: BTreeSet::new(),
+                }),
+            )
+        };
+        let number = || variable("n", hir::Value::Integer(1));
+        let var = |i| hir::Expr::Variable(hir::VariableId(i));
+        let attribute = |name: &str| {
+            hir::Expr::Extract(Box::new(hir::Expr::Current(0, heading())), name.to_string())
+        };
+        let compared = |comparison, name: &str, value: hir::Expr| {
+            hir::Expr::Binary(
+                hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Integer)),
+                Box::new(attribute(name)),
+                Box::new(value),
+            )
+        };
+        let failable = || {
+            hir::Expr::Binary(
+                hir::BinaryOp::Add(hir::Numeric::Integer),
+                Box::new(var(1)),
+                Box::new(hir::Expr::Constant(hir::Value::Integer(1))),
+            )
+        };
+        let runs = |condition| {
+            let restrict = hir::Expr::Restrict(Box::new(var(0)), Box::new(condition));
+            let lowered = lower_program(&program(
+                vec![user(
+                    "main",
+                    &[],
+                    vec![hir::Statement::Assign(vec![hir::Assignment {
+                        target: hir::Target::Variable(hir::VariableId(2)),
+                        value: restrict,
+                    }])],
+                )],
+                vec![empty(), number(), empty()],
+            ));
+            runtime_calls(&lowered.functions[0])
+                .concat()
+                .into_iter()
+                .filter(|f| *f == lir::RuntimeFn::EqualRun)
+                .count()
+        };
+        let and = |operands| hir::Connective::And.of(operands);
+        let equal = hir::Comparison::Equal;
+        // All that is said.
+        assert_eq!(runs(compared(equal, "a", failable())), 1);
+        // Of both attributes, which are the first two.
+        assert_eq!(
+            runs(and(vec![
+                compared(equal, "a", failable()),
+                compared(equal, "z", failable()),
+            ])),
+            2
+        );
+        // After one that can't fail, which guards it.
+        assert_eq!(
+            runs(and(vec![
+                compared(equal, "a", var(1)),
+                compared(equal, "z", failable()),
+            ])),
+            2
+        );
+        // Not with one that can't fail left, which guards it, however few
+        // tuples it holds for.
+        assert_eq!(
+            runs(and(vec![
+                compared(equal, "a", failable()),
+                compared(hir::Comparison::Greater, "z", var(1)),
+            ])),
+            0
+        );
+        assert_eq!(
+            runs(and(vec![
+                compared(equal, "a", failable()),
+                compared(equal, "z", var(1)),
+            ])),
+            0
+        );
+        // Not with another that can fail, computed for every tuple.
+        assert_eq!(
+            runs(and(vec![
+                compared(equal, "a", failable()),
+                compared(hir::Comparison::Greater, "z", failable()),
+            ])),
+            0
+        );
+        // Not of an attribute that isn't next.
+        assert_eq!(runs(compared(equal, "z", failable())), 0);
+    }
+
+    #[test]
     fn a_var_parameter_is_its_variables_address() {
         // `operator set{var n: integer} [ n := 7; ];`, called with the
         // variable `a`: `call set{var n: a};`.
@@ -8568,9 +8773,10 @@ mod tests {
         assert_eq!(runs(equal(attribute("b"), one())), 0);
         // Another attribute's value differs from tuple to tuple.
         assert_eq!(runs(equal(attribute("a"), attribute("b"))), 0);
-        // A value that can fail isn't computed before the tuples.
+        // A value that can fail, if it is all that's left, is computed once,
+        // if there is a tuple (see the test after this one for when not).
         let can_fail = hir::Expr::Binary(hir::BinaryOp::Div, Box::new(one()), Box::new(one()));
-        assert_eq!(runs(equal(attribute("a"), can_fail)), 0);
+        assert_eq!(runs(equal(attribute("a"), can_fail)), 1);
     }
 
     #[test]

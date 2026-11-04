@@ -962,6 +962,165 @@ fn inserts_check_keys_of_what_they_add() {
     assert_eq!(stderr.lines().collect::<Vec<_>>(), ["1", "1"], "{stderr}");
 }
 
+/// A key computed by what can fail gives what going through the tuples gives,
+/// of a value that isn't computed by an expression a run can use: as the first
+/// attribute and as the first two, of integers and texts, from a value block
+/// that runs statements, a call, and the tuple further out.
+const KEYS_THAT_CAN_FAIL: &str = r#"operator twice{n: integer}: integer [
+    n * 2
+];
+
+operator stepped{n: integer}: integer [
+    var at := 0;
+    while at < n loop [
+        at := at + 3;
+    ];
+    at
+];
+
+operator main{} [
+    var r := series{from: 1, to: 200} extend { b := value mod 7, t := to_text{from: value mod 40} } rename {value as a};
+    var wrong := 0;
+    var i := 0;
+    while i < 300 loop [
+        /* `+ 0` of the attribute reads it, so this goes through the tuples. */
+        if (r where a = i + 1) <> (r where a + 0 = i + 1) then [
+            wrong := wrong + 1;
+        ];
+        if (r where a = twice{n: i}) <> (r where a + 0 = twice{n: i}) then [
+            wrong := wrong + 1;
+        ];
+        if (r where a = stepped{n: i}) <> (r where a + 0 = stepped{n: i}) then [
+            wrong := wrong + 1;
+        ];
+        if (r where a = [ var k := i; k + 2 ]) <> (r where a + 0 = i + 2) then [
+            wrong := wrong + 1;
+        ];
+        if (r where a = i + 1 and b = i mod 7) <> (r where a + 0 = i + 1 and b + 0 = i mod 7) then [
+            wrong := wrong + 1;
+        ];
+        /* An attribute that goes first, of texts, as `t` sorts after `b`. */
+        var s := r remove {a, b};
+        if (s where t = to_text{from: i mod 50}) <> (s where t || "" = to_text{from: i mod 50}) then [
+            wrong := wrong + 1;
+        ];
+        i := i + 1;
+    ];
+    /* The value of the tuple further out, once for each of them. */
+    var counts := series{from: 1, to: 5} extend { n := count{r: r where a = value + 1} };
+    call debug_value{v: wrong};
+    call debug_value{v: counts};
+    /* `delete`, by what can fail, and its own value block. */
+    var left := series{from: 1, to: 9};
+    delete left where value = i - 299;
+    delete left where value = [ var k := 2; k + 1 ];
+    call debug_value{v: left};
+];
+"#;
+
+#[test]
+fn keys_that_can_fail_find_what_going_through_the_tuples_does() {
+    let (code, stderr) = run_source("keys_that_can_fail", KEYS_THAT_CAN_FAIL);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "0",
+            "relation { n: integer, value: integer } { { n: 1, value: 1 }, { n: 1, value: 2 }, { n: 1, value: 3 }, { n: 1, value: 4 }, { n: 1, value: 5 } }",
+            "relation { value: integer } { { value: 2 }, { value: 4 }, { value: 5 }, { value: 6 }, { value: 7 }, { value: 8 }, { value: 9 } }",
+        ],
+        "{stderr}"
+    );
+}
+
+/// A key that fails fails just when going through the tuples would have: if
+/// there is a tuple to compute it for, each of them, whatever another key says,
+/// and not behind a guard that holds for none. A conjunct that can fail is still
+/// computed for every tuple, so a key doesn't narrow what it is computed for.
+#[test]
+fn keys_that_can_fail_fail_as_they_did() {
+    let run = |name: &str, line: &str| {
+        run_source(
+            name,
+            &format!(
+                "operator main{{}} [\n    var zero := 0;\n    var none := series{{from: 1, to: 0}} extend {{ z := value }} rename {{value as a}};\n    var r := series{{from: 1, to: 3}} extend {{ z := value }} rename {{value as a}};\n    {line}\n    call debug_value{{v: 0}};\n];\n"
+            ),
+        )
+    };
+    let divides = "error[R0002]: division by zero: 1 div 0";
+    for (name, line, fails) in [
+        // A tuple to compute it for, or none.
+        (
+            "key_fails",
+            "call debug_value{v: r where a = 1 div zero};",
+            true,
+        ),
+        (
+            "key_no_tuple",
+            "call debug_value{v: count{r: none where a = 1 div zero}};",
+            false,
+        ),
+        // Each computed, whatever the other finds, or none.
+        (
+            "key_second_fails",
+            "call debug_value{v: r where a = zero + 99 and z = 1 div zero};",
+            true,
+        ),
+        (
+            "key_first_fails",
+            "call debug_value{v: r where a = 1 div zero and z = zero + 99};",
+            true,
+        ),
+        // Behind a key that can't fail, only among those it finds.
+        (
+            "key_guarded_found",
+            "call debug_value{v: r where a = 2 and z = 1 div zero};",
+            true,
+        ),
+        (
+            "key_guarded_none",
+            "call debug_value{v: count{r: r where a = 99 and z = 1 div zero}};",
+            false,
+        ),
+        // Behind what can't fail and isn't a key.
+        (
+            "key_behind_guard",
+            "call debug_value{v: count{r: r where a = 1 div zero and z > 99}};",
+            false,
+        ),
+        (
+            "key_behind_guard_true",
+            "call debug_value{v: count{r: r where a = 1 div zero and z > 0}};",
+            true,
+        ),
+        // Beside what can fail, computed for tuples the key doesn't find.
+        (
+            "key_beside_failure",
+            "call debug_value{v: count{r: r where a = zero + 1 and 1 div (z - 3) < 99}};",
+            true,
+        ),
+        // The same of a `delete`.
+        ("delete_key_fails", "delete r where a = 1 div zero;", true),
+        (
+            "delete_key_no_tuple",
+            "delete none where a = 1 div zero;",
+            false,
+        ),
+    ] {
+        let (code, stderr) = run(name, line);
+        if fails {
+            assert_eq!(code, 1, "{line}: {stderr}");
+            assert!(stderr.contains(divides), "{line}: {stderr}");
+            assert!(
+                stderr.contains(&format!("{name}.trendy:5:")),
+                "{line}: {stderr}"
+            );
+        } else {
+            assert_eq!(code, 0, "{line}: {stderr}");
+        }
+    }
+}
+
 /// `delete`, `i_delete` and `minus`, which change a variable's own buffer where
 /// nothing else holds it, are the same as an operator computing what is left,
 /// which never does: by the first attribute, by it and another, by another

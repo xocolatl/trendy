@@ -1719,7 +1719,15 @@ next attribute among them. The loop goes over only the run, for the other
 conjuncts: as an equality can't fail, it guards them, so they are computed
 for just those tuples anyway. So `r where key = x` costs the log of the
 relation's size when `key` comes first in name order, as lowering sees it;
-other attributes aren't indexed, and take the loop over every tuple.
+other attributes aren't indexed, and take the loop over every tuple. A value
+that can fail, as `x + 1` or a call can, is the same for every tuple but would
+be computed only where nothing guards it, and for every one where nothing does.
+So if each conjunct left says the next attribute is equal to such a value, those
+values are computed once, if there is a tuple, before any narrows them
+(`FunctionBuilder::failable_runs`), which fails just when going through them
+would. With anything else left, that can't fail, it may hold for no tuple, so the
+value mustn't be computed, or that can, it may fail for a tuple the run leaves
+out, so they take the loop.
 
 `tuple from` and `value from` (`FromExpr`) are prefix operators whose
 `value` and `from` are contextual keywords, recognized by a `tuple`
