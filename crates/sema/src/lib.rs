@@ -8891,6 +8891,171 @@ operator main{{}} [ var lines: array text; {main} ];"
     }
 
     #[test]
+    fn a_name_alone_is_its_own_value() {
+        let area = "operator area{width: integer, height: integer}: integer [ width * height ];\noperator area{side: integer}: integer [ side * side ];\n";
+        for body in [
+            // Arguments, in any order, with others, choosing the operator.
+            "area{width, height}",
+            "area{height, width}",
+            "area{width, height: 2}",
+            "area{width: 2, height}",
+            "area{side: width}",
+            // Tuples, with or without their keyword.
+            "count{r: relation { { width, height } }}",
+            "tuple { width, height }.width",
+            "length{a: array [{ width, height: 1 }]}",
+        ] {
+            let source = format!(
+                "{area}operator f{{width: integer, height: integer}}: integer [ {body} ];{MAIN}"
+            );
+            assert!(
+                analyze_str(&source).is_ok(),
+                "{body}: {:#?}",
+                errors(&source)
+            );
+        }
+        // What it names is any value in scope: a local variable, an attribute
+        // of the tuple at hand.
+        let source = format!(
+            "{area}operator f{{}}: integer [ var side := 2; area{{side}} ];\nvar r := relation {{ {{ side: 1 }} }} extend {{ a := area{{side}} }};{MAIN}"
+        );
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+        // In an update call, with its mode.
+        let source = "operator g{a: integer, out b: integer, var c: integer} [ b := a; c := a; ];\noperator main{} [ var a := 1; var b := 0; var c := 0; call g{a, out b, var c}; ];";
+        assert!(analyze_str(source).is_ok(), "{:#?}", errors(source));
+        // Its mode is still needed, and the fix adds it.
+        assert_eq!(
+            fix(
+                "operator g{out b: integer} [ b := 1; ];\noperator main{} [ var b := 0; call g{b}; ];"
+            ),
+            "operator g{out b: integer} [ b := 1; ];\noperator main{} [ var b := 0; call g{out b}; ];"
+        );
+        // It means what is written out: the same in the program.
+        let written = |args: &str| {
+            let source = format!(
+                "operator f{{a: integer}}: integer [ a ];\nvar a := 1;\nvar x := f{{{args}}};"
+            );
+            variables(&source)[1].init.clone()
+        };
+        assert_eq!(written("a"), written("a: a"));
+        // A value of the name has to exist.
+        let source = format!("operator f{{a: integer}}: integer [ a ];\nvar x := f{{a}};{MAIN}");
+        let unknown = errors(&source);
+        assert_eq!(unknown[0].code, Code::UnknownName);
+        assert!(
+            unknown[0].notes.iter().any(|n| n.contains("its own value")),
+            "{unknown:#?}"
+        );
+        let source = format!("var x := tuple {{ a }};{MAIN}");
+        assert_eq!(codes(&source), [Code::UnknownName]);
+        // Twice is twice.
+        let source = format!("var a := 1;\nvar x := tuple {{ a, a: 2 }};{MAIN}");
+        assert_eq!(codes(&source), [Code::DuplicateAttribute]);
+    }
+
+    #[test]
+    fn a_name_alone_that_is_no_parameter() {
+        let in_f = |call: &str| {
+            format!(
+                "operator f{{w: integer, h: integer, side: integer}}: integer [ {call} ];{MAIN}"
+            )
+        };
+        let area = "operator area{width: integer, height: integer}: integer [ width * height ];\n";
+        // One left over can only be for the one parameter left.
+        assert_eq!(
+            fix(&format!("{area}{}", in_f("area{width: 1, h}"))),
+            format!("{area}{}", in_f("area{width: 1, height: h}"))
+        );
+        assert_eq!(fix(&in_f("count{w}")), in_f("count{r: w}"));
+        // Several, nothing says which is for which.
+        let source = format!("{area}{}", in_f("area{w, h}"));
+        let nameless = errors(&source);
+        assert_eq!(nameless.len(), 2, "{nameless:#?}");
+        assert!(nameless.iter().all(|d| d.code == Code::PositionalArgument));
+        assert!(
+            nameless.iter().all(|d| d.suggestions.is_empty()),
+            "{nameless:#?}"
+        );
+        // No value of the name, it may be a misspelling of the parameter's.
+        let source = format!(
+            "{area}operator f{{width: integer, height: integer}}: integer [ area{{width, heigth}} ];{MAIN}"
+        );
+        assert_eq!(
+            fix(&source),
+            format!(
+                "{area}operator f{{width: integer, height: integer}}: integer [ area{{width, height}} ];{MAIN}"
+            )
+        );
+        // Another language's name for one keeps its value.
+        assert_eq!(
+            fix(&in_f("count{r: series{start: w, stop: h}}")),
+            in_f("count{r: series{from: w, to: h}}")
+        );
+        let source = "operator f{start: integer, stop: integer}: integer [ count{r: series{start, stop}} ];\noperator main{} [];";
+        assert_eq!(
+            fix(source),
+            "operator f{start: integer, stop: integer}: integer [ count{r: series{from: start, to: stop}} ];\noperator main{} [];"
+        );
+        // A program's own operator has no other language's names.
+        let source = "operator g{from: integer}: integer [ from ];\noperator f{start: integer, other: integer}: integer [ g{start, other} ];\noperator main{} [];";
+        assert!(
+            errors(source).iter().all(|d| d.suggestions.is_empty()),
+            "{:#?}",
+            errors(source)
+        );
+    }
+
+    #[test]
+    fn names_alone_that_could_be_a_projection_or_a_call() {
+        let both = "var t := relation { { y: 1, r: 2 } };\noperator t{y: integer, r: integer}: integer [ y ];\n";
+        // In an update operator, as a read-only one reads no variable.
+        let in_f = |call: &str| {
+            format!(
+                "{both}operator f{{y: integer, r: integer}} [ call debug_value{{v: {call}}}; ];{MAIN}"
+            )
+        };
+        // Both fit, so nothing says which.
+        let source = in_f("t{y, r}");
+        assert_eq!(codes(&source), [Code::ProjectionOrCall]);
+        let ambiguous = &errors(&source)[0];
+        assert!(ambiguous.suggestions.is_empty(), "{ambiguous:#?}");
+        assert_eq!(ambiguous.help.len(), 2);
+        // Each way of saying which is fine.
+        for call in ["t{y: y, r: r}", "(t){y, r}"] {
+            let source = in_f(call);
+            assert!(
+                analyze_str(&source).is_ok(),
+                "{call}: {:#?}",
+                errors(&source)
+            );
+        }
+        // Not all its parameters: a projection, of what it can't be a call of.
+        let source = format!("{both}var x := t{{y}};{MAIN}");
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+        // No values of those names: a projection.
+        let source = format!("{both}var x := t{{y, r}};{MAIN}");
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+        // No value of its name: a call, the prelude's operators too.
+        let source = "var r := relation { { x: 1 } };\nvar c := count{r};\noperator main{} [];";
+        assert!(analyze_str(source).is_ok(), "{:#?}", errors(source));
+        // A program's value hides the prelude's name, where it can.
+        let source = "var series := relation { { from: 1, other: 2 } };\nvar x := series{from};\noperator main{} [];";
+        assert!(analyze_str(source).is_ok(), "{:#?}", errors(source));
+        // A value that can't be projected so: the fix calls the operator.
+        let source = "operator f{r: relation { x: integer }}: integer [ var count := 1; count{r} ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::WrongOperandType]);
+        assert_eq!(
+            fix(source),
+            "operator f{r: relation { x: integer }}: integer [ var count := 1; count{r: r} ];\noperator main{} [];"
+        );
+        let source = "var g := relation { { x: 1 } };\noperator g{y: integer}: integer [ y ];\noperator f{y: integer}: integer [ count{r: g{y}} ];\noperator main{} [];";
+        assert_eq!(
+            fix(source),
+            "var g := relation { { x: 1 } };\noperator g{y: integer}: integer [ y ];\noperator f{y: integer}: integer [ count{r: g{y: y}} ];\noperator main{} [];"
+        );
+    }
+
+    #[test]
     fn a_constraint_in_an_operators_braces_is_checked_of_what_is_known() {
         let half =
             "operator half{n: integer, m: integer, constraint n >= 0}: integer [ n div 2 + m ];\n";

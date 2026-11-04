@@ -356,11 +356,13 @@ pub(crate) struct Operators {
 }
 
 /// A call's arguments, as they choose which operator of its name it
-/// calls: the names of those written `name: value`, and how many have no
-/// name.
+/// calls: the names of those written `name: value`, of those written as a
+/// name alone, which is for a parameter of that name if there is one, and
+/// otherwise has no name, and how many have no name.
 #[derive(Default)]
 pub(crate) struct ArgumentNames {
     pub(crate) named: BTreeSet<String>,
+    pub(crate) alone: BTreeSet<String>,
     pub(crate) unnamed: usize,
 }
 
@@ -593,7 +595,8 @@ impl Operators {
     /// is the one they name most nearly, each argument it has no parameter
     /// for, and each parameter they don't name, counting two, but an
     /// argument whose name is a misspelling of a parameter's they don't
-    /// name, or that has no name, one, for both.
+    /// name, or that has no name, one, for both. A name alone that is no
+    /// parameter's has no name, unless it means one.
     pub(crate) fn chosen(
         &self,
         name: crate::WrittenName,
@@ -608,7 +611,7 @@ impl Operators {
                 .written
                 .keys()
                 .map(String::as_str)
-                .filter(|p| !args.named.contains(*p))
+                .filter(|p| !args.named.contains(*p) && !args.alone.contains(*p))
                 .collect();
             let mut distance = 0;
             for arg in args
@@ -624,9 +627,23 @@ impl Operators {
                     None => distance += 2,
                 }
             }
+            let mut unnamed = args.unnamed;
+            for arg in args
+                .alone
+                .iter()
+                .filter(|a| !signature.written.contains_key(*a))
+            {
+                match signature.named_elsewhere(arg, missing.iter().copied()) {
+                    Some(meant) => {
+                        missing.retain(|m| *m != meant);
+                        distance += 1;
+                    }
+                    None => unnamed += 1,
+                }
+            }
             // Naming one without a name, as one of those, fixes both.
-            let paired = args.unnamed.min(missing.len());
-            distance + paired + 2 * (args.unnamed - paired) + 2 * (missing.len() - paired)
+            let paired = unnamed.min(missing.len());
+            distance + paired + 2 * (unnamed - paired) + 2 * (missing.len() - paired)
         };
         let nearest = overloads.iter().map(|s| distance(s)).min()?;
         let mut tied: Vec<&Signature> = overloads
@@ -637,6 +654,18 @@ impl Operators {
             Chosen::One(tied.remove(0))
         } else {
             Chosen::Tied(tied)
+        })
+    }
+
+    /// Whether an operator of `name`, that what is written at `at` sees, has
+    /// exactly `parameters`.
+    pub(crate) fn takes_exactly(&self, name: &str, at: Span, parameters: &BTreeSet<&str>) -> bool {
+        self.overloads(name, at).any(|signature| {
+            signature
+                .written
+                .keys()
+                .map(String::as_str)
+                .eq(parameters.iter().copied())
         })
     }
 
@@ -717,12 +746,21 @@ impl Signature {
         arg: &str,
         missing: impl Iterator<Item = &'a str> + Clone,
     ) -> Option<&'a str> {
-        let elsewhere = (self.source != Source::Program)
-            .then(|| crate::errors::parameter_elsewhere(&self.name, arg))
-            .flatten();
-        elsewhere
-            .and_then(|ours| missing.clone().find(|m| *m == ours))
+        self.named_elsewhere(arg, missing.clone())
             .or_else(|| trendy_diag::renamed(arg, missing))
+    }
+
+    /// Which of the parameters `missing` is the one another language calls
+    /// `arg`, if the compiler's own operator has one.
+    pub(crate) fn named_elsewhere<'a>(
+        &self,
+        arg: &str,
+        mut missing: impl Iterator<Item = &'a str>,
+    ) -> Option<&'a str> {
+        let ours = (self.source != Source::Program)
+            .then(|| crate::errors::parameter_elsewhere(&self.name, arg))
+            .flatten()?;
+        missing.find(|m| *m == ours)
     }
 
     /// The signature of a read-only operator a type's declaration makes,

@@ -1681,13 +1681,31 @@ impl CallExpr {
 }
 
 impl Arguments {
-    /// The named arguments, `name: value`.
+    /// The named arguments, `name: value`, or a name alone, `name`, which is
+    /// its own value.
     pub fn named(&self) -> impl Iterator<Item = AttributeValue> {
         self.0.children().filter_map(AttributeValue::cast)
     }
 
     pub fn positional(&self) -> impl Iterator<Item = PositionalArg> {
         self.0.children().filter_map(PositionalArg::cast)
+    }
+
+    /// Where each argument is written, in the order they are, if none says
+    /// which parameter it is for apart from its value: each a value, or a
+    /// name alone.
+    #[must_use]
+    pub fn unnamed_in_order(&self) -> Option<Vec<Span>> {
+        self.0
+            .children()
+            .filter_map(|child| {
+                if let Some(arg) = PositionalArg::cast(child.clone()) {
+                    return Some(Some(arg.span()));
+                }
+                let arg = AttributeValue::cast(child)?;
+                Some(arg.is_shorthand().then(|| arg.span()))
+            })
+            .collect()
     }
 
     /// Where a new argument goes, as an offset and the text to put around
@@ -2739,9 +2757,27 @@ impl AttributeValue {
         self.0.children().find_map(Mode::cast)
     }
 
+    /// Whether it is a name alone, `a`, which is `a: a`.
+    #[must_use]
+    pub fn is_shorthand(&self) -> bool {
+        self.0.children().find_map(Expr::cast).is_none()
+            && !significant_tokens(&self.0).any(|token| {
+                matches!(
+                    token.kind(),
+                    SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
+                )
+            })
+    }
+
+    /// The value: as written after its name, or, for a name alone, the
+    /// name's own.
     #[must_use]
     pub fn value(&self) -> Option<Expr> {
-        self.0.children().find_map(Expr::cast)
+        self.0.children().find_map(Expr::cast).or_else(|| {
+            self.is_shorthand()
+                .then(|| self.name().map(|name| name.value()))
+                .flatten()
+        })
     }
 }
 
@@ -2890,5 +2926,13 @@ impl Name {
     #[must_use]
     pub fn ident(&self) -> Option<SyntaxToken> {
         ident_of(&self.0)
+    }
+
+    /// The value of what is named as it is, where a name alone gives its own
+    /// value: an attribute written `a`, which is `a: a`, or an argument of a
+    /// call the parser took for a projection, `f{a}`.
+    #[must_use]
+    pub fn value(&self) -> Expr {
+        Expr::Name(NameRef(self.0.clone()))
     }
 }

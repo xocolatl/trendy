@@ -2427,7 +2427,14 @@ fn named_argument<'p>(written: Written, param: &'p str) -> Option<(Edit, &'p str
             match (named.as_slice(), positional.as_slice()) {
                 ([only], []) => {
                     let written = only.name()?;
-                    (written.ident()?.text() != param).then(|| rename(written.span()))?
+                    (written.ident()?.text() != param).then(|| {
+                        // A name alone is its own value, which stays.
+                        if only.is_shorthand() {
+                            name(written.span())
+                        } else {
+                            rename(written.span())
+                        }
+                    })?
                 }
                 ([], [only]) => name(only.span()),
                 _ => return None,
@@ -2552,10 +2559,7 @@ fn named_in_order(name: &str, written: Written) -> Option<Vec<Edit>> {
         .iter()
         .find(|(other, _)| *other == lowercase)?;
     let spans: Vec<Span> = match written {
-        Written::Arguments(args) if args.named().next().is_none() => {
-            args.positional().map(|arg| arg.span()).collect()
-        }
-        Written::Arguments(_) => return None,
+        Written::Arguments(args) => args.unnamed_in_order()?,
         Written::Nothing(list) => list.names().map(|name| name.span()).collect(),
     };
     (!spans.is_empty() && spans.len() <= order.len()).then(|| {
@@ -3439,6 +3443,123 @@ pub(crate) fn positional_argument(
         ),
         None => d.with_help("write each argument as `name: value`"),
     }
+}
+
+/// What a name alone in an argument list or a tuple is.
+const NAME_ALONE: &str =
+    "a name alone, as an argument or a tuple's attribute, is its own value: `a` is `a: a`";
+
+/// A name alone, `name`, at `span`, as an argument of the operator whose
+/// parameters are `signature`, none of which it names: it is for `target`,
+/// which the fix writes before it, when that is certain.
+pub(crate) fn name_alone_for(
+    name: &str,
+    span: Span,
+    target: Option<&str>,
+    signature: &str,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::PositionalArgument,
+        format!("`{name}` isn't a parameter of this operator"),
+        span,
+        "no parameter of this name",
+    )
+    .with_note(NAME_ALONE)
+    .with_note(format!("the parameters are {signature}"));
+    match target {
+        Some(target) => d.with_suggestion(
+            format!("pass it as `{target}`"),
+            vec![Edit {
+                span: Span::empty(span.start),
+                replacement: format!("{target}: "),
+            }],
+        ),
+        None => d.with_help(format!(
+            "say which parameter it is for: `parameter: {name}`"
+        )),
+    }
+}
+
+/// A name alone, `name`, at `span`, as an argument of the operator whose
+/// parameters are `signature`, which no value has, a misspelling of
+/// `target`.
+pub(crate) fn misspelled_name_alone(
+    name: &str,
+    span: Span,
+    target: &str,
+    signature: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::PositionalArgument,
+        format!("`{name}` isn't a parameter of this operator"),
+        span,
+        "no parameter of this name, and no value",
+    )
+    .with_note(NAME_ALONE)
+    .with_note(format!("the parameters are {signature}"))
+    .with_suggestion(
+        format!("did you mean `{target}`?"),
+        vec![Edit {
+            span,
+            replacement: target.to_string(),
+        }],
+    )
+}
+
+/// `name`, a name alone at `span`, which no value has.
+pub(crate) fn unknown_name_alone(name: &str, span: Span, candidates: &[&str]) -> Diagnostic {
+    unknown_name(name, span, "value", candidates).with_note(NAME_ALONE)
+}
+
+/// `expr`, the names `list` after the name `ident`, which is both a
+/// projection of the value it names and a call of the operator it names.
+pub(crate) fn projection_or_call(
+    ident: &SyntaxToken,
+    list: &trendy_syntax::ast::NameList,
+    expr: &Expr,
+) -> Diagnostic {
+    let name = ident.text();
+    let names: Vec<String> = list
+        .names()
+        .map(|n| n.syntax().text().to_string())
+        .collect();
+    let spelled: Vec<String> = names.iter().map(|n| format!("{n}: {n}")).collect();
+    Diagnostic::error(
+        Code::ProjectionOrCall,
+        format!("`{}` could be a projection or a call", expr.syntax().text()),
+        expr.span(),
+        format!("`{name}` is a value with these attributes, and an operator with these parameters"),
+    )
+    .with_note("names alone after a name are a projection's attributes, or a call's arguments, each its own value, and each fits here, so nothing says which is meant")
+    .with_help(format!("to call the operator, write `{name}{{{}}}`", spelled.join(", ")))
+    .with_help(format!("to project the value, write `({name}){{{}}}`", names.join(", ")))
+}
+
+/// `d`, about the projection of the value `ident` names on the names `list`,
+/// which doesn't fit: with the fix that makes it the call of the operator of
+/// that name, which has those parameters.
+pub(crate) fn as_a_call(
+    d: Diagnostic,
+    ident: &SyntaxToken,
+    list: &trendy_syntax::ast::NameList,
+) -> Diagnostic {
+    let edits = list
+        .names()
+        .map(|n| Edit {
+            span: Span::empty(n.span().start),
+            replacement: format!("{}: ", n.syntax().text()),
+        })
+        .collect();
+    // Ahead of any fix of the projection, as an operator has these names.
+    let mut d = d.with_suggestion(
+        format!(
+            "call the operator `{}`, which has these parameters",
+            ident.text()
+        ),
+        edits,
+    );
+    d.suggestions.rotate_right(1);
+    d
 }
 
 /// `operator main{…}: type`, the definition `decl`, which has no result

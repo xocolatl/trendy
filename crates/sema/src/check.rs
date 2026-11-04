@@ -177,7 +177,8 @@ pub(crate) trait Names {
 pub(crate) enum Written<'a> {
     /// In braces, `{name: value, …}`.
     Arguments(&'a ast::Arguments),
-    /// None, in `f{}`, a projection on no attributes to the parser.
+    /// Names alone, each its own value, `f{a, b}`, or none, `f{}`: a
+    /// projection to the parser.
     Nothing(&'a ast::NameList),
 }
 
@@ -355,7 +356,8 @@ impl<'a> Checker<'a> {
             Expr::Project(project) if let Some((ident, list)) = self.projected_call(project) => {
                 self.projection_call(&ident, &list, expr, expected, errors)
             }
-            Expr::Project(_) | Expr::Postfix(_) => self.reshaped(expr, expected, errors),
+            Expr::Project(project) => self.projection(project, expr, expected, errors),
+            Expr::Postfix(_) => self.reshaped(expr, expected, errors),
             Expr::Image(image) => self.image(image, expr, expected, errors),
             Expr::From(from) => self.taken(from, expr, expected, errors),
             Expr::Tuple(tuple) => types::tuple_selector(tuple, expected, self, errors),
@@ -588,6 +590,8 @@ impl<'a> Checker<'a> {
                 let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
                 errors.push(if self.names.unnumbered() {
                     errors::unnumbered_position(name, span, &candidates)
+                } else if name_ref.syntax().kind() == trendy_syntax::SyntaxKind::Name {
+                    errors::unknown_name_alone(name, span, &candidates)
                 } else {
                     errors::unknown_name(name, span, "value", &candidates)
                 });
@@ -850,49 +854,56 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let known = self
-            .names
-            .operators()
-            .has(ident.text(), trendy_syntax::span(ident.text_range()));
-        if known && list.names().next().is_some() {
-            self.positional_names(ident, list, errors);
-            return None;
-        }
         let name = crate::WrittenName::plain(ident.text(), trendy_syntax::span(ident.text_range()));
         self.call(ident, name, Written::Nothing(list), expr, expected, errors)
     }
 
-    /// The names in `list`, after the operator `ident` names, written as a
-    /// projection's attributes: each a positional argument, which a call
-    /// can't have.
-    fn positional_names(
-        &self,
-        ident: &SyntaxToken,
-        list: &ast::NameList,
+    /// `project`, written `expr`, a projection, whose operand has a value.
+    /// Its names alone could also be the arguments of an operator of the
+    /// operand's name, if it has exactly those parameters, and each has a
+    /// value here: then, if the projection fits too, nothing says which is
+    /// meant (A0079), and if it doesn't, the fix writes the call out.
+    fn projection(
+        &mut self,
+        project: &ast::ProjectExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
-    ) {
-        let operators = self.names.operators();
-        let at = trendy_syntax::span(ident.text_range());
-        // The one these arguments choose, if one is nearest.
-        let (signature, chosen) = match operators.chosen(
-            crate::WrittenName::plain(ident.text(), at),
-            &argument_names(Written::Nothing(list)),
-        ) {
-            Some(Chosen::One(signature)) => (signature, true),
-            Some(Chosen::Tied(tied)) => (tied[0], false),
-            None => unreachable!("a projected call is of an operator"),
+    ) -> Option<hir::Expr> {
+        let Some((ident, list)) = self.could_be_a_call(project) else {
+            return self.reshaped(expr, expected, errors);
         };
-        let names: Vec<ast::Name> = list.names().collect();
-        let only_param = (chosen && signature.written.len() == 1 && names.len() == 1)
-            .then(|| signature.written.keys().next())
-            .flatten();
-        for name in &names {
-            errors.push(errors::positional_argument(
-                name.span(),
-                only_param.map(String::as_str),
-                &operators.described(signature, at),
-            ));
+        let mut own = Vec::new();
+        let projected = self.reshaped(expr, expected, &mut own);
+        if own.is_empty() {
+            errors.push(errors::projection_or_call(&ident, &list, expr));
+            return None;
         }
+        let first = own.remove(0);
+        errors.push(errors::as_a_call(first, &ident, &list));
+        errors.append(&mut own);
+        projected
+    }
+
+    /// The name of `project`'s operand, and its list, if they could be read
+    /// as a call: an operator of that name has exactly those parameters, and
+    /// each of them names a value.
+    fn could_be_a_call(&self, project: &ast::ProjectExpr) -> Option<(SyntaxToken, ast::NameList)> {
+        let Expr::Name(name_ref) = project.operand()? else {
+            return None;
+        };
+        let ident = name_ref.ident()?;
+        let list = project.names()?;
+        let at = trendy_syntax::span(ident.text_range());
+        let names: Vec<SyntaxToken> = list.names().filter_map(|n| n.ident()).collect();
+        let parameters: BTreeSet<&str> = names.iter().map(SyntaxToken::text).collect();
+        (!names.is_empty()
+            && self
+                .names
+                .operators()
+                .takes_exactly(ident.text(), at, &parameters)
+            && parameters.iter().all(|name| self.names.has_value(name, at)))
+        .then_some((ident, list))
     }
 
     /// Whether an argument of `written`, checked on its own, is an array,
@@ -975,7 +986,7 @@ impl<'a> Checker<'a> {
                 name,
                 span,
                 signature.defined(),
-                matches!(written, Written::Nothing(_)),
+                matches!(written, Written::Nothing(list) if list.names().next().is_none()),
                 projectable,
                 errors::out_result(&signature, written, expr),
             ));
@@ -1079,6 +1090,109 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Each of the arguments `named`, of `written`, given to the parameter of
+    /// `signature`, which are `signature_text`, it says it is for, reporting
+    /// those no parameter has, but names alone that nothing says the parameter
+    /// of, as they are reported with any unnamed ones.
+    fn assigned_to_parameters<'g, 's>(
+        &self,
+        named: &'g [Given],
+        written: Written,
+        signature: &'s Signature,
+        signature_text: &str,
+        errors: &mut Vec<Diagnostic>,
+    ) -> ArgumentsGiven<'g, 's> {
+        let mut ok = true;
+        let mut missing: Vec<&str> = signature
+            .written
+            .keys()
+            .map(String::as_str)
+            .filter(|p| !named.iter().any(|given| given.name == *p))
+            .collect();
+        // The arguments to check, with their parameters.
+        let mut pending: Vec<(Expr, &str, &Param)> = Vec::new();
+        // Names alone that are no parameter's, which have no name.
+        let mut nameless: Vec<&Given> = Vec::new();
+        for given in named {
+            let (name, span) = (given.name.as_str(), given.span);
+            if let Some(first) = named.iter().find(|other| other.name == name)
+                && first.span != span
+            {
+                errors.push(errors::duplicate_attribute(
+                    errors::Noun::Argument,
+                    name,
+                    span,
+                    first.span,
+                ));
+                ok = false;
+                continue;
+            }
+            let Some(param) = signature.written.get(name) else {
+                ok = false;
+                if given.alone {
+                    // Its value stays, for another language's name for one.
+                    // No value of the name, it may be a misspelling of one.
+                    // Otherwise, nothing says which it is for, but what's
+                    // left when it is the only one.
+                    let elsewhere = signature.named_elsewhere(name, missing.iter().copied());
+                    let misspelled = (!self.names.has_value(name, span))
+                        .then(|| trendy_diag::closest(name, missing.iter().copied()))
+                        .flatten();
+                    if let Some(target) = elsewhere.or(misspelled) {
+                        missing.retain(|m| *m != target);
+                    }
+                    match (elsewhere, misspelled) {
+                        (Some(target), _) => errors.push(errors::name_alone_for(
+                            name,
+                            span,
+                            Some(target),
+                            signature_text,
+                        )),
+                        (None, Some(target)) => errors.push(errors::misspelled_name_alone(
+                            name,
+                            span,
+                            target,
+                            signature_text,
+                        )),
+                        (None, None) => nameless.push(given),
+                    }
+                    continue;
+                }
+                // Another language's name for one, or a misspelling.
+                let renamed = signature.meant(name, missing.iter().copied());
+                if let Some(target) = renamed {
+                    missing.retain(|m| *m != target);
+                }
+                let (Some(attribute), Written::Arguments(args)) = (&given.attribute, written)
+                else {
+                    unreachable!("only arguments in braces are written out");
+                };
+                errors.push(errors::unknown_attribute(
+                    errors::Noun::Argument,
+                    name,
+                    span,
+                    &format!("the parameters are {signature_text}"),
+                    renamed,
+                    Some(args.removal(attribute)),
+                ));
+                continue;
+            };
+            if let Some(attribute) = &given.attribute {
+                ok &= marked(attribute, name, param, signature, errors);
+            }
+            match &given.value {
+                Some(value) => pending.push((value.clone(), name, param)),
+                None => ok = false,
+            }
+        }
+        ArgumentsGiven {
+            pending,
+            nameless,
+            missing,
+            valid: ok,
+        }
+    }
+
     /// A call of the operator `signature`, with `written` arguments for its
     /// parameters: each named, each parameter given one, and each of its
     /// parameter's type, once each type parameter in that type is given
@@ -1090,68 +1204,28 @@ impl<'a> Checker<'a> {
         signature: &Signature,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Call> {
-        let params = &signature.written;
         let signature_text = self.names.operators().described(signature, written.span());
         let mut ok = true;
 
-        let (named, positional): (Vec<AttributeValue>, Vec<ast::PositionalArg>) = match written {
-            Written::Arguments(args) => (args.named().collect(), args.positional().collect()),
-            Written::Nothing(_) => (Vec::new(), Vec::new()),
+        let (named, positional): (Vec<Given>, Vec<ast::PositionalArg>) = match written {
+            Written::Arguments(args) => (
+                args.named().filter_map(Given::written).collect(),
+                args.positional().collect(),
+            ),
+            Written::Nothing(list) => (
+                list.names()
+                    .filter_map(|name| Given::alone(&name))
+                    .collect(),
+                Vec::new(),
+            ),
         };
-        let named: Vec<(AttributeValue, String, Span)> = named
-            .into_iter()
-            .filter_map(|a| {
-                let ident = a.name()?.ident()?;
-                let span = trendy_syntax::span(ident.text_range());
-                Some((a, ident.text().to_string(), span))
-            })
-            .collect();
-        let mut missing: Vec<&str> = params
-            .keys()
-            .map(String::as_str)
-            .filter(|p| !named.iter().any(|(_, n, _)| n == p))
-            .collect();
-        // The arguments to check, with their parameters.
-        let mut pending: Vec<(Expr, &str, &Param)> = Vec::new();
-        for (arg, name, span) in &named {
-            if let Some(&(_, _, first)) = named.iter().find(|(_, n, _)| n == name)
-                && first != *span
-            {
-                errors.push(errors::duplicate_attribute(
-                    errors::Noun::Argument,
-                    name,
-                    *span,
-                    first,
-                ));
-                ok = false;
-                continue;
-            }
-            let Some(param) = params.get(name) else {
-                ok = false;
-                // Another language's name for one, or a misspelling.
-                let renamed = signature.meant(name, missing.iter().copied());
-                if let Some(target) = renamed {
-                    missing.retain(|m| *m != target);
-                }
-                let Written::Arguments(args) = written else {
-                    unreachable!("only arguments in braces are named");
-                };
-                errors.push(errors::unknown_attribute(
-                    errors::Noun::Argument,
-                    name,
-                    *span,
-                    &format!("the parameters are {signature_text}"),
-                    renamed,
-                    Some(args.removal(arg)),
-                ));
-                continue;
-            };
-            ok &= marked(arg, name, param, signature, errors);
-            match arg.value() {
-                Some(value) => pending.push((value, name, param)),
-                None => ok = false,
-            }
-        }
+        let ArgumentsGiven {
+            pending,
+            nameless,
+            missing,
+            valid,
+        } = self.assigned_to_parameters(&named, written, signature, &signature_text, errors);
+        ok &= valid;
 
         let variables: BTreeMap<&str, (Expr, hir::Mode)> = pending
             .iter()
@@ -1163,8 +1237,9 @@ impl<'a> Checker<'a> {
         let checked = self.typed_arguments(pending, signature, errors);
         // A lone unnamed argument can only be for the one parameter no
         // other argument names.
-        let only_param = match (positional.as_slice(), missing.as_slice()) {
-            ([_], [param]) => Some(*param),
+        let unnamed = positional.len() + nameless.len();
+        let only_param = match missing.as_slice() {
+            [param] if unnamed == 1 => Some(*param),
             _ => None,
         };
         for arg in &positional {
@@ -1175,9 +1250,17 @@ impl<'a> Checker<'a> {
                 &signature_text,
             ));
         }
+        for given in &nameless {
+            errors.push(errors::name_alone_for(
+                &given.name,
+                given.span,
+                only_param,
+                &signature_text,
+            ));
+        }
         // Unnamed arguments are for parameters without them, so those
         // aren't missing.
-        if !missing.is_empty() && positional.is_empty() {
+        if !missing.is_empty() && unnamed == 0 {
             errors.push(missing_arguments(
                 &missing,
                 signature,
@@ -3823,19 +3906,82 @@ impl Names for ComponentNames<'_> {
 /// The names of the arguments `written`, which choose which operator of
 /// its name a call calls.
 pub(crate) fn argument_names(written: Written) -> ArgumentNames {
+    let name_of = |a: &AttributeValue| Some(a.name()?.ident()?.text().to_string());
     match written {
         Written::Arguments(args) => ArgumentNames {
             named: args
                 .named()
-                .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+                .filter(|a| !a.is_shorthand())
+                .filter_map(|a| name_of(&a))
+                .collect(),
+            alone: args
+                .named()
+                .filter(AttributeValue::is_shorthand)
+                .filter_map(|a| name_of(&a))
                 .collect(),
             unnamed: args.positional().count(),
         },
-        // Names written as a projection's attributes, as in `double{n}`,
-        // are arguments without names.
+        // Names written as a projection's attributes, as in `double{n}`.
         Written::Nothing(list) => ArgumentNames {
             named: BTreeSet::new(),
-            unnamed: list.names().count(),
+            alone: list
+                .names()
+                .filter_map(|n| Some(n.ident()?.text().to_string()))
+                .collect(),
+            unnamed: 0,
         },
+    }
+}
+
+/// What a call's arguments that say which parameter they are for are given
+/// to (see [`Checker::assigned_to_parameters`]).
+struct ArgumentsGiven<'g, 's> {
+    /// The arguments to check, with their parameters.
+    pending: Vec<(Expr, &'g str, &'s Param)>,
+    /// Names alone that are no parameter's, which have no name.
+    nameless: Vec<&'g Given>,
+    /// The parameters none is for.
+    missing: Vec<&'s str>,
+    /// Whether nothing was reported.
+    valid: bool,
+}
+
+/// An argument of a call that says which parameter it is for: `name: value`,
+/// or a name alone, which is its own value.
+struct Given {
+    name: String,
+    span: Span,
+    value: Option<Expr>,
+    /// As written in an argument list, which a call the parser took for a
+    /// projection has none of.
+    attribute: Option<AttributeValue>,
+    /// Whether it is a name alone.
+    alone: bool,
+}
+
+impl Given {
+    /// The argument written `attribute`, if it has a name.
+    fn written(attribute: AttributeValue) -> Option<Given> {
+        let ident = attribute.name()?.ident()?;
+        Some(Given {
+            name: ident.text().to_string(),
+            span: trendy_syntax::span(ident.text_range()),
+            value: attribute.value(),
+            alone: attribute.is_shorthand(),
+            attribute: Some(attribute),
+        })
+    }
+
+    /// The argument written `name`, in a list the parser took for a
+    /// projection's.
+    fn alone(name: &ast::Name) -> Option<Given> {
+        let ident = name.ident()?;
+        Some(Given {
+            name: ident.text().to_string(),
+            span: trendy_syntax::span(ident.text_range()),
+            value: Some(name.value()),
+            attribute: None,
+            alone: true,
+        })
     }
 }

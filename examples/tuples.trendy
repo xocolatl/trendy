@@ -37,6 +37,15 @@ operator project_addr{a: tuple { street: text, city: text, country: text, postal
     call debug_value{v: x remove {c}{a}};
 ];
 
+/* A name alone is its own value: `tuple { nation }` is
+   `tuple { nation: nation }`, of whatever `nation` names. */
+var nation := "Peru";
+var nation_alone := tuple { nation };
+
+operator take_nation{nation: text} [
+    call debug_value{v: tuple { nation }};
+];
+
 /* Renaming attributes (Algebra A's RENAME), each `old as new`, all at
    once, so two attributes can swap names. Implemented, and printed twice
    like the projections. */
@@ -207,6 +216,7 @@ operator main{} [
     call debug_value{v: paris};
     call debug_value{v: country};
     call debug_value{v: place};
+    call debug_value{v: nation_alone};
 
     call project_addr{a: addr};
 
@@ -225,4 +235,6 @@ operator main{} [
     call join_addr{a: addr, d: tuple { postal_code: "75001", district: "1st" }};
 
     call take_city{c: cities};
+
+    call take_nation{nation};
 ];

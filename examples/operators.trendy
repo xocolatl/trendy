@@ -227,6 +227,10 @@ operator main{} [
     call show{label: "half of 1200", value: half{n: 1200}};
     call debug_table{r: powers{base: 3, limit: 30}};
     call debug_value{v: share{total: 1200, people: 3}};
+    /* A name alone is its own value: `total` here is `total: total`. */
+    var total := 1500;
+    var people := 5;
+    call debug_value{v: share{total, people}};
     /* A value block's statements do the same on its own local variables:
        how many price rises of a tenth each dish has in it, for each tuple. */
     call debug_table{r: dishes extend { rises := [

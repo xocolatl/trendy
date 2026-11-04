@@ -244,6 +244,8 @@ const OPERATORS: &[&str] = &[
     "└───────┘",
     // A call its operator's constraint is true of.
     "400",
+    // With names alone.
+    "300",
     // A value block's, for each tuple.
     "┌─────────┬─────────────┬───────┬───────┐",
     "│ country │ dish        │ price │ rises │",
@@ -706,6 +708,67 @@ fn a_series_with_a_step_of_zero_fails() {
         "{stderr}"
     );
     assert!(stderr.contains("series_known_zero.trendy:3:25"), "{stderr}");
+}
+
+/// A name alone, in each place one can be, computes what the same thing
+/// written out does, when the program runs.
+#[test]
+fn names_alone_run_as_written_out() {
+    let (code, stderr) = run_source(
+        "names_alone",
+        r#"uses { trendy.files };
+
+operator area{width: integer, height: integer}: integer [ width * height ];
+
+operator person{name: text, born: integer} [
+    call debug_value{v: tuple { name, born }};
+    call debug_value{v: relation { { name, born } }};
+    call debug_value{v: array [{ name, born: born + 1 }]};
+];
+
+operator show{width: integer, height: integer} [
+    call debug_value{v: area{width, height}};
+    call debug_value{v: area{height: width, width: 5}};
+    call debug_value{v: area{width, height: 7}};
+];
+
+operator bump{var n: integer, out twice: integer} [
+    n := n + 1;
+    twice := n * 2;
+];
+
+operator main{} [
+    call person{name: "Ada", born: 1815};
+    call show{width: 2, height: 3};
+    var n := 1;
+    var twice := 0;
+    call bump{var n, out twice};
+    call debug_value{v: tuple { n, twice }};
+    var r := relation { { width: 2, height: 4 } };
+    call debug_value{v: r extend { a := area{width, height} }};
+    call debug_value{v: sum{r, of: width}};
+    var from := 1;
+    var to := 2;
+    call debug_value{v: series{from, to}};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            r#"tuple { born: 1815, name: "Ada" }"#,
+            r#"relation { born: integer, name: text } { { born: 1815, name: "Ada" } }"#,
+            r#"array [tuple { born: 1816, name: "Ada" }]"#,
+            "6",
+            "10",
+            "14",
+            "tuple { n: 2, twice: 4 }",
+            "relation { a: integer, height: integer, width: integer } { { a: 8, height: 4, width: 2 } }",
+            "2",
+            "relation { value: integer } { { value: 1 }, { value: 2 } }",
+        ]
+    );
 }
 
 /// Constraints in operators' braces, checked of arguments of each kind: a
@@ -4147,6 +4210,8 @@ fn tuples() {
             r#"tuple { city: "Paris", country: "France" }"#,
             r#""France""#,
             r#""Kumasi, Ghana""#,
+            // A name alone is its own value.
+            r#"tuple { nation: "Peru" }"#,
         ]
     );
 }

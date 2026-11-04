@@ -1787,6 +1787,20 @@ mod tests {
     }
 
     #[test]
+    fn names_alone() {
+        assert_eq!(
+            fmt("var a:=1;var c:=f{a , b:1 };var t:=tuple{ a , b:2 };var r:=relation{ {a} };"),
+            "var a := 1;\nvar c := f{a, b: 1};\nvar t := tuple { a, b: 2 };\nvar r := relation { { a } };\n"
+        );
+        assert_eq!(
+            fmt("operator main{} [ call f{ a , out b }; ];"),
+            "operator main{} [\n    call f{a, out b};\n];\n"
+        );
+        // Written out, it stays so: what `f{a: a}` calls, `f{a}` may project.
+        assert_eq!(fmt("var c := f{a: a};"), "var c := f{a: a};\n");
+    }
+
+    #[test]
     fn constraints_in_an_operators_braces() {
         assert_eq!(
             fmt("operator f{ n:integer,constraint n>0 } [];\n"),

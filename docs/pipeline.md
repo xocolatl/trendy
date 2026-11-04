@@ -1192,6 +1192,19 @@ the arguments it reads, copied from the call's own into a tuple, are what the
 constraint's function is given, and, if it says false, what
 `trendy_rt_broken_call_constraint` writes.
 
+A name alone, in an argument list or a tuple, is an `AttributeValue` with a
+`Name` and nothing after it, whose `value` is its own name
+(`ast::Name::value`), so what checks a value needs no other path, and `is_shorthand`
+says which it is. Names alone after a name are a projection to the parser,
+which can't tell (`Parser::at_arguments`), and one anything else follows are
+arguments. `Checker::projected_call` makes `f{a, b}` a call when no value is
+named `f`, each name an argument (`check::Given`) as if written out, and
+otherwise `Checker::projection` reports it (A0079) if an operator `f` has
+exactly those parameters, each name has a value and the projection fits, and
+adds the fix to the call to the projection's error if it doesn't. A name alone
+that names no parameter has no name, in choosing among operators of a name
+too (`ArgumentNames::alone`).
+
 The kinds, which only the prelude declares (A0013), are in `Namespaces`,
 each with the built-in types that declare it. Loading the prelude reads the
 kinds first, then the types, checking that each has what its kinds

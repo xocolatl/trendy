@@ -181,6 +181,7 @@ codes! {
     BitGrouping => "A0076",
     InitialValueWhenRunning => "A0077",
     CallConstraint => "A0078",
+    ProjectionOrCall => "A0079",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

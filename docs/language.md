@@ -373,7 +373,10 @@ body in square brackets `[]`, and a closing `;`.
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
   order doesn't matter. One for a `var` or `out` parameter is marked so
-  too.
+  too. A name alone is its own value, so `call greet{name, count};` is
+  `call greet{name: name, count: count};`, and `call read{path, out lines};`
+  marks what it needs to, as in a tuple (see
+  [A name alone](#a-name-alone)).
 
 Following *The Third Manifesto*, operators are either read-only operators,
 which return a value and are used in expressions, or update operators, which
@@ -3245,7 +3248,8 @@ operator main{} [
 ## Tuples
 
 A tuple type is written `tuple { name: type, … }`, and a tuple value
-`tuple { name: value, … }`. Tuples are values like any other: an attribute
+`tuple { name: value, … }`, or `tuple { name, … }` for a name's own value (see
+[A name alone](#a-name-alone)). Tuples are values like any other: an attribute
 can itself be a tuple, and a variable can hold one.
 
 ```trendy
@@ -4970,6 +4974,9 @@ operator main{} [
 
 - **The result is a set.** Projecting a relation can make tuples equal,
   and duplicates are dropped: `names` above has one tuple.
+- **`f{a}` is a projection if `f` is a value,** and otherwise a call: names
+  alone are its own arguments' values (see [A name alone](#a-name-alone)).
+  `(f){a}` is always a projection.
 - **The names must be the operand's attributes,** each named once. An
   unknown name gets a fix renaming it to the closest attribute.
 - **`r{}` keeps nothing:** a tuple becomes `tuple {}`, and a relation
@@ -5022,13 +5029,69 @@ var moved := addr rename {code as postal_code};
 operator main{} [];
 ```
 
+### A name alone
+
+Where a name is given a value with `:`, in a call's arguments, a selector's or
+a tuple's attributes, a name alone is its own value: `a` is `a: a`, as Rust
+writes a struct's fields and JavaScript an object's.
+
+```trendy
+operator area{width: integer, height: integer}: integer [
+    width * height
+];
+
+operator room{width: integer, height: integer} [
+    call debug_value{v: area{width, height}};
+    call debug_value{v: area{height, width: 2}};
+    call debug_value{v: tuple { width, height }};
+    call debug_value{v: relation { { width, height } }};
+];
+
+operator main{} [
+    call room{width: 3, height: 4};
+];
+```
+
+- **It is by name, not by position.** `area{height, width}` gives each its own
+  parameter, so arguments can't be swapped. A name that is no parameter's is an
+  error (A0018), which says which parameter it is for, when that is certain: the
+  only one left, or the one PostgreSQL's or another language's name for it says.
+- **What it names is whatever has that name here:** a parameter, a local
+  variable, or an attribute of the tuple at hand, as in `r extend { a := area{width,
+  height} }`. A name no value has is an error (A0015).
+- **A `var` or `out` parameter's is still marked:** `call read{path, out lines};`,
+  and the fix adds the mark (A0052).
+- **Only where a value goes.** A heading's name and a parameter's take their
+  types, and `:=` defines something new, so `extend { a }` means nothing.
+- **Writing it out stays valid,** and the formatter leaves both as they are.
+- **`f{a, b}` with names alone is a call if `f` is an operator, and a
+  projection if `f` is a value.** A value named `f` comes first, so
+  `count{r}` calls `count`, unless the program has a variable `count`. If that
+  value can't be projected so, the fix calls the operator, if it has exactly
+  those parameters. If it can, and each name has a value too, nothing says
+  which is meant, which is an error (A0079): `f{a: a, b: b}` is the call, and
+  `(f){a, b}` is the projection.
+
+```trendy,error
+var totals := relation { { year: 2024, region: "Lima" } };
+
+operator totals{year: integer, region: text}: integer [ year ];
+
+operator show{year: integer, region: text} [
+    call debug_value{v: totals{year, region}};
+];
+
+operator main{} [];
+```
+
 ### Names and values: `:`, `:=` and `as`
 
 Three separators pair a name with something, each with one meaning:
 
 - **`name: value`** pairs a name with what is given: a tuple's attribute
   with its value, a heading's with its type, a parameter with its
-  argument.
+  argument. Where it gives a value, a name alone is its own (see
+  [A name alone](#a-name-alone)).
 - **`name := …`** defines a new name by what follows: a variable by its
   initial value, an attribute by the value `extend` or `replace` computes
   for each tuple, or by the attributes `group` or `wrap` gathers. The new
@@ -6356,6 +6419,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a[0]`, the first element | `a[1]` |
 | `a[-1]`, the last element | `a[length{a: a}]` |
 | `len(a)`, `a.length`, `a.length()`, `CARDINALITY(a)`, `size(a)` | `length{a: a}` |
+| `Point { x, y }`, `{ x, y }`, `f(x=x, y=y)` | `point{x, y}`, `tuple { x, y }`, `f{x, y}`: a name alone is its own value |
 | `generate_series(1, 9, 2)`, `range(1, 10, 2)` | `series{from: 1, to: 9, step: 2}` |
 | `assert n > 0;`, `require(n > 0);`, `CHECK (n > 0)`, Ada's `with Pre => N > 0`, Eiffel's `require` | `operator f{n: integer, constraint n > 0} …`, of what a call is given; `if not (n > 0) then [ fail failure{message: "…"}; ];`, of what a body computes |
 | `r.sum(of: price)`, a method call | `sum{r: r, of: price}`: the value is an argument, named as the others are |

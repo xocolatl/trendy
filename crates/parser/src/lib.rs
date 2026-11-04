@@ -131,6 +131,15 @@ enum KeySpelling {
     Unique,
 }
 
+/// Whether a token of this kind ends an item of a list in braces, or in the
+/// parentheses other languages write arguments in.
+fn ends_item(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::Comma | SyntaxKind::RBrace | SyntaxKind::RParen
+    )
+}
+
 /// Whether a token of this kind starts a constraint's condition, as written
 /// after `constraint`.
 fn starts_condition(kind: SyntaxKind) -> bool {
@@ -4069,14 +4078,25 @@ impl<'a> Parser<'a> {
 
     /// Whether the list opened at the significant token `n` after the next
     /// one, or the next one for 0, holds arguments, which a projection's
-    /// names can't be: named ones, or one starting with a value, or with a
-    /// name the rest of a value follows, since a projection's names are
+    /// names can't be: after any names, which either can start with, as
+    /// `f{a, b: 1}` does, a named one, or one starting with a value, or with
+    /// a name the rest of a value follows, since a projection's names are
     /// only ever followed by `,` or its `}`.
     fn at_arguments(&mut self, n: usize) -> bool {
-        self.mode_at(n + 1).is_some()
-            || self.at_named_argument(n + 1)
-            || match self.lookahead_nth(n + 1) {
-                Some(f) if f.kind == SyntaxKind::Ident => self.continues_value(n + 2),
+        let mut first = n + 1;
+        while self
+            .lookahead_nth(first)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && self
+                .lookahead_nth(first + 1)
+                .is_some_and(|f| f.kind == SyntaxKind::Comma)
+        {
+            first += 2;
+        }
+        self.mode_at(first).is_some()
+            || self.at_named_argument(first)
+            || match self.lookahead_nth(first) {
+                Some(f) if f.kind == SyntaxKind::Ident => self.continues_value(first + 1),
                 Some(f) => starts_value(f.kind),
                 None => false,
             }
@@ -4138,10 +4158,13 @@ impl<'a> Parser<'a> {
         );
     }
 
-    /// `name: value`, with a mode before the name if it has one, or a
-    /// value without a name, which sema reports.
+    /// `name: value`, or a name alone, which is its own value, with a mode
+    /// before the name if it has one, or a value without a name, which sema
+    /// reports.
     fn argument(&mut self) {
-        if self.mode_at(0).is_some() || self.at_named_argument(0) {
+        let lone =
+            self.at(SyntaxKind::Ident) && self.found_after(1).is_some_and(|f| ends_item(f.kind));
+        if lone || self.mode_at(0).is_some() || self.at_named_argument(0) {
             self.moded_attribute(SyntaxKind::AttributeValue, true, Self::expression);
         } else {
             self.start_node(SyntaxKind::PositionalArg);
@@ -6286,11 +6309,12 @@ impl<'a> Parser<'a> {
         };
         let name = self.found_after(n + mode.count)?;
         let separator = self.found_after(n + mode.count + 1)?;
+        // Before a `:`, or, for a name alone, the end of the argument.
         (name.kind == SyntaxKind::Ident
-            && matches!(
+            && (matches!(
                 separator.kind,
                 SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
-            ))
+            ) || ends_item(separator.kind)))
         .then_some(mode)
     }
 
@@ -6373,9 +6397,17 @@ impl<'a> Parser<'a> {
         self.start_node(SyntaxKind::Name);
         self.bump();
         self.builder.finish_node();
-        self.attribute_separator();
-        item(self);
+        if !self.at_shorthand_end(attribute) {
+            self.attribute_separator();
+            item(self);
+        }
         self.builder.finish_node();
+    }
+
+    /// Whether the attribute `attribute` being parsed ends with its name, as
+    /// a value's can, `{ a, b }`, which is its own name's value.
+    fn at_shorthand_end(&mut self, attribute: SyntaxKind) -> bool {
+        attribute == SyntaxKind::AttributeValue && self.found().is_some_and(|f| ends_item(f.kind))
     }
 
     /// `name: x`, as [`Parser::attribute`], with a mode before the name, if
@@ -6395,6 +6427,10 @@ impl<'a> Parser<'a> {
         self.start_node(SyntaxKind::Name);
         let name = self.bump();
         self.builder.finish_node();
+        if self.at_shorthand_end(attribute) {
+            self.builder.finish_node();
+            return;
+        }
         self.attribute_separator();
         if let Some(words) = self.misplaced_mode(attribute).filter(|_| called) {
             self.start_node(SyntaxKind::Mode);
@@ -8494,8 +8530,79 @@ SourceFile
     }
 
     #[test]
+    fn names_alone_are_their_own_values() {
+        // Arguments, once anything but a name says they aren't a projection's.
+        let args = |source: &str| {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+            parse
+                .tree
+                .syntax()
+                .descendants()
+                .find_map(trendy_syntax::ast::Arguments::cast)
+                .unwrap()
+        };
+        let written = args("var x := f{a, b: 1, c,};");
+        let named: Vec<(String, bool)> = written
+            .named()
+            .map(|a| {
+                (
+                    a.name().unwrap().syntax().text().to_string(),
+                    a.is_shorthand(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("a".to_string(), true),
+                ("b".to_string(), false),
+                ("c".to_string(), true)
+            ]
+        );
+        assert_eq!(written.positional().count(), 0);
+        // A value after names makes them arguments too.
+        let written = args("var x := f{a, 1};");
+        assert_eq!(written.named().count(), 1);
+        assert_eq!(written.positional().count(), 1);
+        // A name alone has its own name for its value.
+        let written = args("operator main{} [ call f{a, out b, var c}; ];");
+        let values: Vec<String> = written
+            .named()
+            .map(|a| a.value().unwrap().syntax().text().to_string())
+            .collect();
+        assert_eq!(values, ["a", "b", "c"]);
+        let modes: Vec<bool> = written.named().map(|a| a.mode().is_some()).collect();
+        assert_eq!(modes, [false, true, true]);
+        // Names alone, to the parser, stay a projection, for sema to read.
+        let parse = parse_str("var x := f{a, b};\nvar y := f{a, b,};");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let projections = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::ProjectExpr)
+            .count();
+        assert_eq!(projections, 2);
+        // In a tuple, with or without its keyword.
+        for source in [
+            "var x := tuple { a, b: 1 };",
+            "var x := relation { { a, b } };",
+            "var x := array [{ a }];",
+        ] {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+        }
+        // A heading's name needs its type.
+        assert!(!parse_str("var x: tuple { a, b };").errors.is_empty());
+        assert!(!parse_str("operator f{a, b} [];").errors.is_empty());
+        // Tutorial D's order, a value right after a name, still lacks a colon.
+        assert_eq!(fix("var x := tuple { a 1 };"), "var x := tuple { a: 1 };");
+    }
+
+    #[test]
     fn positional_arguments_parse_for_sema_to_fix() {
-        let parse = parse_str("operator main{} [ call debug_value{r}; ];");
+        let parse = parse_str("operator main{} [ call debug_value{1}; ];");
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
         let statement = parse
             .tree
@@ -8509,7 +8616,8 @@ SourceFile
         let Some(Statement::Call(call)) = statement else {
             panic!("a call");
         };
-        assert_eq!(call.arguments().unwrap().positional().count(), 1);
+        let arguments = call.arguments().unwrap();
+        assert_eq!(arguments.positional().count(), 1);
     }
 
     #[test]
