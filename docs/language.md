@@ -5866,6 +5866,12 @@ operator main{} [
 - **A cycle is a path from a value back to itself,** so
   `r tclose where a = b` is the values on a cycle, as `on_the_loop` is,
   without Meguro, which nothing leads back to.
+- **A restriction to one value follows only its paths:** `r tclose where
+  from = x` finds what paths from `x` reach, and `r tclose where to = y` what
+  reaches `y`, without making the rest of the closure, so a graph whose whole
+  closure wouldn't fit in memory can be asked about one value at a time. The value
+  is a value that is the same for each tuple, and the result what the closure's
+  would be.
 - **Postfix, binding like a projection:** `r tclose where a = b` closes
   `r`, then restricts the closure, and `r{a, b} tclose` closes a
   projection. Tutorial D's `TCLOSE r` is fixed to `r tclose` (P0054).

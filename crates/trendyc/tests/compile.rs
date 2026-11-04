@@ -7945,3 +7945,286 @@ fn a_transitive_closure_goes_each_way_to_a_value_once() {
     let taken = start.elapsed();
     assert!(taken.as_secs() < 4, "{taken:?}");
 }
+
+/// Restrictions of a closure that follow only one value's paths, of values of
+/// each kind, freed memory being scribbled over, whatever else the condition says.
+const CLOSURE_OF_A_VALUE: &str = r#"
+operator from_here{edges: relation { a: text, b: text }, here: text}: relation { b: text } [
+    (edges tclose where a = here){b}
+];
+
+operator main{} [
+    var one := 1;
+    var two := 2;
+    var three := 3;
+    var four := 4;
+    var five := 5;
+    var six := 6;
+    var nine := 9;
+    /* A diamond, then a cycle, then a value only an arc ends at. */
+    var edges := relation {
+        { a: one * 1, b: one * 2 },
+        { a: one * 1, b: one * 3 },
+        { a: one * 2, b: one * 4 },
+        { a: one * 3, b: one * 4 },
+        { a: one * 4, b: one * 5 },
+        { a: one * 5, b: one * 4 },
+        { a: one * 5, b: one * 6 },
+    };
+    call debug_table{r: edges tclose where a = one};
+    call debug_table{r: edges tclose where a = four};
+    call debug_table{r: edges tclose where b = four};
+    call debug_table{r: edges tclose where two = b};
+    call debug_table{r: edges tclose where a = six};
+    call debug_table{r: edges tclose where b = one};
+    call debug_table{r: edges tclose where a = nine};
+    call debug_table{r: edges tclose where b = nine};
+    /* Both, what else there is, and an operation on its result. */
+    call debug_table{r: edges tclose where a = one and b = six};
+    call debug_table{r: edges tclose where b = six and a = nine};
+    call debug_table{r: edges tclose where a = one and b > 4};
+    call debug_table{r: edges tclose where b = four and a <> b};
+    call debug_table{r: (edges tclose where a = three){b}};
+    /* A value that can fail, by itself, or with another. */
+    call debug_table{r: edges tclose where a = one * 3};
+    call debug_table{r: edges tclose where b = one * 4};
+    call debug_table{r: edges tclose where a = one * 1 and b = one * 6};
+    /* An operand that's made here, and goes, and a value of each tuple. */
+    call debug_table{r: (edges where a > 0) tclose where a = five};
+    var nodes := relation { { v: one * 1 }, { v: one * 5 }, { v: one * 6 } };
+    call debug_table{
+        r: nodes extend {
+            down := count{r: edges tclose where a = v},
+            up := count{r: edges tclose where b = v},
+        },
+    };
+    /* Values that point to what they're shared with, and a parameter. */
+    var names := relation {
+        { a: "x" || "1", b: "x" || "2" },
+        { a: "x" || "2", b: "x" || "3" },
+        { a: "x" || "3", b: "x" || "2" },
+    };
+    call debug_table{r: names tclose where a = "x" || "1"};
+    call debug_table{r: names tclose where b = "x" || "3"};
+    call debug_table{r: from_here{edges: names, here: "x" || "2"}};
+    var held := names tclose where a = "x" || "3";
+    call debug_table{r: held};
+    /* Pairs of tuples of text. */
+    var places := relation {
+        { a: tuple { p: "m" || "n", q: one }, b: tuple { p: "m" || "o", q: one } },
+        { a: tuple { p: "m" || "o", q: one }, b: tuple { p: "m" || "p", q: one } },
+    };
+    call debug_table{r: places tclose where a = tuple { p: "m" || "n", q: one }};
+    /* A value that can fail, computed only if a tuple is there to compare it to,
+       and not when a guard holds for none of them. */
+    var none: relation { a: integer, b: integer } := relation {};
+    var zero := one - 1;
+    call debug_table{r: none tclose where a = 1 div zero};
+    call debug_table{r: edges tclose where a = 1 div zero and b < 0};
+    call debug_table{r: edges tclose where a = nine and b = 1 div zero};
+    call debug_table{r: edges tclose where a = 1 div zero};
+];
+"#;
+
+/// What `CLOSURE_OF_A_VALUE` writes.
+const CLOSURE_OF_A_VALUE_WRITTEN: [&str; 156] = [
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 2 │",
+    "│ 1 │ 3 │",
+    "│ 1 │ 4 │",
+    "│ 1 │ 5 │",
+    "│ 1 │ 6 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 4 │ 4 │",
+    "│ 4 │ 5 │",
+    "│ 4 │ 6 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 4 │",
+    "│ 2 │ 4 │",
+    "│ 3 │ 4 │",
+    "│ 4 │ 4 │",
+    "│ 5 │ 4 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 2 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 6 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 5 │",
+    "│ 1 │ 6 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 4 │",
+    "│ 2 │ 4 │",
+    "│ 3 │ 4 │",
+    "│ 5 │ 4 │",
+    "└───┴───┘",
+    "┌───┐",
+    "│ b │",
+    "├───┤",
+    "│ 4 │",
+    "│ 5 │",
+    "│ 6 │",
+    "└───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 3 │ 4 │",
+    "│ 3 │ 5 │",
+    "│ 3 │ 6 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 4 │",
+    "│ 2 │ 4 │",
+    "│ 3 │ 4 │",
+    "│ 4 │ 4 │",
+    "│ 5 │ 4 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 1 │ 6 │",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "│ 5 │ 4 │",
+    "│ 5 │ 5 │",
+    "│ 5 │ 6 │",
+    "└───┴───┘",
+    "┌──────┬────┬───┐",
+    "│ down │ up │ v │",
+    "├──────┼────┼───┤",
+    "│    0 │  5 │ 6 │",
+    "│    3 │  5 │ 5 │",
+    "│    5 │  0 │ 1 │",
+    "└──────┴────┴───┘",
+    "┌────┬────┐",
+    "│ a  │ b  │",
+    "├────┼────┤",
+    "│ x1 │ x2 │",
+    "│ x1 │ x3 │",
+    "└────┴────┘",
+    "┌────┬────┐",
+    "│ a  │ b  │",
+    "├────┼────┤",
+    "│ x1 │ x3 │",
+    "│ x2 │ x3 │",
+    "│ x3 │ x3 │",
+    "└────┴────┘",
+    "┌────┐",
+    "│ b  │",
+    "├────┤",
+    "│ x2 │",
+    "│ x3 │",
+    "└────┘",
+    "┌────┬────┐",
+    "│ a  │ b  │",
+    "├────┼────┤",
+    "│ x3 │ x2 │",
+    "│ x3 │ x3 │",
+    "└────┴────┘",
+    "┌─────────────────────────┬─────────────────────────┐",
+    "│ a                       │ b                       │",
+    "├─────────────────────────┼─────────────────────────┤",
+    "│ tuple { p: \"mn\", q: 1 } │ tuple { p: \"mo\", q: 1 } │",
+    "│ tuple { p: \"mn\", q: 1 } │ tuple { p: \"mp\", q: 1 } │",
+    "└─────────────────────────┴─────────────────────────┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "┌───┬───┐",
+    "│ a │ b │",
+    "├───┼───┤",
+    "└───┴───┘",
+    "error[R0002]: division by zero: 1 div 0 has no result",
+    " --> closure_of_a_value.trendy:75:5",
+];
+
+#[test]
+fn a_closure_can_be_asked_about_one_value() {
+    let (code, stderr) = run_source("closure_of_a_value", CLOSURE_OF_A_VALUE);
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        CLOSURE_OF_A_VALUE_WRITTEN
+    );
+}
+
+/// Its paths from or to one value, of a chain of twenty thousand: with all the
+/// closure's 200 million tuples made first, that would come to over 3 GB.
+#[test]
+fn a_closure_of_one_value_makes_no_more_of_it() {
+    let source = "operator main{} [
+    var n := 20_000;
+    var edges := (series{from: 1, to: n} rename {value as a}) extend { b := a + 1 };
+    call debug_value{v: count{r: edges tclose where a = n - 5}};
+    call debug_value{v: count{r: edges tclose where b = 5}};
+];";
+    let peak = peak_memory_of("closure_of_one", source, 0);
+    assert!(peak < 50 << 20, "{peak} bytes");
+}
+
+/// What a closure of one value reads is given up once it has its result, as any
+/// operation's operand is: of 64 MB, which with the next operand's would make 192
+/// here, rather than 128.
+#[test]
+fn a_closure_of_one_value_gives_up_its_operand() {
+    let source = "operator main{} [
+    var n := 40_000;
+    var one := 1;
+    var t := times{series{from: 1, to: n} rename {value as a}, series{from: 1, to: 100} rename {value as b}};
+    call debug_value{
+        v: count{
+            r: ((t rename {a as c, b as d}) tclose where c = one){d} union (t rename {a as c, b as d}){d},
+        },
+    };
+];";
+    let peak = peak_memory_of("closure_operand", source, 0);
+    assert!(peak < 195 << 20, "{peak} bytes");
+}

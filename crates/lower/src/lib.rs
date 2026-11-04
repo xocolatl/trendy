@@ -5231,7 +5231,13 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("sema restricts only relations");
         };
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
-        let whole = self.place(operand, cx);
+        let narrowed = self.closure_narrowed(operand, heading, condition, cx);
+        let (whole, rest) = match narrowed {
+            Some((closure, rest)) if rest.is_empty() => return closure,
+            Some((closure, rest)) => (closure, Some(hir::Connective::And.of(rest))),
+            None => (self.place(operand, cx), None),
+        };
+        let condition = rest.as_ref().unwrap_or(condition);
         let (src, condition) = self.equal_runs(whole.clone(), &ty, heading, condition, cx);
         let mut count = src.clone();
         count.path.push(1);
@@ -5286,6 +5292,74 @@ impl<'a> FunctionBuilder<'a> {
         self.adopt(&dst, &ty, cx);
         self.operand_read(operand, &whole, &ty, cx);
         dst
+    }
+
+    /// If `operand` is a transitive closure, and `condition` says one of its
+    /// attributes is equal to a value that is the same for every tuple, the tuples
+    /// for which that holds, in a new slot, found by following only the paths from
+    /// or to that value ([`lir::RuntimeFn::TcloseOf`]), and what is left of
+    /// `condition`. The first attribute's is preferred, whose arcs are in order
+    /// already. An equality of a value that can't fail guards the other conjuncts,
+    /// as for [`FunctionBuilder::equal_runs`], and one of a value that can is taken
+    /// only if nothing else is left, computed if the closure has a tuple, which it
+    /// does if `operand` has one.
+    fn closure_narrowed(
+        &mut self,
+        operand: &hir::Expr,
+        heading: &hir::Heading,
+        condition: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> Option<(lir::Place, Vec<hir::Expr>)> {
+        let mut closure = operand;
+        while let hir::Expr::At(_, inner) = closure {
+            closure = inner;
+        }
+        let hir::Expr::Tclose(arcs) = closure else {
+            return None;
+        };
+        let conjuncts = condition.conjuncts();
+        let (mut found, mut can_fail) = (None, None);
+        'attributes: for (i, (name, ty)) in heading.attributes().enumerate() {
+            for (at, conjunct) in conjuncts.iter().enumerate() {
+                let Some(value) = self.equated(conjunct, name, ty) else {
+                    continue;
+                };
+                if !value.can_fail() {
+                    found = Some((i, at, value));
+                    break 'attributes;
+                }
+                can_fail = can_fail.or(Some((i, at, value)));
+            }
+        }
+        let (i, at, value) = found.or(can_fail.filter(|_| conjuncts.len() == 1))?;
+        let fails = value.can_fail();
+        let ty = self.type_of(arcs);
+        let src = self.place(arcs, cx);
+        let value = if fails {
+            let mut values = self.values_if_any_tuple(&src, &[(i, value)], cx);
+            values.remove(0).1
+        } else {
+            self.tuples.push(AtHand::one(src.clone()));
+            let value = self.place(value, cx);
+            self.tuples.pop();
+            value
+        };
+        let dst = self.slot(cx.layout(&ty));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let attribute = usize_constant(len(i), cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::TcloseOf,
+            args: vec![dst.clone(), src.clone(), value, descriptor, attribute],
+        });
+        self.scoped = true;
+        self.operand_read(arcs, &src, &ty, cx);
+        let rest = conjuncts
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| *k != at)
+            .map(|(_, conjunct)| conjunct.clone())
+            .collect();
+        Some((dst, rest))
     }
 
     /// The part of the relation at `src`, of type `ty`, with `heading`, that
@@ -5397,6 +5471,21 @@ impl<'a> FunctionBuilder<'a> {
         ty: &hir::Type,
         cx: &mut Lowering,
     ) -> lir::Place {
+        let places = self.values_if_any_tuple(&src, values, cx);
+        places.iter().fold(src, |src, (i, value)| {
+            self.equal_run(src, value, *i, ty, cx)
+        })
+    }
+
+    /// `values`, each computed if the relation at `src` has a tuple, as for
+    /// [`FunctionBuilder::failable_runs`], each in a slot of its own, which
+    /// nothing reads with no tuple to compare it to.
+    fn values_if_any_tuple(
+        &mut self,
+        src: &lir::Place,
+        values: &[(usize, &hir::Expr)],
+        cx: &mut Lowering,
+    ) -> Vec<(usize, lir::Place)> {
         let mut count = src.clone();
         count.path.push(1);
         let zero = usize_constant(0, cx);
@@ -5416,8 +5505,6 @@ impl<'a> FunctionBuilder<'a> {
             },
             computed,
         );
-        // Each in a slot of its own, which no run reads with no tuple to
-        // compare it to.
         self.tuples.push(AtHand::one(src.clone()));
         let places: Vec<(usize, lir::Place)> = values
             .iter()
@@ -5435,9 +5522,7 @@ impl<'a> FunctionBuilder<'a> {
             .collect();
         self.tuples.pop();
         self.end_block(lir::Terminator::Jump(after), after);
-        places.iter().fold(src, |src, (i, value)| {
-            self.equal_run(src, value, *i, ty, cx)
-        })
+        places
     }
 
     /// The value `conjunct`, of a condition on a relation's tuples, says

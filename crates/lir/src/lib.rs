@@ -420,6 +420,10 @@ pub enum RuntimeFn {
     /// buffer if nothing else holds it, as `combination`, a
     /// [`Combination::code`] of a union or a disjoint union, says.
     Insert,
+    /// `trendy_rt_tclose_of(dst, relation, value, descriptor, attribute)`: the
+    /// tuples of the relation's transitive closure whose attribute, 0 or 1 by
+    /// name order, is `value`, searching only by paths from or to it.
+    TcloseOf,
     /// `trendy_rt_drop_operand(value, descriptor)`: give up the current scope's
     /// reference to what the operand at `value` points to, if it is the only
     /// one, as the operation that read it has its result.
@@ -716,7 +720,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 87] = [
+    pub const ALL: [RuntimeFn; 88] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -756,6 +760,7 @@ impl RuntimeFn {
         RuntimeFn::BrokenConstraintInFile,
         RuntimeFn::OverlappingSubtypes,
         RuntimeFn::BrokenCallConstraint,
+        RuntimeFn::TcloseOf,
         RuntimeFn::DropOperand,
         RuntimeFn::TooDeep,
         RuntimeFn::Run,
@@ -836,6 +841,7 @@ impl RuntimeFn {
             | RuntimeFn::KeyShared
             | RuntimeFn::KeyAdded
             | RuntimeFn::TooDeep
+            | RuntimeFn::TcloseOf
             | RuntimeFn::Insert
             | RuntimeFn::Remove
             | RuntimeFn::RemoveRun
@@ -949,6 +955,7 @@ impl RuntimeFn {
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::BrokenCallConstraint => "trendy_rt_broken_call_constraint",
+            RuntimeFn::TcloseOf => "trendy_rt_tclose_of",
             RuntimeFn::DropOperand => "trendy_rt_drop_operand",
             RuntimeFn::TooDeep => "trendy_rt_too_deep",
             RuntimeFn::Run => "trendy_rt_run",

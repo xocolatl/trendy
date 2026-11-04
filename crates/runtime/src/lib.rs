@@ -2445,6 +2445,145 @@ pub unsafe extern "C" fn trendy_rt_tclose(
     })
 }
 
+/// Store at `dst` the tuples of the transitive closure of the relation at `src`,
+/// as for [`trendy_rt_tclose`], whose attribute `*attribute`, 0 or 1 by name order,
+/// is the value at `value`, in memory the statement owns: following only paths from
+/// that value, or to it, rather than making the whole closure. The tuples are in
+/// order by the first attribute, so paths from a value find each arc by binary
+/// search, and paths to one sort them by the second first. Fails if the memory
+/// can't be allocated.
+///
+/// # Safety
+///
+/// `src` must point to a valid relation of the type `desc` describes, a relation
+/// of two attributes of one type, `value` to a valid value of it, if the relation
+/// has a tuple, and `dst` to memory for a relation. The statement must have begun a
+/// scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_tclose_of(
+    dst: *mut Text,
+    src: *const u8,
+    value: *const u8,
+    desc: *const TypeDesc,
+    attribute: *const usize,
+) -> bool {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes.
+    status(|| unsafe {
+        let desc = &*desc;
+        let element = desc.element();
+        let [first, second] = attributes(element) else {
+            internal_error("the transitive closure of a relation without two attributes");
+        };
+        let (tuples, count) = read_slice(src);
+        let (found, len) = if attribute.read_unaligned() == 0 {
+            let tuple = |i: usize| tuples.add(i * element.size);
+            paths_from(value, count, tuple, first, second)?
+        } else {
+            let mut by_second = pointers(tuples, count, element.size)?;
+            let by_second = by_second.values();
+            by_second.sort_unstable_by(|a, b| {
+                order(a.add(second.offset), b.add(second.offset), &*second.desc)
+            });
+            paths_from(value, count, |i: usize| by_second[i], second, first)?
+        };
+        let (given, other) = if attribute.read_unaligned() == 0 {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let size = (*given.desc).size;
+        let (bytes, len) = made_in_order(len, desc, |made| {
+            for i in 0..len {
+                let tuple = made.add(i * element.size);
+                core::ptr::copy_nonoverlapping(value, tuple.add(given.offset), size);
+                let end = found.ptr().add(i).read();
+                core::ptr::copy_nonoverlapping(end, tuple.add(other.offset), size);
+            }
+        })?;
+        dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
+/// The values that paths from `start` reach, in order, once each, and how many:
+/// of the `count` tuples `tuple` gives, in order by the attribute `from`, each an
+/// arc from that attribute's value to the attribute `to`'s, each followed once,
+/// from each value they come to, however many ways lead to it. Each is where it is
+/// in its tuple, and so lasts as long as they do. Fails if there is no memory.
+///
+/// # Safety
+///
+/// `tuple` must give `count` valid tuples with those attributes, in that order,
+/// and `start` must point to a valid value of their type, if `count` isn't 0.
+#[cfg(not(test))]
+unsafe fn paths_from(
+    start: *const u8,
+    count: usize,
+    tuple: impl Fn(usize) -> *const u8,
+    from: &Attr,
+    to: &Attr,
+) -> Fallible<(Temp<*const u8>, usize)> {
+    // SAFETY: guaranteed by the caller; each pointer is to a value of the
+    // attributes' type, and no more than `count` are in either list, as each
+    // arc is followed once, from its value's first.
+    unsafe {
+        let value = &*from.desc;
+        let source = |i: usize| tuple(i).add(from.offset);
+        let mut followed = Temp::<u64>::zeroed(count / 64 + 1)?;
+        let followed = followed.values();
+        let waiting = Temp::<usize>::new(count.max(1))?;
+        // Only those below `waits` are read, once written.
+        let waiting = core::slice::from_raw_parts_mut(waiting.ptr(), count.max(1));
+        let mut waits = 0;
+        // The first tuple of those from `value_at`, unless none are, or they have
+        // been followed, to follow next.
+        let mut first_from = |value_at: *const u8| {
+            let run = partition_point(0, count, |i| order(source(i), value_at, value).is_lt());
+            let (word, bit) = (run / 64, 1_u64 << (run % 64));
+            let fresh = run < count
+                && followed[word] & bit == 0
+                && order(source(run), value_at, value).is_eq();
+            if fresh {
+                followed[word] |= bit;
+            }
+            fresh.then_some(run)
+        };
+        if let Some(run) = first_from(start) {
+            waiting[waits] = run;
+            waits += 1;
+        }
+        let found = Temp::<*const u8>::new(count.max(1))?;
+        let mut len = 0;
+        while waits > 0 {
+            waits -= 1;
+            let run = waiting[waits];
+            let mut i = run;
+            while i < count && order(source(i), source(run), value).is_eq() {
+                let end = tuple(i).add(to.offset);
+                found.ptr().add(len).write(end);
+                len += 1;
+                if let Some(run) = first_from(end) {
+                    waiting[waits] = run;
+                    waits += 1;
+                }
+                i += 1;
+            }
+        }
+        let values = core::slice::from_raw_parts_mut(found.ptr(), len);
+        values.sort_unstable_by(|a, b| order(*a, *b, value));
+        let mut kept = 0;
+        for i in 0..len {
+            if kept == 0 || order(values[kept - 1], values[i], value).is_ne() {
+                values[kept] = values[i];
+                kept += 1;
+            }
+        }
+        Ok((found, kept))
+    }
+}
+
 /// The arcs of a relation of two attributes of one type, with its values
 /// numbered in canonical order, so that in that order is how they compare. Its
 /// numbers take 32 bits, as there are many, as a relation with more values takes

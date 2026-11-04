@@ -1803,7 +1803,13 @@ work is about the size of the result, however many ways lead to a value. Each
 value's list is then in order, and written as it is, with nothing to sort or take
 duplicates from. The numbers take 32 bits, which halves the memory they need; more
 values than that fail as being out of memory, since those arrays would take over
-160 GB as it is.
+160 GB as it is. A restriction of a closure, whose condition says one of its
+attributes is equal to a value that is the same for every tuple, makes no closure
+(`FunctionBuilder::closure_narrowed`, `trendy_rt_tclose_of`): it follows the paths
+from that value, by binary search in the operand's tuples, or to it, having sorted
+them by the second attribute, each arc once, and the rest of the condition goes
+through what that finds. The time and memory it takes are then about the part of
+the graph that value reaches, but for that sort, and for a bit for each arc.
 
 The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
