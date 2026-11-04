@@ -221,6 +221,37 @@ operator powers{base: integer, limit: integer}: relation { value: integer } [
     result
 ];
 
+/* Operators that call themselves, directly or through others: each call in a
+   tail position, nothing left to do after it, takes the place of its caller, so
+   they take no stack and keep no memory, however many follow. */
+operator even{n: integer}: boolean [
+    if n = 0 then true else odd{n: n - 1}
+];
+
+operator odd{n: integer}: boolean [
+    if n = 0 then false else even{n: n - 1}
+];
+
+operator count_down{n: integer, var left: integer} [
+    left := n;
+    if n > 0 then [
+        call count_down{n: n - 1, var left};
+    ];
+];
+
+heading leg := { start: text, stop: text, km: integer };
+
+heading distance := { town: text, km: integer };
+
+/* The distances `known`, and those along the legs `legs` from them: values that
+   none of its operands has, which `tclose` doesn't make. */
+operator distances{legs: relation leg, known: relation distance}: relation distance [
+    var onward := join{legs rename {km as more}, known rename {town as start}};
+    var added := onward extend { total := km + more };
+    var all := known union added{stop, total} rename {stop as town, total as km};
+    if all = known then known else distances{legs, known: all}
+];
+
 operator main{} [
     call debug_table{r: totals};
     call debug_table{r: affordable};
@@ -335,4 +366,16 @@ operator main{} [
     var high := 0;
     call price_range{r: dishes, out low: low, out high: high};
     call show{label: "cheapest and dearest", value: tuple { low: low, high: high }};
+    /* A hundred million calls, each in place of the one before it. */
+    var left := 100_000_000;
+    call show{label: "an even number", value: even{n: left}};
+    call count_down{n: left, var left};
+    call show{label: "left", value: left};
+    var legs := relation {
+        { start: "Xi'an", stop: "Dunhuang", km: 1700 },
+        { start: "Dunhuang", stop: "Kashgar", km: 1900 },
+        { start: "Dunhuang", stop: "Samarkand", km: 2700 },
+        { start: "Kashgar", stop: "Samarkand", km: 900 },
+    };
+    call debug_table{r: distances{legs, known: relation { { town: "Xi'an", km: 0 } }}};
 ];

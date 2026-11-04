@@ -245,6 +245,10 @@ type overlapping_subtypes is error { { value: text, first: text, second: text } 
    constraint (R0024). */
 type broken_call_constraint is error { { called: text, constraint: text } };
 
+/* Calls, each with work left when it returns, have used up the `bytes` of
+   the stack (R0025). */
+type too_deep is error { { bytes: integer } };
+
 /* A statement left the variables so that the constraint named
    `constraint` is false: its condition, or the operand of its `and` that
    is, written `condition` (R0023). */
@@ -436,6 +440,12 @@ operator message{error: no_square_root}: text [
 
 operator message{error: not_of_type}: text [
     error.value || " isn't a value of `" || error.type || "`"
+];
+
+operator message{error: too_deep}: text [
+    "the calls went too deep: those with work left when they return used up the "
+        || to_text{from: error.bytes}
+        || " bytes of the stack"
 ];
 
 operator message{error: broken_call_constraint}: text [

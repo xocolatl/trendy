@@ -163,6 +163,11 @@ pub(crate) trait Names {
     /// cycle, reported then.
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool;
 
+    /// A call of the operator `callee`, its name written at `span`, gives its
+    /// type parameters `types`, in an operator whose calls can lead back to
+    /// itself: a read-only one's, which [`body::Growing`] records.
+    fn calling(&mut self, _callee: &Signature, _types: &[hir::Type], _span: Span) {}
+
     /// What evaluating a call substitutes, besides its arguments.
     fn bindings(&self) -> ops::Bindings<'_>;
 
@@ -996,6 +1001,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         let call = self.arguments(written, &signature, errors)?;
+        self.names.calling(&signature, &call.types, span);
         // A built-in's implementation is the compiler's, never checked, but
         // one that makes values of a type the library defines makes each as
         // selecting it would, which checks what that checks first.
@@ -3751,6 +3757,10 @@ impl Names for TupleNames<'_> {
         self.outer.checked(id, at, errors)
     }
 
+    fn calling(&mut self, callee: &Signature, types: &[hir::Type], span: Span) {
+        self.outer.calling(callee, types, span);
+    }
+
     fn bindings(&self) -> ops::Bindings<'_> {
         self.outer.bindings()
     }
@@ -3885,6 +3895,10 @@ impl Names for ComponentNames<'_> {
 
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         self.outer.checked(id, at, errors)
+    }
+
+    fn calling(&mut self, callee: &Signature, types: &[hir::Type], span: Span) {
+        self.outer.calling(callee, types, span);
     }
 
     fn bindings(&self) -> ops::Bindings<'_> {

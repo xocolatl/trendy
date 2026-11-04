@@ -11,6 +11,7 @@ use trendy_lir as lir;
 #[must_use]
 pub fn lower(program: &hir::Program) -> lir::Program {
     let mut cx = Lowering::new(&program.files, &program.subtypes);
+    cx.recursion = program.recursion();
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
@@ -514,9 +515,10 @@ impl Waiting {
 /// An update operator's function runs each statement in a scope of its
 /// own. A read-only operator's computes its value, then stores it where the
 /// caller says, as a `result`; it begins no scope, so what it makes is the
-/// calling statement's. Read-only operators don't call themselves, so
-/// whether one makes something is known once its function is lowered,
-/// before the calling statement ends.
+/// calling statement's. Whether one makes something is known once its function
+/// is lowered, before the calling statement ends, unless it calls itself: one
+/// in a cycle of calls, which is lowered while it is being lowered, always
+/// makes what its result points to, as the call it ends in may have.
 fn function(
     program: &hir::Program,
     variable_data: &[lir::DataId],
@@ -528,11 +530,7 @@ fn function(
     if let Some(&lowered) = cx.functions_of.get(&key) {
         return lowered;
     }
-    // Numbered before its body is lowered, so that a call of itself finds
-    // it.
     let function_id = cx.number();
-    cx.functions_of.insert(key.clone(), (function_id, false));
-
     let op = program.operator(id);
     let hir::Operator {
         name, params, kind, ..
@@ -549,11 +547,21 @@ fn function(
     } else {
         format!("{name}{}", params_text(&params))
     };
+    // Found before its body is lowered, so that a call of itself finds it.
+    let cycle = cx.recursion.cycle(id);
+    let hands_out = cycle.is_some()
+        && matches!(&kind, hir::OperatorKind::ReadOnly { result, .. } if cx.points(result));
+    cx.functions_of
+        .insert(key.clone(), (function_id, hands_out));
     let mut builder = FunctionBuilder::new(program, name, params, variable_data);
+    if let Some(cycle) = cycle {
+        builder.in_cycle(cycle, cx);
+    }
     let (lowered, makes) = match kind {
         hir::OperatorKind::Update { locals, body } => {
             builder.declare(locals, cx);
-            builder.block(&body, cx);
+            builder.tail_block(&body, cx);
+            builder.give_up_arguments(cx);
             (builder.finish(None, cx), false)
         }
         hir::OperatorKind::ReadOnly {
@@ -683,6 +691,11 @@ struct Lowering {
     sites: HashMap<hir::Site, lir::DataId>,
     /// Each file's path, as a text, made once.
     paths: HashMap<hir::FileId, lir::Field>,
+    /// Which operators call themselves, directly or through others.
+    recursion: hir::Recursion,
+    /// Where the arguments of a tail call of each function wait, as the
+    /// frame they were made in goes, until the function copies them.
+    tail_arguments: HashMap<lir::FunctionId, lir::DataId>,
     /// How many functions are numbered.
     numbered: usize,
     /// Where a failure's error waits, once a `fail` or the entry is
@@ -708,6 +721,8 @@ impl Lowering {
             files: files.to_vec(),
             sites: HashMap::new(),
             paths: HashMap::new(),
+            recursion: hir::Recursion::default(),
+            tail_arguments: HashMap::new(),
             numbered: 0,
             waiting: None,
             collection: None,
@@ -840,6 +855,28 @@ impl Lowering {
         let path = self.value_field(&hir::Value::Text(text));
         self.paths.insert(file, path.clone());
         path
+    }
+
+    /// Where the arguments of a tail call of `function`, laid out as `layout`,
+    /// wait, made when first needed. One place does for all its calls, as they
+    /// are there only from before the caller gives up its frame until the
+    /// function starts, and nothing else runs in that time.
+    fn tail_arguments(&mut self, function: lir::FunctionId, layout: &lir::Layout) -> lir::Place {
+        let data = if let Some(&data) = self.tail_arguments.get(&function) {
+            data
+        } else {
+            let data = self.push(lir::Data {
+                kind: lir::DataKind::Constant,
+                writable: true,
+                fields: vec![zero_field(layout)],
+            });
+            self.tail_arguments.insert(function, data);
+            data
+        };
+        lir::Place {
+            base: lir::Base::Data(data),
+            path: vec![0],
+        }
     }
 
     fn push(&mut self, data: lir::Data) -> lir::DataId {
@@ -1170,6 +1207,16 @@ struct FunctionBuilder<'a> {
     /// null before and after, from the function's entry on, so that its
     /// failure exit releases each.
     lets: Vec<(lir::Place, hir::Type)>,
+    /// The cycle of calls the function is in, if it is in one: see
+    /// [`FunctionBuilder::in_cycle`].
+    cycle: Option<usize>,
+    /// The slot it copies its arguments to, if it is, and has parameters.
+    arguments: Option<lir::Place>,
+    /// The blocks that end in a tail call, which end the scopes it has begun.
+    tail_blocks: Vec<lir::BlockId>,
+    /// The slot of the innermost scope as the function starts, once what ends
+    /// the scopes it has begun needs it.
+    outer_scope: Option<lir::Place>,
 }
 
 /// A variable a transaction keeps as it begins: where it is, the slot its
@@ -1376,6 +1423,10 @@ impl<'a> FunctionBuilder<'a> {
             handlers: vec![None],
             exit: None,
             lets: Vec::new(),
+            cycle: None,
+            arguments: None,
+            tail_blocks: Vec::new(),
+            outer_scope: None,
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -1400,6 +1451,39 @@ impl<'a> FunctionBuilder<'a> {
             builder.pointers.insert(name, id);
         }
         builder
+    }
+
+    /// Make the function one in the cycle of calls `cycle`, whose calls can go
+    /// on without end. Its caller gives it a reference to what each argument
+    /// points to, which it holds in a slot of its own, as a `Let`'s binding does
+    /// (see `lets`), rather than leaving them with the calling statement: a
+    /// tail call can then give them up, however long the calls go on, and it
+    /// reads nothing of a frame that has gone. And it fails if the stack is
+    /// used up (R0025), rather than running off its end.
+    fn in_cycle(&mut self, cycle: usize, cx: &mut Lowering) {
+        self.cycle = Some(cycle);
+        if let Some(layout) = params_layout(&self.params, &cx.families) {
+            let arguments = self.slot(layout.clone());
+            self.insts.push(lir::Inst::Copy {
+                dst: arguments.clone(),
+                src: lir::Place::whole(lir::Base::Params),
+                layout,
+            });
+            for (place, ty) in held_arguments(&self.params, &arguments, cx) {
+                self.lets.push((place, ty));
+            }
+            self.arguments = Some(arguments);
+        }
+        self.insts.push(lir::Inst::CheckStack);
+    }
+
+    /// Give up the arguments the function holds, if it is in a cycle of calls.
+    fn give_up_arguments(&mut self, cx: &mut Lowering) {
+        if let Some(arguments) = self.arguments.clone() {
+            for (place, ty) in held_arguments(&self.params, &arguments, cx) {
+                self.release_place(&place, &ty, cx);
+            }
+        }
     }
 
     /// The type of `expr`, in the function.
@@ -1452,15 +1536,12 @@ impl<'a> FunctionBuilder<'a> {
         self.bind(locals);
         let layout = cx.layout(result);
         self.nested_scope(cx, |this, cx| {
-            let src = this.place(value, cx);
-            let dst = lir::Place::whole(lir::Base::Result);
-            this.insts.push(lir::Inst::Copy {
-                dst: dst.clone(),
-                src,
-                layout: layout.clone(),
-            });
-            vec![(dst, result.clone())]
+            this.returned(value, result, cx);
+            // Whatever it reads, a call in a cycle always hands it out.
+            this.scoped |= this.cycle.is_some() && cx.points(result);
+            vec![(lir::Place::whole(lir::Base::Result), result.clone())]
         });
+        self.give_up_arguments(cx);
         let makes = self.scoped && cx.points(result);
         (self.finish(Some(layout), cx), makes)
     }
@@ -1489,6 +1570,170 @@ impl<'a> FunctionBuilder<'a> {
         });
         let layout = scalar_layout(hir::Scalar::Text);
         (self.finish(Some(layout), cx), true)
+    }
+
+    /// `expr`, a read-only operator's value or a part of it in a tail position,
+    /// of the type `ty`, stored as the function's result: unless a tail call
+    /// ends the function first, which then leaves it to the function called.
+    fn returned(&mut self, expr: &hir::Expr, ty: &hir::Type, cx: &mut Lowering) {
+        let result = lir::Place::whole(lir::Base::Result);
+        if !self.has_tail_call(expr, cx) {
+            let src = self.place(expr, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: result,
+                src,
+                layout: cx.layout(ty),
+            });
+            return;
+        }
+        match expr {
+            hir::Expr::At(site, inner) => {
+                let outer = self.site;
+                self.at(Some(*site), cx);
+                self.returned(inner, ty, cx);
+                if outer.is_some() {
+                    self.at(outer, cx);
+                }
+            }
+            hir::Expr::Treat(_, inner) => self.returned(inner, ty, cx),
+            hir::Expr::Let(..) => {
+                let (end, alive) = self.let_bindings(expr, cx);
+                self.returned(end, ty, cx);
+                self.keep_past_bindings(&result, ty, alive, cx);
+            }
+            hir::Expr::Run(block, value) => {
+                self.running(block, &result, ty, cx, |this, cx| {
+                    this.returned(value, ty, cx);
+                });
+            }
+            hir::Expr::If(condition, then, otherwise) => {
+                let condition = self.place(condition, cx);
+                let (first, second, after) = (self.new_block(), self.new_block(), self.new_block());
+                self.end_block(
+                    lir::Terminator::Branch {
+                        condition,
+                        then: first,
+                        otherwise: second,
+                    },
+                    first,
+                );
+                let outer = self.site;
+                for (branch, next) in [then, otherwise].into_iter().zip([second, after]) {
+                    self.returned(branch, ty, cx);
+                    self.site = outer;
+                    self.end_block(lir::Terminator::Jump(after), next);
+                }
+            }
+            hir::Expr::Call(call) => self.tail_call(call, cx),
+            _ => unreachable!("only those are tail positions"),
+        }
+    }
+
+    /// Whether `expr`, in a tail position, has a tail call in one.
+    fn has_tail_call(&self, expr: &hir::Expr, cx: &Lowering) -> bool {
+        match expr {
+            hir::Expr::At(_, inner)
+            | hir::Expr::Treat(_, inner)
+            | hir::Expr::Run(_, inner)
+            | hir::Expr::Let(_, _, inner) => self.has_tail_call(inner, cx),
+            hir::Expr::If(_, then, otherwise) => {
+                self.has_tail_call(then, cx) || self.has_tail_call(otherwise, cx)
+            }
+            hir::Expr::Call(call) => self.is_tail_call(call, cx),
+            _ => false,
+        }
+    }
+
+    /// Whether `call`, in a tail position, is a tail call: it closes a cycle of
+    /// calls, and leaves its caller nothing to do after it returns.
+    fn is_tail_call(&self, call: &hir::Call, cx: &Lowering) -> bool {
+        self.cycle.is_some()
+            && self.cycle == cx.recursion.cycle(call.operator)
+            // A local variable's address is in the frame it would give up, and
+            // sema rejects a variable of the program's in a call that closes a
+            // cycle, as the operator would use it by its own name too (A0053).
+            && call
+                .updated
+                .values()
+                .all(|target| matches!(target, hir::Target::Parameter(_)))
+    }
+
+    /// `call`, a tail call: its arguments, checked against the constraints in
+    /// the braces of the operator it calls, then a jump to the first of its
+    /// versions that they fit, in place of the function.
+    fn tail_call(&mut self, call: &hir::Call, cx: &mut Lowering) {
+        let params = params_of(self.program.operator(call.operator), &call.types);
+        let args = self.arguments(&params, call, cx);
+        self.call_constraints_checked(call, args.as_ref(), &params, cx);
+        self.for_version(call, args, cx, |this, operator, args, cx| {
+            this.tail_call_of(operator, &call.types, args, cx);
+        });
+    }
+
+    /// End the block with a jump to the function of the operator `operator`,
+    /// instantiated with `types`, in place of this one: it gets its arguments,
+    /// at `args`, with its own references, and its result goes where this one's
+    /// would. All this function holds is given up first, which ends what the
+    /// arguments alone don't hold. What follows is never reached.
+    fn tail_call_of(
+        &mut self,
+        operator: hir::OperatorId,
+        types: &[hir::Type],
+        args: Option<lir::Place>,
+        cx: &mut Lowering,
+    ) {
+        let (function, _) = function(self.program, self.variable_data, operator, types, cx);
+        let params = params_of(self.program.operator(operator), types);
+        let waiting = args.map(|args| {
+            for (place, ty) in held_arguments(&params, &args, cx) {
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Retain,
+                    args: vec![place, descriptor],
+                });
+            }
+            let layout = params_layout(&params, &cx.families).expect("it has arguments");
+            let waiting = cx.tail_arguments(function, &layout);
+            self.insts.push(lir::Inst::Copy {
+                dst: waiting.clone(),
+                src: args,
+                layout,
+            });
+            waiting
+        });
+        self.release_held(cx);
+        self.tail_blocks.push(self.current);
+        let next = self.new_block();
+        self.end_block(
+            lir::Terminator::TailCall {
+                function,
+                args: waiting,
+            },
+            next,
+        );
+    }
+
+    /// The statements of `block`, the last of them in a tail position, as an
+    /// update operator's last statement is, and of a branch of an `if` that is
+    /// one, then the release of the references its local variables hold.
+    fn tail_block(&mut self, block: &hir::Block, cx: &mut Lowering) {
+        if let Some(((site, last), statements)) = block.statements.split_last() {
+            for (site, statement) in statements {
+                self.at(Some(*site), cx);
+                self.statement(statement, cx);
+            }
+            self.at(Some(*site), cx);
+            match last {
+                hir::Statement::Call(call) if self.is_tail_call(call, cx) => {
+                    self.scoped(|this| this.tail_call(call, cx));
+                }
+                hir::Statement::If(condition, then, otherwise) => {
+                    self.if_statement(condition, [then, otherwise], Self::tail_block, cx);
+                }
+                statement => self.statement(statement, cx),
+            }
+        }
+        self.release_locals_of(block, cx);
     }
 
     /// The statements of `block`, then the release of the references its
@@ -1593,6 +1838,29 @@ impl<'a> FunctionBuilder<'a> {
     /// `lets`). Its statements have scopes of their own, which the
     /// statement this is in may be using.
     fn run(&mut self, block: &hir::Block, value: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let ty = self.type_of(value);
+        let result = self.slot(cx.layout(&ty));
+        self.running(block, &result, &ty, cx, |this, cx| {
+            let src = this.place(value, cx);
+            this.insts.push(lir::Inst::Copy {
+                dst: result.clone(),
+                src,
+                layout: cx.layout(&ty),
+            });
+        });
+        result
+    }
+
+    /// `block`'s statements then what `value` adds, which stores the value at
+    /// `result`, of the type `ty`, as [`FunctionBuilder::run`] says.
+    fn running(
+        &mut self,
+        block: &hir::Block,
+        result: &lir::Place,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+        value: impl FnOnce(&mut Self, &mut Lowering),
+    ) {
         let declared = block.declared();
         self.bound_in_loops(&declared);
         let mut loops = Vec::new();
@@ -1618,25 +1886,17 @@ impl<'a> FunctionBuilder<'a> {
                 self.lets.push((place, ty));
             }
         }
-        let ty = self.type_of(value);
-        let result = self.slot(cx.layout(&ty));
         let (outer_scope, outer_site) = (self.scope.take(), self.site);
         self.nested_scope(cx, |this, cx| {
             this.statements_of(block, cx);
-            let src = this.place(value, cx);
-            this.insts.push(lir::Inst::Copy {
-                dst: result.clone(),
-                src,
-                layout: cx.layout(&ty),
-            });
-            this.scoped |= cx.points(&ty);
+            value(this, cx);
+            this.scoped |= cx.points(ty);
             vec![(result.clone(), ty.clone())]
         });
         self.scope = outer_scope;
         self.release_locals_of(block, cx);
         self.site = outer_site;
         self.after_call(cx);
-        result
     }
 
     /// The value of `expr`, a chain of `Let`s, each binding a local
@@ -1650,6 +1910,63 @@ impl<'a> FunctionBuilder<'a> {
     /// then keeps. So a relation a body declares lasts no longer than its
     /// last use, as a statement's values do.
     fn let_chain(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let outer = self.site;
+        let (end, alive) = self.let_bindings(expr, cx);
+        let mut value = self.place(end, cx);
+        if !alive.is_empty() {
+            // The end's value may point into the bindings still alive, so
+            // it is copied out of them first.
+            let ty = self.type_of(end);
+            let layout = cx.layout(&ty);
+            let copy = self.slot(layout.clone());
+            self.insts.push(lir::Inst::Copy {
+                dst: copy.clone(),
+                src: value,
+                layout,
+            });
+            self.keep_past_bindings(&copy, &ty, alive, cx);
+            value = copy;
+        }
+        if outer.is_some() && self.site != outer {
+            self.at(outer, cx);
+        }
+        value
+    }
+
+    /// Have the scope keep the value at `value`, of the type `ty`, which may
+    /// point into the bindings `alive`, the end of a chain of `Let`s, then
+    /// release them.
+    fn keep_past_bindings(
+        &mut self,
+        value: &lir::Place,
+        ty: &hir::Type,
+        alive: Vec<(lir::Place, hir::Type)>,
+        cx: &mut Lowering,
+    ) {
+        if alive.is_empty() {
+            return;
+        }
+        if cx.points(ty) {
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Keep,
+                args: vec![value.clone(), descriptor],
+            });
+            self.scoped = true;
+        }
+        for (slot, ty) in alive {
+            self.release_place(&slot, &ty, cx);
+        }
+    }
+
+    /// The bindings of `expr`, a chain of `Let`s, in order, each given up once
+    /// nothing after it in the chain reads it: the end of the chain, which is
+    /// not lowered, and the slots of those it may read, with their types.
+    fn let_bindings<'e>(
+        &mut self,
+        expr: &'e hir::Expr,
+        cx: &mut Lowering,
+    ) -> (&'e hir::Expr, Vec<(lir::Place, hir::Type)>) {
         // The chain's sites and bindings, in order, then its end.
         enum Part<'e> {
             Site(hir::Site),
@@ -1685,7 +2002,6 @@ impl<'a> FunctionBuilder<'a> {
             }
             end.reads_local(id)
         };
-        let outer = self.site;
         let mut alive: Vec<(hir::LocalId, lir::Place, hir::Type)> = Vec::new();
         for (k, part) in parts.iter().enumerate() {
             match part {
@@ -1705,36 +2021,8 @@ impl<'a> FunctionBuilder<'a> {
                 }
             }
         }
-        let mut value = self.place(end, cx);
-        if !alive.is_empty() {
-            // The end's value may point into the bindings still alive, so
-            // the scope keeps it, copied out of them first, before they are
-            // released.
-            let ty = self.type_of(end);
-            let layout = cx.layout(&ty);
-            let copy = self.slot(layout.clone());
-            self.insts.push(lir::Inst::Copy {
-                dst: copy.clone(),
-                src: value,
-                layout,
-            });
-            if cx.points(&ty) {
-                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-                self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::Keep,
-                    args: vec![copy.clone(), descriptor],
-                });
-                self.scoped = true;
-            }
-            for (_, slot, ty) in alive {
-                self.release_place(&slot, &ty, cx);
-            }
-            value = copy;
-        }
-        if outer.is_some() && self.site != outer {
-            self.at(outer, cx);
-        }
-        value
+        let alive = alive.into_iter().map(|(_, slot, ty)| (slot, ty));
+        (end, alive.collect())
     }
 
     /// Bind the local variable `id` to `value`: computed in a scope of its
@@ -1837,6 +2125,22 @@ impl<'a> FunctionBuilder<'a> {
         if let Some(exit) = self.exit {
             self.failure_exit(exit, cx);
         }
+        if self.begins {
+            for block in std::mem::take(&mut self.tail_blocks) {
+                let saved = self.outer_scope();
+                self.blocks[block.0].insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::EndSince,
+                    args: vec![saved],
+                });
+            }
+        }
+        if let Some(outer_scope) = self.outer_scope.take() {
+            let innermost = lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Innermost,
+                args: vec![outer_scope],
+            };
+            self.blocks[0].insts.insert(0, innermost);
+        }
         if let Some(entered) = self.entered.take() {
             let save = lir::Inst::SaveSite { dst: entered };
             self.blocks[0].insts.insert(0, save);
@@ -1857,6 +2161,7 @@ impl<'a> FunctionBuilder<'a> {
         }
         lir::Function {
             name: self.name,
+            recursive: self.cycle.is_some(),
             params: params_layout(&self.params, &cx.families),
             result,
             slots: self.slots,
@@ -1877,17 +2182,38 @@ impl<'a> FunctionBuilder<'a> {
     fn failure_exit(&mut self, exit: lir::BlockId, cx: &mut Lowering) {
         self.current = exit;
         if self.begins {
-            let saved = self.slot(lir::Layout::Address);
-            let innermost = lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Innermost,
-                args: vec![saved.clone()],
-            };
-            self.blocks[0].insts.insert(0, innermost);
+            let saved = self.outer_scope();
             self.insts.push(lir::Inst::CallRuntime {
                 function: lir::RuntimeFn::EndSince,
                 args: vec![saved],
             });
         }
+        self.release_held(cx);
+        let (entered, name) = (self.entered(), self.name.clone());
+        let name = self.text(&name, cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Trace,
+            args: vec![entered, name],
+        });
+        self.end_block(lir::Terminator::Failed, exit);
+    }
+
+    /// The slot of the innermost scope as the function starts.
+    fn outer_scope(&mut self) -> lir::Place {
+        if let Some(saved) = &self.outer_scope {
+            return saved.clone();
+        }
+        let saved = self.slot(lir::Layout::Address);
+        self.outer_scope = Some(saved.clone());
+        saved
+    }
+
+    /// Give up what the function holds, its local variables' references, and
+    /// its `Let`s' bindings', as it leaves, and whatever it was doing: a local
+    /// variable holds none before its declaration or after its block, nor a
+    /// binding before its `Let` or after its last use, so one released gives up
+    /// only what it holds.
+    fn release_held(&mut self, cx: &mut Lowering) {
         let held: Vec<(lir::Place, hir::Type)> = self
             .local_places
             .iter()
@@ -1899,19 +2225,8 @@ impl<'a> FunctionBuilder<'a> {
             .chain(self.lets.iter().cloned())
             .collect();
         for (value, ty) in held {
-            let descriptor = cx.descriptor(&ty);
-            self.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Release,
-                args: vec![value, lir::Place::whole(lir::Base::Data(descriptor))],
-            });
+            self.release_place(&value, &ty, cx);
         }
-        let (entered, name) = (self.entered(), self.name.clone());
-        let name = self.text(&name, cx);
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Trace,
-            args: vec![entered, name],
-        });
-        self.end_block(lir::Terminator::Failed, exit);
     }
 
     /// A new block, to be built later.
@@ -2011,7 +2326,7 @@ impl<'a> FunctionBuilder<'a> {
                 this.constraints_checked(&assigns, cx);
             }),
             hir::Statement::If(condition, then, otherwise) => {
-                self.if_statement(condition, [then, otherwise], cx);
+                self.if_statement(condition, [then, otherwise], Self::block, cx);
             }
             hir::Statement::Loop(condition, body, check) => {
                 self.loop_statement(condition, body, *check, cx);
@@ -2306,7 +2621,7 @@ impl<'a> FunctionBuilder<'a> {
             args: BTreeMap::new(),
             updated: BTreeMap::new(),
         };
-        self.invoke(&call, Some(args), Some(message.clone()), cx);
+        self.invoke(&call, Some(args), Some(&message), cx);
         message
     }
 
@@ -2502,10 +2817,11 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         condition: &hir::Expr,
         branches: [&hir::Block; 2],
+        block: fn(&mut Self, &hir::Block, &mut Lowering),
         cx: &mut Lowering,
     ) {
         if let hir::Expr::Constant(hir::Value::Boolean(taken)) = condition {
-            self.block(branches[usize::from(!taken)], cx);
+            block(self, branches[usize::from(!taken)], cx);
             return;
         }
         // Copied, so that nothing its scope owns is read once it ends.
@@ -2528,7 +2844,7 @@ impl<'a> FunctionBuilder<'a> {
             then,
         );
         for (branch, next) in branches.into_iter().zip([otherwise, after]) {
-            self.block(branch, cx);
+            block(self, branch, cx);
             self.end_block(lir::Terminator::Jump(after), next);
         }
     }
@@ -2674,12 +2990,13 @@ impl<'a> FunctionBuilder<'a> {
                 self.call_constraints_checked(call, args.as_ref(), &params, cx);
                 // An assignment the operator makes must not free what an
                 // argument points to, though it can replace the value of
-                // the only variable holding it.
-                for (i, hir::Parameter { ty, mode }) in params.values().enumerate() {
-                    if *mode == hir::Mode::Const && cx.points(ty) {
-                        let mut arg = args.clone().expect("a parameter has a slot");
-                        arg.path.push(i);
-                        let descriptor = cx.descriptor(ty);
+                // the only variable holding it. One in a cycle of calls holds
+                // its own.
+                if cx.recursion.cycle(call.operator).is_none()
+                    && let Some(args) = &args
+                {
+                    for (arg, ty) in held_arguments(&params, args, cx) {
+                        let descriptor = cx.descriptor(&ty);
                         self.insts.push(lir::Inst::CallRuntime {
                             function: lir::RuntimeFn::Keep,
                             args: vec![arg, lir::Place::whole(lir::Base::Data(descriptor))],
@@ -3309,7 +3626,7 @@ impl<'a> FunctionBuilder<'a> {
         let args = self.arguments(&params, call, cx);
         self.call_constraints_checked(call, args.as_ref(), &params, cx);
         let dst = self.slot(cx.layout(&self.program.result(call)));
-        self.invoke(call, args, Some(dst.clone()), cx);
+        self.invoke(call, args, Some(&dst), cx);
         dst
     }
 
@@ -3391,21 +3708,34 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// Call the operator `call` names, with the argument struct `args`,
-    /// its value, if it is read-only, into `result`: of its versions, the
-    /// first whose parameters the arguments' values are of, and otherwise
-    /// its own function. A specification without a body has a version for
-    /// whatever the arguments' values are of, so the last is called,
-    /// untested, if none before it is.
+    /// its value, if it is read-only, into `result`.
     fn invoke(
         &mut self,
         call: &hir::Call,
         args: Option<lir::Place>,
-        result: Option<lir::Place>,
+        result: Option<&lir::Place>,
         cx: &mut Lowering,
+    ) {
+        self.for_version(call, args, cx, |this, operator, args, cx| {
+            this.call_function(operator, &call.types, args, result.cloned(), cx);
+        });
+    }
+
+    /// What `lower` adds for the operator that `call` runs, given the argument
+    /// struct `args`: of its versions, the first whose parameters the arguments'
+    /// values are of, and otherwise itself. A specification without a body has a
+    /// version for whatever the arguments' values are of, so the last is run,
+    /// untested, if none before it is.
+    fn for_version(
+        &mut self,
+        call: &hir::Call,
+        args: Option<lir::Place>,
+        cx: &mut Lowering,
+        lower: impl Fn(&mut Self, hir::OperatorId, Option<lir::Place>, &mut Lowering),
     ) {
         let callee = self.program.operator(call.operator);
         if callee.versions.is_empty() {
-            self.call_function(call.operator, &call.types, args, result, cx);
+            lower(self, call.operator, args, cx);
             return;
         }
         let params = params_of(callee, &call.types);
@@ -3433,17 +3763,11 @@ impl<'a> FunctionBuilder<'a> {
                     );
                 }
             }
-            self.call_function(
-                version.operator,
-                &call.types,
-                args.clone(),
-                result.clone(),
-                cx,
-            );
+            lower(self, version.operator, args.clone(), cx);
             self.end_block(lir::Terminator::Jump(done), next);
         }
         if !bodiless {
-            self.call_function(call.operator, &call.types, args, result, cx);
+            lower(self, call.operator, args, cx);
         }
         self.end_block(lir::Terminator::Jump(done), done);
     }
@@ -3460,6 +3784,19 @@ impl<'a> FunctionBuilder<'a> {
     ) {
         let (function, makes) = function(self.program, self.variable_data, operator, types, cx);
         self.scoped |= makes;
+        // It holds its arguments itself (see `in_cycle`).
+        if cx.recursion.cycle(operator).is_some()
+            && let Some(args) = &args
+        {
+            let params = params_of(self.program.operator(operator), types);
+            for (arg, ty) in held_arguments(&params, args, cx) {
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Retain,
+                    args: vec![arg, descriptor],
+                });
+            }
+        }
         self.insts.push(lir::Inst::Call {
             function,
             args,
@@ -4142,10 +4479,12 @@ impl<'a> FunctionBuilder<'a> {
                     .keys()
                     .position(|p| p == name)
                     .expect("sema resolved the parameter");
-                lir::Place {
-                    base: lir::Base::Params,
-                    path: vec![index],
-                }
+                let mut parameter = self
+                    .arguments
+                    .clone()
+                    .unwrap_or_else(|| lir::Place::whole(lir::Base::Params));
+                parameter.path.push(index);
+                parameter
             }
             hir::Expr::Unary(op, operand) => {
                 let src = self.place(operand, cx);
@@ -7463,6 +7802,24 @@ fn params_layout(
         hir::Mode::Var | hir::Mode::Out => lir::Layout::Address,
     };
     (!params.is_empty()).then(|| lir::Layout::Struct(params.values().map(field).collect()))
+}
+
+/// Of the argument struct at `args` for `params`, each `const` parameter's
+/// place and type that points to a text, relation or array.
+fn held_arguments(
+    params: &BTreeMap<String, hir::Parameter>,
+    args: &lir::Place,
+    cx: &mut Lowering,
+) -> Vec<(lir::Place, hir::Type)> {
+    let mut held = Vec::new();
+    for (i, parameter) in params.values().enumerate() {
+        if parameter.mode == hir::Mode::Const && cx.points(&parameter.ty) {
+            let mut place = args.clone();
+            place.path.push(i);
+            held.push((place, parameter.ty.clone()));
+        }
+    }
+    held
 }
 
 fn len(n: usize) -> u64 {

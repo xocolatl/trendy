@@ -382,6 +382,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
         namespaces: &namespaces,
         operators: &operators,
         values: &evaluated.values,
+        recursive: &evaluated.recursive,
         variables: &evaluated.variables,
         declared: &declared,
     };
@@ -400,7 +401,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
             bodies.insert(signature.id, statements);
         }
     }
-    body::deferred_checks(&deferred, &bodies, &operators, errors);
+    body::deferred_checks(&deferred, &bodies, &evaluated, &operators, errors);
     Checked {
         namespaces,
         operators,
@@ -2079,17 +2080,14 @@ mod tests {
     }
 
     #[test]
-    fn read_only_operators_dont_call_themselves() {
-        let mutual = errors(
+    fn read_only_operators_can_call_themselves() {
+        for source in [
             "operator f{}: integer [ g{} ];\noperator g{}: integer [ f{} ];\noperator main{} [];",
-        );
-        assert_eq!(mutual.len(), 1, "{mutual:#?}");
-        assert_eq!(mutual[0].code, Code::Recursion);
-        assert_eq!(mutual[0].message, "`f` and `g` call each other");
-        assert_eq!(
-            messages("operator f{x: integer}: integer [ f{x: x} ];\noperator main{} [];"),
-            ["`f` calls itself"]
-        );
+            "operator f{x: integer}: integer [ f{x: x} ];\noperator main{} [];",
+            "operator f{x: integer}: integer [ if x = 0 then 0 else f{x: x - 1} ];\noperator main{} [];",
+        ] {
+            assert!(analyze_str(source).is_ok(), "{:#?}", errors(source));
+        }
         // No cycle goes through an operator's value, which reads no
         // variable of the program's.
         assert_eq!(
@@ -3779,7 +3777,7 @@ operator main{{}} [ var lines: array text; {main} ];"
         );
         let errors = errors(&format!("{cycle}operator main{{}} [];"));
         assert_eq!(errors.len(), 1, "{errors:#?}");
-        assert_eq!(errors[0].code, Code::Recursion);
+        assert_eq!(errors[0].code, Code::ConstraintCycle);
         assert_eq!(
             errors[0].message,
             "`tens{big: …}`'s constraint selects a value in its representation through `tens`"
@@ -9154,11 +9152,11 @@ operator main{{}} [ var lines: array text; {main} ];"
             // Not calling its own operator, even through another.
             (
                 "operator f{n: integer, constraint f{n: n} > 0}: integer [ n ];",
-                Code::Recursion,
+                Code::ConstraintCycle,
             ),
             (
                 "operator f{n: integer, constraint g{n: n} > 0}: integer [ n ];\noperator g{n: integer}: integer [ f{n: n} ];",
-                Code::Recursion,
+                Code::ConstraintCycle,
             ),
             // A version has none of its own.
             (
@@ -10654,30 +10652,171 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
     }
 
     #[test]
-    fn a_read_only_operator_whose_statements_are_run_doesnt_recurse() {
-        // In a value block.
-        let source = format!(
-            "operator f{{n: integer}}: integer [ [ var r := 0; if n > 0 then [ r := f{{n: n - 1}}; ]; r ] ];{MAIN}"
+    fn a_call_that_reaches_a_cycle_is_never_computed_when_compiling() {
+        let countdown = "operator countdown{n: integer}: integer [ if n = 0 then 0 else countdown{n: n - 1} ];\n";
+        for value in [
+            "countdown{n: 3}",
+            "countdown{n: 3} + 1",
+            // Through one that isn't in the cycle.
+            "reaching{n: 3}",
+            // Through the versions of a specification, one of which is.
+            "walk{s: ahead{n: 3}}",
+            // Through a type's constraint, as a selection checks it.
+            "fine{n: 3}.n",
+        ] {
+            let source = format!(
+                "{countdown}operator reaching{{n: integer}}: integer [ countdown{{n: n}} ];\n\
+                 type fine {{ {{ n: integer }}, constraint countdown{{n: n}} = 0 }};\n\
+                 type s union;\ntype ahead is s {{ {{ n: integer }} }};\ntype back is s {{ {{ m: integer }} }};\n\
+                 operator walk{{s: s}}: integer;\n\
+                 operator walk{{s: ahead}}: integer [ walk{{s: back{{m: s.n}}}} ];\n\
+                 operator walk{{s: back}}: integer [ s.m ];\n\
+                 var v := {value};{MAIN}"
+            );
+            assert_eq!(
+                codes(&source),
+                [Code::InitialValueWhenRunning],
+                "{value}: {:#?}",
+                errors(&source)
+            );
+        }
+        // Where it is left for the program to make, it is fine.
+        let source =
+            format!("{countdown}operator main{{}} [ call debug_value{{v: countdown{{n: 3}}}}; ];");
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+    }
+
+    #[test]
+    fn a_cycle_through_a_conversion_or_a_constraint_checks_itself() {
+        for source in [
+            // A type's constraint that selects its own type, through an
+            // operator that could otherwise stop it.
+            format!(
+                "type t {{ {{ n: integer }}, constraint fine{{n: n}} }};\noperator fine{{n: integer}}: boolean [ if n = 0 then true else t{{n: n - 1}}.n = 0 ];{MAIN}"
+            ),
+            // A conversion that selects in the representation it converts from.
+            format!(
+                "type t {{ {{ n: integer }}, {{ m: integer }} to {{ n := back{{m: m}} }} from {{ m := n }} }};\noperator back{{m: integer}}: integer [ if m = 0 then 0 else t{{m: m - 1}}.n ];{MAIN}"
+            ),
+            // A constraint in an operator's braces, through another.
+            format!(
+                "operator f{{n: integer, constraint g{{n: n}} > 0}}: integer [ n ];\noperator g{{n: integer}}: integer [ if n = 0 then 1 else f{{n: n - 1}} ];{MAIN}"
+            ),
+        ] {
+            assert_eq!(
+                codes(&source),
+                [Code::ConstraintCycle],
+                "{:#?}",
+                errors(&source)
+            );
+        }
+    }
+
+    #[test]
+    fn a_cycle_is_found_past_an_operator_already_checked() {
+        // Whichever comes first in the program, the cycle through the constraint
+        // is found.
+        let a = "operator a{n: integer}: integer [ b{n: n} + t{n: n}.n ];\n";
+        let b = "operator b{n: integer}: integer [ if n = 0 then 0 else a{n: n - 1} ];\n";
+        let t = "type t { { n: integer }, constraint b{n: n} = 0 };\n";
+        for source in [
+            format!("{a}{b}{t}{MAIN}"),
+            format!("{b}{a}{t}{MAIN}"),
+            format!("{t}{a}{b}{MAIN}"),
+        ] {
+            assert_eq!(
+                codes(&source),
+                [Code::ConstraintCycle],
+                "{:#?}",
+                errors(&source)
+            );
+        }
+        // An initial value, checked first, starts at `a`, and `b` is done by the
+        // time the constraint refers to it.
+        let source = format!("var v: integer := a{{n: 1}};\n{a}{b}{t}{MAIN}");
+        assert!(
+            codes(&source).contains(&Code::ConstraintCycle),
+            "{:#?}",
+            errors(&source)
         );
-        assert_eq!(codes(&source), [Code::Recursion]);
-        // Itself, which the fold would never reach.
+    }
+
+    #[test]
+    fn writing_an_error_doesnt_lead_back_to_its_fail() {
+        let error = "type refused is error { { code: integer } };\n";
+        let message =
+            "operator message{error: refused}: text [ to_text{from: checked{n: error.code}} ];\n";
+        for checked in [
+            // A `fail` as a value.
+            "operator checked{n: integer}: integer [ if n < 0 then fail refused{code: n} else n ];\n",
+            // A `fail` statement.
+            "operator checked{n: integer}: integer [ if n < 0 then [ fail refused{code: n}; ]; n ];\n",
+            // Through another, done by the time the `fail` refers to `message`.
+            "operator checked{n: integer}: integer [ other{n: n} + (if n < 0 then fail refused{code: n} else 0) ];\noperator other{n: integer}: integer [ if n = 0 then 0 else checked{n: n - 1} ];\n",
+        ] {
+            for source in [
+                format!("{error}{message}{checked}{MAIN}"),
+                format!("{error}{checked}{message}{MAIN}"),
+            ] {
+                let found = errors(&source);
+                assert_eq!(codes(&source), [Code::ConstraintCycle], "{found:#?}");
+                assert!(found[0].message.contains("a `fail` in"), "{found:#?}");
+            }
+        }
+        // A `message` that calls an operator with no `fail` can recur, and a
+        // `fail` that nothing `message` calls reaches is fine.
         let source = format!(
-            "operator f{{n: integer}}: integer [ var r := 0; if n > 0 then [ r := f{{n: n - 1}}; ]; r ];{MAIN}"
+            "{error}operator message{{error: refused}}: text [ to_text{{from: down{{n: error.code}}}} ];\noperator down{{n: integer}}: integer [ if n = 0 then 0 else down{{n: n - 1}} ];\noperator checked{{n: integer}}: integer [ if n < 0 then fail refused{{code: n}} else n ];{MAIN}"
         );
-        let found = errors(&source);
-        assert_eq!(codes(&source), [Code::Recursion], "{found:#?}");
-        assert_eq!(found[0].message, "`f` calls itself");
-        // Through an operator computed when it can be, each way around,
-        // reported once.
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+    }
+
+    #[test]
+    fn a_read_only_operator_that_grows_its_types_is_reported() {
+        for source in [
+            format!("operator nest{{a: any type}}: integer [ nest{{a: tuple {{ x: a }}}} ];{MAIN}"),
+            // Through another, and in a value block's statements.
+            format!(
+                "operator nest{{a: any type}}: integer [ other{{a: tuple {{ x: a }}}} ];\noperator other{{a: any type}}: integer [ var n := 0; if n = 0 then [ n := nest{{a: a}}; ]; n ];{MAIN}"
+            ),
+        ] {
+            assert_eq!(
+                codes(&source),
+                [Code::GrowingRecursion],
+                "{:#?}",
+                errors(&source)
+            );
+        }
+        // Passed on as it is, it never grows.
         let source = format!(
-            "operator g{{n: integer}}: integer [ f{{n: n}} ];\noperator f{{n: integer}}: integer [ var r := 0; if n > 0 then [ r := g{{n: n - 1}}; ]; r ];{MAIN}"
+            "operator same{{a: T, n: integer}}: T\n    types {{ T: any type }}\n[ if n = 0 then a else same{{a: a, n: n - 1}} ];{MAIN}"
         );
-        assert_eq!(codes(&source), [Code::Recursion]);
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+    }
+
+    #[test]
+    fn a_read_only_operator_whose_statements_are_run_can_recur() {
+        for source in [
+            // In a value block.
+            format!(
+                "operator f{{n: integer}}: integer [ [ var r := 0; if n > 0 then [ r := f{{n: n - 1}}; ]; r ] ];{MAIN}"
+            ),
+            // Itself.
+            format!(
+                "operator f{{n: integer}}: integer [ var r := 0; if n > 0 then [ r := f{{n: n - 1}}; ]; r ];{MAIN}"
+            ),
+            // Through an operator computed when it can be, each way around.
+            format!(
+                "operator g{{n: integer}}: integer [ f{{n: n}} ];\noperator f{{n: integer}}: integer [ var r := 0; if n > 0 then [ r := g{{n: n - 1}}; ]; r ];{MAIN}"
+            ),
+        ] {
+            assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+        }
         // Through a type's constraint, which selecting a value checks.
         let source = format!(
             "type t {{ {{ n: integer }}, constraint fine{{n: n}} }};\noperator fine{{n: integer}}: boolean [ var ok := true; if n > 0 then [ ok := t{{n: 0}}.n = 0; ]; ok ];{MAIN}"
         );
-        assert_eq!(codes(&source), [Code::Recursion]);
+        assert_eq!(codes(&source), [Code::ConstraintCycle]);
         // Two that call neither themselves nor each other are fine.
         let source = format!(
             "operator a{{n: integer}}: integer [ var r := n; if n > 0 then [ r := b{{n: n}}; ]; r ];\noperator b{{n: integer}}: integer [ var r := n; if n > 1 then [ r := 1; ]; r ];{MAIN}"

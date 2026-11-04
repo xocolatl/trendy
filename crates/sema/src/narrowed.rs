@@ -20,7 +20,7 @@ use trendy_syntax::ast::{self, AstNode, Expr};
 
 use crate::Namespaces;
 use crate::check::{Checker, Lookup, Names};
-use crate::operators::Operators;
+use crate::operators::{Operators, Signature};
 use crate::ops;
 use crate::types;
 
@@ -433,6 +433,10 @@ impl Names for Narrowed<'_> {
         self.outer.checked(id, at, errors)
     }
 
+    fn calling(&mut self, callee: &Signature, types: &[hir::Type], span: Span) {
+        self.outer.calling(callee, types, span);
+    }
+
     fn bindings(&self) -> ops::Bindings<'_> {
         self.outer.bindings()
     }
@@ -500,6 +504,10 @@ impl Names for Unnarrowed<'_> {
 
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         self.outer.checked(id, at, errors)
+    }
+
+    fn calling(&mut self, callee: &Signature, types: &[hir::Type], span: Span) {
+        self.outer.calling(callee, types, span);
     }
 
     fn bindings(&self) -> ops::Bindings<'_> {

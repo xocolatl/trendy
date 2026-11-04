@@ -5,14 +5,14 @@
 //! cycle: of initial values, through operators or not, or of read-only
 //! operators that call each other.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{self, Assignee, Assigning};
-use crate::body::Around;
+use crate::body::{Around, Growing};
 use crate::check::{Checker, Lookup, Names};
 use crate::locals::{self, Declaration, Declaring, Local, Locals};
 use crate::operators::{CallConstraint, FromType, Made, Operators, Signature};
@@ -28,6 +28,12 @@ pub(crate) struct Evaluated {
     /// Each valid read-only operator's local variables, which its value's
     /// `Let`s give values.
     pub(crate) locals: HashMap<hir::OperatorId, Vec<hir::Local>>,
+    /// The read-only operators that reach a cycle of calls, or are in one
+    /// (see [`ops::Bindings`]).
+    pub(crate) recursive: HashSet<hir::OperatorId>,
+    /// Each call in a read-only operator's body that gives a type parameter a
+    /// type built from its caller's own.
+    pub(crate) growing: Vec<Growing>,
 }
 
 /// Evaluates the globals, each when first needed.
@@ -59,6 +65,26 @@ pub(crate) struct Globals<'a> {
     /// computed for each tuple of a relation, as in an `extend`'s values,
     /// are substituted when each tuple is.
     block_locals: Vec<hir::Local>,
+    /// The read-only operators that reach a cycle of calls, or are in one,
+    /// as far as they have been checked (see [`ops::Bindings`]).
+    recursive: HashSet<hir::OperatorId>,
+    /// Each call in a read-only operator's body that gives a type parameter
+    /// a type built from its caller's own.
+    growing: Vec<Growing>,
+    /// Each reference an operator or constraint being checked has made.
+    references: Vec<Reference>,
+    /// Each operator or constraint whose checking has started, as a cycle
+    /// shows it.
+    pendings: HashMap<hir::OperatorId, Pending>,
+}
+
+/// A reference, written at `at`, that checking `from` makes to the read-only
+/// operator `to`, whether or not it has been checked yet.
+#[derive(Clone, Copy)]
+struct Reference {
+    from: hir::OperatorId,
+    to: hir::OperatorId,
+    at: Span,
 }
 
 /// What a global being evaluated is.
@@ -98,6 +124,8 @@ pub(crate) struct Pending {
     pub(crate) defined: Span,
     /// Where it refers to the next one, once it does.
     pub(crate) via: Span,
+    /// Whether it does by a `fail`, whose error the next one writes.
+    pub(crate) failing: bool,
 }
 
 impl<'a> Globals<'a> {
@@ -121,6 +149,10 @@ impl<'a> Globals<'a> {
             read: HashSet::new(),
             cycles: HashSet::new(),
             block_locals: Vec::new(),
+            recursive: HashSet::new(),
+            growing: Vec::new(),
+            references: Vec::new(),
+            pendings: HashMap::new(),
         }
     }
 
@@ -148,6 +180,7 @@ impl<'a> Globals<'a> {
                 self.checked(signature.id, defined, errors);
             }
         }
+        self.report_cycles_through_what_was_checked(errors);
         Evaluated {
             variables: self
                 .variables
@@ -159,6 +192,8 @@ impl<'a> Globals<'a> {
                 .collect(),
             values: self.values,
             locals: self.locals,
+            recursive: self.recursive,
+            growing: self.growing,
         }
     }
 
@@ -183,6 +218,7 @@ impl<'a> Globals<'a> {
             representation: None,
             defined: declared,
             via: declared,
+            failing: false,
         });
         let variable = variable(&decl, self, errors);
         self.stack.pop();
@@ -241,8 +277,9 @@ impl<'a> Globals<'a> {
 
     /// Whether the read-only operator `id`, called at `at`, has a valid
     /// value, its body checked if it isn't yet. Calling one whose body is
-    /// being checked closes a cycle: recursion, or a cycle with the initial
-    /// values that call it.
+    /// being checked closes a cycle: recursion, whose calls are made when the
+    /// program runs, or, through what a type's declaration or an operator's
+    /// constraint makes, what nothing can stop (A0036).
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         let operators = self.operators;
         let signature = operators.get(id);
@@ -254,7 +291,15 @@ impl<'a> Globals<'a> {
                 valid &= self.checked(version.operator, at, errors);
             }
             let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
-            return valid && (bodiless || self.checked_own(id, at, errors));
+            let valid = valid && (bodiless || self.checked_own(id, at, errors));
+            if signature
+                .versions
+                .iter()
+                .any(|version| self.recursive.contains(&version.operator))
+            {
+                self.recursive.insert(id);
+            }
+            return valid;
         }
         self.checked_own(id, at, errors)
     }
@@ -289,20 +334,15 @@ impl<'a> Globals<'a> {
             }
             return valid;
         }
+        if let Some(
+            Global::Operator(from) | Global::Constraint(from) | Global::CallConstraint(from),
+        ) = self.stack.last().map(|pending| pending.global)
+        {
+            self.references.push(Reference { from, to: id, at });
+        }
         match self.operator_states.get(&id) {
             Some(State::Done(done)) => return done.is_some(),
-            Some(State::Evaluating) => {
-                if let Some(start) = self.stack.iter().position(|p| {
-                    matches!(
-                        p.global,
-                        Global::Operator(o) | Global::Constraint(o) | Global::CallConstraint(o)
-                            if o == id
-                    )
-                }) {
-                    self.cycle(start, at, errors);
-                }
-                return false;
-            }
+            Some(State::Evaluating) => return self.closes_a_cycle(id, at, errors),
             None => {}
         }
         if let Some(innermost) = self.stack.last_mut() {
@@ -327,23 +367,71 @@ impl<'a> Globals<'a> {
                     signature.params.keys().map(|c| format!("{c}: …")).collect();
                 format!("{}{{{}}}", ty.name, components.join(", "))
             });
-        self.stack.push(Pending {
+        let pending = Pending {
             global,
             name,
             representation,
             defined,
             via: defined,
-        });
+            failing: false,
+        };
+        self.pendings.insert(id, pending.clone());
+        self.stack.push(pending);
         let value = self.value(signature, errors);
         self.stack.pop();
         let valid = value.is_some();
         if let Some((locals, value)) = value {
+            // What calls one that reaches a cycle reaches it too. Every other
+            // operator it calls is checked, and reaches none, so a call's
+            // evaluation never meets a cycle.
+            if value
+                .calling()
+                .iter()
+                .any(|callee| self.recursive.contains(callee))
+            {
+                self.recursive.insert(id);
+            }
             self.values.insert(id, value);
             self.locals.insert(id, locals);
         }
         self.operator_states
             .insert(id, State::Done(valid.then_some(())));
         valid
+    }
+
+    /// Whether a reference at `at` to the read-only operator `id`, whose body is
+    /// being checked, is valid: recursion, as each operator in the cycle it
+    /// closes runs when the program does, and a call of it is left for then, or
+    /// not, as the cycle has what nothing can stop, which it reports.
+    fn closes_a_cycle(
+        &mut self,
+        id: hir::OperatorId,
+        at: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let Some(start) = self.stack.iter().position(|p| {
+            matches!(
+                p.global,
+                Global::Operator(o) | Global::Constraint(o) | Global::CallConstraint(o)
+                    if o == id
+            )
+        }) else {
+            return false;
+        };
+        let operators_alone = self.stack[start..].iter().all(|p| match p.global {
+            Global::Operator(o) => self.operators.get(o).from_type.is_none(),
+            Global::Constraint(_) | Global::CallConstraint(_) | Global::Variable(_) => false,
+        });
+        if !operators_alone {
+            self.cycle(start, at, errors);
+            return false;
+        }
+        for pending in &self.stack[start..] {
+            if let Global::Operator(operator) = pending.global {
+                self.recursive.insert(operator);
+            }
+        }
+        true
     }
 
     /// Report the cycle closed by a reference at `at` back to the global
@@ -355,6 +443,84 @@ impl<'a> Globals<'a> {
         if let Some(last) = cycle.last_mut() {
             last.via = at;
         }
+        self.report_cycle(cycle, errors);
+    }
+
+    /// Report each cycle that is more than operators calling each other that
+    /// checking them, each as it is first needed, can't see: one operator of a
+    /// cycle can be checked before another reference to it closes a second one,
+    /// through a constraint, and a `fail` always refers to `message`, whose
+    /// calls then lead back to it, which writing the error would run again
+    /// without end (see [`Expr::fails`]). Only one of each is reported, as one
+    /// more cycle would show once it is fixed.
+    ///
+    /// [`Expr::fails`]: hir::Expr::fails
+    fn report_cycles_through_what_was_checked(&mut self, errors: &mut Vec<Diagnostic>) {
+        let references = std::mem::take(&mut self.references);
+        let count = references
+            .iter()
+            .map(|reference| reference.from.0.max(reference.to.0) + 1)
+            .max()
+            .unwrap_or(0);
+        let mut edges = vec![Vec::new(); count];
+        for reference in &references {
+            edges[reference.from.0].push(reference.to.0);
+        }
+        let cycles = hir::cycles_of(&edges);
+        // Those already reported, whose errors say enough.
+        let mut reported: HashSet<usize> = self
+            .cycles
+            .iter()
+            .flatten()
+            .filter_map(|global| match *global {
+                Global::Operator(id) | Global::Constraint(id) | Global::CallConstraint(id) => {
+                    cycles.get(id.0).copied().flatten()
+                }
+                Global::Variable(_) => None,
+            })
+            .collect();
+        let writes_errors: Vec<hir::OperatorId> =
+            self.operators.message().map_or_else(Vec::new, |message| {
+                message.versions.iter().map(|v| v.operator).collect()
+            });
+        for reference in &references {
+            let Some(cycle) = cycles[reference.from.0] else {
+                continue;
+            };
+            if cycles[reference.to.0] != Some(cycle) || reported.contains(&cycle) {
+                continue;
+            }
+            let failing = writes_errors.contains(&reference.to)
+                && self
+                    .values
+                    .get(&reference.from)
+                    .is_some_and(hir::Expr::fails);
+            let from = &self.pendings[&reference.from];
+            let checks_itself = !matches!(from.global, Global::Operator(_))
+                || self.operators.get(reference.from).from_type.is_some();
+            if !failing && !checks_itself {
+                continue;
+            }
+            reported.insert(cycle);
+            let leading = references_between(&references, reference.to, reference.from, |id| {
+                cycles[id.0] == Some(cycle)
+            });
+            let mut shown = vec![Pending {
+                via: reference.at,
+                failing,
+                ..from.clone()
+            }];
+            shown.extend(leading.into_iter().map(|next| Pending {
+                via: next.at,
+                ..self.pendings[&next.from].clone()
+            }));
+            self.report_cycle(shown, errors);
+        }
+    }
+
+    /// Report the `cycle`, unless it is reported already: see
+    /// [`Globals::cycle`].
+    fn report_cycle(&mut self, mut cycle: Vec<Pending>, errors: &mut Vec<Diagnostic>) {
         if let Some(constraint) = cycle
             .iter()
             .position(|p| matches!(p.global, Global::Constraint(_) | Global::CallConstraint(_)))
@@ -814,6 +980,37 @@ fn reassigned(
     true
 }
 
+/// The references, the fewest, that lead from the operator `from` to the operator
+/// `to`, by those that `within` says of: none if it is `from`.
+fn references_between(
+    references: &[Reference],
+    from: hir::OperatorId,
+    to: hir::OperatorId,
+    within: impl Fn(hir::OperatorId) -> bool,
+) -> Vec<Reference> {
+    if from == to {
+        return Vec::new();
+    }
+    let mut came_by: HashMap<hir::OperatorId, Reference> = HashMap::new();
+    let mut next = VecDeque::from([from]);
+    while let Some(at) = next.pop_front() {
+        for reference in references.iter().filter(|r| r.from == at && within(r.to)) {
+            if reference.to != from && !came_by.contains_key(&reference.to) {
+                came_by.insert(reference.to, *reference);
+                next.push_back(reference.to);
+            }
+        }
+    }
+    let mut path = Vec::new();
+    let mut at = to;
+    while let Some(reference) = came_by.get(&at) {
+        path.push(*reference);
+        at = reference.from;
+    }
+    path.reverse();
+    path
+}
+
 impl Names for Globals<'_> {
     fn namespaces(&self) -> &Namespaces {
         self.namespaces
@@ -879,6 +1076,7 @@ impl Names for Globals<'_> {
             operators: self.operators,
             namespaces: self.namespaces,
             values: &self.values,
+            recursive: &self.recursive,
         }
     }
 
@@ -1067,11 +1265,17 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         self.globals.checked(id, at, errors)
     }
 
+    fn calling(&mut self, callee: &Signature, types: &[hir::Type], span: Span) {
+        let growing = Growing::of(self.within, callee, types, span);
+        self.globals.growing.extend(growing);
+    }
+
     fn bindings(&self) -> ops::Bindings<'_> {
         ops::Bindings {
             operators: self.globals.operators,
             namespaces: self.globals.namespaces,
             values: &self.globals.values,
+            recursive: &self.globals.recursive,
         }
     }
 

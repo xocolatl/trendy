@@ -4185,7 +4185,14 @@ pub extern "C" fn trendy_rt_write_trace() {
     // texts are UTF-8.
     unsafe {
         let trace = &mut *TRACE.get();
-        for i in 0..trace.len {
+        // Calls that went too deep are too many to write: the innermost, and
+        // the outermost, say what they were doing.
+        let (first, last) = if trace.len > 2 * TRACE_WRITTEN {
+            (TRACE_WRITTEN, trace.len - TRACE_WRITTEN)
+        } else {
+            (trace.len, trace.len)
+        };
+        let write_frame = |out: &mut Stderr, i: usize| {
             let frame = trace.frames.add(i).read();
             let site = &*frame.site;
             let path = read_text((&raw const site.path).cast());
@@ -4196,6 +4203,19 @@ pub extern "C" fn trendy_rt_write_trace() {
                 "  = note: in `{function}`, called at {path}:{}:{}",
                 site.line, site.column
             );
+        };
+        for i in 0..first {
+            write_frame(&mut out, i);
+        }
+        if last > first {
+            let _ = writeln!(
+                out,
+                "  = note: and {} calls more, the outermost:",
+                last - first
+            );
+        }
+        for i in last..trace.len {
+            write_frame(&mut out, i);
         }
         if trace.lost > 0 {
             let _ = writeln!(out, "  = note: and {} calls more", trace.lost);
@@ -4203,6 +4223,95 @@ pub extern "C" fn trendy_rt_write_trace() {
         (trace.len, trace.lost) = (0, 0);
     }
     out.flush();
+}
+
+/// How many calls a trace writes of each end, of more than twice as many.
+#[cfg(not(test))]
+const TRACE_WRITTEN: usize = 8;
+
+/// How much stack the program runs on, which only the calls it makes touch:
+/// what a recursion with work left after each call can use, before it fails
+/// (R0025), and what the system doesn't reserve until it is used.
+#[cfg(not(test))]
+const STACK_BYTES: usize = 1 << 30;
+
+/// How much of it a recursive function leaves as it starts: for what it calls
+/// that isn't recursive, whose depth the program's text bounds, for the
+/// runtime's functions, and for the failure when there is too little.
+#[cfg(not(test))]
+const STACK_MARGIN: usize = 8 << 20;
+
+/// The lowest the stack pointer goes as a recursive function starts, which
+/// compiled code compares it to ([`trendy_rt_too_deep`]).
+#[unsafe(export_name = "trendy_rt_stack_limit")]
+pub static STACK_LIMIT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Room for a `pthread_attr_t`, which is opaque, of any system's.
+#[cfg(not(test))]
+#[repr(C, align(16))]
+struct PthreadAttr([u8; 128]);
+
+/// The program, on the thread [`trendy_rt_run`] made for it, whose stack it
+/// sets the limit of: `entry`, the program's entry function, whose failing
+/// is what it returns.
+#[cfg(not(test))]
+extern "C" fn run_on_stack(entry: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+    let top = core::ptr::addr_of!(entry) as usize;
+    STACK_LIMIT.store(
+        top - (STACK_BYTES - STACK_MARGIN),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    // SAFETY: it is the entry function `trendy_rt_run` was given.
+    let entry: extern "C" fn() -> u8 = unsafe { core::mem::transmute(entry) };
+    core::ptr::null_mut::<core::ffi::c_void>().wrapping_add(usize::from(entry()))
+}
+
+/// Run the program, whose entry function is `entry`, on a thread of its own,
+/// the only one that does anything, with a stack `STACK_BYTES` long, as the
+/// main thread's is whatever the system says, and small: a recursion with work
+/// left after each call can then go millions of calls deep. The status to exit
+/// with: 1 if it failed, and 0 if not.
+///
+/// # Safety
+///
+/// `entry` must be a function that takes nothing and returns whether it failed.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_run(entry: extern "C" fn() -> u8) -> i32 {
+    // SAFETY: each is given what it asks for, of memory that outlives it.
+    unsafe {
+        let mut attr = core::mem::MaybeUninit::<PthreadAttr>::uninit();
+        let mut thread = 0;
+        let started = pthread_attr_init(attr.as_mut_ptr()) == 0
+            && pthread_attr_setstacksize(attr.as_mut_ptr(), STACK_BYTES) == 0
+            && pthread_create(
+                &raw mut thread,
+                attr.as_ptr(),
+                run_on_stack,
+                entry as *mut _,
+            ) == 0;
+        if !started {
+            let mut out = Stderr::default();
+            // There is nowhere to report a failure to write to stderr.
+            let _ = writeln!(out, "error: no memory for the program's stack");
+            out.flush();
+            return 1;
+        }
+        let mut failed = core::ptr::null_mut();
+        pthread_join(thread, &raw mut failed);
+        i32::from(!failed.is_null())
+    }
+}
+
+/// Fail with the error of calls that have used up the stack, a `too_deep`
+/// (R0025): compiled code compares the stack pointer to [`STACK_LIMIT`] as a
+/// recursive function starts.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_too_deep() -> bool {
+    let bytes = i64::try_from(STACK_BYTES).unwrap_or(i64::MAX);
+    // SAFETY: the component is a valid integer.
+    status(|| unsafe { Err(fail_as(TOO_DEEP, &[("bytes", (&raw const bytes).cast())])) })
 }
 
 /// The site the program is at, which compiled code sets before each
@@ -5096,7 +5205,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 30] = [
+pub const KINDS: [&str; 31] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -5123,6 +5232,7 @@ pub const KINDS: [&str; 30] = [
     "not_of_type",
     "overlapping_subtypes",
     "broken_call_constraint",
+    "too_deep",
     "column_shared",
     "column_below_one",
     "constraint_violated",
@@ -5210,6 +5320,8 @@ pub const NOT_OF_TYPE: usize = place("not_of_type");
 pub const OVERLAPPING_SUBTYPES: usize = place("overlapping_subtypes");
 /// `broken_call_constraint`'s, as [`UNREADABLE_FILE`] is.
 pub const BROKEN_CALL_CONSTRAINT: usize = place("broken_call_constraint");
+/// `too_deep`'s, as [`UNREADABLE_FILE`] is.
+pub const TOO_DEEP: usize = place("too_deep");
 /// `column_shared`'s, as [`UNREADABLE_FILE`] is.
 pub const COLUMN_SHARED: usize = place("column_shared");
 /// `column_below_one`'s, as [`UNREADABLE_FILE`] is.
@@ -7263,6 +7375,19 @@ impl Write for Stderr {
 const O_RDONLY: i32 = 0;
 
 unsafe extern "C" {
+    #[cfg(not(test))]
+    fn pthread_attr_init(attr: *mut PthreadAttr) -> i32;
+    #[cfg(not(test))]
+    fn pthread_attr_setstacksize(attr: *mut PthreadAttr, size: usize) -> i32;
+    #[cfg(not(test))]
+    fn pthread_create(
+        thread: *mut usize,
+        attr: *const PthreadAttr,
+        start: extern "C" fn(*mut core::ffi::c_void) -> *mut core::ffi::c_void,
+        arg: *mut core::ffi::c_void,
+    ) -> i32;
+    #[cfg(not(test))]
+    fn pthread_join(thread: usize, result: *mut *mut core::ffi::c_void) -> i32;
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
     #[cfg(not(test))]
     fn open(path: *const u8, flags: i32, ...) -> i32;

@@ -691,10 +691,8 @@ operator main{} [
   that are purely local". They reach nothing else: they can't read or
   assign a variable of the program's (A0050, A0034), `call` an operator
   (A0034) or warn (A0035).
-- **It doesn't call itself,** directly or through others, whatever its
-  body is (A0036), yet: whether a recursive call would stop when the
-  compiler computes it, and how deep one can go when the program runs, are
-  still to be settled.
+- **It can call itself,** directly or through others: see
+  [Recursion](#recursion).
 - **A call is evaluated when compiling where its arguments are known
   then:** in an initial value, where variables have their initial values,
   and in a body, as `double{x: 21}` is, and in an `extend`'s or a
@@ -705,9 +703,10 @@ operator main{} [
   known only then, as a variable's value is in a body, so
   `scaled{x: 2, rate: rate}` above is 16 once `rate` is 4, and a failure
   in it stops the program, as one anywhere else does.
-- **A call of one whose statements decide what runs next is always made
-  when the program runs,** whatever its arguments, as they may not stop.
-  So an initial value can't call one, directly or through another (A0077).
+- **A call of one whose statements decide what runs next, or that calls
+  itself, is always made when the program runs,** whatever its arguments, as
+  they may not stop. So an initial value can't call one, directly or through
+  another (A0077).
 - **`f{}` calls a read-only operator without parameters,** and is its
   value, even where a variable or parameter is named `f` too: see
   [Names](#names-1).
@@ -864,6 +863,102 @@ operator share{total: integer, people: integer}: integer [
 ];
 
 operator main{} [];
+```
+
+### Recursion
+
+An operator can call itself, directly or through others, as RM Prescription 19
+says a relational expression can, and Tutorial D's `TRANCLO` does. This one
+makes values that its operand doesn't have, which is what `tclose` can't do:
+each town's distance along each way there.
+
+```trendy
+heading leg := { start: text, stop: text, km: integer };
+
+heading distance := { town: text, km: integer };
+
+/* The distances `known`, and those along the legs `legs` from them. */
+operator distances{legs: relation leg, known: relation distance}: relation distance [
+    var onward := join{legs rename {km as more}, known rename {town as start}};
+    var added := onward extend { total := km + more };
+    var all := known union added{stop, total} rename {stop as town, total as km};
+    if all = known then known else distances{legs, known: all}
+];
+
+operator main{} [
+    var legs := relation {
+        { start: "Xi'an", stop: "Dunhuang", km: 1700 },
+        { start: "Dunhuang", stop: "Kashgar", km: 1900 },
+        { start: "Dunhuang", stop: "Samarkand", km: 2700 },
+        { start: "Kashgar", stop: "Samarkand", km: 900 },
+    };
+    call debug_table{r: distances{legs, known: relation { { town: "Xi'an", km: 0 } }}};
+];
+```
+
+- **A tail call takes no stack and keeps no memory, however many follow.** This
+  is a guarantee, not an optimization: no flag or build turns it off, and a
+  program can count on it, so `distances` above needs no loop, and `known` lasts
+  only as long as the call it is given to. A call that closes a cycle of calls is
+  a tail call where it is in a tail position; no syntax says so. Before it runs,
+  its caller gives up what it holds, its local variables and what its statement
+  made, keeping only what the new arguments hold, and it returns to where its
+  caller would have.
+- **A tail position is** a read-only operator's value, a branch of an `if` in a
+  tail position, and the value of a value block in one; and an update operator's
+  last statement, and the last statement of a branch of an `if` statement in one.
+- **These hold for read-only and update operators, directly or through others:**
+  in each of the operators below, whose calls would use up any stack otherwise.
+- **A call with work left after it returns isn't a tail call:** an operand, as in
+  `n + sum_to{n: n - 1}`; an argument; a local variable's value; `treat`'s
+  operand, whose type is tested after; a call for each tuple of an `extend` or a
+  `where`; a statement before the last; a call in a loop or a transaction; and a
+  call whose `var` or `out` argument is a local variable of the caller's, which
+  it would give up. A `var` or `out` parameter of the caller's passed on is fine,
+  whose variable outlives the caller. A variable of the program's is never passed
+  to a call that closes a cycle, as the operators would use it by its own name too
+  (A0053).
+- **Those that aren't can go as deep as the stack allows,** a gibibyte, millions
+  of calls of a small operator. Going deeper is a failure like any other, a
+  `too_deep` (R0025), with a message and exit status 1.
+- **A failure's trace has no tail call's caller,** whose frame is gone, as a
+  loop's has none of its earlier times around. It has the last of them, and the
+  calls waiting: those it writes, if there are many, are the innermost and the
+  outermost.
+- **A call that reaches a cycle runs only when the program runs,** as a loop
+  does, whatever its arguments, as it may not stop. So an initial value can't make
+  one (A0077).
+- **What nothing could stop is an error:** a type's constraint that selects its
+  own type, a conversion that selects in the representation it converts, and a
+  constraint in an operator's braces that calls the operator, each of which runs
+  before anything could decide; a `fail` whose error's `message` leads back to it,
+  which would go on writing errors (A0036); and calls that give an operator's type
+  parameter ever larger types (A0041). A relation can't yet be defined from itself,
+  as SQL's `WITH RECURSIVE` does.
+
+```trendy
+operator even{n: integer}: boolean [
+    if n = 0 then true else odd{n: n - 1}
+];
+
+operator odd{n: integer}: boolean [
+    if n = 0 then false else even{n: n - 1}
+];
+
+operator count_down{n: integer, var calls: integer} [
+    calls := calls + 1;
+    if n > 0 then [
+        call count_down{n: n - 1, var calls};
+    ];
+];
+
+operator main{} [
+    var n := 100_000_000;
+    call debug_value{v: even{n}};
+    var calls := 0;
+    call count_down{n, var calls};
+    call debug_value{v: calls};
+];
 ```
 
 ### Generic operators
@@ -1454,6 +1549,10 @@ type overlapping_subtypes is error { { value: text, first: text, second: text } 
    `constraint`, in the braces of the operator it calls, reads, breaks that
    constraint (R0024). */
 type broken_call_constraint is error { { called: text, constraint: text } };
+
+/* Calls, each with work left when it returns, have used up the `bytes` of
+   the stack (R0025). */
+type too_deep is error { { bytes: integer } };
 
 /* A statement left the variables so that the constraint named
    `constraint` is false: its condition, or the operand of its `and` that

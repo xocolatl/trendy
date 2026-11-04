@@ -5788,7 +5788,7 @@ fn call_constraint_cycle(first: &Pending, names: &[String]) -> Diagnostic {
         ),
         [] => unreachable!("a cycle has a global in it"),
     };
-    Diagnostic::error(Code::Recursion, message, first.defined, "this constraint")
+    Diagnostic::error(Code::ConstraintCycle, message, first.defined, "this constraint")
         .with_note(
             "a constraint in an operator's braces is checked at every call of it, so one that calls the operator, directly or through others, would check itself again",
         )
@@ -6318,48 +6318,19 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
     };
     let names: Vec<String> = cycle.iter().map(shown).collect();
     let d = match first.global {
-        Global::Constraint(_) if first.representation.is_some() => {
-            let message = match names.as_slice() {
-                [own] => format!("{own} selects a value in its representation"),
-                [own, rest @ ..] => format!(
-                    "{own} selects a value in its representation through {}",
-                    trendy_diag::conjoin(rest)
-                ),
-                [] => unreachable!("a cycle has a global in it"),
-            };
-            Diagnostic::error(Code::Recursion, message, first.defined, "this constraint")
-                .with_note(
-                    "a possible representation's own constraints are checked whenever a value is selected in it, by its selector, `replace`, `update` or `load_csv`, so one that selects a value in it, directly or through operators, would check itself again",
-                )
-                .with_help("compute the condition from the components as given, without selecting a value in the representation")
-        }
-        Global::Constraint(_) => {
-            let ty = &first.name;
-            let message = match names.as_slice() {
-                [_] => format!("`{ty}`'s constraint selects a value of `{ty}`"),
-                [_, rest @ ..] => format!(
-                    "`{ty}`'s constraint selects a value of `{ty}` through {}",
-                    trendy_diag::conjoin(rest)
-                ),
-                [] => unreachable!("a cycle has a global in it"),
-            };
-            Diagnostic::error(Code::Recursion, message, first.defined, "this constraint")
-                .with_note(
-                    "a type's constraints are checked whenever a value of it is selected, by its selector, `replace` or `update`, so a constraint that selects one, directly or through operators, would check itself again",
-                )
-                .with_help("compute the condition from the components without selecting a value of the type")
-        }
+        Global::Constraint(_) => constraint_cycle(first, &names),
         Global::CallConstraint(_) => call_constraint_cycle(first, &names),
+        Global::Operator(_) if first.failing => failing_cycle(first, &names),
         Global::Operator(_) => {
             let message = match names.as_slice() {
                 [_] => format!("`{}` calls itself", first.name),
                 _ => format!("{} call each other", trendy_diag::conjoin(&names)),
             };
-            Diagnostic::error(Code::Recursion, message, first.defined, "defined here")
+            Diagnostic::error(Code::ConstraintCycle, message, first.defined, "defined here")
                 .with_note(
-                    "a read-only operator can't call itself, directly or through others, yet: whether a recursive call would stop when the compiler computes it, and how deep one can go when the program runs, are still to be settled",
+                    "a possible representation's conversion is computed whenever a value in it is, so one that leads back to itself, directly or through operators, would compute itself again",
                 )
-                .with_help("compute the value without calling the operator from its own body")
+                .with_help("compute the components from those it is given, without selecting a value in the representation")
         }
         Global::Variable(_) => {
             let message = match names.as_slice() {
@@ -6377,6 +6348,10 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
         }
     };
     cycle.iter().enumerate().fold(d, |d, (i, pending)| {
+        // The primary label says what a `fail` first in the cycle does.
+        if i == 0 && pending.failing && matches!(pending.global, Global::Operator(_)) {
+            return d;
+        }
         let next = &cycle[(i + 1) % cycle.len()];
         let (this, that) = (shown(pending), shown(next));
         let label = match (pending.global, next.global) {
@@ -6390,11 +6365,65 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
                 format!("{this} refers to itself")
             }
             (Global::Variable(_), _) => format!("{this} refers to {that}"),
+            _ if pending.failing => format!("{this} fails with an error {that} writes"),
             _ if next.global == pending.global => format!("{this} calls itself"),
             _ => format!("{this} calls {that}"),
         };
         d.with_secondary(pending.via, label)
     })
+}
+
+/// The cycle, whose globals are written `names`, through the type's constraint
+/// `first`, or a possible representation's own.
+fn constraint_cycle(first: &Pending, names: &[String]) -> Diagnostic {
+    if first.representation.is_some() {
+        let message = match names {
+            [own] => format!("{own} selects a value in its representation"),
+            [own, rest @ ..] => format!(
+                "{own} selects a value in its representation through {}",
+                trendy_diag::conjoin(rest)
+            ),
+            [] => unreachable!("a cycle has a global in it"),
+        };
+        return Diagnostic::error(Code::ConstraintCycle, message, first.defined, "this constraint")
+            .with_note(
+                "a possible representation's own constraints are checked whenever a value is selected in it, by its selector, `replace`, `update` or `load_csv`, so one that selects a value in it, directly or through operators, would check itself again",
+            )
+            .with_help("compute the condition from the components as given, without selecting a value in the representation");
+    }
+    let ty = &first.name;
+    let message = match names {
+        [_] => format!("`{ty}`'s constraint selects a value of `{ty}`"),
+        [_, rest @ ..] => format!(
+            "`{ty}`'s constraint selects a value of `{ty}` through {}",
+            trendy_diag::conjoin(rest)
+        ),
+        [] => unreachable!("a cycle has a global in it"),
+    };
+    Diagnostic::error(Code::ConstraintCycle, message, first.defined, "this constraint")
+        .with_note(
+            "a type's constraints are checked whenever a value of it is selected, by its selector, `replace` or `update`, so a constraint that selects one, directly or through operators, would check itself again",
+        )
+        .with_help("compute the condition from the components without selecting a value of the type")
+}
+
+/// The cycle, whose globals are written `names`, from the `fail` in `first`
+/// through the `message` that writes its error.
+fn failing_cycle(first: &Pending, names: &[String]) -> Diagnostic {
+    let message = match names {
+        [_] => format!("a `fail` in `{}` leads back to itself", first.name),
+        [own, rest @ ..] => format!(
+            "a `fail` in {own} leads back to itself through {}",
+            trendy_diag::conjoin(rest)
+        ),
+        [] => unreachable!("a cycle has a global in it"),
+    };
+    let label = "this `fail`, whose error `message` writes";
+    Diagnostic::error(Code::ConstraintCycle, message, first.via, label)
+        .with_note(
+            "an error that nothing takes is written with `message`, and one that `message` fails with is written in its turn, so a `fail` that writing its error can reach could go on writing errors without end",
+        )
+        .with_help("compute the message from the error's components, without an operator that can `fail`")
 }
 
 /// How a type's possible representations relate, for notes.
@@ -6738,7 +6767,7 @@ pub(crate) fn value_known_only_when_running(written: &Expr) -> Diagnostic {
         written.span(),
         "its statements, or an operator's it calls, are run then",
     )
-    .with_note("a variable's initial value is known when compiling, and the compiler runs no `if` statement, loop, transaction or `fail` statement, of a value block or of a read-only operator's body, directly or through the operators it calls, as they may not stop")
+    .with_note("a variable's initial value is known when compiling, and the compiler runs no `if` statement, loop, transaction or `fail` statement, of a value block or of a read-only operator's body, and no operator that calls itself, directly or through the operators it calls, as they may not stop")
     .with_help("declare the variable with its type, and assign it in `main`")
 }
 

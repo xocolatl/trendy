@@ -1,7 +1,7 @@
 //! Operators in expressions: what each token denotes, checking operand
 //! types, and evaluating and simplifying what can be known when compiling.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use trendy_diag::{Diagnostic, Span, closest};
 use trendy_hir as hir;
@@ -2268,6 +2268,10 @@ pub(crate) struct Bindings<'a> {
     /// reads a variable of the program's, so its value depends on its
     /// arguments alone.
     pub(crate) values: &'a HashMap<hir::OperatorId, hir::Expr>,
+    /// The read-only operators that reach a cycle of calls, or are in one,
+    /// whose calls are made only when the program runs, as they may not stop,
+    /// and whose values a call doesn't substitute.
+    pub(crate) recursive: &'a HashSet<hir::OperatorId>,
 }
 
 /// What [`substitute`] replaces in an expression, which it then folds
@@ -2363,6 +2367,9 @@ impl<'a> Substitution<'a> {
 /// Returns why evaluating the operator's value for the arguments fails.
 pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Failed> {
     constraints_hold(&call, bindings).map_err(Failed::CallConstraint)?;
+    if bindings.recursive.contains(&call.operator) {
+        return Ok(hir::Expr::Call(call));
+    }
     let known: Option<BTreeMap<String, hir::Value>> = call
         .args
         .iter()

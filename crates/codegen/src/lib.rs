@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
+use cranelift_codegen::Context;
 use cranelift_codegen::ir::{
-    AbiParam, Endianness, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value, types,
+    AbiParam, Endianness, InstBuilder, MemFlagsData, Signature, StackSlotData, StackSlotKind,
+    Value, types,
 };
-use cranelift_codegen::isa::TargetFrontendConfig;
+use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names};
@@ -15,9 +17,9 @@ use trendy_lir as lir;
 ///
 /// Every function becomes a local symbol named `trendy_op_<name>`, which
 /// returns whether it failed, a byte. A C-ABI `main` is emitted alongside
-/// it that calls the program's entry function and returns 1 if it failed
-/// and 0 if not, so the object links against the platform's C startup
-/// code.
+/// it that has the runtime run the program's entry function, on a stack of its
+/// own, and returns 1 if it failed and 0 if not, so the object links against
+/// the platform's C startup code.
 /// Variables become local data symbols named `trendy_var_<name>`, and
 /// constants `trendy_const_<index>`. Runtime functions are imported by their
 /// symbols, for the linker to resolve against the runtime library.
@@ -56,6 +58,9 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
         .iter()
         .map(|f| {
             let mut signature = module.make_signature();
+            if f.recursive {
+                signature.call_conv = CallConv::Tail;
+            }
             // The parameters' address, then the result's.
             for _ in f.params.iter().chain(&f.result) {
                 signature.params.push(AbiParam::new(pointer));
@@ -78,6 +83,7 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
         runtime: HashMap::new(),
         site: None,
         failure: None,
+        stack_limit: None,
     };
     let mut ctx = functions.module.make_context();
     let mut fctx = FunctionBuilderContext::new();
@@ -98,30 +104,77 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
     }
 
     let mut module = functions.module;
-    let mut entry_sig = module.make_signature();
-    entry_sig.returns.push(AbiParam::new(types::I32));
-    let entry_id = module
-        .declare_function("main", Linkage::Export, &entry_sig)
+    let entry = functions.function_ids[program.entry.0];
+    define_main(&mut module, entry, &mut ctx, &mut fctx)?;
+    module.finish().emit().map_err(|e| e.to_string())
+}
+
+/// The C-ABI `main`, which has the runtime run the program's function `entry`,
+/// whatever its calling convention, through a function of the system's.
+fn define_main(
+    module: &mut ObjectModule,
+    entry: FuncId,
+    ctx: &mut Context,
+    fctx: &mut FunctionBuilderContext,
+) -> Result<(), String> {
+    let pointer = module.target_config().pointer_type();
+    let mut shim_signature = module.make_signature();
+    shim_signature.returns.push(AbiParam::new(types::I8));
+    let shim = module
+        .declare_function("trendy_entry", Linkage::Local, &shim_signature)
         .map_err(|e| e.to_string())?;
-    ctx.func.signature = entry_sig;
+    define_returning(module, shim, shim_signature, ctx, fctx, |module, b| {
+        let entry = module.declare_func_in_func(entry, b.func);
+        let call = b.ins().call(entry, &[]);
+        b.inst_results(call)[0]
+    })?;
+    let mut run_signature = module.make_signature();
+    run_signature.params.push(AbiParam::new(pointer));
+    run_signature.returns.push(AbiParam::new(types::I32));
+    let run = module
+        .declare_function(
+            lir::RuntimeFn::Run.symbol(),
+            Linkage::Import,
+            &run_signature,
+        )
+        .map_err(|e| e.to_string())?;
+    let mut main_signature = module.make_signature();
+    main_signature.returns.push(AbiParam::new(types::I32));
+    let main = module
+        .declare_function("main", Linkage::Export, &main_signature)
+        .map_err(|e| e.to_string())?;
+    define_returning(module, main, main_signature, ctx, fctx, |module, b| {
+        let shim = module.declare_func_in_func(shim, b.func);
+        let run = module.declare_func_in_func(run, b.func);
+        let address = b.ins().func_addr(pointer, shim);
+        let call = b.ins().call(run, &[address]);
+        b.inst_results(call)[0]
+    })
+}
+
+/// Define the function `id`, of one block, which returns the value `body` adds.
+fn define_returning(
+    module: &mut ObjectModule,
+    id: FuncId,
+    signature: Signature,
+    ctx: &mut Context,
+    fctx: &mut FunctionBuilderContext,
+    body: impl FnOnce(&mut ObjectModule, &mut FunctionBuilder) -> Value,
+) -> Result<(), String> {
+    let config = module.target_config();
+    ctx.func.signature = signature;
     {
-        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-        let entry = b.create_block();
-        b.switch_to_block(entry);
-        b.seal_block(entry);
-        let entry_fn = module.declare_func_in_func(functions.function_ids[program.entry.0], b.func);
-        let call = b.ins().call(entry_fn, &[]);
-        let failed = b.inst_results(call)[0];
-        let status = b.ins().uextend(types::I32, failed);
-        b.ins().return_(&[status]);
+        let mut b = FunctionBuilder::new(&mut ctx.func, fctx);
+        let start = b.create_block();
+        b.switch_to_block(start);
+        b.seal_block(start);
+        let value = body(module, &mut b);
+        b.ins().return_(&[value]);
         b.finalize(config);
     }
-    module
-        .define_function(entry_id, &mut ctx)
-        .map_err(|e| e.to_string())?;
-    module.clear_context(&mut ctx);
-
-    module.finish().emit().map_err(|e| e.to_string())
+    module.define_function(id, ctx).map_err(|e| e.to_string())?;
+    module.clear_context(ctx);
+    Ok(())
 }
 
 /// Everything needed to build function bodies.
@@ -139,6 +192,8 @@ struct Functions {
     runtime: HashMap<&'static str, FuncId>,
     /// The runtime's `trendy_rt_site`, imported when first set.
     site: Option<DataId>,
+    /// The runtime's `trendy_rt_stack_limit`, imported when first read.
+    stack_limit: Option<DataId>,
     /// Where a failure in the block being built goes, its
     /// [`lir::Block::failure`], if anything in it can fail.
     failure: Option<cranelift_codegen::ir::Block>,
@@ -212,6 +267,17 @@ impl Functions {
                     let failure = self.failure_target()?;
                     b.ins().jump(failure, &[]);
                 }
+                lir::Terminator::TailCall { function, args } => {
+                    let callee = self
+                        .module
+                        .declare_func_in_func(self.function_ids[function.0], b.func);
+                    let mut given = Vec::new();
+                    if let Some(args) = args {
+                        given.push(self.address(args, &frame, &mut b)?);
+                    }
+                    given.extend(frame.result);
+                    b.ins().return_call(callee, &given);
+                }
             }
         }
         self.failure = None;
@@ -227,6 +293,7 @@ impl Functions {
         b: &mut FunctionBuilder,
     ) -> Result<(), String> {
         match inst {
+            lir::Inst::CheckStack => self.stack_checked(b)?,
             lir::Inst::Copy { dst, src, layout } => {
                 let dst = self.address(dst, frame, b)?;
                 let src = self.address(src, frame, b)?;
@@ -561,6 +628,41 @@ impl Functions {
             let failed = b.inst_results(call)[0];
             self.unless_failed(failed, b)?;
         }
+        Ok(())
+    }
+
+    /// Fail if the stack pointer is below the runtime's limit, in a cold
+    /// block, and carry on in a new block otherwise.
+    fn stack_checked(&mut self, b: &mut FunctionBuilder) -> Result<(), String> {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        let pointer = self.config.pointer_type();
+        let limit = if let Some(limit) = self.stack_limit {
+            limit
+        } else {
+            let limit = self
+                .module
+                .declare_data("trendy_rt_stack_limit", Linkage::Import, false, false)
+                .map_err(|e| e.to_string())?;
+            self.stack_limit = Some(limit);
+            limit
+        };
+        let limit = self.module.declare_data_in_func(limit, b.func);
+        let limit = b.ins().symbol_value(pointer, limit);
+        let limit = b.ins().load(pointer, MemFlagsData::trusted(), limit, 0);
+        let stack = b.ins().get_stack_pointer(pointer);
+        let room = b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, stack, limit);
+        let (carry_on, too_deep) = (b.create_block(), b.create_block());
+        b.ins().brif(room, carry_on, &[], too_deep, &[]);
+        b.set_cold_block(too_deep);
+        b.switch_to_block(too_deep);
+        let id = self.runtime_function(lir::RuntimeFn::TooDeep, &[])?;
+        let callee = self.module.declare_func_in_func(id, b.func);
+        b.ins().call(callee, &[]);
+        let failure = self.failure_target()?;
+        b.ins().jump(failure, &[]);
+        b.switch_to_block(carry_on);
         Ok(())
     }
 
@@ -1087,6 +1189,7 @@ mod tests {
         lir::Program {
             functions: vec![lir::Function {
                 name: "main".to_string(),
+                recursive: false,
                 params: None,
                 result: None,
                 slots: Vec::new(),
@@ -1201,6 +1304,7 @@ mod tests {
         let args = lir::Layout::Struct(vec![lir::Layout::I64]);
         let callee = lir::Function {
             name: "show".to_string(),
+            recursive: false,
             params: Some(args.clone()),
             result: None,
             slots: Vec::new(),
@@ -1221,6 +1325,7 @@ mod tests {
         };
         let main = lir::Function {
             name: "main".to_string(),
+            recursive: false,
             params: None,
             result: None,
             slots: vec![args],
@@ -1282,9 +1387,9 @@ mod tests {
     fn the_runtime_functions_that_fail_return_whether_they_did() {
         let runtime = include_str!("../../runtime/src/lib.rs");
         let exported: std::collections::BTreeMap<&str, bool> = runtime
-            .match_indices("extern \"C\" fn ")
-            .map(|(at, keyword)| {
-                let rest = &runtime[at + keyword.len()..];
+            .match_indices("extern \"C\" fn trendy_rt_")
+            .map(|(at, _)| {
+                let rest = &runtime[at + "extern \"C\" fn ".len()..];
                 let signature = &rest[..rest.find('{').unwrap()];
                 let name = &rest[..rest.find('(').unwrap()];
                 (name, signature.trim_end().ends_with("-> bool"))

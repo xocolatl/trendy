@@ -192,7 +192,7 @@ fn variables() {
 
 /// What `examples/operators.trendy` writes last, of its operators with
 /// `var` and `out` parameters.
-const PARAMETERS: [&str; 16] = [
+const PARAMETERS: [&str; 29] = [
     // `var` parameters: a local relation with a dish added, the
     // program's with another, and a price discounted by 10%, then
     // twice more.
@@ -214,6 +214,20 @@ const PARAMETERS: [&str; 16] = [
     "563",
     r#""cheapest and dearest""#,
     "tuple { high: 1500, low: 937 }",
+    // Recursion: a hundred million calls in constant stack.
+    "\"an even number\"",
+    "true",
+    "\"left\"",
+    "0",
+    "┌──────┬───────────┐",
+    "│ km   │ town      │",
+    "├──────┼───────────┤",
+    "│    0 │ Xi'an     │",
+    "│ 1700 │ Dunhuang  │",
+    "│ 3600 │ Kashgar   │",
+    "│ 4400 │ Samarkand │",
+    "│ 4500 │ Samarkand │",
+    "└──────┴───────────┘",
 ];
 
 /// What `operators` writes before `PARAMETERS`.
@@ -6257,4 +6271,809 @@ fn explain() {
             .unwrap()
             .contains("known codes: P0001,")
     );
+}
+
+/// The most memory the executable at `path` held as it ran, in bytes, and that
+/// it ran without failing.
+fn peak_memory(path: &Path) -> u64 {
+    let (flag, label, unit) = if cfg!(target_os = "macos") {
+        ("-l", "maximum resident set size", 1)
+    } else {
+        ("-v", "Maximum resident set size (kbytes)", 1024)
+    };
+    let run = Command::new("/usr/bin/time")
+        .arg(flag)
+        .arg(path)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    let line = stderr.lines().find(|line| line.contains(label)).unwrap();
+    let digits: String = line.chars().filter(char::is_ascii_digit).collect();
+    digits.parse::<u64>().unwrap() * unit
+}
+
+/// The source of a program that compiles and runs `operators`, with `LEFT` in
+/// them being `left`, and the most memory it holds as it runs.
+fn peak_memory_of(name: &str, operators: &str, left: u32) -> u64 {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let input = dir.join(format!("{name}-{left}.trendy"));
+    std::fs::write(&input, operators.replace("LEFT", &left.to_string())).unwrap();
+    let output = dir.join(format!("{name}-{left}"));
+    let (code, stderr) = build_and_run(&input, &output, &workspace_root());
+    assert_eq!(code, 0, "{stderr}");
+    peak_memory(&output)
+}
+
+/// Programs that each make a thousand tuples `LEFT` times, kept by what the name says.
+const HOLDING_MEMORY: [(&str, &str); 10] = [
+    (
+        "an_argument",
+        "operator churn{r: relation { value: integer }, left: integer}: integer [
+            if left = 0 then count{r} else churn{r: series{from: left, to: left + 999}, left: left - 1}
+        ];
+        operator main{} [
+            var left := LEFT;
+            call debug_value{v: churn{r: relation {}, left}};
+        ];",
+    ),
+    (
+        "a_bound_value",
+        "operator churn{left: integer}: integer [
+            var r := series{from: left, to: left + 999};
+            if left = 0 then count{r} else churn{left: left - count{r} + 999}
+        ];
+        operator main{} [
+            var left := LEFT;
+            call debug_value{v: churn{left}};
+        ];",
+    ),
+    (
+        "a_value_blocks_variable",
+        "operator churn{left: integer}: integer [
+            var r: relation { value: integer } := relation {};
+            if left > 0 then [
+                r := series{from: left, to: left + 999};
+            ];
+            if left = 0 then count{r} else churn{left: left - count{r} + 999}
+        ];
+        operator main{} [
+            var left := LEFT;
+            call debug_value{v: churn{left}};
+        ];",
+    ),
+    (
+        "what_its_arguments_are_made_of",
+        "operator churn{n: integer, left: integer}: integer [
+            if left = 0 then n else churn{n: count{r: series{from: left, to: left + 999}}, left: left - 1}
+        ];
+        operator main{} [
+            var left := LEFT;
+            call debug_value{v: churn{n: 0, left}};
+        ];",
+    ),
+    (
+        "an_update_operators_variable",
+        "operator churn{left: integer, var kept: integer} [
+            var r := series{from: left, to: left + 999};
+            kept := count{r};
+            if left > 0 then [
+                call churn{left: left - 1, var kept};
+            ];
+        ];
+        operator main{} [
+            var left := LEFT;
+            var kept := 0;
+            call churn{left, var kept};
+            call debug_value{v: kept};
+        ];",
+    ),
+    (
+        "an_update_operators_argument",
+        "operator churn{r: relation { value: integer }, left: integer, var kept: integer} [
+            kept := count{r};
+            if left > 0 then [
+                call churn{r: series{from: left, to: left + 999}, left: left - 1, var kept};
+            ];
+        ];
+        operator main{} [
+            var left := LEFT;
+            var kept := 0;
+            call churn{r: relation {}, left, var kept};
+            call debug_value{v: kept};
+        ];",
+    ),
+    (
+        "as_it_returns",
+        "operator given{r: relation { value: integer }, n: integer}: integer [
+            if n = 0 then count{r} else given{r, n: n - 1}
+        ];
+        operator main{} [
+            var left := LEFT;
+            while left > 0 loop [
+                left := left - given{r: series{from: left, to: left + 999}, n: 1} + 999;
+            ];
+        ];",
+    ),
+    (
+        "as_an_update_operator_returns",
+        "operator given{r: relation { value: integer }, n: integer} [
+            if n > 0 then [
+                call given{r, n: n - 1};
+            ];
+        ];
+        operator main{} [
+            var left := LEFT;
+            while left > 0 loop [
+                call given{r: series{from: left, to: left + 999}, n: 1};
+                left := left - 1;
+            ];
+        ];",
+    ),
+    (
+        "as_it_fails",
+        "operator given{r: relation { value: integer }, n: integer}: integer [
+            if n = 0 then 1 div (count{r} - 1000) else given{r, n: n - 1}
+        ];
+        operator main{} [
+            var left := LEFT;
+            var errors: relation transaction_collection := relation {};
+            while left > 0 loop [
+                var r := series{from: left, to: left + 999};
+                transaction collecting errors [
+                    left := left - given{r, n: 1};
+                ];
+                left := left - 1;
+            ];
+        ];",
+    ),
+    (
+        "through_others",
+        "operator churn{r: relation { value: integer }, left: integer}: integer [
+            if left = 0 then count{r} else other{r: series{from: left, to: left + 999}, left: left - 1}
+        ];
+        operator other{r: relation { value: integer }, left: integer}: integer [
+            churn{r: series{from: left, to: left + count{r} - 1}, left}
+        ];
+        operator main{} [
+            var left := LEFT;
+            call debug_value{v: churn{r: relation {}, left}};
+        ];",
+    ),
+];
+
+/// A tail call gives up what its frame holds, whatever holds it: the most
+/// memory these hold doesn't grow with how many calls follow, though each makes
+/// a thousand tuples, which all together would come to 160 MB.
+#[test]
+fn a_tail_call_keeps_no_memory() {
+    for (name, source) in HOLDING_MEMORY {
+        let few = peak_memory_of(name, source, 200);
+        let many = peak_memory_of(name, source, 20_000);
+        assert!(many < few + (1 << 20), "{name}: {few} bytes, then {many}");
+    }
+}
+
+/// Operators of each shape a tail position has, each called twenty million deep.
+const TAIL_CALLS: &str = r#"
+var ticks := 0;
+
+operator countdown{n: integer}: integer [
+    if n = 0 then 0 else countdown{n: n - 1}
+];
+
+operator even{n: integer}: boolean [
+    if n = 0 then true else odd{n: n - 1}
+];
+
+operator odd{n: integer}: boolean [
+    if n = 0 then false else even{n: n - 1}
+];
+
+/* In a value block, and after a binding, and in the `if`s of each. */
+operator blocks{n: integer}: integer [
+    var half := n div 2;
+    [
+        var left := half + half + n mod 2;
+        if left = 0 then 7 else if left mod 2 = 0 then blocks{n: left - 1} else blocks{n: left - 1}
+    ]
+];
+
+/* A statement that decides what runs next: the body is a value block too. */
+operator stated{n: integer}: integer [
+    var left := n;
+    if left > 0 then [
+        left := left - 1;
+    ];
+    if n = 0 then 8 else stated{n: left}
+];
+
+/* Arguments it passes on as they are, and that it returns at the end. */
+operator kept{r: relation { v: integer }, t: text, n: integer}: text [
+    if n = 0 then t || to_text{from: count{r}} else kept{r, t, n: n - 1}
+];
+
+operator generic{a: T, n: integer}: T
+    types { T: any type }
+[
+    if n = 0 then a else generic{a, n: n - 1}
+];
+
+operator checked{n: integer, constraint n >= 0}: integer [
+    if n = 0 then 9 else checked{n: n - 1}
+];
+
+/* Update operators: the last statement, of a branch, of a branch. */
+operator down{n: integer} [
+    if n > 0 then [
+        if n > 1 then [
+            call down{n: n - 1};
+        ] else [
+            call down{n: 0};
+        ];
+    ];
+];
+
+/* The call is the last statement, with none around it. */
+operator around{} [
+    ticks := ticks + 1;
+    if ticks < 20_000_000 then [
+        call again{};
+    ];
+];
+
+operator again{} [
+    call around{};
+];
+
+/* A `var` parameter passed on, a variable's passed by a `var` parameter, and
+   an `out` parameter. */
+operator summed{n: integer, var total: integer} [
+    total := total + n;
+    if n > 0 then [
+        call summed{n: n - 1, var total};
+    ];
+];
+
+operator on_global{n: integer} [
+    ticks := n;
+    if n > 0 then [
+        call by_global{n: n - 1, var left: ticks};
+    ];
+];
+
+operator by_global{n: integer, var left: integer} [
+    if n > 0 then [
+        left := n;
+        call by_global{n: n - 1, var left};
+    ];
+];
+
+operator up_even{n: integer, out result: boolean} [
+    if n = 0 then [
+        result := true;
+    ] else [
+        call up_odd{n: n - 1, out result};
+    ];
+];
+
+operator up_odd{n: integer, out result: boolean} [
+    if n = 0 then [
+        result := false;
+    ] else [
+        call up_even{n: n - 1, out result};
+    ];
+];
+
+operator main{} [
+    var n := 20_000_000;
+    call debug_value{v: countdown{n}};
+    call debug_value{v: even{n}};
+    call debug_value{v: odd{n}};
+    call debug_value{v: blocks{n}};
+    call debug_value{v: stated{n}};
+    var made := relation { { v: n }, { v: n + 1 } };
+    call debug_value{v: kept{r: made, t: "tuples: " || to_text{from: 1 + 1}, n}};
+    call debug_value{v: generic{a: n, n}};
+    call debug_value{v: generic{a: "a" || to_text{from: n}, n}};
+    call debug_value{v: count{r: generic{a: made, n}}};
+    call debug_value{v: checked{n}};
+    call down{n};
+    call around{};
+    var total := 0;
+    call summed{n: 1000, var total};
+    call debug_value{v: total};
+    call summed{n, var total};
+    call on_global{n};
+    call debug_value{v: ticks};
+    var result := false;
+    call up_even{n, out result};
+    call debug_value{v: result};
+];
+"#;
+
+/// None of these can be done with a frame for each call: a million deep is
+/// nothing, but twenty million, of frames of a hundred bytes or so, is more than
+/// the stack has.
+#[test]
+fn tail_calls_take_no_stack() {
+    let (code, stderr) = run_source("tail_calls", TAIL_CALLS);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "0",
+            "true",
+            "false",
+            "7",
+            "8",
+            "\"tuples: 22\"",
+            "20000000",
+            "\"a20000000\"",
+            "2",
+            "9",
+            "500500",
+            "1",
+            "true",
+        ]
+    );
+}
+
+/// A specification whose versions call each other, and one whose version ends it.
+const TAIL_VERSIONS: &str = r#"
+type step union;
+
+type forward is step { { by: integer } };
+
+type back is step { { by: integer, name: text } };
+
+operator walk{at: step, n: integer}: text;
+
+operator walk{at: forward, n: integer}: text [
+    if n = 0 then "forward " || to_text{from: at.by} else walk{at: back{by: n, name: "b" || to_text{from: n}}, n: n - 1}
+];
+
+operator walk{at: back, n: integer}: text [
+    if n = 0 then at.name else walk{at: forward{by: n}, n: n - 1}
+];
+
+/* A version that calls nothing is in the cycle its specification is in, as a
+   tail call can run it. */
+type ending union;
+
+type going is ending { { by: integer } };
+
+type done is ending { { name: text } };
+
+operator finish{at: ending, n: integer}: text;
+
+operator finish{at: going, n: integer}: text [
+    if n = 0 then finish{at: done{name: "done " || to_text{from: at.by}}, n} else finish{at: going{by: n}, n: n - 1}
+];
+
+operator finish{at: done, n: integer}: text [
+    at.name
+];
+
+operator main{} [
+    var n := 20_000_000;
+    call debug_value{v: walk{at: forward{by: 0}, n}};
+    n := n + 1;
+    call debug_value{v: walk{at: forward{by: 0}, n}};
+    call debug_value{v: finish{at: going{by: 0}, n}};
+];
+"#;
+
+/// Whichever version a call of a specification fits, a tail call runs it in
+/// place of its caller, as a call of the operator would be.
+#[test]
+fn a_tail_call_runs_a_version() {
+    let (code, stderr) = run_source("tail_versions", TAIL_VERSIONS);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["\"forward 1\"", "\"b1\"", "\"done 1\""]
+    );
+}
+
+/// What `TAIL_VALUES` writes.
+const TAIL_VALUES_WRITTEN: [&str; 41] = [
+    "10",
+    "┌───────┐",
+    "│ value │",
+    "├───────┤",
+    "│     1 │",
+    "│     2 │",
+    "└───────┘",
+    "\"3\"",
+    "3",
+    "┌───────┬──────┐",
+    "│ level │ wire │",
+    "├───────┼──────┤",
+    "│     3 │ a    │",
+    "│     3 │ b    │",
+    "│     3 │ c    │",
+    "│     3 │ d    │",
+    "└───────┴──────┘",
+    "relation { level: integer, wire: text } { { level: 3, wire: \"a\" } }",
+    "\"1x0\"",
+    "\"n3!!!\"",
+    "\"321..1..21..1..\"",
+    "\"s3yyy\"",
+    "\"1x0\"",
+    "┌───────┬──────┐",
+    "│ level │ wire │",
+    "├───────┼──────┤",
+    "│     1 │ w1   │",
+    "└───────┴──────┘",
+    "\"pzzzz\"",
+    "┌──────┬───┐",
+    "│ made │ n │",
+    "├──────┼───┤",
+    "│ 1x0  │ 1 │",
+    "│ 1x0  │ 2 │",
+    "└──────┴───┘",
+    "┌──────┬───┐",
+    "│ made │ n │",
+    "├──────┼───┤",
+    "│ k!   │ 1 │",
+    "│ k!!  │ 2 │",
+    "└──────┴───┘",
+];
+
+/// Values of each kind a call in a cycle takes, holds and gives.
+const TAIL_VALUES: &str = r#"
+heading signal := { wire: text, level: integer };
+
+/* Returns what it was given, once nothing new comes. */
+operator settled{gates: relation { wire: text, from_wire: text }, known: relation signal}: relation signal [
+    var lit := (gates rename {wire as out_wire, from_wire as wire} join known){out_wire, level} rename {out_wire as wire};
+    var more := known union lit;
+    if more = known then known else settled{gates, known: more}
+];
+
+/* Returns what a binding holds. */
+operator last_made{n: integer, s: text}: text [
+    var made := s || "x" || to_text{from: n};
+    if n = 0 then made else last_made{n: n - 1, s: to_text{from: count{r: series{from: 1, to: n}}}}
+];
+
+/* Returns a parameter's part. */
+operator part{t: tuple { name: text, n: integer }}: text [
+    if t.n = 0 then t.name else part{t: tuple { name: t.name || "!", n: t.n - 1 }}
+];
+
+/* Work left with the result, which is a value made by a tail call. */
+operator doubled{n: integer}: text [
+    if n = 0 then "." else [
+        var below := doubled{n: n - 1};
+        to_text{from: n} || below || below
+    ]
+];
+
+/* In a value block, a local variable as its value. */
+operator local_value{n: integer, s: text}: text [
+    var kept := s;
+    if n > 0 then [
+        kept := kept || "y";
+    ];
+    if n = 0 then kept else local_value{n: n - 1, s: kept}
+];
+
+/* An update operator, whose argument its variable held. */
+var shared := relation { { wire: "start", level: 1 } };
+
+operator replaced{r: relation signal, n: integer} [
+    shared := relation { { wire: "w" || to_text{from: n}, level: n } };
+    if n = 0 then [
+        call debug_table{r};
+    ] else [
+        call replaced{r: shared, n: n - 1};
+    ];
+];
+
+/* A local variable that's an argument, and passed on. */
+operator passing{n: integer, s: text, var out_text: text} [
+    var mine := s || "z";
+    out_text := mine;
+    if n > 0 then [
+        call passing{n: n - 1, s: mine, var out_text};
+    ];
+];
+
+/* Returns its argument, the only thing holding it once a tail call has left the
+   statement that made it, with nothing of its own to make. */
+operator passes_on{r: relation { value: integer }, n: integer}: relation { value: integer } [
+    if n = 0 then r else if n = 1 then fresh{n: 0} else passes_on{r, n: n - 1}
+];
+
+operator fresh{n: integer}: relation { value: integer } [
+    passes_on{r: series{from: 1, to: 2 + n}, n}
+];
+
+/* Reads its parameter after a call that ends in a tail call of itself, which
+   gives that other arguments. */
+operator reread{n: integer}: integer [
+    if n <= 0 then 0 else tail_to_reread{n: n - 1} + n
+];
+
+operator tail_to_reread{n: integer}: integer [
+    reread{n}
+];
+
+/* Of two results, of which one points to something and the other doesn't,
+   whichever is lowered first: `digits` makes a text for `parsed`, which holds
+   it, whatever called it. */
+operator digits{n: integer}: text [
+    if n = 0 then "0" else to_text{from: parsed{n: n - 1} + 1}
+];
+
+operator parsed{n: integer}: integer [
+    parse_integer{from: digits{n}}
+];
+
+operator main{} [
+    var n := 3;
+    call debug_value{v: reread{n: n + 1}};
+    call debug_table{r: passes_on{r: relation {}, n}};
+    call debug_value{v: digits{n}};
+    call debug_value{v: parsed{n}};
+    var gates := relation {
+        { wire: "b", from_wire: "a" },
+        { wire: "c", from_wire: "b" },
+        { wire: "d", from_wire: "c" },
+    };
+    var known := relation { { wire: "a", level: n } };
+    call debug_table{r: settled{gates, known}};
+    call debug_value{v: known};
+    call debug_value{v: last_made{n, s: "s"}};
+    call debug_value{v: part{t: tuple { name: "n" || to_text{from: n}, n }}};
+    call debug_value{v: doubled{n}};
+    call debug_value{v: local_value{n, s: "s" || to_text{from: n}}};
+    /* Called with known arguments too, when the program runs. */
+    call debug_value{v: last_made{n: 1, s: "t"}};
+    call replaced{r: shared, n};
+    var written := "";
+    call passing{n, s: "p", var out_text: written};
+    call debug_value{v: written};
+    /* For each tuple, of a relation known when compiling and of one that isn't. */
+    var given := relation { { n: 2 }, { n: 1 } };
+    call debug_table{r: given extend { made := last_made{n, s: "e"} }};
+    call debug_table{r: relation { { n: 2 }, { n: 1 } } extend { made := part{t: tuple { name: "k", n }} }};
+];
+"#;
+
+/// What a call in a cycle takes and gives holds up through tail calls and calls
+/// with work left alike, freed memory being scribbled over: what it was given
+/// as it returns it, what it made, what a binding held, and parts of each.
+#[test]
+fn values_outlive_tail_calls() {
+    let (code, stderr) = run_source("tail_values", TAIL_VALUES);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), TAIL_VALUES_WRITTEN);
+}
+
+/// Each program's name, its source, and what it writes before it fails.
+const TOO_DEEP: [(&str, &str, &str); 9] = [
+    (
+        "too_deep_operand",
+        "operator sum_to{n: integer}: integer [
+            if n = 0 then 0 else n + sum_to{n: n - 1}
+        ];
+        operator main{} [
+            var n := 1000;
+            call debug_value{v: sum_to{n}};
+            n := 100_000_000;
+            call debug_value{v: sum_to{n}};
+        ];",
+        "500500\n",
+    ),
+    (
+        "too_deep_for_each_tuple",
+        "heading contains := { parent: text, child: text };
+        operator size{part: text, parts: relation contains}: integer [
+            1 + sum{r: (parts where parent = part) extend { under := size{part: child, parts} }, of: under}
+        ];
+        operator main{} [
+            var tree: relation contains := relation {
+                { parent: \"bike\", child: \"wheel\" },
+                { parent: \"bike\", child: \"frame\" },
+                { parent: \"wheel\", child: \"spoke\" },
+                { parent: \"wheel\", child: \"hub\" },
+            };
+            call debug_value{v: size{part: \"bike\", parts: tree}};
+            var ring: relation contains := relation {
+                { parent: \"a\", child: \"b\" },
+                { parent: \"b\", child: \"a\" },
+            };
+            call debug_value{v: size{part: \"a\", parts: ring}};
+        ];",
+        "5\n",
+    ),
+    (
+        "too_deep_before_the_last_statement",
+        "operator deep{n: integer} [
+            if n > 0 then [
+                call deep{n: n - 1};
+                call debug_value{v: n};
+            ];
+        ];
+        operator main{} [
+            var n := 100_000_000;
+            call deep{n};
+        ];",
+        "",
+    ),
+    (
+        "too_deep_local_argument",
+        "operator deep{n: integer, var total: integer} [
+            var mine := total;
+            if n > 0 then [
+                call deep{n: n - 1, var total: mine};
+            ];
+        ];
+        operator main{} [
+            var total := 0;
+            var n := 100_000_000;
+            call deep{n, var total};
+        ];",
+        "",
+    ),
+    (
+        "too_deep_in_a_statement",
+        "operator deep{n: integer}: integer [
+            var below := 0;
+            if n > 0 then [
+                below := deep{n: n - 1};
+            ];
+            below
+        ];
+        operator main{} [
+            var n := 100_000_000;
+            call debug_value{v: deep{n}};
+        ];",
+        "",
+    ),
+    (
+        "too_deep_in_a_value_block",
+        "operator deep{n: integer}: integer [
+            1 + [
+                var left := n - 1;
+                deep{n: left}
+            ]
+        ];
+        operator main{} [
+            var n := 100_000_000;
+            call debug_value{v: deep{n}};
+        ];",
+        "",
+    ),
+    (
+        "too_deep_in_a_loop",
+        "operator deep{n: integer} [
+            var more := n > 0;
+            while more loop [
+                call deep{n: n - 1};
+                more := false;
+            ];
+        ];
+        operator main{} [
+            var n := 100_000_000;
+            call deep{n};
+        ];",
+        "",
+    ),
+    (
+        "too_deep_in_a_transaction",
+        "operator deep{n: integer} [
+            transaction [
+                if n > 0 then [
+                    call deep{n: n - 1};
+                ];
+            ];
+        ];
+        operator main{} [
+            var n := 100_000_000;
+            call deep{n};
+        ];",
+        "",
+    ),
+    (
+        "too_deep_treated",
+        "type thing union;
+        type small is thing { { n: integer } };
+        type large is thing { { m: integer } };
+        operator outer{n: integer}: small [
+            treat inner{n: n + 1} as small
+        ];
+        operator inner{n: integer}: thing [
+            outer{n}
+        ];
+        operator main{} [
+            var n := 3;
+            call debug_value{v: outer{n}};
+        ];",
+        "",
+    ),
+];
+
+/// A call with work left after it, whether it is a call of a read-only or an
+/// update operator's, fails like anything else once they use up the stack,
+/// writing the ends of the calls and exiting with status 1: however they got
+/// there, and a tail call among them makes no difference.
+#[test]
+fn calls_with_work_left_fail_when_they_go_too_deep() {
+    for (name, source, before) in TOO_DEEP {
+        let (code, stderr) = run_source(name, source);
+        assert_eq!(code, 1, "{name}: {stderr}");
+        let written = stderr
+            .strip_prefix(before)
+            .unwrap_or_else(|| panic!("{name}: {stderr}"));
+        assert!(
+            written.starts_with(
+                "error[R0025]: the calls went too deep: those with work left when they return \
+                 used up the 1073741824 bytes of the stack\n"
+            ),
+            "{name}: {stderr}"
+        );
+        assert!(
+            stderr.contains("calls more, the outermost:"),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.lines().count() < 30, "{name}: {stderr}");
+    }
+}
+
+/// A transaction takes a `too_deep`, as it does any other error, and then the
+/// stack is as it was: the calls that fail give up what they hold on the way.
+#[test]
+fn a_transaction_takes_too_deep() {
+    let (code, stderr) = run_source(
+        "too_deep_taken",
+        r#"
+operator sum_to{n: integer, t: text}: integer [
+    if n = 0 then length{a: to_code_points{from: t}} else n + sum_to{n: n - 1, t: t || ""}
+];
+
+operator main{} [
+    var n := 100_000_000;
+    var total := 0;
+    var errors: relation transaction_collection := relation {};
+    transaction collecting errors [
+        total := sum_to{n, t: "abc"};
+    ];
+    call debug_value{v: total};
+    n := 1000;
+    transaction collecting errors [
+        total := sum_to{n, t: "abc"};
+    ];
+    call debug_value{v: total};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), ["0", "500503"]);
+}
+
+/// A failure in a call that tail calls led to leaves no trace of what they held,
+/// and of them only the last.
+#[test]
+fn a_tail_call_fails_like_any_other() {
+    let (code, stderr) = run_source(
+        "tail_failure",
+        r"
+operator dividing{n: integer, r: relation { v: integer }}: integer [
+    var doubled := r extend { w := v * 2 };
+    if n = 0 then 1 div count{r: doubled where w < 0} else dividing{n: n - 1, r: r union relation { { v: n } }}
+];
+
+operator main{} [
+    var n := 100;
+    call debug_value{v: dividing{n, r: relation {}}};
+];
+",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.starts_with("error[R0002]"), "{stderr}");
+    assert_eq!(stderr.matches("in `dividing`").count(), 1, "{stderr}");
 }

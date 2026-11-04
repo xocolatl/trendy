@@ -138,7 +138,7 @@ codes! {
     NoChange => "A0033",
     ReadOnlyEffect => "A0034",
     Return => "A0035",
-    Recursion => "A0036",
+    ConstraintCycle => "A0036",
     CallOfReadOnly => "A0037",
     UndeterminedTypeParameter => "A0038",
     TypeParameterNamedOnce => "A0039",
@@ -206,6 +206,7 @@ codes! {
     Warned => "R0022",
     ConstraintViolated => "R0023",
     BrokenCallConstraint => "R0024",
+    TooDeep => "R0025",
     Internal => "X0000",
 }
 
@@ -252,6 +253,7 @@ impl Code {
         !matches!(
             self,
             Code::OutOfMemory
+                | Code::TooDeep
                 | Code::UnreadableFile
                 | Code::NotUtf8
                 | Code::MalformedCsv

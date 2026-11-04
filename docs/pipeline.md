@@ -1104,10 +1104,18 @@ Initial values are evaluated when compiling, so a HIR variable holds a
 and call any read-only operator, which reads no variable: each global is
 evaluated, or checked, when first needed, after the ones it refers to
 (`globals::Globals`). One referred to while it is itself being evaluated
-closes a cycle, reported once with a label at each reference in it: of
-initial values (A0021), or, among read-only operators, recursion (A0036),
-which nothing could stop without a conditional. No cycle has both, as no
-operator reads a variable. A variable's id is its first declaration's
+closes a cycle: of initial values (A0021), reported once with a label at
+each reference in it, or of read-only operators. That is recursion, which is
+allowed, as what an operator decides can stop it, and is recorded
+(`Globals::recursive`), unless a constraint or a conversion is in the cycle,
+which runs before anything can decide (A0036). As one of a cycle's operators
+can be done by the time a reference to it closes another cycle, through a
+constraint, each reference is recorded (`Globals::references`), and once all are
+checked, the cycles among them that have a constraint or a conversion are reported
+if they haven't been, with those that have a `fail` whose error's `message` leads
+back to it, which the entry would go on writing, however deep the stack
+(`report_cycles_through_what_was_checked`). No cycle has both a variable and an
+operator, as no operator reads a variable. A variable's id is its first declaration's
 place among them, known before any is evaluated.
 
 A read-only operator's body ends with its value, of its result type
@@ -1124,10 +1132,14 @@ they can assign one, and which statements are refused. An update body's is
 and assigns only its parameters (A0050, A0034), and a value block's
 `block::Outside`, over the names around the block, wherever it is. The
 read-only operator's is checked with its value, on demand in `Globals`, so
-a cycle through its statements is found as any other is (A0036). A `Run` is
+a cycle through its statements is found as any other is. A `Run` is
 never evaluated: `ops::substitute` leaves it, it has no known value, and
 so `ops::call` leaves a call that reaches one to the program, as they may
-not stop, and an initial value that needs one is reported (A0077).
+not stop, and an initial value that needs one is reported (A0077). A call
+that reaches a cycle of operators is left to the program for the same reason,
+with no statement in it for `ast::decides_what_runs` to see: `Globals::checked`
+flags each operator in a cycle, or that calls one that is, once its value is
+checked, and `ops::call` looks in that set (`Bindings::recursive`).
 Lowering (`FunctionBuilder::run`) places its local variables, which hold
 references, as an update operator's do, in a scope of their own, so a
 statement's scope isn't reused by those inside it; then runs the statements
@@ -1146,7 +1158,7 @@ in the rest once it is known (`ops::Substitution::locals`); lowering places
 the local variable where the value is, with no copy and no references of
 its own, since nothing changes it while the expression is computed. Checking a call checks its
 callee's value first, so every operator a call's evaluation reaches is
-checked already, and recursion is found then, not when it would loop. The
+checked already, or is in a cycle, which is found then, and is never evaluated. The
 call's arguments are checked as `call`'s are (`Checker::arguments`). An
 update operator has no value, so calling one in an expression is an error
 (A0016), and `call` of a read-only operator would lose its value (A0037).
@@ -1897,7 +1909,11 @@ blocks: each block is a list of instructions (`Copy`, `Call`,
 conversions of a count to an integer and of an array's position less 1 to
 an index, `Element` and `Increment` for loops and indexes, and `Address`
 for a variable passed to a `var` or `out` parameter) ending in a
-terminator: `Return`, `Jump`, `Branch`, `Fail`, `Raise` or `Failed`. A block that
+terminator: `Return`, `Jump`, `Branch`, `Fail`, `Raise`, `Failed` or
+`TailCall`, which goes to a function in place of this one, its result where
+this one's goes, and whose arguments must outlive its frame. A `CheckStack`
+fails if the stack has too little left, as a `Function::recursive` function
+starts. A block that
 can fail, by a call, an arithmetic instruction or a `Fail`, says where
 its failures go (`Block::failure`), and a function returns whether it
 failed. Instructions refer to memory through places: a data object, a
@@ -1946,9 +1962,8 @@ type parameters becomes one for each list of types it is called with,
 instantiated with them (`hir::Operator::instantiated`), so the functions
 see only specific types; their names are the operator's with its
 parameters' types in full, wrapped attributes too, as
-`pair{a: integer, b: integer}`. An update operator's
-function is numbered before its body is lowered, so a call of itself finds
-it. A read-only operator's computes its value, then stores it where the
+`pair{a: integer, b: integer}`. A function is numbered before its body is
+lowered, so a call of itself finds it. A read-only operator's computes its value, then stores it where the
 caller says (`Base::Result`). An update operator's `var` or `out`
 parameter is the address of its variable in the parameter struct, which the function copies
 to a slot on entry, and reads and assigns the variable through
@@ -1986,7 +2001,9 @@ when its last reference is given up, after it gives up those it holds
 through its elements. A statement that passes a text, a relation or an
 array to an update operator has its scope keep it (`trendy_rt_keep`),
 since the operator can assign the only variable that holds it, so it has
-a scope even if it makes nothing. Other values are assigned by a copy.
+a scope even if it makes nothing, unless the operator is in a cycle of calls,
+which holds its arguments itself (see [Recursion](#recursion)). Other values are
+assigned by a copy.
 
 A local variable is a slot in its operator's function, assigned by
 `trendy_rt_assign` as a variable is. One that points to buffers starts
@@ -2051,7 +2068,7 @@ out of a scope, as a reference costs less than a copy. So a statement
 that calls a read-only operator whose result points to a text, relation
 or array it made has a scope, for the result handed to it. Lowering knows
 whether one does from its function, lowered at its first call, before
-the caller's statement ends; read-only operators don't call themselves,
+the caller's statement ends; one in a cycle says so before its body is lowered,
 so that ends.
 
 A failure doesn't stop the program where it happens. Its runtime
@@ -2337,7 +2354,8 @@ produced with Cranelift.
   variables, and `trendy_const_<index>` for constants, all local;
 - laying out data for the target's byte order and pointer size, where every
   object occupies at least one byte;
-- calling conventions, and the C-ABI `main` entry shim;
+- calling conventions, and the C-ABI `main`, which has `trendy_rt_run` run the
+  entry function on the program's stack (see [Recursion](#recursion));
 - `shl` and `shr` (`Functions::shifted`): Cranelift's shifts take the
   count modulo 64, so a count is first clamped to 63, which gives a right
   shift's result beyond it, and a left shift lost a bit if shifting back
@@ -2403,6 +2421,49 @@ there is one zero, as in HIR. LIR carries approximate numbers as exact bits
 **Must not:** see syntax, or produce user-facing errors. Any error it
 returns is a compiler bug, and the driver reports it as `X0000`, internal
 compiler error.
+
+### Recursion
+
+Language.md's guarantees about recursion take the whole pipeline.
+`hir::Program::recursion` finds the operators in a cycle of calls (`cycles_of`,
+Tarjan's, without recursion of its own), by their bodies' calls and a
+specification's calls of its versions. A specification and its versions are all in
+a cycle if one is, as a call of it can compute any.
+
+Such a function is built to be left (`FunctionBuilder::in_cycle`). Its caller
+takes a reference to whatever each argument points to (`call_function`), which
+the function holds, in a slot of its own that it copies its argument struct to,
+as a `Let`'s binding (`lets`) holds its value: its failure exit releases each,
+and each way out of it does. So nothing it reads is in another frame, and the
+caller's statement holds nothing for it. A result that points to anything is
+always handed out, so that what a chain of tail calls ends in is the original
+caller's (`hands_out`); its caller's statement has a scope then, known before
+the body is lowered. Its `var` and `out` parameters are addresses, which stay
+good as long as the variable's frame does.
+
+A tail position is lowered by `returned`, for a value, and `tail_block`, for a
+last statement, which leave what isn't a tail call (`is_tail_call`) to `place`
+and `statement`. A tail call (`tail_call_of`) builds its arguments as any call
+does, in its statement's scope, takes references to them, copies the struct to
+a static area of the callee's (`Lowering::tail_arguments`), which no other code
+can reach before the callee copies it, gives up all the function holds
+(`release_held`), ends the scopes it began (`trendy_rt_end_since`, added once
+the function is finished, as only then is it known to begin any), and ends the
+block with `Terminator::TailCall`. Codegen makes that Cranelift's `return_call`
+to the same arguments and the same result pointer, with both functions of the
+`tail` calling convention (`Function::recursive`), which the failure byte comes
+back through.
+
+As the stack can be used up by calls that aren't tail calls, `Inst::CheckStack`,
+a comparison of the stack pointer with `trendy_rt_stack_limit`, starts each such
+function, failing with `too_deep` (R0025, `trendy_rt_too_deep`) in a cold block.
+The limit is set by `trendy_rt_run`, which `main` calls with the program's entry
+function: it runs that on a thread of its own, the only one that does anything,
+with a stack of 1 GiB (`STACK_BYTES`), which the system reserves only as it is
+used, as the main thread's is whatever the system says, and small. The limit
+leaves 8 MiB (`STACK_MARGIN`) for what's called without a check: runtime
+functions, and the operators outside a cycle, whose depth the program's text
+bounds. A trace of millions of calls is written by its ends (`TRACE_WRITTEN`).
 
 ### Drivers
 

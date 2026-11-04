@@ -16,6 +16,7 @@ use crate::assign::{self, Assignee, Assigning};
 use crate::body::{self, Around};
 use crate::check::{Checker, Lookup, Names};
 use crate::locals::Declaring;
+use crate::operators::Signature;
 use crate::types::Expected;
 use crate::{Namespaces, Operators, errors, locals, ops};
 
@@ -170,6 +171,10 @@ impl Names for Outside<'_> {
 
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         self.outer.checked(id, at, errors)
+    }
+
+    fn calling(&mut self, callee: &Signature, types: &[hir::Type], span: Span) {
+        self.outer.calling(callee, types, span);
     }
 
     fn bindings(&self) -> ops::Bindings<'_> {
@@ -442,6 +447,10 @@ impl Names for BlockNames<'_> {
 
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         self.outer.checked(id, at, errors)
+    }
+
+    fn calling(&mut self, callee: &Signature, types: &[hir::Type], span: Span) {
+        self.outer.calling(callee, types, span);
     }
 
     fn bindings(&self) -> ops::Bindings<'_> {

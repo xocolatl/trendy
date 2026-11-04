@@ -171,6 +171,8 @@ fn link(object: &[u8], output: &Path) -> Result<(), String> {
     let status = Command::new("cc")
         .arg(&object_path)
         .arg(&runtime_path)
+        // The runtime runs the program on a thread with a stack of its own.
+        .arg("-lpthread")
         .arg("-o")
         .arg(output)
         .status();

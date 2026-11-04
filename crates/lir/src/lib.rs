@@ -50,6 +50,14 @@
 //! [`RuntimeFn::Begin`]). Every function returns a boolean, whether it
 //! failed, which the caller checks after the call.
 //!
+//! An operator's function in a cycle of calls ([`Function::recursive`]) has
+//! the tail calling convention, and copies its arguments as it starts, as they
+//! may be where another tail call puts them. It owns what they point to, so
+//! its caller takes a reference for it to each, and it gives them up as it ends
+//! or makes a tail call ([`Terminator::TailCall`]), which gives up all it holds
+//! first, and leaves its result pointer and its boolean to the function it
+//! calls. It checks there is room on the stack as it starts ([`Inst::CheckStack`]).
+//!
 //! # Failures
 //!
 //! A failure makes the function it happens in fail, and so each caller in
@@ -105,6 +113,10 @@ pub struct Function {
     /// The layout of its result, if it has one: a read-only operator's
     /// function stores its value at [`Base::Result`].
     pub result: Option<Layout>,
+    /// Whether it is an operator's in a cycle of calls, so that it can be
+    /// tail called ([`Terminator::TailCall`]) and call so: the tail calling
+    /// convention, and it owns what its arguments point to.
+    pub recursive: bool,
     /// Stack slots, each with the layout of what it holds.
     pub slots: Vec<Layout>,
     /// The first block is the entry block.
@@ -408,6 +420,13 @@ pub enum RuntimeFn {
     /// buffer if nothing else holds it, as `combination`, a
     /// [`Combination::code`] of a union or a disjoint union, says.
     Insert,
+    /// `trendy_rt_too_deep()`: write the error of calls that have used up
+    /// the stack, each with work left when it returns.
+    TooDeep,
+    /// `trendy_rt_run(entry)`: run the program, whose entry function is `entry`,
+    /// on the stack it needs, giving the status to exit with, which only `main`
+    /// calls.
+    Run,
     /// `trendy_rt_remove(relation, tuples, descriptor, combination)`: take
     /// the tuples of the relation `tuples` from the relation variable at
     /// `relation`, both of the type the descriptor describes, in its own
@@ -693,7 +712,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 84] = [
+    pub const ALL: [RuntimeFn; 86] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -733,6 +752,8 @@ impl RuntimeFn {
         RuntimeFn::BrokenConstraintInFile,
         RuntimeFn::OverlappingSubtypes,
         RuntimeFn::BrokenCallConstraint,
+        RuntimeFn::TooDeep,
+        RuntimeFn::Run,
         RuntimeFn::Insert,
         RuntimeFn::Remove,
         RuntimeFn::RemoveRun,
@@ -809,6 +830,7 @@ impl RuntimeFn {
             | RuntimeFn::Product
             | RuntimeFn::KeyShared
             | RuntimeFn::KeyAdded
+            | RuntimeFn::TooDeep
             | RuntimeFn::Insert
             | RuntimeFn::Remove
             | RuntimeFn::RemoveRun
@@ -873,6 +895,7 @@ impl RuntimeFn {
             | RuntimeFn::Subset
             | RuntimeFn::EqualRun
             | RuntimeFn::CompareText
+            | RuntimeFn::Run
             | RuntimeFn::Equal => false,
         }
     }
@@ -920,6 +943,8 @@ impl RuntimeFn {
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::BrokenCallConstraint => "trendy_rt_broken_call_constraint",
+            RuntimeFn::TooDeep => "trendy_rt_too_deep",
+            RuntimeFn::Run => "trendy_rt_run",
             RuntimeFn::Insert => "trendy_rt_insert",
             RuntimeFn::Remove => "trendy_rt_remove",
             RuntimeFn::RemoveRun => "trendy_rt_remove_run",
@@ -971,6 +996,10 @@ impl RuntimeFn {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inst {
+    /// Fail, writing the error of [`RuntimeFn::TooDeep`], unless the stack has
+    /// room: as a [`Function::recursive`] function starts, so that calls that
+    /// go too deep fail, as anything else does.
+    CheckStack,
     /// Copy a value with `layout` from `src` to `dst`.
     Copy {
         dst: Place,
@@ -1544,7 +1573,7 @@ impl Inst {
     #[must_use]
     pub fn can_fail(&self) -> bool {
         match self {
-            Inst::Call { .. } => true,
+            Inst::Call { .. } | Inst::CheckStack => true,
             Inst::CallRuntime { function, .. } => function.fails(),
             Inst::Unary { op, .. } => op.can_fail(),
             Inst::Binary { op, .. } => op.can_fail(),
@@ -1572,6 +1601,16 @@ pub enum Terminator {
     /// Fail with an error compiled code has kept, a `fail`'s, writing
     /// nothing: go to the block's failure target, which may take it.
     Raise,
+    /// Become a call of the function `function`, of the same result, in
+    /// place of this one, which is gone, so that its caller is the caller of
+    /// this one, which it returns to, and whose result pointer it is given:
+    /// a tail call. So `args` is no slot, but what lasts: the function's
+    /// [`Function::recursive`] copies them as it starts, and owns what they
+    /// point to.
+    TailCall {
+        function: FunctionId,
+        args: Option<Place>,
+    },
     /// Return to the caller, failing: the end of a function's failure exit.
     Failed,
 }

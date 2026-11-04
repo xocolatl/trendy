@@ -48,6 +48,47 @@ pub struct Program {
 }
 
 impl Program {
+    /// Which operators call themselves, directly or through others. A
+    /// specification calls each of its versions. No cycle goes through a
+    /// constraint, a conversion or a `fail`'s `message`, which sema rejects
+    /// (A0036), so only calls need following.
+    #[must_use]
+    pub fn recursion(&self) -> Recursion {
+        let edges: Vec<Vec<usize>> = self
+            .operators
+            .iter()
+            .map(|operator| {
+                let mut called: Vec<OperatorId> =
+                    operator.versions.iter().map(|v| v.operator).collect();
+                match &operator.kind {
+                    OperatorKind::Update { body, .. } => called.extend(body.calling()),
+                    OperatorKind::ReadOnly { value, .. } => called.extend(value.calling()),
+                    OperatorKind::Builtin(_) | OperatorKind::Specification { .. } => {}
+                }
+                called.into_iter().map(|id| id.0).collect()
+            })
+            .collect();
+        let mut cycles = cycles_of(&edges);
+        // Of a specification and its versions, all, if any.
+        let mut next = cycles.iter().flatten().max().map_or(0, |last| last + 1);
+        for (id, operator) in self.operators.iter().enumerate() {
+            let family =
+                || std::iter::once(id).chain(operator.versions.iter().map(|v| v.operator.0));
+            if family().any(|member| cycles[member].is_some()) {
+                let cycle = family()
+                    .find_map(|member| cycles[member])
+                    .unwrap_or_else(|| {
+                        next += 1;
+                        next
+                    });
+                for member in family() {
+                    cycles[member].get_or_insert(cycle);
+                }
+            }
+        }
+        Recursion { cycles }
+    }
+
     #[must_use]
     pub fn operator(&self, id: OperatorId) -> &Operator {
         &self.operators[id.0]
@@ -641,6 +682,8 @@ pub enum LanguageError {
     /// A call's arguments break a constraint in its operator's braces
     /// (R0024).
     BrokenCallConstraint,
+    /// Calls with work left when they return have used up the stack (R0025).
+    TooDeep,
     /// A load's `columns` gives two attributes one column (R0016).
     ColumnShared,
     /// A load's `columns` gives an attribute a column below 1 (R0016).
@@ -654,7 +697,7 @@ pub enum LanguageError {
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 30] = [
+    pub const ALL: [LanguageError; 31] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -681,6 +724,7 @@ impl LanguageError {
         LanguageError::NotOfType,
         LanguageError::OverlappingSubtypes,
         LanguageError::BrokenCallConstraint,
+        LanguageError::TooDeep,
         LanguageError::ColumnShared,
         LanguageError::ColumnBelowOne,
         LanguageError::ConstraintViolated,
@@ -708,6 +752,7 @@ impl LanguageError {
                 Code::OverlappingSubtypes
             }
             LanguageError::BrokenCallConstraint => Code::BrokenCallConstraint,
+            LanguageError::TooDeep => Code::TooDeep,
             LanguageError::Overflow => Code::Overflow,
             LanguageError::DivisionByZero => Code::DivisionByZero,
             LanguageError::NotOneTuple => Code::NotOneTuple,
@@ -757,6 +802,7 @@ impl LanguageError {
             LanguageError::NotOfType => "not_of_type",
             LanguageError::OverlappingSubtypes => "overlapping_subtypes",
             LanguageError::BrokenCallConstraint => "broken_call_constraint",
+            LanguageError::TooDeep => "too_deep",
             LanguageError::ColumnShared => "column_shared",
             LanguageError::ColumnBelowOne => "column_below_one",
             LanguageError::ConstraintViolated => "constraint_violated",
@@ -851,6 +897,7 @@ impl LanguageError {
                 &[("value", text), ("first", text), ("second", text)]
             }
             LanguageError::BrokenCallConstraint => &[("called", text), ("constraint", text)],
+            LanguageError::TooDeep => &[("bytes", integer)],
             LanguageError::ColumnShared => {
                 &[("first", text), ("second", text), ("column", integer)]
             }
@@ -1801,6 +1848,15 @@ impl Block {
         declared
     }
 
+    /// The operators called anywhere in the block: by its statements and in
+    /// their expressions, in the blocks within them too.
+    #[must_use]
+    pub fn calling(&self) -> Vec<OperatorId> {
+        let mut called = self.called();
+        self.for_each_expr(&mut |expr| called.extend(expr.calling()));
+        called
+    }
+
     /// The operators the block's statements call, in the blocks within
     /// them too, each once, in the order they first do.
     #[must_use]
@@ -1815,6 +1871,83 @@ impl Block {
         });
         called
     }
+}
+
+/// Which operators call themselves, directly or through others, each with the
+/// cycle of calls it is in: only a call within one can go on without end, so
+/// only those need the guarantees of `language.md`'s "Recursion".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recursion {
+    /// By operator id, the cycle each is in, if it is in one.
+    cycles: Vec<Option<usize>>,
+}
+
+impl Recursion {
+    /// The cycle of calls the operator `id` is in, if it is in one, or a
+    /// version of a specification that is, as a call of the specification
+    /// can compute any of them, and they take their arguments alike.
+    #[must_use]
+    pub fn cycle(&self, id: OperatorId) -> Option<usize> {
+        self.cycles.get(id.0).copied().flatten()
+    }
+}
+
+/// The cycle each node of the graph `edges`, of the nodes each calls, is in,
+/// if it is in one: its strongly connected component (Tarjan), of more than
+/// one node, or of one that calls itself. Without recursion of its own, as a
+/// cycle is what it finds.
+#[must_use]
+pub fn cycles_of(edges: &[Vec<usize>]) -> Vec<Option<usize>> {
+    let count = edges.len();
+    let mut index = vec![None::<usize>; count];
+    let mut lowest = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack = Vec::new();
+    let mut cycles = vec![None; count];
+    let (mut next_index, mut next_cycle) = (0, 0);
+    for start in 0..count {
+        if index[start].is_some() {
+            continue;
+        }
+        // Each node being visited, with the next of its edges to follow.
+        let mut visiting = vec![(start, 0)];
+        while let Some(&mut (node, ref mut edge)) = visiting.last_mut() {
+            if *edge == 0 {
+                index[node] = Some(next_index);
+                lowest[node] = next_index;
+                next_index += 1;
+                stack.push(node);
+                on_stack[node] = true;
+            }
+            if let Some(&callee) = edges[node].get(*edge) {
+                *edge += 1;
+                match index[callee] {
+                    None => visiting.push((callee, 0)),
+                    Some(seen) if on_stack[callee] => lowest[node] = lowest[node].min(seen),
+                    Some(_) => {}
+                }
+                continue;
+            }
+            visiting.pop();
+            if let Some(&(caller, _)) = visiting.last() {
+                lowest[caller] = lowest[caller].min(lowest[node]);
+            }
+            if Some(lowest[node]) == index[node] {
+                let recursive = stack.last() != Some(&node) || edges[node].contains(&node);
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    if recursive {
+                        cycles[member] = Some(next_cycle);
+                    }
+                    if member == node {
+                        break;
+                    }
+                }
+                next_cycle += usize::from(recursive);
+            }
+        }
+    }
+    cycles
 }
 
 /// `target := value`, in an assignment statement.
@@ -2455,6 +2588,31 @@ impl Expr {
             Expr::Connective(Connective::And, operands) => operands,
             _ => std::slice::from_ref(self),
         }
+    }
+
+    /// The operators called anywhere in the expression, in its parts too.
+    #[must_use]
+    pub fn calling(&self) -> Vec<OperatorId> {
+        let mut called = Vec::new();
+        if let Expr::Call(call) = self {
+            called.push(call.operator);
+        }
+        self.for_each_child(|child, _| called.extend(child.calling()));
+        called
+    }
+
+    /// Whether a `fail` is anywhere in the expression, in its parts too, a
+    /// `fail` statement or a `fail` value, whose error `message` writes.
+    #[must_use]
+    pub fn fails(&self) -> bool {
+        let mut fails = matches!(self, Expr::Fail(..));
+        if let Expr::Run(block, _) = self {
+            block.each_statement(&mut |statement| {
+                fails |= matches!(statement, Statement::Fail(_));
+            });
+        }
+        self.for_each_child(|child, _| fails |= child.fails());
+        fails
     }
 
     /// The expression with each expression directly in it replaced by what
@@ -5171,6 +5329,44 @@ impl std::hash::Hash for Approximate {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_cycle_is_of_calls_that_lead_back() {
+        // 0 calls itself, 1 and 2 each other, and 3 reaches them, in no cycle
+        // itself, as 4 reaches nothing.
+        let cycles = cycles_of(&[vec![0], vec![2], vec![1], vec![1, 4], vec![]]);
+        assert!(cycles[0].is_some());
+        assert!(cycles[1].is_some());
+        assert_eq!(cycles[1], cycles[2]);
+        assert_ne!(cycles[0], cycles[1]);
+        assert_eq!(cycles[3], None);
+        assert_eq!(cycles[4], None);
+    }
+
+    #[test]
+    fn a_longer_cycle_is_found_from_anywhere_in_it() {
+        // 0 -> 1 -> 2 -> 3 -> 1, and 2 -> 4 -> 2 is the same one.
+        let cycles = cycles_of(&[vec![1], vec![2], vec![3, 4], vec![1], vec![2]]);
+        assert_eq!(cycles[0], None);
+        let one = cycles[1];
+        assert!(one.is_some());
+        for node in [2, 3, 4] {
+            assert_eq!(cycles[node], one);
+        }
+    }
+
+    #[test]
+    fn a_long_chain_needs_no_recursion_to_look_through() {
+        let mut edges: Vec<Vec<usize>> = (1..200_000).map(|next| vec![next]).collect();
+        edges.push(vec![0]);
+        let cycles = cycles_of(&edges);
+        assert!(
+            cycles
+                .iter()
+                .all(|cycle| *cycle == cycles[0] && cycle.is_some())
+        );
+    }
+
     use super::*;
 
     fn tuple(attributes: &[(&str, Type)]) -> Type {

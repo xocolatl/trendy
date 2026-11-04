@@ -2,7 +2,7 @@
 //! read-only operator's or a value block's that decides what runs next:
 //! their statements, their local variables, and the expressions in them.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use trendy_diag::{CodeKind, Diagnostic, Span};
 use trendy_hir as hir;
@@ -25,6 +25,8 @@ pub(crate) struct Context<'a> {
     pub(crate) operators: &'a Operators,
     /// Each valid read-only operator's value.
     pub(crate) values: &'a HashMap<hir::OperatorId, hir::Expr>,
+    /// The read-only operators that reach a cycle of calls, or are in one.
+    pub(crate) recursive: &'a HashSet<hir::OperatorId>,
     /// Each variable, by id: `None` for one with errors, already reported.
     pub(crate) variables: &'a [Option<hir::Variable>],
     /// Each variable's id and declaration, by the name its unit writes.
@@ -39,6 +41,7 @@ impl Context<'_> {
             operators: self.operators,
             namespaces: self.namespaces,
             values: self.values,
+            recursive: self.recursive,
         }
     }
 
@@ -60,10 +63,9 @@ impl Context<'_> {
     }
 }
 
-/// A call, in the body of the update operator `caller`, of `callee`, which
-/// gives one of its type parameters, `parameter`, a type built from
-/// `caller`'s own, `ty`. If it leads back to `caller`, each time around
-/// gives it a larger type.
+/// A call, in the body of the operator `caller`, of `callee`, which gives one
+/// of its type parameters, `parameter`, a type built from `caller`'s own, `ty`.
+/// If it leads back to `caller`, each time around gives it a larger type.
 pub(crate) struct Growing {
     pub(crate) caller: hir::OperatorId,
     pub(crate) callee: hir::OperatorId,
@@ -71,6 +73,34 @@ pub(crate) struct Growing {
     pub(crate) span: Span,
     pub(crate) parameter: hir::TypeParameter,
     pub(crate) ty: hir::Type,
+}
+
+impl Growing {
+    /// Those of a call in the body of `within` of `called`, its name written
+    /// at `span`, which gives its type parameters `types`. A type parameter
+    /// passed on as it is never grows.
+    pub(crate) fn of(
+        within: hir::OperatorId,
+        called: &Signature,
+        types: &[hir::Type],
+        span: Span,
+    ) -> Vec<Growing> {
+        called
+            .types
+            .iter()
+            .zip(types)
+            .filter(|(_, ty)| {
+                !matches!(ty, hir::Type::Parameter(_)) && ty.parameters().next().is_some()
+            })
+            .map(|(parameter, ty)| Growing {
+                caller: within,
+                callee: called.id,
+                span,
+                parameter: parameter.clone(),
+                ty: ty.clone(),
+            })
+            .collect()
+    }
 }
 
 /// What can only be checked once every update operator's body is (see
@@ -916,18 +946,10 @@ impl Statements<'_, '_> {
                 transaction,
             });
         }
-        // A type parameter passed on as it is never grows.
-        for (parameter, ty) in signature.types.iter().zip(&call.types) {
-            if !matches!(ty, hir::Type::Parameter(_)) && ty.parameters().next().is_some() {
-                update.deferred.growing.push(Growing {
-                    caller: within,
-                    callee: signature.id,
-                    span,
-                    parameter: parameter.clone(),
-                    ty: ty.clone(),
-                });
-            }
-        }
+        update
+            .deferred
+            .growing
+            .extend(Growing::of(within, signature, &call.types, span));
         let looped: Vec<(hir::VariableId, String, Span)> = self
             .frozen
             .iter()
@@ -1192,6 +1214,7 @@ impl Statements<'_, '_> {
 pub(crate) fn deferred_checks(
     deferred: &Deferred,
     bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+    evaluated: &crate::globals::Evaluated,
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) {
@@ -1207,7 +1230,8 @@ pub(crate) fn deferred_checks(
             ));
         }
     }
-    growing_recursion(&deferred.growing, bodies, operators, errors);
+    let growing = deferred.growing.iter().chain(&evaluated.growing);
+    growing_recursion(growing, bodies, &evaluated.values, operators, errors);
     for call in &deferred.in_loops {
         let assigned = assigned_variables(call.callee, bodies);
         if let Some((_, name, array)) = call.looped.iter().find(|(id, ..)| assigned.contains(id)) {
@@ -1307,7 +1331,7 @@ fn assigned_variables(
         };
         assigned_in(body, &mut assigned);
         let mut called = Vec::new();
-        calls_in(body, &mut called);
+        called.extend(body.called());
         for callee in called {
             if !seen.contains(&callee) {
                 seen.push(callee);
@@ -1372,7 +1396,7 @@ fn read_variables(
         };
         exprs_in(body, &mut |expr| walk(expr, &mut read));
         let mut callees = Vec::new();
-        calls_in(body, &mut callees);
+        callees.extend(body.called());
         for callee in callees {
             if !called.contains(&callee) {
                 called.push(callee);
@@ -1407,19 +1431,29 @@ fn exprs_in(block: &hir::Block, f: &mut dyn FnMut(&hir::Expr)) {
 }
 
 /// Report each call in `growing` that leads back to its caller through
-/// the calls in the update operators' `bodies`: the operator would need a
-/// function for each of the ever larger types the type parameter is given
+/// the calls in the update operators' `bodies` and the read-only operators'
+/// `values`, and from a specification to its versions: the operator would need
+/// a function for each of the ever larger types the type parameter is given
 /// each time around (see [`hir::Operator`]).
-fn growing_recursion(
-    growing: &[Growing],
+fn growing_recursion<'g>(
+    growing: impl Iterator<Item = &'g Growing>,
     bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+    values: &HashMap<hir::OperatorId, hir::Expr>,
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) {
     let calls = |id: &hir::OperatorId| {
-        let mut called = Vec::new();
+        let mut called: Vec<hir::OperatorId> = operators
+            .get(*id)
+            .versions
+            .iter()
+            .map(|version| version.operator)
+            .collect();
         if let Some((_, body)) = bodies.get(id) {
-            calls_in(body, &mut called);
+            called.extend(body.calling());
+        }
+        if let Some(value) = values.get(id) {
+            called.extend(value.calling());
         }
         called
     };
@@ -1445,12 +1479,6 @@ fn growing_recursion(
             ));
         }
     }
-}
-
-/// Add each operator `block`'s statements call, in blocks within it too, to
-/// `called`.
-fn calls_in(block: &hir::Block, called: &mut Vec<hir::OperatorId>) {
-    called.extend(block.called());
 }
 
 /// Names in a block of statements: its local variables, which hide variables
@@ -1588,6 +1616,10 @@ impl Names for BodyNames<'_> {
 
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         self.around.checked(id, at, errors)
+    }
+
+    fn calling(&mut self, callee: &Signature, types: &[hir::Type], span: Span) {
+        self.around.calling(callee, types, span);
     }
 
     fn bindings(&self) -> ops::Bindings<'_> {
