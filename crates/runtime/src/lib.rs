@@ -1249,7 +1249,9 @@ struct Group {
 ///
 /// Both operands' tuples are sorted on the common attributes, then merged:
 /// each run of tuples of one that agree on them pairs with the matching run
-/// of the other.
+/// of the other. Of none in common, it is their product: made in canonical
+/// order, if all one's attributes come before all the other's in name
+/// order, and otherwise sorted.
 ///
 /// # Safety
 ///
@@ -1279,6 +1281,24 @@ pub unsafe extern "C" fn trendy_rt_and(
         let result_attrs = attributes(result);
         let sources = array(sources, result_attrs.len());
         let common = array(common, common_count.read_unaligned());
+        if common.is_empty() {
+            let (bytes, len) = product(
+                Tuples {
+                    at: lhs,
+                    count: lhs_count,
+                    size: lhs_desc.element().size,
+                },
+                Tuples {
+                    at: rhs,
+                    count: rhs_count,
+                    size: rhs_desc.element().size,
+                },
+                result,
+                sources,
+            )?;
+            dst.write_unaligned(Text { bytes, len });
+            return Ok(());
+        }
         let mut lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size)?;
         let mut rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size)?;
         let (lhs_sorted, rhs_sorted) = (lhs_sorted.values(), rhs_sorted.values());
@@ -1314,6 +1334,97 @@ pub unsafe extern "C" fn trendy_rt_and(
         });
         Ok(())
     })
+}
+
+/// A relation's tuples, or some of them: `count` of them from `at`, each
+/// `size` bytes.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct Tuples {
+    at: *const u8,
+    count: usize,
+    size: usize,
+}
+
+#[cfg(not(test))]
+impl Tuples {
+    /// The tuple at position `i`.
+    ///
+    /// # Safety
+    ///
+    /// `i` must be less than `count`.
+    unsafe fn tuple(self, i: usize) -> *const u8 {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.at.add(i * self.size) }
+    }
+}
+
+/// The relation `result` describes of every tuple made of a tuple of `lhs`
+/// and one of `rhs`, which have no attributes in common, in canonical
+/// order, in memory the statement owns: that memory and how many tuples it
+/// holds. `sources` says where each attribute of `result` comes from, in
+/// name order. If all one operand's come before all the other's, each tuple
+/// of that one, in its order, with each of the other's, in its order, is
+/// the canonical order of the result, which is written as it is made, with
+/// no sorting and no copy. Otherwise the tuples must be sorted. They are all
+/// different, as each operand's are.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_and`], whose operands they are.
+#[cfg(not(test))]
+unsafe fn product(
+    lhs: Tuples,
+    rhs: Tuples,
+    result: &TypeDesc,
+    sources: &[Source],
+) -> Fallible<(*mut u8, usize)> {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes, and each tuple written has room.
+    unsafe {
+        let element = result.element();
+        let total = lhs.count.checked_mul(rhs.count);
+        let Some((total, bytes)) =
+            total.and_then(|total| Some((total, total.checked_mul(element.size)?)))
+        else {
+            return Err(out_of_memory());
+        };
+        let rhs_first = sources.first().is_some_and(|source| source.from == 1);
+        let write = |to: *mut u8| {
+            let (outer, inner) = if rhs_first { (rhs, lhs) } else { (lhs, rhs) };
+            let attributes = attributes(result);
+            for i in 0..outer.count {
+                for j in 0..inner.count {
+                    let (a, b) = (outer.tuple(i), inner.tuple(j));
+                    let (l, r) = if rhs_first { (b, a) } else { (a, b) };
+                    let made = to.add((i * inner.count + j) * element.size);
+                    for (attr, source) in attributes.iter().zip(sources) {
+                        let from = if source.from == 1 { r } else { l };
+                        core::ptr::copy_nonoverlapping(
+                            from.add(source.offset),
+                            made.add(attr.offset),
+                            (*attr.desc).size,
+                        );
+                    }
+                }
+            }
+        };
+        // The attributes change operand at most once if they don't interleave.
+        let changes = sources
+            .windows(2)
+            .filter(|pair| pair[0].from != pair[1].from)
+            .count();
+        if changes > 1 {
+            let made = Temp::<u8>::zeroed(bytes)?;
+            write(made.ptr());
+            return canonical(made.ptr(), total, result);
+        }
+        let out = allocate_buffer(bytes, result)?;
+        core::ptr::write_bytes(out, 0, bytes);
+        write(out);
+        adopt(out, total, element);
+        Ok((out, total))
+    }
 }
 
 /// Store at `dst` an index of the relation `rel`, which `rel_desc`

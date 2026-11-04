@@ -4386,6 +4386,81 @@ fn image_relations_are_looked_up_once_per_loop() {
     );
 }
 
+/// Products when running, made in canonical order where the operands'
+/// attributes don't interleave, and sorted where they do (the runtime's
+/// `product`), of what's still held once the operands are given up.
+#[test]
+fn products_are_in_canonical_order() {
+    let source = r#"operator show{
+    u: relation { a: integer },
+    t: relation { b: text },
+    pair: relation { a: integer, c: integer },
+    z: relation { z: integer },
+    x: integer,
+} [
+    /* All of one operand's attributes before the other's, whichever it is. */
+    call debug_value{v: u times t};
+    call debug_value{v: t times u};
+    /* A chain written against name order. */
+    call debug_value{v: times{z, t, u}};
+    /* Interleaved: `b` comes between `pair`'s attributes. */
+    call debug_value{v: pair times t};
+    call debug_value{v: t times pair};
+    /* An empty operand, either way. */
+    call debug_value{v: u times (t where b = "none")};
+    call debug_value{v: (t where b = "none") times u};
+    /* An operand without attributes: one tuple, and none. */
+    call debug_value{v: u times relation {} { {} }};
+    call debug_value{v: relation {} { {} } times u};
+    call debug_value{v: u times (relation {} { {} } where x > 100)};
+    call debug_value{v: relation {} { {} } times (relation {} { {} } where x < 100)};
+    /* What it points to outlasts its operands, which are given up here. */
+    var kept := [
+        var l := relation { { a: "left " || to_text{from: x} } };
+        var r := relation { { b: "right " || to_text{from: x} } };
+        l times r
+    ];
+    var interleaved := [
+        var l := relation { { a: "left " || to_text{from: x}, c: "far " || to_text{from: x} } };
+        var r := relation { { b: "right " || to_text{from: x} } };
+        l times r
+    ];
+    call debug_value{v: kept};
+    call debug_value{v: interleaved};
+];
+
+operator main{} [
+    call show{
+        u: relation { { a: 2 }, { a: 1 } },
+        t: relation { { b: "y" }, { b: "x" } },
+        pair: relation { { a: 1, c: 9 }, { a: 1, c: 8 }, { a: 0, c: 7 } },
+        z: relation { { z: 5 } },
+        x: 3,
+    };
+];
+"#;
+    let (code, stderr) = run_source("products", source);
+    let two_by_two = r#"relation { a: integer, b: text } { { a: 1, b: "x" }, { a: 1, b: "y" }, { a: 2, b: "x" }, { a: 2, b: "y" } }"#;
+    let interleaved = r#"relation { a: integer, b: text, c: integer } { { a: 0, b: "x", c: 7 }, { a: 0, b: "y", c: 7 }, { a: 1, b: "x", c: 8 }, { a: 1, b: "x", c: 9 }, { a: 1, b: "y", c: 8 }, { a: 1, b: "y", c: 9 } }"#;
+    let expected = [
+        two_by_two,
+        two_by_two,
+        r#"relation { a: integer, b: text, z: integer } { { a: 1, b: "x", z: 5 }, { a: 1, b: "y", z: 5 }, { a: 2, b: "x", z: 5 }, { a: 2, b: "y", z: 5 } }"#,
+        interleaved,
+        interleaved,
+        "relation { a: integer, b: text } {}",
+        "relation { a: integer, b: text } {}",
+        "relation { a: integer } { { a: 1 }, { a: 2 } }",
+        "relation { a: integer } { { a: 1 }, { a: 2 } }",
+        "relation { a: integer } {}",
+        "relation {} { {} }",
+        r#"relation { a: text, b: text } { { a: "left 3", b: "right 3" } }"#,
+        r#"relation { a: text, b: text, c: text } { { a: "left 3", b: "right 3", c: "far 3" } }"#,
+    ];
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!((code, &lines[..]), (0, &expected[..]), "{stderr}");
+}
+
 /// A program whose restrictions by the first attributes in name order look
 /// at only the tuples they may keep, when running
 /// (`FunctionBuilder::equal_runs`), or at every tuple.

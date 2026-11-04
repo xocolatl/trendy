@@ -2162,7 +2162,12 @@ An AND (`hir::Expr::And`) calls `trendy_rt_and`, which sorts both operands'
 tuples on their common attributes and merges them: each run of tuples of
 one that agree on them pairs with the matching run of the other. The
 results are sorted into the canonical order, into memory released like a
-text's. Lowering passes where each attribute of the result comes from, and
+text's. A product, of operands with no attribute in common, is made in
+that order where it can be (`product`): if all one operand's attributes come
+before all the other's in name order, each of its tuples with each of the
+other's is that order, so the result is written as it is made, with no
+sorting and no copy, whichever is written first; attributes that interleave
+are sorted. Lowering passes where each attribute of the result comes from, and
 each common attribute's offset in both operands and its type, so here too
 the runtime never matches attributes by name.
 
