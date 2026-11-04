@@ -4486,6 +4486,7 @@ impl<'a> FunctionBuilder<'a> {
         };
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         let src = self.place(operand, cx);
+        let (src, condition) = self.equal_runs(src, &ty, heading, condition, cx);
         let mut count = src.clone();
         count.path.push(1);
         let dst = self.allocated(&ty, count, cx);
@@ -4501,7 +4502,7 @@ impl<'a> FunctionBuilder<'a> {
             // which nothing it made outlives.
             let keep = this.slot(lir::Layout::U8);
             this.nested_scope(cx, |this, cx| {
-                let computed = this.place(condition, cx);
+                let computed = this.place(&condition, cx);
                 this.insts.push(lir::Inst::Copy {
                     dst: keep.clone(),
                     src: computed,
@@ -4538,6 +4539,87 @@ impl<'a> FunctionBuilder<'a> {
         });
         self.adopt(&dst, &ty, cx);
         dst
+    }
+
+    /// The part of the relation at `src`, of type `ty`, with `heading`, that
+    /// `condition` needs computed for each tuple, and what is left of
+    /// `condition`. A relation's tuples are sorted by their attributes in
+    /// name order, so those for which the first is equal to a value are a
+    /// run, found by binary search ([`lir::RuntimeFn::EqualRun`]), and
+    /// among them, so are those for which the next is, and so on, while
+    /// `condition` has a conjunct for it (see [`FunctionBuilder::equated`]).
+    /// An equality can't fail, so it guards the other conjuncts, which are
+    /// computed only for the tuples it holds for, as they are in the run.
+    fn equal_runs(
+        &mut self,
+        src: lir::Place,
+        ty: &hir::Type,
+        heading: &hir::Heading,
+        condition: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> (lir::Place, hir::Expr) {
+        let mut src = src;
+        let mut rest: Vec<&hir::Expr> = condition.conjuncts().iter().collect();
+        for (i, (name, attribute)) in heading.attributes().enumerate() {
+            let found = rest
+                .iter()
+                .enumerate()
+                .find_map(|(at, conjunct)| Some((at, self.equated(conjunct, name, attribute)?)));
+            let Some((at, value)) = found else {
+                break;
+            };
+            rest.remove(at);
+            // Computed before the tuples are: `value` reads none of them,
+            // but what's further out is further out from it than from here.
+            self.tuples.push(AtHand::one(src.clone()));
+            let value = self.place(value, cx);
+            self.tuples.pop();
+            let run = self.slot(cx.layout(ty));
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+            let attribute = usize_constant(len(i), cx);
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::EqualRun,
+                args: vec![run.clone(), src, value, descriptor, attribute],
+            });
+            src = run;
+        }
+        let rest = rest.into_iter().cloned().collect();
+        (src, hir::Connective::And.of(rest))
+    }
+
+    /// The value `conjunct`, of a condition on a relation's tuples, says
+    /// the tuple at hand's attribute `name`, of type `attribute`, is equal
+    /// to, if it says that, of a value of its type, that's the same for
+    /// every tuple and can't fail, so that computing it before them all
+    /// changes nothing.
+    fn equated<'e>(
+        &self,
+        conjunct: &'e hir::Expr,
+        name: &str,
+        attribute: &hir::Type,
+    ) -> Option<&'e hir::Expr> {
+        let hir::Expr::Binary(hir::BinaryOp::Compare(hir::Comparison::Equal, _), lhs, rhs) =
+            conjunct
+        else {
+            return None;
+        };
+        let is_attribute = |expr: &hir::Expr| {
+            matches!(expr, hir::Expr::Extract(tuple, read)
+                if read == name && matches!(**tuple, hir::Expr::Current(0, _)))
+        };
+        let value = if is_attribute(lhs) {
+            rhs
+        } else if is_attribute(rhs) {
+            lhs
+        } else {
+            return None;
+        };
+        let read = value.tuple_read(0);
+        let same = !read.whole
+            && read.attributes.is_empty()
+            && !value.can_fail()
+            && self.type_of(value) == *attribute;
+        same.then_some(&**value)
     }
 
     /// A new relation or array of type `ty` with room for `count` tuples or
@@ -7981,6 +8063,68 @@ mod tests {
         assert_eq!(per_tuple.first(), Some(&Begin), "{blocks:?}");
         assert_eq!(per_tuple.last(), Some(&End), "{blocks:?}");
         assert!(!per_tuple.contains(&HandOut), "{blocks:?}");
+    }
+
+    #[test]
+    fn a_restriction_by_its_first_attributes_finds_their_run() {
+        use lir::RuntimeFn::EqualRun;
+        // `r where …`, of `r` with the attributes `a` and `b`.
+        let heading =
+            hir::Heading::new([("a".to_string(), integer()), ("b".to_string(), integer())].into());
+        let attribute = |name: &str| {
+            hir::Expr::Extract(
+                Box::new(hir::Expr::Current(0, heading.clone())),
+                name.to_string(),
+            )
+        };
+        let one = || hir::Expr::Constant(hir::Value::Integer(1));
+        let equal = |lhs: hir::Expr, rhs: hir::Expr| {
+            hir::Expr::Binary(
+                hir::BinaryOp::Compare(
+                    hir::Comparison::Equal,
+                    hir::Compared::Scalar(hir::Scalar::Integer),
+                ),
+                Box::new(lhs),
+                Box::new(rhs),
+            )
+        };
+        let runs = |condition: hir::Expr| {
+            let restrict = hir::Expr::Restrict(
+                Box::new(hir::Expr::Variable(hir::VariableId(0))),
+                Box::new(condition),
+            );
+            let lowered = lower_program(&program(
+                vec![
+                    debug_value(),
+                    user("main", &[], vec![call(0, vec![("v", restrict)])]),
+                ],
+                vec![variable(
+                    "r",
+                    hir::Value::Relation(hir::RelationValue {
+                        heading: heading.clone(),
+                        tuples: std::collections::BTreeSet::new(),
+                    }),
+                )],
+            ));
+            let calls = runtime_calls(&lowered.functions[0]).concat();
+            calls.iter().filter(|call| **call == EqualRun).count()
+        };
+        let and = hir::Connective::And;
+        // The first, on either side, and the first two in either order.
+        assert_eq!(runs(equal(attribute("a"), one())), 1);
+        assert_eq!(runs(equal(one(), attribute("a"))), 1);
+        let both = and.of(vec![
+            equal(attribute("b"), one()),
+            equal(attribute("a"), one()),
+        ]);
+        assert_eq!(runs(both), 2);
+        // Only the second, which the tuples aren't sorted by.
+        assert_eq!(runs(equal(attribute("b"), one())), 0);
+        // Another attribute's value differs from tuple to tuple.
+        assert_eq!(runs(equal(attribute("a"), attribute("b"))), 0);
+        // A value that can fail isn't computed before the tuples.
+        let can_fail = hir::Expr::Binary(hir::BinaryOp::Div, Box::new(one()), Box::new(one()));
+        assert_eq!(runs(equal(attribute("a"), can_fail)), 0);
     }
 
     #[test]

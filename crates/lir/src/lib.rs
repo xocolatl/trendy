@@ -543,6 +543,14 @@ pub enum RuntimeFn {
     /// arguments are as for [`RuntimeFn::And`]'s, `key` its right operand's
     /// one tuple.
     Lookup,
+    /// `trendy_rt_equal_run(dst, src, value, descriptor, attribute)`: store
+    /// at `dst` the run of tuples of the relation at `src`, of the type the
+    /// descriptor describes, whose attribute `attribute` (a
+    /// [`Field::Usize`]), from the first in name order, is equal to `value`,
+    /// which they are sorted by, as those before it are the same in all of
+    /// them: the address of the first in `src`'s buffer, and their number,
+    /// so only to be read while `src` holds them.
+    EqualRun,
     /// `trendy_rt_ungroup(dst, src, result, source, sources, ungrouped,
     /// ungrouped_count)`: store at `dst` the relation, of the type the
     /// descriptor `result` describes, of every tuple made of a tuple of
@@ -654,7 +662,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 77] = [
+    pub const ALL: [RuntimeFn; 78] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -718,6 +726,7 @@ impl RuntimeFn {
         RuntimeFn::And,
         RuntimeFn::Index,
         RuntimeFn::Lookup,
+        RuntimeFn::EqualRun,
         RuntimeFn::Ungroup,
         RuntimeFn::Matching,
         RuntimeFn::Tclose,
@@ -819,6 +828,7 @@ impl RuntimeFn {
             | RuntimeFn::Retain
             | RuntimeFn::Adopt
             | RuntimeFn::Subset
+            | RuntimeFn::EqualRun
             | RuntimeFn::CompareText
             | RuntimeFn::Equal => false,
         }
@@ -891,6 +901,7 @@ impl RuntimeFn {
             RuntimeFn::And => "trendy_rt_and",
             RuntimeFn::Index => "trendy_rt_index",
             RuntimeFn::Lookup => "trendy_rt_lookup",
+            RuntimeFn::EqualRun => "trendy_rt_equal_run",
             RuntimeFn::Ungroup => "trendy_rt_ungroup",
             RuntimeFn::Matching => "trendy_rt_matching",
             RuntimeFn::Tclose => "trendy_rt_tclose",

@@ -4386,6 +4386,151 @@ fn image_relations_are_looked_up_once_per_loop() {
     );
 }
 
+/// A program whose restrictions by the first attributes in name order look
+/// at only the tuples they may keep, when running
+/// (`FunctionBuilder::equal_runs`), or at every tuple.
+const EQUAL_RUNS: &str = r#"type city { { name: text } };
+type figure union;
+type round is figure { { r: integer } };
+type square is figure { { s: integer } };
+
+operator show{
+    r: relation { a: integer, b: text, c: integer },
+    q: relation { k: integer },
+    named: relation { name: text, people: integer },
+    places: relation { at: city, n: integer },
+    figures: relation { f: figure, n: integer },
+    x: integer,
+    below: integer,
+    between: integer,
+    above: integer,
+    t: text,
+    z: integer,
+} [
+    /* The first attribute, written on either side. */
+    call debug_table{r: r where a = x};
+    call debug_table{r: r where x = a};
+    /* Not there: below its values, between them, and above them. */
+    call debug_value{v: count{r: r where a = below}};
+    call debug_value{v: count{r: r where a = between}};
+    call debug_value{v: count{r: r where a = above}};
+    /* The first two, in either order. */
+    call debug_table{r: r where b = t and a = x};
+    /* The first and the third: only the first narrows. */
+    call debug_table{r: r where c = x and a = x};
+    /* Only the second, for which every tuple is looked at. */
+    call debug_table{r: r where b = t};
+    /* The others are computed only for the tuples of the run: another
+       tuple's `c` of 0 divides nothing. */
+    call debug_table{r: r where 10 div c > 1 and a = x};
+    /* From a tuple further out. */
+    call debug_table{r: q extend { n := count{r: r where a = k} }};
+    /* Text, and a type of the program's own, come first too. */
+    call debug_table{r: named where name = t};
+    call debug_table{r: places where at = city{name: t}};
+    /* A subtype's value isn't of the attribute's type: all are looked at. */
+    call debug_table{r: figures where f = round{r: x}};
+    /* A value that can fail is computed only if a tuple needs it. */
+    call debug_value{v: count{r: (r where a = below) where a = 1 div z}};
+    call debug_value{v: count{r: r where a = 1 div z}};
+];
+
+operator main{} [
+    call show{
+        r: relation {
+            { a: 1, b: "no", c: 0 },
+            { a: 3, b: "no", c: 3 },
+            { a: 3, b: "yes", c: 5 },
+            { a: 5, b: "yes", c: 0 },
+        },
+        q: relation { { k: 1 }, { k: 2 }, { k: 3 } },
+        named: relation { { name: "Oslo", people: 1 }, { name: "yes", people: 2 } },
+        places: relation { { at: city{name: "Oslo"}, n: 1 }, { at: city{name: "yes"}, n: 2 } },
+        figures: relation { { f: round{r: 3}, n: 1 }, { f: square{s: 3}, n: 2 } },
+        x: 3,
+        below: 0,
+        between: 2,
+        above: 9,
+        t: "yes",
+        z: 0,
+    };
+];
+"#;
+
+#[test]
+fn a_restriction_by_its_first_attributes_finds_their_run() {
+    let (code, stderr) = run_source("equal_runs", EQUAL_RUNS);
+    let run_of_three = [
+        "┌───┬─────┬───┐",
+        "│ a │ b   │ c │",
+        "├───┼─────┼───┤",
+        "│ 3 │ no  │ 3 │",
+        "│ 3 │ yes │ 5 │",
+        "└───┴─────┴───┘",
+    ];
+    let expected = [
+        &run_of_three[..],
+        &run_of_three[..],
+        &["0", "0", "0"],
+        &[
+            "┌───┬─────┬───┐",
+            "│ a │ b   │ c │",
+            "├───┼─────┼───┤",
+            "│ 3 │ yes │ 5 │",
+            "└───┴─────┴───┘",
+            "┌───┬────┬───┐",
+            "│ a │ b  │ c │",
+            "├───┼────┼───┤",
+            "│ 3 │ no │ 3 │",
+            "└───┴────┴───┘",
+            "┌───┬─────┬───┐",
+            "│ a │ b   │ c │",
+            "├───┼─────┼───┤",
+            "│ 3 │ yes │ 5 │",
+            "│ 5 │ yes │ 0 │",
+            "└───┴─────┴───┘",
+        ],
+        &run_of_three[..],
+        &[
+            "┌───┬───┐",
+            "│ k │ n │",
+            "├───┼───┤",
+            "│ 1 │ 1 │",
+            "│ 2 │ 0 │",
+            "│ 3 │ 2 │",
+            "└───┴───┘",
+            "┌──────┬────────┐",
+            "│ name │ people │",
+            "├──────┼────────┤",
+            "│ yes  │      2 │",
+            "└──────┴────────┘",
+            "┌───────────────────┬───┐",
+            "│ at                │ n │",
+            "├───────────────────┼───┤",
+            "│ city{name: \"yes\"} │ 2 │",
+            "└───────────────────┴───┘",
+            "┌─────────────┬───┐",
+            "│ f           │ n │",
+            "├─────────────┼───┤",
+            "│ round{r: 3} │ 1 │",
+            "└─────────────┴───┘",
+            "0",
+        ],
+    ]
+    .concat();
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        (code, &lines[..expected.len()]),
+        (1, &expected[..]),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[expected.len()..][0],
+        division("1 div 0"),
+        "a value that can fail is computed for the first tuple: {stderr}"
+    );
+}
+
 /// Relations whose tuples come out in canonical order or don't, and too big
 /// for the runtime's scratch memory or not, when running.
 #[test]

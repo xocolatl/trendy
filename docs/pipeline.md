@@ -1649,7 +1649,16 @@ opt). So the zebra's `times{…} where …`, of 199 million
 tuples, is made from a few hundred. Lowering loops over the tuples, as for
 `extend` (`each_tuple`), copying those that pass into a relation
 allocated for all of them, then setting its count: they stay in the
-canonical order, so they need no sorting.
+canonical order, so they need no sorting. A relation's tuples are sorted
+by their attributes in name order, so where a conjunct says the first
+attribute is equal to a value of its type that's the same for every tuple
+and can't fail, those it holds for are a run, found by binary search
+(`FunctionBuilder::equal_runs`, `trendy_rt_equal_run`), and so on for the
+next attribute among them. The loop goes over only the run, for the other
+conjuncts: as an equality can't fail, it guards them, so they are computed
+for just those tuples anyway. So `r where key = x` costs the log of the
+relation's size when `key` comes first in name order, as lowering sees it;
+other attributes aren't indexed, and take the loop over every tuple.
 
 `tuple from` and `value from` (`FromExpr`) are prefix operators whose
 `value` and `from` are contextual keywords, recognized by a `tuple`

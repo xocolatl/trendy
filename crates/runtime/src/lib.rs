@@ -1460,6 +1460,43 @@ pub unsafe extern "C" fn trendy_rt_lookup(
     })
 }
 
+/// Store at `dst` the run of tuples of the relation at `src`, which `desc`
+/// describes, whose attribute `*attribute`, from the first in name order,
+/// is equal to the value at `value`, found by binary search: it is the
+/// attribute they are sorted by, as those before it are the same in all of
+/// them. It has no buffer of its own, only its tuples' address in `src`'s,
+/// and their number, so it is only to be read while `src` holds them.
+///
+/// # Safety
+///
+/// `src` must point to a relation's tuples of the type `desc` describes, or
+/// a run of them this made of an attribute before this one, `value` to a
+/// valid value of the attribute's type, and `dst` to memory for a relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_equal_run(
+    dst: *mut Text,
+    src: *const u8,
+    value: *const u8,
+    desc: *const TypeDesc,
+    attribute: *const usize,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        let (tuples, count) = read_slice(src);
+        let size = desc.element().size;
+        let attr = &attributes(desc)[attribute.read_unaligned()];
+        let compared = |i: usize| order(tuples.add(i * size + attr.offset), value, &*attr.desc);
+        let start = partition_point(0, count, |i| compared(i).is_lt());
+        let end = partition_point(start, count, |i| compared(i).is_eq());
+        dst.write_unaligned(Text {
+            bytes: tuples.add(start * size),
+            len: end - start,
+        });
+    }
+}
+
 /// The first of `start..end` for which `before` is false, all those before
 /// it being those for which it is true, by binary search.
 #[cfg(not(test))]
