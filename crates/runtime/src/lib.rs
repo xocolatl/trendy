@@ -1177,30 +1177,23 @@ pub unsafe extern "C" fn trendy_rt_reshape(
         let (result, source) = (&*result, &*source);
         let (tuples, count) = read_slice(src);
         let size = result.element().size;
-        let Some(bytes) = count.checked_mul(size) else {
-            return Err(out_of_memory());
-        };
         let attributes = attributes(result);
         let offsets = core::slice::from_raw_parts(offsets, attributes.len());
         // Each tuple with only the kept attributes, in the source's order.
-        let projected = Temp::<u8>::zeroed(bytes)?;
-        let projected = projected.ptr();
-        for i in 0..count {
-            let from = tuples.add(i * source.element().size);
-            let to = projected.add(i * size);
-            for (attr, &offset) in attributes.iter().zip(offsets) {
-                core::ptr::copy_nonoverlapping(
-                    from.add(offset),
-                    to.add(attr.offset),
-                    (*attr.desc).size,
-                );
+        let (bytes, len) = made_canonical(count, result, |projected| {
+            for i in 0..count {
+                let from = tuples.add(i * source.element().size);
+                let to = projected.add(i * size);
+                for (attr, &offset) in attributes.iter().zip(offsets) {
+                    core::ptr::copy_nonoverlapping(
+                        from.add(offset),
+                        to.add(attr.offset),
+                        (*attr.desc).size,
+                    );
+                }
             }
-        }
-        let canonical = canonical(projected, count, result)?;
-        dst.write_unaligned(Text {
-            bytes: canonical.0,
-            len: canonical.1,
-        });
+        })?;
+        dst.write_unaligned(Text { bytes, len });
         Ok(())
     })
 }
@@ -1327,33 +1320,26 @@ pub unsafe extern "C" fn trendy_rt_and(
         let (mut groups, total) = matching_runs(common, lhs_sorted, rhs_sorted)?;
 
         let size = result.element().size;
-        let Some(bytes) = total.checked_mul(size) else {
-            return Err(out_of_memory());
-        };
-        let joined = Temp::<u8>::zeroed(bytes)?;
-        let joined = joined.ptr();
-        let mut k = 0;
-        for group in &*groups.values() {
-            for &l in &lhs_sorted[group.lhs_start..group.lhs_end] {
-                for &r in &rhs_sorted[group.rhs_start..group.rhs_end] {
-                    let to = joined.add(k * size);
-                    for (attr, source) in result_attrs.iter().zip(sources) {
-                        let from = if source.from == 1 { r } else { l };
-                        core::ptr::copy_nonoverlapping(
-                            from.add(source.offset),
-                            to.add(attr.offset),
-                            (*attr.desc).size,
-                        );
+        let (bytes, len) = made_canonical(total, result, |joined| {
+            let mut k = 0;
+            for group in &*groups.values() {
+                for &l in &lhs_sorted[group.lhs_start..group.lhs_end] {
+                    for &r in &rhs_sorted[group.rhs_start..group.rhs_end] {
+                        let to = joined.add(k * size);
+                        for (attr, source) in result_attrs.iter().zip(sources) {
+                            let from = if source.from == 1 { r } else { l };
+                            core::ptr::copy_nonoverlapping(
+                                from.add(source.offset),
+                                to.add(attr.offset),
+                                (*attr.desc).size,
+                            );
+                        }
+                        k += 1;
                     }
-                    k += 1;
                 }
             }
-        }
-        let canonical = canonical(joined, total, result)?;
-        dst.write_unaligned(Text {
-            bytes: canonical.0,
-            len: canonical.1,
-        });
+        })?;
+        dst.write_unaligned(Text { bytes, len });
         Ok(())
     })
 }
@@ -1437,9 +1423,7 @@ unsafe fn product(
             .filter(|pair| pair[0].from != pair[1].from)
             .count();
         if changes > 1 {
-            let made = Temp::<u8>::zeroed(bytes)?;
-            write(made.ptr());
-            return canonical(made.ptr(), total, result);
+            return made_canonical(total, result, write);
         }
         let out = allocate_buffer(bytes, result)?;
         core::ptr::write_bytes(out, 0, bytes);
@@ -1698,63 +1682,58 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
             })
             .try_fold(0usize, |sum, n| sum.checked_add(n?));
         let size = result.element().size;
-        let Some((total, bytes)) = total.and_then(|total| Some((total, total.checked_mul(size)?)))
-        else {
+        let Some(total) = total else {
             return Err(out_of_memory());
         };
-        let made = Temp::<u8>::zeroed(bytes)?;
-        let made = made.ptr();
         // For the tuple at hand, the index in each ungrouped relation of the
         // tuple being combined, counted up like an odometer.
         let mut at = Temp::<usize>::zeroed(ungrouped.len())?;
         let at = at.values();
-        let mut k = 0;
-        for i in 0..count {
-            let outer = tuple(i);
-            if ungrouped
-                .iter()
-                .any(|u| read_slice(outer.add(u.offset)).1 == 0)
-            {
-                continue;
-            }
-            at.fill(0);
-            loop {
-                let to = made.add(k * size);
-                for (attr, source) in result_attrs.iter().zip(sources) {
-                    let from = match source.from {
-                        0 => outer,
-                        n => {
-                            let u = &ungrouped[n - 1];
-                            read_slice(outer.add(u.offset))
-                                .0
-                                .add(at[n - 1] * u.element_size)
-                        }
-                    };
-                    core::ptr::copy_nonoverlapping(
-                        from.add(source.offset),
-                        to.add(attr.offset),
-                        (*attr.desc).size,
-                    );
-                }
-                k += 1;
-                // The next combination, or the end of this tuple's.
-                let next = ungrouped
+        let (bytes, len) = made_canonical(total, result, |made| {
+            let mut k = 0;
+            for i in 0..count {
+                let outer = tuple(i);
+                if ungrouped
                     .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|&(j, u)| at[j] + 1 < read_slice(outer.add(u.offset)).1);
-                let Some((j, _)) = next else {
-                    break;
-                };
-                at[j] += 1;
-                at[j + 1..].fill(0);
+                    .any(|u| read_slice(outer.add(u.offset)).1 == 0)
+                {
+                    continue;
+                }
+                at.fill(0);
+                loop {
+                    let to = made.add(k * size);
+                    for (attr, source) in result_attrs.iter().zip(sources) {
+                        let from = match source.from {
+                            0 => outer,
+                            n => {
+                                let u = &ungrouped[n - 1];
+                                read_slice(outer.add(u.offset))
+                                    .0
+                                    .add(at[n - 1] * u.element_size)
+                            }
+                        };
+                        core::ptr::copy_nonoverlapping(
+                            from.add(source.offset),
+                            to.add(attr.offset),
+                            (*attr.desc).size,
+                        );
+                    }
+                    k += 1;
+                    // The next combination, or the end of this tuple's.
+                    let next = ungrouped
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|&(j, u)| at[j] + 1 < read_slice(outer.add(u.offset)).1);
+                    let Some((j, _)) = next else {
+                        break;
+                    };
+                    at[j] += 1;
+                    at[j + 1..].fill(0);
+                }
             }
-        }
-        let canonical = canonical(made, total, result)?;
-        dst.write_unaligned(Text {
-            bytes: canonical.0,
-            len: canonical.1,
-        });
+        })?;
+        dst.write_unaligned(Text { bytes, len });
         Ok(())
     })
 }
@@ -2490,13 +2469,13 @@ pub unsafe extern "C" fn trendy_rt_tclose(
             closure = closure.merged(&new, by_pair)?;
             step = new;
         }
-        let made = Temp::<u8>::zeroed(closure.len * element.size)?;
-        for (i, pair) in closure.values().iter().enumerate() {
-            let tuple = made.ptr().add(i * element.size);
-            core::ptr::copy_nonoverlapping(pair[0], tuple.add(from.offset), value.size);
-            core::ptr::copy_nonoverlapping(pair[1], tuple.add(to.offset), value.size);
-        }
-        let (bytes, len) = canonical(made.ptr(), closure.len, desc)?;
+        let (bytes, len) = made_canonical(closure.len, desc, |made| {
+            for (i, pair) in closure.values().iter().enumerate() {
+                let tuple = made.add(i * element.size);
+                core::ptr::copy_nonoverlapping(pair[0], tuple.add(from.offset), value.size);
+                core::ptr::copy_nonoverlapping(pair[1], tuple.add(to.offset), value.size);
+            }
+        })?;
         dst.write_unaligned(Text { bytes, len });
         Ok(())
     })
@@ -2739,10 +2718,11 @@ pub unsafe extern "C" fn trendy_rt_allocate(
 
 /// Put the tuples of the relation at `relation`, of the type `desc`
 /// describes, in the canonical order, without duplicates: it then holds
-/// them, in memory the statement owns. The buffer it had is freed at once
-/// if only the current scope holds it, as the one compiled code filled
-/// has nothing else pointing into it once it is replaced, so that a
-/// relation sorted isn't two of it until the statement ends.
+/// them, in memory the statement owns. The buffer it had is sorted where it is
+/// if its tuples are integers and only the current scope holds it, and
+/// otherwise freed at once if only the current scope holds it, as the one
+/// compiled code filled has nothing else pointing into it once it is replaced,
+/// so that a relation sorted isn't two of it until the statement ends.
 ///
 /// # Safety
 ///
@@ -2755,6 +2735,11 @@ pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDe
     // SAFETY: guaranteed by the caller.
     status(|| unsafe {
         let (tuples, count) = read_slice(relation.cast());
+        if sorts_in_place(&*desc) && only_in_scope(tuples.cast_mut()).is_some() {
+            let (bytes, len) = sorted_in_place(tuples.cast_mut(), count, &*desc)?;
+            relation.write_unaligned(Text { bytes, len });
+            return Ok(());
+        }
         if in_canonical_order(tuples, count, &*desc) {
             adopt(tuples.cast_mut(), count, (*desc).element());
             return Ok(());
@@ -2781,19 +2766,35 @@ unsafe fn release_replaced(buffer: *mut u8) {
     // SAFETY: guaranteed by the caller; the scope's list holds its `len`
     // buffers.
     unsafe {
+        if let Some(i) = only_in_scope(buffer) {
+            let scope = &mut *CURRENT.load(Relaxed);
+            scope.len -= 1;
+            *scope.buffers.add(i) = *scope.buffers.add(scope.len);
+            release_buffer(buffer);
+        }
+    }
+}
+
+/// Where `buffer` is in the current scope's list, if the scope holds the only
+/// reference to it.
+///
+/// # Safety
+///
+/// `buffer` must be a buffer, just past its header, or null.
+#[cfg(not(test))]
+unsafe fn only_in_scope(buffer: *mut u8) -> Option<usize> {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller; the scope's list holds its `len`
+    // buffers.
+    unsafe {
         if buffer.is_null() || header(buffer).count != 1 {
-            return;
+            return None;
         }
-        let scope = &mut *CURRENT.load(Relaxed);
+        let scope = &*CURRENT.load(Relaxed);
         // From the end, where a buffer the statement made recently is.
-        for i in (0..scope.len).rev() {
-            if *scope.buffers.add(i) == buffer {
-                scope.len -= 1;
-                *scope.buffers.add(i) = *scope.buffers.add(scope.len);
-                release_buffer(buffer);
-                return;
-            }
-        }
+        (0..scope.len)
+            .rev()
+            .find(|&i| *scope.buffers.add(i) == buffer)
     }
 }
 
@@ -2914,29 +2915,24 @@ pub unsafe extern "C" fn trendy_rt_unload(
         let (elements, len) = read_slice(src);
         let element = source.element().size;
         let size = result.element().size;
-        let Some(bytes) = len.checked_mul(size) else {
-            return Err(out_of_memory());
-        };
-        // The tuples are made here first, zeroed, as everywhere, so that
-        // the padding in them is zero, and share the elements' buffers
-        // until `canonical` copies them, taking a reference to each.
-        let tuples = Temp::<u8>::zeroed(bytes)?;
-        let tuples = tuples.ptr();
-        for i in 0..len {
-            let (from, to) = (elements.add(i * element), tuples.add(i * size));
-            for part in parts {
-                core::ptr::copy_nonoverlapping(from.add(part.from), to.add(part.to), part.size);
-            }
-            // An array of tuples of no attributes takes no memory, so only
-            // the integers limit its positions.
-            let Ok(position) = i64::try_from(i + 1) else {
-                return Err(overflowed("the position"));
-            };
-            for number in numbers {
-                to.add(*number).cast::<i64>().write_unaligned(position);
-            }
+        // An array of tuples of no attributes takes no memory, so only the
+        // integers limit its positions.
+        if i64::try_from(len).is_err() {
+            return Err(overflowed("the position"));
         }
-        let (out, kept) = canonical(tuples, len, result)?;
+        let (out, kept) = made_canonical(len, result, |tuples| {
+            let mut position = 0_i64;
+            for i in 0..len {
+                let (from, to) = (elements.add(i * element), tuples.add(i * size));
+                for part in parts {
+                    core::ptr::copy_nonoverlapping(from.add(part.from), to.add(part.to), part.size);
+                }
+                position += 1;
+                for number in numbers {
+                    to.add(*number).cast::<i64>().write_unaligned(position);
+                }
+            }
+        })?;
         dst.write_unaligned(Text {
             bytes: out,
             len: kept,
@@ -2984,6 +2980,11 @@ unsafe fn canonical(
     // SAFETY: guaranteed by the caller.
     unsafe {
         let size = desc.element().size;
+        if sorts_in_place(desc) {
+            let out = allocate_buffer(count * size, desc)?;
+            core::ptr::copy_nonoverlapping(tuples, out, count * size);
+            return sorted_in_place(out, count, desc);
+        }
         if in_canonical_order(tuples, count, desc) {
             let out = allocate_buffer(count * size, desc)?;
             core::ptr::copy_nonoverlapping(tuples, out, count * size);
@@ -3003,6 +3004,122 @@ unsafe fn canonical(
             kept += 1;
         }
         Ok((out, kept))
+    }
+}
+
+/// The relation `desc` describes of the `count` tuples that `write` writes at
+/// the address it is given, in any order: sorted canonically and without
+/// duplicates, in memory the current statement owns, as [`canonical`] gives
+/// them. Tuples of integers are written in that memory and sorted there, and
+/// others are written in temporary memory, zeroed, as everywhere, so that the
+/// padding in them is zero, and share what they point to until [`canonical`]
+/// copies them, taking a reference to each.
+///
+/// # Safety
+///
+/// `write` must write `count` valid tuples of that relation.
+#[cfg(not(test))]
+unsafe fn made_canonical(
+    count: usize,
+    desc: &TypeDesc,
+    write: impl FnOnce(*mut u8),
+) -> Fallible<(*mut u8, usize)> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let Some(bytes) = count.checked_mul(desc.element().size) else {
+            return Err(out_of_memory());
+        };
+        if sorts_in_place(desc) {
+            let out = allocate_buffer(bytes, desc)?;
+            write(out);
+            return sorted_in_place(out, count, desc);
+        }
+        let made = Temp::<u8>::zeroed(bytes)?;
+        write(made.ptr());
+        canonical(made.ptr(), count, desc)
+    }
+}
+
+/// Whether the tuples of the relation `desc` describes are sorted where they
+/// are, rather than through pointers to them, which takes half the time or less,
+/// and no memory for the pointers: they are integers, and few enough. Past that,
+/// the gain is small, and each number of them takes code in every program.
+#[cfg(not(test))]
+fn sorts_in_place(desc: &TypeDesc) -> bool {
+    (1..=8).contains(&desc.integers)
+}
+
+/// The `count` tuples at `out`, a buffer the current scope holds alone, of the
+/// relation `desc` describes, of which [`sorts_in_place`] is true, sorted
+/// canonically where they are, without duplicates: the memory that holds them,
+/// which is smaller if they take less than half of it, as what a relation holds
+/// lasts as long as it does, and how many there are. Fails if there is no memory.
+///
+/// # Safety
+///
+/// `out` must hold `count` valid tuples of that relation.
+#[cfg(not(test))]
+unsafe fn sorted_in_place(
+    out: *mut u8,
+    count: usize,
+    desc: &TypeDesc,
+) -> Fallible<(*mut u8, usize)> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let kept = if in_canonical_order(out, count, desc) {
+            count
+        } else {
+            sort_integers(out, count, desc.integers)
+        };
+        // Integers point to nothing, so a buffer needs no references through
+        // them.
+        if kept >= count / 2 {
+            return Ok((out, kept));
+        }
+        let bytes = kept * desc.element().size;
+        let smaller = allocate_buffer(bytes, desc)?;
+        core::ptr::copy_nonoverlapping(out, smaller, bytes);
+        release_replaced(out);
+        Ok((smaller, kept))
+    }
+}
+
+/// Sort the `count` tuples at `tuples`, each of `integers` integers, where they
+/// are, as [`compare_integers`] orders them, keeping one of those that are
+/// equal: how many that leaves, first in the memory.
+///
+/// # Safety
+///
+/// `tuples` must point to `count` such tuples, aligned for integers, and
+/// `integers` must be one of those [`sorts_in_place`] allows.
+unsafe fn sort_integers(tuples: *mut u8, count: usize, integers: usize) -> usize {
+    /// As for [`sort_integers`], of `N` integers.
+    unsafe fn sort<const N: usize>(tuples: *mut u8, count: usize) -> usize {
+        // SAFETY: guaranteed by the caller.
+        let tuples = unsafe { core::slice::from_raw_parts_mut(tuples.cast::<[i64; N]>(), count) };
+        tuples.sort_unstable();
+        let mut kept = 0;
+        for i in 0..count {
+            if kept == 0 || tuples[kept - 1] != tuples[i] {
+                tuples[kept] = tuples[i];
+                kept += 1;
+            }
+        }
+        kept
+    }
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        match integers {
+            1 => sort::<1>(tuples, count),
+            2 => sort::<2>(tuples, count),
+            3 => sort::<3>(tuples, count),
+            4 => sort::<4>(tuples, count),
+            5 => sort::<5>(tuples, count),
+            6 => sort::<6>(tuples, count),
+            7 => sort::<7>(tuples, count),
+            8 => sort::<8>(tuples, count),
+            _ => unreachable!("`sorts_in_place` allows no others"),
+        }
     }
 }
 
@@ -7632,6 +7749,56 @@ mod tests {
         assert!(ordering(&[1], &[1, 0]).is_lt());
         assert!(ordering(&[], &[0]).is_lt());
         assert!(ordering(&[3, 1], &[3, 1]).is_eq());
+    }
+
+    #[test]
+    fn tuples_of_integers_sort_where_they_are_as_they_compare() {
+        // Signed, by the first that differs, one of those equal kept.
+        let mut pairs: [[i64; 2]; 6] = [
+            [1, 2],
+            [-1, 5],
+            [1, -2],
+            [i64::MAX, i64::MIN],
+            [1, 2],
+            [i64::MIN, i64::MAX],
+        ];
+        // SAFETY: they are six tuples of two integers each, aligned for them.
+        let kept = unsafe { sort_integers(pairs.as_mut_ptr().cast(), 6, 2) };
+        assert_eq!(
+            pairs[..kept],
+            [
+                [i64::MIN, i64::MAX],
+                [-1, 5],
+                [1, -2],
+                [1, 2],
+                [i64::MAX, i64::MIN],
+            ]
+        );
+        let mut same = [[7_i64]; 5];
+        // SAFETY: as above, of one integer each.
+        assert_eq!(unsafe { sort_integers(same.as_mut_ptr().cast(), 5, 1) }, 1);
+        // Each number of them `sorts_in_place` allows.
+        for integers in 1..=8 {
+            let tuple = |first: i64| {
+                let mut tuple = [0_i64; 8];
+                tuple[integers - 1] = first;
+                tuple
+            };
+            let mut tuples = [tuple(3), tuple(-3), tuple(3), tuple(0)];
+            let mut flat: Vec<i64> = tuples
+                .iter_mut()
+                .flat_map(|t| t[..integers].to_vec())
+                .collect();
+            // SAFETY: as above, of that many integers each.
+            let kept = unsafe { sort_integers(flat.as_mut_ptr().cast(), 4, integers) };
+            assert_eq!(kept, 3, "{integers}");
+            let last: Vec<i64> = flat
+                .chunks(integers)
+                .take(kept)
+                .map(|t| t[integers - 1])
+                .collect();
+            assert_eq!(last, [-3, 0, 3], "{integers}");
+        }
     }
 
     #[test]

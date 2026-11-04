@@ -1989,7 +1989,8 @@ calls do. A buffer that compiled code fills (`trendy_rt_allocate`) holds
 no references through its tuples or elements until `trendy_rt_adopt`
 takes them for it, or `trendy_rt_sort` copies its tuples into a buffer
 that takes them, and frees the one it replaces, which only the
-statement's scope holds, at once rather than as the statement ends. A buffer compiled into the program is never released,
+statement's scope holds, at once rather than as the statement ends, or sorts
+tuples of few integers where they are (see `sorted_in_place` below). A buffer compiled into the program is never released,
 so sharing it costs nothing.
 
 Only a variable's references outlive a statement. `trendy_rt_assign`
@@ -2400,8 +2401,15 @@ otherwise make for each tuple: whether a value of the type can point to
 buffers at all (`points`), which takes no reference to anything if not,
 and, of a tuple, a value of a type of the program's own or a relation of
 such tuples, how many integers it is, if it is nothing else, one after
-another in name order, as they are laid out and compared (`integers`), which sorting
-and equality compare as a run of them.
+another in name order, as they are laid out and compared (`integers`), which
+equality compares as a run of them, and sorting too. Tuples of up to 8 integers
+are written straight into the result's buffer, which holds no references, and
+sorted there as arrays of integers (`made_canonical`, `sorted_in_place`,
+`sort_integers`), with no pointers to them and no second copy; others are written
+in temporary memory, and sorted through pointers (`canonical`). Past 8 the gain is
+small, and each number of integers takes about 7 KB of code in every program. A
+result that lost more than half its tuples as duplicates moves to a buffer of its
+size, as what a relation holds lasts as long as it does.
 
 A value of a type in a hierarchy, a union type or a subtype of one, is
 laid out as every value of the union type at its top: the address of its

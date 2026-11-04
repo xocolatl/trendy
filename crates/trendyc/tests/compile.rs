@@ -7077,3 +7077,252 @@ operator main{} [
     assert!(stderr.starts_with("error[R0002]"), "{stderr}");
     assert_eq!(stderr.matches("in `dividing`").count(), 1, "{stderr}");
 }
+
+/// Each way a relation's tuples of integers come to be sorted, whose order is
+/// signed and goes by each attribute in turn, and where equal tuples are one.
+const INTEGER_TUPLES: &str = r"
+type spot { { across: integer, up: integer } };
+
+operator main{} [
+    var big := 9223372036854775807;
+    var low := -big - 1;
+    var one := 1;
+    var rows := relation {
+        { a: one, b: 2 },
+        { a: -one, b: 5 },
+        { a: one, b: -2 },
+        { a: big, b: low },
+        { a: low, b: big },
+    };
+    /* A projection: the attribute that comes first is `b` once renamed, with
+       equal tuples as one. */
+    call debug_table{r: rows rename {a as z, b as c}};
+    call debug_table{r: (rows extend { p := a * 0 }){p}};
+    /* An `extend`, whose new attribute comes first, and equal tuples can't arise. */
+    var few := (rows where a = one or a = -one) rename {a as m, b as n};
+    call debug_table{r: few extend { a := -m }};
+    /* A selector with values known only when the program runs. */
+    call debug_table{r: relation { { n: one }, { n: -one }, { n: one }, { n: 0 * one } }};
+    /* A join, its common attribute last in name order. */
+    var left := relation { { k: one, a: 2 }, { k: 0 * one, a: 3 }, { k: 2 * one, a: 1 } };
+    var right := relation { { k: one, c: 7 }, { k: 0 * one, c: 9 }, { k: 2 * one, c: 8 } };
+    call debug_table{r: join{left, right}};
+    /* A product whose attributes interleave. */
+    var odds := relation { { a: 3 * one, c: 1 }, { a: one, c: 2 } };
+    var evens := relation { { b: 2 * one, d: 1 }, { b: 0 * one, d: 2 } };
+    call debug_table{r: odds times evens};
+    /* An ungrouping, whose tuples don't come in order. */
+    var grouped := relation {
+        { g: 2 * one, r: relation { { n: 1 } } },
+        { g: one, r: relation { { n: 3 }, { n: 2 } } },
+    };
+    call debug_table{r: (grouped ungroup {r}) rename {g as z}};
+    /* An array's elements, which can repeat. */
+    var numbers := array [3 * one, -one, 3 * one, 0 * one];
+    var loaded: relation { n: integer };
+    load loaded from numbers as n;
+    call debug_table{r: loaded};
+    /* A transitive closure. */
+    var edges := relation { { from_n: 3 * one, to_n: one }, { from_n: one, to_n: 2 * one } };
+    call debug_table{r: edges tclose};
+    /* A tuple attribute, and a type of the program's own, are integers too. */
+    var nested := relation {
+        { t: tuple { y: one, x: 2 }, i: 1 },
+        { t: tuple { y: -one, x: 2 }, i: 1 },
+        { t: tuple { y: one, x: 1 }, i: 1 },
+    };
+    call debug_table{r: nested{t}};
+    var spots := relation { { s: spot{across: one, up: 2} }, { s: spot{across: -one, up: 3} } };
+    call debug_table{r: (spots extend { i := 1 }){s}};
+    /* Eight attributes, the last sorted in place, and nine, the first that isn't. */
+    var eight := relation {
+        { a: one, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: 2 },
+        { a: one, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: -2 },
+    };
+    call debug_table{r: eight rename {h as a0}};
+    var nine := relation {
+        { a: one, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: 1, i: 2 },
+        { a: one, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: 1, i: -2 },
+    };
+    call debug_table{r: nine rename {i as a0}};
+    /* What a projection leaves can grow and shrink where it is held. */
+    var kept := (series{from: 1, to: 1000} rename {value as i}) extend { z := i mod 3 };
+    var values := kept{z};
+    insert values relation { { z: 7 * one }, { z: -one } };
+    call debug_table{r: values};
+    delete values where z = 7;
+    call debug_table{r: values};
+];
+";
+
+/// What `INTEGER_TUPLES` writes.
+const INTEGER_TUPLES_WRITTEN: [&str; 106] = [
+    "┌──────────────────────┬──────────────────────┐",
+    "│ c                    │ z                    │",
+    "├──────────────────────┼──────────────────────┤",
+    "│ -9223372036854775808 │  9223372036854775807 │",
+    "│                   -2 │                    1 │",
+    "│                    2 │                    1 │",
+    "│                    5 │                   -1 │",
+    "│  9223372036854775807 │ -9223372036854775808 │",
+    "└──────────────────────┴──────────────────────┘",
+    "┌───┐",
+    "│ p │",
+    "├───┤",
+    "│ 0 │",
+    "└───┘",
+    "┌────┬────┬────┐",
+    "│ a  │ m  │ n  │",
+    "├────┼────┼────┤",
+    "│ -1 │  1 │ -2 │",
+    "│ -1 │  1 │  2 │",
+    "│  1 │ -1 │  5 │",
+    "└────┴────┴────┘",
+    "┌────┐",
+    "│ n  │",
+    "├────┤",
+    "│ -1 │",
+    "│  0 │",
+    "│  1 │",
+    "└────┘",
+    "┌───┬───┬───┐",
+    "│ a │ c │ k │",
+    "├───┼───┼───┤",
+    "│ 1 │ 8 │ 2 │",
+    "│ 2 │ 7 │ 1 │",
+    "│ 3 │ 9 │ 0 │",
+    "└───┴───┴───┘",
+    "┌───┬───┬───┬───┐",
+    "│ a │ b │ c │ d │",
+    "├───┼───┼───┼───┤",
+    "│ 1 │ 0 │ 2 │ 2 │",
+    "│ 1 │ 2 │ 2 │ 1 │",
+    "│ 3 │ 0 │ 1 │ 2 │",
+    "│ 3 │ 2 │ 1 │ 1 │",
+    "└───┴───┴───┴───┘",
+    "┌───┬───┐",
+    "│ n │ z │",
+    "├───┼───┤",
+    "│ 1 │ 2 │",
+    "│ 2 │ 1 │",
+    "│ 3 │ 1 │",
+    "└───┴───┘",
+    "┌────┐",
+    "│ n  │",
+    "├────┤",
+    "│ -1 │",
+    "│  0 │",
+    "│  3 │",
+    "└────┘",
+    "┌────────┬──────┐",
+    "│ from_n │ to_n │",
+    "├────────┼──────┤",
+    "│      1 │    2 │",
+    "│      3 │    1 │",
+    "│      3 │    2 │",
+    "└────────┴──────┘",
+    "┌───────────────────────┐",
+    "│ t                     │",
+    "├───────────────────────┤",
+    "│ tuple { x: 1, y: 1 }  │",
+    "│ tuple { x: 2, y: -1 } │",
+    "│ tuple { x: 2, y: 1 }  │",
+    "└───────────────────────┘",
+    "┌─────────────────────────┐",
+    "│ s                       │",
+    "├─────────────────────────┤",
+    "│ spot{across: -1, up: 3} │",
+    "│ spot{across: 1, up: 2}  │",
+    "└─────────────────────────┘",
+    "┌───┬────┬───┬───┬───┬───┬───┬───┐",
+    "│ a │ a0 │ b │ c │ d │ e │ f │ g │",
+    "├───┼────┼───┼───┼───┼───┼───┼───┤",
+    "│ 1 │ -2 │ 1 │ 1 │ 1 │ 1 │ 1 │ 1 │",
+    "│ 1 │  2 │ 1 │ 1 │ 1 │ 1 │ 1 │ 1 │",
+    "└───┴────┴───┴───┴───┴───┴───┴───┘",
+    "┌───┬────┬───┬───┬───┬───┬───┬───┬───┐",
+    "│ a │ a0 │ b │ c │ d │ e │ f │ g │ h │",
+    "├───┼────┼───┼───┼───┼───┼───┼───┼───┤",
+    "│ 1 │ -2 │ 1 │ 1 │ 1 │ 1 │ 1 │ 1 │ 1 │",
+    "│ 1 │  2 │ 1 │ 1 │ 1 │ 1 │ 1 │ 1 │ 1 │",
+    "└───┴────┴───┴───┴───┴───┴───┴───┴───┘",
+    "┌────┐",
+    "│ z  │",
+    "├────┤",
+    "│ -1 │",
+    "│  0 │",
+    "│  1 │",
+    "│  2 │",
+    "│  7 │",
+    "└────┘",
+    "┌────┐",
+    "│ z  │",
+    "├────┤",
+    "│ -1 │",
+    "│  0 │",
+    "│  1 │",
+    "│  2 │",
+    "└────┘",
+];
+
+#[test]
+fn tuples_of_integers_sort_and_lose_duplicates_however_they_are_made() {
+    let (code, stderr) = run_source("integer_tuples", INTEGER_TUPLES);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), INTEGER_TUPLES_WRITTEN);
+}
+
+/// A relation holds no more memory than its tuples need, or twice as much at
+/// most, however many it was projected from: fifty of a thousand values,
+/// projected from a million tuples each, take next to nothing, and would come to
+/// 400 MB in buffers of a million.
+#[test]
+fn a_projection_leaves_no_room_for_what_it_dropped() {
+    let source = "
+operator main{} [
+    var n := 1_000_000;
+    var made := (series{from: 1, to: n} rename {value as i}) extend { z := i mod 1000 };
+    var held: relation { at: integer, values: relation { z: integer } } := relation {};
+    var at := 0;
+    while at < 50 loop [
+        at := at + 1;
+        held := held union relation { { at, values: made{z} } };
+    ];
+    call debug_value{v: count{r: held}};
+];
+";
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let input = dir.join("projection_room.trendy");
+    std::fs::write(&input, source).unwrap();
+    let output = dir.join("projection_room");
+    let (code, stderr) = build_and_run(&input, &output, &workspace_root());
+    assert_eq!((code, stderr.as_str()), (0, "50\n"));
+    let peak = peak_memory(&output);
+    assert!(peak < 150 << 20, "{peak} bytes");
+}
+
+/// Tuples of integers are sorted where they are written, so reshaping them holds
+/// nothing but its operand and its result as it sorts: 16 bytes for each of four
+/// million tuples, and with temporary memory for them and for pointers to them,
+/// 40 bytes.
+#[test]
+fn sorting_integers_takes_no_memory_but_the_result() {
+    let product = "operator main{} [
+    var n := 40_000;
+    var tuples := times{series{from: 1, to: n} rename {value as a}, series{from: 1, to: 100} rename {value as b}};
+";
+    let unsorted = peak_memory_of(
+        "unsorted_integers",
+        &format!("{product}    call debug_value{{v: count{{r: tuples}}}};\n];"),
+        0,
+    );
+    let sorted = peak_memory_of(
+        "sorted_integers",
+        &format!("{product}    call debug_value{{v: count{{r: tuples rename {{a as c}}}}}};\n];"),
+        0,
+    );
+    assert!(
+        sorted < unsorted + 24 * 4_000_000,
+        "{unsorted} bytes, then {sorted}"
+    );
+}
