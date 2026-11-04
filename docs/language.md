@@ -365,9 +365,8 @@ body in square brackets `[]`, and a closing `;`.
   and `out` parameters](#var-and-out-parameters)).
 - **A body is a list of statements,** each ending with `;`: calls,
   assignments (see [Assignment](#assignment)), local variables'
-  declarations (see [Local variables](#local-variables)), and in an update
-  operator `if` statements (see [`if` statements](#if-statements)) and
-  loops (see [Loops](#loops)). A
+  declarations (see [Local variables](#local-variables)), `if` statements
+  (see [`if` statements](#if-statements)) and loops (see [Loops](#loops)). A
   read-only operator's ends with its value, an expression without `;`
   (see [Read-only operators](#read-only-operators)). An expression alone
   isn't a statement, as its value would go unused (P0035).
@@ -682,9 +681,17 @@ operator main{} [
 - **`return` is for leaving an operator early,** which no operator does
   yet: a body runs to its end (A0035). So a body's value is written alone,
   and `return x;` at its end is fixed to `x` (P0031).
-- **It doesn't call itself,** directly or through others (A0036), yet: a
-  call is evaluated when compiling where it can be, as below, and the
-  compiler can't yet tell whether a recursive one would stop.
+- **Its statements can decide what runs next:** an `if` statement, a loop,
+  a transaction and a `fail` statement are what they are in an update
+  operator, on its parameters, which it reads, and its local variables,
+  which it reads and assigns, as RM Prescription 3 lets it update "ones
+  that are purely local". They reach nothing else: they can't read or
+  assign a variable of the program's (A0050, A0034), `call` an operator
+  (A0034) or warn (A0035).
+- **It doesn't call itself,** directly or through others, whatever its
+  body is (A0036), yet: whether a recursive call would stop when the
+  compiler computes it, and how deep one can go when the program runs, are
+  still to be settled.
 - **A call is evaluated when compiling where its arguments are known
   then:** in an initial value, where variables have their initial values,
   and in a body, as `double{x: 21}` is, and in an `extend`'s or a
@@ -695,6 +702,9 @@ operator main{} [
   known only then, as a variable's value is in a body, so
   `scaled{x: 2, rate: rate}` above is 16 once `rate` is 4, and a failure
   in it stops the program, as one anywhere else does.
+- **A call of one whose statements decide what runs next is always made
+  when the program runs,** whatever its arguments, as they may not stop.
+  So an initial value can't call one, directly or through another (A0077).
 - **`f{}` calls a read-only operator without parameters,** and is its
   value, even where a variable or parameter is named `f` too: see
   [Names](#names-1).
@@ -728,6 +738,51 @@ operator double{x: integer}: integer [
 operator main{} [
     call double{x: 21};
 ];
+```
+
+A read-only operator's statements run when it is called, on what it is
+given:
+
+```trendy
+/* The powers of `base` up to `limit`. */
+operator powers{base: integer, limit: integer}: relation { value: integer } [
+    var result: relation { value: integer };
+    var at := 1;
+    while at <= limit loop [
+        insert result relation { { value: at } };
+        at := at * base;
+    ];
+    result
+];
+
+operator largest{numbers: array integer}: integer [
+    var best := numbers[1];
+    for n in numbers loop [
+        if n > best then [
+            best := n;
+        ];
+    ];
+    best
+];
+
+operator main{} [
+    call debug_table{r: powers{base: 3, limit: 30}};
+    call debug_value{v: largest{numbers: array [3, 9, 5]}};
+];
+```
+
+```trendy,error
+operator doubling{n: integer}: integer [
+    var at := 1;
+    while at < n loop [
+        at := at * 2;
+    ];
+    at
+];
+
+var size := doubling{n: 100};
+
+operator main{} [];
 ```
 
 ### Generic operators
@@ -2227,8 +2282,10 @@ operator main{} [
   statement of a block on a line of its own, even of one.
 - **A block's local variables are its own,** in scope in it alone, so two
   blocks side by side can each declare a `note`, as above.
-- **Only in an update operator.** A read-only operator computes one value,
-  so it chooses between values with an `if` expression (A0035).
+- **In an operator's body, read-only too, and in a value block,** on the
+  local variables and parameters each can assign (see
+  [Read-only operators](#read-only-operators) and
+  [Value blocks](#value-blocks)).
 - **A condition known when compiling runs one block only,** whose failures
   are the only ones reported. One written `true` or `false`, and an empty
   block, are errors, which the fix removes (A0046).
@@ -2297,9 +2354,10 @@ operator main{} [
   statement's branches are (P0029), with the same fixes for other
   languages' blocks (P0003). Each run's local variables are its own,
   declared afresh, and out of scope after the loop, in its condition too.
-- **Only in an update operator.** A read-only operator and a value block
-  compute one value from whole relations, and change nothing that a loop
-  could do again (A0035).
+- **In an operator's body, read-only too, and in a value block,** on the
+  local variables and parameters each can assign (see
+  [Read-only operators](#read-only-operators) and
+  [Value blocks](#value-blocks)).
 - **A `for` loop goes through an array** (A0022), computed once, before
   its first run. A relation's tuples have no order to go through them in
   (TTM RM Proscriptions 2 and 7), so an operator applies to a whole
@@ -4657,6 +4715,16 @@ operator main{} [
     call debug_value{v: span};
     call debug_value{v: label{n: span}};
     call debug_table{r: people extend { age_at_50 := [ var at := born + 50; at - born ] }};
+    /* How many halvings bring each year below 100. */
+    call debug_table{r: people extend { steps := [
+        var left := born;
+        var count := 0;
+        while left >= 100 loop [
+            left := left div 2;
+            count := count + 1;
+        ];
+        count
+    ] }};
 ];
 ```
 
@@ -4674,12 +4742,19 @@ operator main{} [
   attribute of the tuple at hand (A0001), but they hide a variable of the
   program's.
 - **It changes nothing else,** as a read-only operator doesn't: it can't
-  assign a variable that isn't its own, `call` an operator (A0034), or
-  have an `if` statement or a `return` (A0035). It chooses between values
-  with an `if` expression, whose branches can be value blocks; an `if`
+  assign a variable that isn't its own, or `call` an operator (A0034), and
+  it neither warns nor returns (A0035). It reads what the names around it
+  let it read, so a program's variable in a read-only operator's body, or
+  an `out` parameter not yet assigned, is what it would be outside.
+- **Its statements can decide what runs next:** an `if` statement, a loop,
+  a transaction and a `fail` statement are what they are in a body, on its
+  own local variables, as above with `steps`. It can choose between values
+  with an `if` expression too, whose branches can be value blocks; an `if`
   that runs to the end of a body or block, with no `;`, is its value.
 - **It is evaluated when compiling** where its values are known, as any
-  expression is.
+  expression is, unless it has a statement that decides what runs next,
+  which is run when the program runs, as it may not stop. So an initial
+  value can't have one, directly or through an operator it calls (A0077).
 
 ```trendy,error
 operator twice{n: integer}: integer [
@@ -5628,8 +5703,8 @@ operator main{} [
 - **A read-only operator can fail,** as `div` does for a divisor of zero:
   it is still a function of its arguments, a partial one, which fails for
   the same arguments whenever it is called. It fails in its value, as in a
-  branch of an `if`, not with a `fail` statement, as its body is its value
-  (A0035).
+  branch of an `if`, or with a `fail` statement, which is then computed
+  when the program runs, as any such statement is.
 - **Its message is written with its control characters and
   bidirectional controls escaped,** as a table's cell is, so that a
   message made from a file's text can't change the terminal or show what
@@ -5782,9 +5857,10 @@ holds the error: `granaries` is as it was.
   what a transaction decides to write is kept in a variable it assigns,
   which its rollback undoes too, and written after it. `debug_value` and
   `debug_table` write for the programmer, so they are exempt.
-- **A transaction is a statement,** so only an update operator's body
-  has one: a read-only operator, or a value block, changes nothing, so a
-  transaction in it would have nothing to undo (A0035).
+- **A transaction is a statement of an operator's body,** read-only too,
+  where it undoes what it assigned of its local variables, and takes a
+  failure of what it computes, and of a value block, where it does the
+  same with the block's own.
 - **A failure of the language's own is an error too,** which a
   transaction takes as it takes a `fail`'s: each failure of the
   program's values, a value of the prelude's subtype of `error` for its

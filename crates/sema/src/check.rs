@@ -124,6 +124,11 @@ pub(crate) trait Names {
     /// operator whose body this is, or of the initial value being checked.
     fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId;
 
+    /// The id [`Names::fresh_local`] would give next, past the local
+    /// variables so far: those of a value block with statements that are
+    /// run follow it, and join these when it ends.
+    fn next_local(&self) -> usize;
+
     /// Whether a local variable named `name`, declared here, would hide a
     /// name that means something here: a parameter, a local variable or an
     /// attribute of the tuple at hand. It may hide a variable of the
@@ -3635,6 +3640,10 @@ impl Names for TupleNames<'_> {
         self.outer.fresh_local(local)
     }
 
+    fn next_local(&self) -> usize {
+        self.outer.next_local()
+    }
+
     fn hides(&self, name: &str) -> bool {
         self.heading.get(name).is_some() || self.outer.hides(name)
     }
@@ -3766,6 +3775,10 @@ impl Names for ComponentNames<'_> {
 
     fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
         self.outer.fresh_local(local)
+    }
+
+    fn next_local(&self) -> usize {
+        self.outer.next_local()
     }
 
     fn hides(&self, name: &str) -> bool {

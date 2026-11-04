@@ -4420,18 +4420,6 @@ pub(crate) fn endless_loop(condition: &Expr) -> Diagnostic {
     )
 }
 
-/// `stmt`, a loop in the read-only operator `name`.
-pub(crate) fn loop_in_read_only(name: &str, stmt: &trendy_syntax::ast::Statement) -> Diagnostic {
-    Diagnostic::error(
-        Code::Return,
-        "a read-only operator has no loops",
-        loop_start(stmt),
-        format!("a loop in `{name}`"),
-    )
-    .with_note("a read-only operator's body declares and assigns its local variables, then ends with its value: it computes one value, and changes nothing, so a loop would have nothing to do again")
-    .with_help("compute the value from the whole relation, as in `sum{r: r, of: x}` or `r extend { … }`, or make the operator an update operator, without a result type, invoked by `call`")
-}
-
 /// The name `name`, at `span`, after the `collecting` of the transaction
 /// `stmt`, of no variable: one is declared before the transaction, which
 /// the fix does, of the one type a transaction's collection has, the
@@ -4512,60 +4500,6 @@ pub(crate) fn io_in_transaction(
         })
         .with_note("a transaction's statements read no input and write no output, at any depth of the calls they make: a transaction is undone, and can be run again, but nothing undoes a read or a write; `debug_value` and `debug_table` write for the programmer, so they are exempt")
         .with_help("read the file before the transaction, and pass what it gives to the statements in it; to write, keep what to write in a variable the transaction assigns, which its rollback undoes too, and write it after")
-}
-
-/// `stmt`, a transaction in the read-only operator `name`.
-pub(crate) fn transaction_in_read_only(
-    name: &str,
-    stmt: &trendy_syntax::ast::TransactionStmt,
-) -> Diagnostic {
-    Diagnostic::error(
-        Code::Return,
-        "a read-only operator has no transactions",
-        transaction_start(stmt),
-        format!("a transaction in `{name}`"),
-    )
-    .with_note("a read-only operator computes one value and changes nothing, so a transaction in it would have nothing to undo; a failure in it goes to the transaction the statement that calls it is in")
-    .with_help("put the transaction around the statement that calls the operator, or make the operator an update operator, without a result type, invoked by `call`")
-}
-
-/// `stmt`, a transaction in a value block.
-pub(crate) fn transaction_in_block(stmt: &trendy_syntax::ast::TransactionStmt) -> Diagnostic {
-    Diagnostic::error(
-        Code::Return,
-        "a value block has no transactions",
-        transaction_start(stmt),
-        "a transaction in a value block",
-    )
-    .with_note(BLOCK)
-    .with_help("a value block changes nothing, so it has nothing to undo: put the transaction around the statement whose value the block computes")
-}
-
-/// Where to point at the transaction `stmt`: its keyword.
-fn transaction_start(stmt: &trendy_syntax::ast::TransactionStmt) -> Span {
-    stmt.keyword()
-        .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()))
-}
-
-/// `stmt`, a loop in a value block.
-pub(crate) fn loop_in_block(stmt: &trendy_syntax::ast::Statement) -> Diagnostic {
-    Diagnostic::error(
-        Code::Return,
-        "a value block has no loops",
-        loop_start(stmt),
-        "a loop in a value block",
-    )
-    .with_note(BLOCK)
-    .with_help(
-        "compute the value from the whole relation, as in `sum{r: r, of: x}` or `r extend { … }`",
-    )
-}
-
-/// Where to point at the loop `stmt`: its first keyword.
-fn loop_start(stmt: &trendy_syntax::ast::Statement) -> Span {
-    stmt.syntax()
-        .first_token()
-        .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()))
 }
 
 /// `index`, `a[i]`, whose operand `a`, written `operand`, has type `ty`,
@@ -6052,7 +5986,7 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
             };
             Diagnostic::error(Code::Recursion, message, first.defined, "defined here")
                 .with_note(
-                    "a read-only operator can't call itself, directly or through others, yet: a call is evaluated when compiling where its arguments are known then, and the compiler can't yet tell whether a recursive one would stop",
+                    "a read-only operator can't call itself, directly or through others, yet: whether a recursive call would stop when the compiler computes it, and how deep one can go when the program runs, are still to be settled",
                 )
                 .with_help("compute the value without calling the operator from its own body")
         }
@@ -6408,26 +6342,6 @@ pub(crate) fn call_in_read_only(name: &str, stmt: &trendy_syntax::ast::CallStmt)
     ))
 }
 
-/// An `if` statement, `stmt`, in the read-only operator `name`, which
-/// chooses between values with an `if` expression.
-pub(crate) fn if_in_read_only(name: &str, stmt: &trendy_syntax::ast::IfStmt) -> Diagnostic {
-    let at = match (stmt.keyword(), stmt.condition()) {
-        (Some(keyword), Some(condition)) => Span::new(
-            trendy_syntax::span(keyword.text_range()).start,
-            condition.span().end,
-        ),
-        _ => stmt.span(),
-    };
-    Diagnostic::error(
-        Code::Return,
-        "a read-only operator has no `if` statements",
-        at,
-        format!("an `if` statement in `{name}`"),
-    )
-    .with_note("a read-only operator's body declares and assigns its local variables and ends with its value: it computes one value, choosing between values with `if` expressions, not statements")
-    .with_help("compute the value with an `if` expression, as in `x := if c then a else b;`, or make the operator an update operator, without a result type, invoked by `call`")
-}
-
 /// The variable `name`, at `span`, of the program's, assigned in the
 /// read-only operator `op`.
 pub(crate) fn assigned_in_read_only(name: &str, span: Span, op: &str) -> Diagnostic {
@@ -6441,6 +6355,20 @@ pub(crate) fn assigned_in_read_only(name: &str, span: Span, op: &str) -> Diagnos
     .with_help(format!(
         "to compute a value, assign a local variable of `{op}`'s, as in `var new_{name} := …;`; to change `{name}`, make `{op}` an update operator, without a result type, invoked by `call`"
     ))
+}
+
+/// `written`, a program variable's initial value, which has statements
+/// that are run, or calls an operator that has, as only the program does:
+/// they may not stop, so the compiler doesn't.
+pub(crate) fn value_known_only_when_running(written: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::InitialValueWhenRunning,
+        "this initial value is computed only when the program runs",
+        written.span(),
+        "its statements, or an operator's it calls, are run then",
+    )
+    .with_note("a variable's initial value is known when compiling, and the compiler runs no `if` statement, loop, transaction or `fail` statement, of a value block or of a read-only operator's body, directly or through the operators it calls, as they may not stop")
+    .with_help("declare the variable with its type, and assign it in `main`")
 }
 
 /// The read-only operator `name`, whose `body` doesn't end with a value,
@@ -7944,7 +7872,7 @@ pub(crate) fn second_order(
 }
 
 /// What a value block is, for notes.
-const BLOCK: &str = "a value block declares and assigns its own local variables, then ends with the value they compute; it changes nothing else, as a read-only operator's body doesn't";
+const BLOCK: &str = "a value block's statements assign its own local variables, then it ends with the value they compute; it changes nothing else, as a read-only operator's body doesn't";
 
 /// A value block's local variable `name`, declared at `span`, whose name
 /// means something around the block already.
@@ -7970,42 +7898,6 @@ pub(crate) fn call_in_block(stmt: &trendy_syntax::ast::CallStmt) -> Diagnostic {
         "a `call` in a value block",
     )
     .with_note(BLOCK)
-}
-
-/// `stmt`, an `if` statement in a value block.
-pub(crate) fn if_in_block(stmt: &trendy_syntax::ast::IfStmt) -> Diagnostic {
-    let at = match (stmt.keyword(), stmt.condition()) {
-        (Some(keyword), Some(condition)) => Span::new(
-            trendy_syntax::span(keyword.text_range()).start,
-            condition.span().end,
-        ),
-        _ => stmt.span(),
-    };
-    Diagnostic::error(
-        Code::Return,
-        "a value block has no `if` statements",
-        at,
-        "an `if` statement in a value block",
-    )
-    .with_note(BLOCK)
-    .with_help("choose between values with an `if` expression, as in `x := if c then a else b;`, whose branches can be value blocks")
-}
-
-/// `stmt`, a `fail` statement in `within`, a value block or a read-only
-/// operator's body, which ends with its value: a `fail` there is that
-/// value, or in it, and a statement before it would leave it unused.
-pub(crate) fn fail_statement_for_value(
-    stmt: &trendy_syntax::ast::FailStmt,
-    within: &str,
-) -> Diagnostic {
-    Diagnostic::error(
-        Code::Return,
-        format!("{within} fails with a `fail` in its value, not a statement"),
-        stmt.span(),
-        "a `fail` statement",
-    )
-    .with_note(format!("{within} has local variables, then its value; a `fail` has no value, so it goes where one does, the type expected there being its type"))
-    .with_help("fail in the value instead, as in `if ok then x else fail failure{message: \"…\"}`, or end the body with the `fail`, without its `;`")
 }
 
 /// `stmt`, a `warn` statement in `within`, a value block or a read-only
@@ -8063,11 +7955,11 @@ pub(crate) fn loop_variable_declared_again(
     name: &str,
     span: Span,
     first: &crate::locals::Declaration,
-    op: &str,
+    within: &str,
 ) -> Diagnostic {
     Diagnostic::error(
         Code::DuplicateName,
-        format!("`{name}` is declared again in `{op}`"),
+        format!("`{name}` is declared again in {within}"),
         span,
         "a loop's variable with a name in use",
     )

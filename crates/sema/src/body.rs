@@ -1,5 +1,6 @@
-//! Update operators' bodies: their statements, their local variables, and
-//! the expressions in them.
+//! Blocks of statements that are run, an update operator's body, or a
+//! read-only operator's or a value block's that decides what runs next:
+//! their statements, their local variables, and the expressions in them.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -10,7 +11,7 @@ use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{Assignee, Assigning, Declared};
 use crate::check::{self, Checker, Lookup, Names, Representation, Written, argument_names};
-use crate::locals::{Declaration, Local, Locals};
+use crate::locals::{Declaration, Declaring, Local, Locals};
 use crate::narrowed::{self, Facts};
 use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Expected, Origin};
@@ -121,11 +122,64 @@ struct LoopCall {
 }
 
 /// What a `for` loop keeps from changing while it runs: the variables its
-/// array is computed from, of the program and local, by name, and where the
-/// array is written.
+/// array is computed from, of the program and local, and where the array is
+/// written.
 pub(crate) struct Frozen {
-    targets: Vec<(hir::Target, String)>,
+    targets: Vec<hir::Target>,
     array: Span,
+}
+
+/// What is around a block of statements that are run: what the names that
+/// aren't its local variables refer to, and what the block can't do there.
+pub(crate) trait Around: Names {
+    /// What decides whether a local variable of the block can have its name.
+    fn declaring(&self) -> Declaring<'_>;
+
+    /// Why `statement` can't be in the block, if it can't.
+    fn refused(&self, statement: &ast::Statement) -> Option<Diagnostic>;
+
+    /// Whether `name`, written at `span`, is also a variable of the program's,
+    /// which a local variable of that name hides.
+    fn is_variable(&self, name: &str, span: Span) -> bool;
+
+    /// The variable `name`, written at `span`, not one of the block's local
+    /// variables, `locals`, that an assignment assigns, or `None` after
+    /// reporting why it can't be assigned.
+    fn assigned_around(
+        &mut self,
+        name: &str,
+        span: Span,
+        locals: &[&str],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee>;
+
+    /// Whether `name` is an `out` parameter, of an update operator whose
+    /// body the block is.
+    fn is_out(&self, _name: &str) -> bool {
+        false
+    }
+}
+
+/// What only an update operator's body can do, which is to call one.
+struct Update<'a, 'b> {
+    cx: &'a Context<'b>,
+    within: hir::OperatorId,
+    /// What can only be checked once every body is.
+    deferred: &'a mut Deferred,
+}
+
+impl Update<'_, '_> {
+    /// Whether `name` is a variable of the program's that the operator's
+    /// body sees, which an operator it calls may assign.
+    fn sees_variable(&self, name: &str) -> bool {
+        let signature = self.cx.operators.get(self.within);
+        let body = signature
+            .decl
+            .as_ref()
+            .map(AstNode::span)
+            .expect("an operator with a body is declared with it");
+        self.cx.declared.find(name, body).is_some() && !signature.is_parameter(name)
+    }
 }
 
 /// The statements of the update operator `op`, whose id is `within`, and
@@ -139,17 +193,13 @@ pub(crate) fn body(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(Vec<hir::Local>, hir::Block)> {
     let body = op.body()?;
-    let mut statements = Statements {
+    let mut around = UpdateNames { cx, within };
+    let update = Update {
         cx,
         within,
-        locals: Locals::default(),
         deferred,
-        frozen: Vec::new(),
-        transactions: Vec::new(),
-        outs: Outs::default(),
-        narrowed: Facts::default(),
-        ended: BTreeMap::new(),
     };
+    let mut statements = Statements::new(&mut around, Some(update));
     let checked: Vec<ast::Statement> = body.statements().collect();
     let block = statements.block(&checked, errors)?;
     // Every `out` parameter is assigned, whichever way the body goes.
@@ -174,6 +224,33 @@ pub(crate) fn body(
     ok.then(|| (statements.locals.finish(), block))
 }
 
+/// The statements of a body or a value block whose statements decide what
+/// runs next, `statements`, and its value, `written`, of the type `expected`
+/// says, if it says one, which they are in scope for, whose surroundings
+/// are `around`: its local variables, and its value as a [`hir::Expr::Run`],
+/// or `None` after reporting why it has none. Its local variables' ids
+/// follow those of what's around it.
+pub(crate) fn run(
+    around: &mut dyn Around,
+    statements: &[ast::Statement],
+    written: Option<&ast::Expr>,
+    expected: Option<&Expected>,
+    errors: &mut Vec<Diagnostic>,
+) -> (Vec<hir::Local>, Option<hir::Expr>) {
+    let mut checker = Statements::new(around, None);
+    let (block, value) = checker.block_then(statements, errors, |checker, errors| {
+        let written = written?;
+        let site = checker.around.site(written.span());
+        let mut names = checker.names();
+        let value = Checker::new(&mut names).expr(written, expected, errors)?;
+        Some(hir::Expr::at(site, value))
+    });
+    let value = block
+        .zip(value)
+        .map(|(block, value)| hir::Expr::Run(Box::new(block), Box::new(value)));
+    (checker.locals.finish(), value)
+}
+
 /// What is known of an update operator's `out` parameters where the
 /// statement being checked is: which are assigned on every path to it, and
 /// where it reads and assigns them, which [`Statements::settle`] then
@@ -194,14 +271,13 @@ pub(crate) struct Outs {
     reported: BTreeSet<String>,
 }
 
-/// Checks the statements of the update operator `within`, each block's
-/// local variables in scope in it.
+/// Checks a block of statements, each block's local variables in scope in
+/// it, with `around` around them.
 struct Statements<'a, 'b> {
-    cx: &'a Context<'b>,
-    within: hir::OperatorId,
+    around: &'a mut (dyn Around + 'a),
+    /// An update operator's body's, if this is one.
+    update: Option<Update<'a, 'b>>,
     locals: Locals,
-    /// What can only be checked once every body is.
-    deferred: &'a mut Deferred,
     /// What each `for` loop the statement being checked is in keeps from
     /// changing, outermost first.
     frozen: Vec<Frozen>,
@@ -220,11 +296,26 @@ struct Statements<'a, 'b> {
     ended: BTreeMap<String, Span>,
 }
 
+impl<'a, 'b> Statements<'a, 'b> {
+    fn new(around: &'a mut (dyn Around + 'a), update: Option<Update<'a, 'b>>) -> Self {
+        let locals = Locals::from(around.next_local());
+        Statements {
+            around,
+            update,
+            locals,
+            frozen: Vec::new(),
+            transactions: Vec::new(),
+            outs: Outs::default(),
+            narrowed: Facts::default(),
+            ended: BTreeMap::new(),
+        }
+    }
+}
+
 impl Statements<'_, '_> {
-    fn names(&mut self) -> BodyNames<'_, '_> {
+    fn names(&mut self) -> BodyNames<'_> {
         BodyNames {
-            cx: self.cx,
-            within: self.within,
+            around: &mut *self.around,
             locals: &mut self.locals,
             frozen: &self.frozen,
             outs: &mut self.outs,
@@ -248,16 +339,11 @@ impl Statements<'_, '_> {
     /// with where: those it names, and, if it calls an update operator,
     /// the program's variables, which the operator may assign.
     fn assigned(&self, assigns: &narrowed::Assigns) -> BTreeMap<String, Span> {
-        let signature = self.cx.operators.get(self.within);
-        // The variables its body sees.
-        let body = signature
-            .decl
-            .as_ref()
-            .map(AstNode::span)
-            .expect("an operator with a body is declared with it");
+        // Only an update operator's body calls one.
         let global = |name: &str| {
-            self.cx.declared.find(name, body).is_some()
-                && !signature.is_parameter(name)
+            self.update
+                .as_ref()
+                .is_some_and(|update| update.sees_variable(name))
                 && self.locals.find(name).is_none()
         };
         assigns.of_names(self.narrowed.names(), global)
@@ -296,10 +382,9 @@ impl Statements<'_, '_> {
             _ => Vec::new(),
         };
         self.flush(errors);
-        let signature = self.cx.operators.get(self.within);
         for target in assigned {
             if let hir::Target::Parameter(name) = target
-                && signature.mode(name) == Some(hir::Mode::Out)
+                && self.around.is_out(name)
             {
                 self.outs.assigned.insert(name.clone());
             }
@@ -309,14 +394,17 @@ impl Statements<'_, '_> {
     /// Report each read of an `out` parameter checked since the last,
     /// before it is assigned on every path to here.
     fn flush(&mut self, errors: &mut Vec<Diagnostic>) {
-        let signature = self.cx.operators.get(self.within);
         let mut reported: Vec<Span> = Vec::new();
         for (name, span) in std::mem::take(&mut self.outs.reads) {
             if self.outs.assigned.contains(&name) || reported.contains(&span) {
                 continue;
             }
             reported.push(span);
-            let decl = signature.param_decl(&name);
+            // Only an update operator has `out` parameters.
+            let decl = self
+                .update
+                .as_ref()
+                .and_then(|update| update.cx.operators.get(update.within).param_decl(&name));
             errors.push(errors::read_before_assigned(&name, span, decl.as_ref()));
             self.outs.reported.insert(name);
         }
@@ -329,8 +417,20 @@ impl Statements<'_, '_> {
         statements: &[ast::Statement],
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Block> {
-        let op = self.cx.operators.get(self.within);
-        let mut ok = self.locals.enter(statements.iter().cloned(), op, errors);
+        self.block_then(statements, errors, |_, _| ()).0
+    }
+
+    /// As [`Statements::block`], and what `then` makes while its local
+    /// variables are still in scope.
+    fn block_then<T>(
+        &mut self,
+        statements: &[ast::Statement],
+        errors: &mut Vec<Diagnostic>,
+        then: impl FnOnce(&mut Self, &mut Vec<Diagnostic>) -> T,
+    ) -> (Option<hir::Block>, T) {
+        let mut ok = self
+            .locals
+            .enter(statements.iter().cloned(), self.around.declaring(), errors);
         let mut checked = Vec::new();
         for stmt in statements {
             match self.sited(stmt, errors) {
@@ -338,11 +438,13 @@ impl Statements<'_, '_> {
                 None => ok = false,
             }
         }
+        let made = then(self, errors);
         let locals = self.locals.exit();
-        ok.then_some(hir::Block {
+        let block = ok.then_some(hir::Block {
             statements: checked,
             locals,
-        })
+        });
+        (block, made)
     }
 
     /// `stmt`, with its site, where it starts, or `None` after reporting
@@ -353,9 +455,8 @@ impl Statements<'_, '_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(hir::Site, hir::Statement)> {
         let site = self
-            .cx
-            .sites
-            .at(trendy_syntax::span(stmt.syntax().text_range()));
+            .around
+            .site(trendy_syntax::span(stmt.syntax().text_range()));
         Some((site, self.statement(stmt, errors)?))
     }
 
@@ -389,7 +490,11 @@ impl Statements<'_, '_> {
         stmt: &ast::Statement,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Statement> {
-        let (cx, within) = (self.cx, self.within);
+        if let Some(refused) = self.around.refused(stmt) {
+            errors.push(refused);
+            self.settle(None, errors);
+            return None;
+        }
         let checked = match stmt {
             ast::Statement::Call(stmt) => self.call(stmt, errors),
             ast::Statement::Assign(stmt) => {
@@ -397,11 +502,9 @@ impl Statements<'_, '_> {
                 assign::statement(&clauses, &mut self.names(), errors)
             }
             ast::Statement::Block(block) => assign::block(block, &mut self.names(), errors),
-            ast::Statement::Return(stmt) => {
-                let name = &cx.operators.get(within).name;
-                errors.push(errors::return_in_update(name, stmt));
-                None
-            }
+            // At the end of a read-only operator's body, with no value: a
+            // body without one, reported then.
+            ast::Statement::Return(_) => None,
             ast::Statement::Var(decl) => self.declaration(decl, errors),
             // These settle their parts as they check them.
             ast::Statement::If(stmt) => return self.if_stmt(stmt, errors),
@@ -491,21 +594,8 @@ impl Statements<'_, '_> {
             errors.push(errors::not_iterable(&written, &ty));
             return None;
         };
-        let targets = ops::targets_read(&array)
-            .into_iter()
-            .map(|target| {
-                let name = match &target {
-                    hir::Target::Variable(id) => self.cx.variables[id.0]
-                        .as_ref()
-                        .map_or_else(String::new, |v| v.name.clone()),
-                    hir::Target::Local(id) => self.locals.get(*id).name.clone(),
-                    hir::Target::Parameter(name) => name.clone(),
-                };
-                (target, name)
-            })
-            .collect();
         self.frozen.push(Frozen {
-            targets,
+            targets: ops::targets_read(&array),
             array: written.span(),
         });
         let local = hir::Local {
@@ -513,10 +603,13 @@ impl Statements<'_, '_> {
             ty: *element,
             keys: Vec::new(),
         };
-        let op = self.cx.operators.get(self.within);
-        let (id, mut ok) =
-            self.locals
-                .enter_loop(&variable, local, statements.iter().cloned(), op, errors);
+        let (id, mut ok) = self.locals.enter_loop(
+            &variable,
+            local,
+            statements.iter().cloned(),
+            self.around.declaring(),
+            errors,
+        );
         // The block may not run, so what it assigns isn't assigned after.
         let before = self.outs.assigned.clone();
         let mut checked = Vec::new();
@@ -554,8 +647,9 @@ impl Statements<'_, '_> {
             .body()
             .map(|body| body.statements().collect())
             .unwrap_or_default();
-        let op = self.cx.operators.get(self.within);
-        let mut ok = self.locals.enter(statements.iter().cloned(), op, errors);
+        let mut ok = self
+            .locals
+            .enter(statements.iter().cloned(), self.around.declaring(), errors);
         let before = self.outs.assigned.clone();
         let keyword = stmt.keyword().map_or_else(
             || stmt.span(),
@@ -596,17 +690,15 @@ impl Statements<'_, '_> {
         let ident = collecting.variable()?.ident()?;
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         let errors_type = hir::Type::Relation(hir::transaction_collection(
-            self.cx.namespaces.library().error_type(),
+            self.around.namespaces().library().error_type(),
         ));
-        let known = self.locals.find(name).is_some()
-            || self.cx.operators.get(self.within).is_parameter(name)
-            || self.cx.declared.find(name, span).is_some();
+        let known = self.locals.find(name).is_some() || self.around.has_value(name, span);
         if !known {
             errors.push(errors::undeclared_collecting(
                 name,
                 span,
                 stmt,
-                self.cx.namespaces,
+                self.around.namespaces(),
             ));
             return None;
         }
@@ -629,8 +721,12 @@ impl Statements<'_, '_> {
         decl: &VarDecl,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Statement> {
-        let op = self.cx.operators.get(self.within);
-        let checked = locals::local(decl, &op.types, &mut self.names(), errors);
+        let types = self
+            .around
+            .type_parameters()
+            .map(<[hir::TypeParameter]>::to_vec)
+            .unwrap_or_default();
+        let checked = locals::local(decl, &types, &mut self.names(), errors);
         let (local, value) = checked.unzip();
         let id = self.locals.declare(decl, local)?;
         Some(hir::Statement::Assign(vec![hir::Assignment {
@@ -704,7 +800,11 @@ impl Statements<'_, '_> {
         stmt: &ast::CallStmt,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Statement> {
-        let (cx, within) = (self.cx, self.within);
+        let update = self
+            .update
+            .as_ref()
+            .expect("only an update operator's body has calls");
+        let (cx, within) = (update.cx, update.within);
         let ident = stmt.callee()?.ident()?;
         let name = ident.text();
         let span = trendy_syntax::span(ident.text_range());
@@ -798,10 +898,14 @@ impl Statements<'_, '_> {
     /// and the variables of the program the `for` loops it is in keep from
     /// changing.
     fn defer(&mut self, call: &hir::Call, signature: &Signature, span: Span, statement: Span) {
-        let within = self.within;
-        self.deferred.calls.push((within, signature.id, span));
+        let update = self
+            .update
+            .as_mut()
+            .expect("only an update operator's body has calls");
+        let (cx, within) = (update.cx, update.within);
+        update.deferred.calls.push((within, signature.id, span));
         if let Some(&transaction) = self.transactions.last() {
-            self.deferred.in_transactions.push(TransactionCall {
+            update.deferred.in_transactions.push(TransactionCall {
                 callee: signature.id,
                 span,
                 transaction,
@@ -810,7 +914,7 @@ impl Statements<'_, '_> {
         // A type parameter passed on as it is never grows.
         for (parameter, ty) in signature.types.iter().zip(&call.types) {
             if !matches!(ty, hir::Type::Parameter(_)) && ty.parameters().next().is_some() {
-                self.deferred.growing.push(Growing {
+                update.deferred.growing.push(Growing {
                     caller: within,
                     callee: signature.id,
                     span,
@@ -823,17 +927,19 @@ impl Statements<'_, '_> {
             .frozen
             .iter()
             .flat_map(|frozen| {
-                frozen
-                    .targets
-                    .iter()
-                    .filter_map(|(target, name)| match target {
-                        hir::Target::Variable(id) => Some((*id, name.clone(), frozen.array)),
-                        hir::Target::Local(_) | hir::Target::Parameter(_) => None,
-                    })
+                frozen.targets.iter().filter_map(|target| match target {
+                    hir::Target::Variable(id) => {
+                        let name = cx.variables[id.0]
+                            .as_ref()
+                            .map_or_else(String::new, |v| v.name.clone());
+                        Some((*id, name, frozen.array))
+                    }
+                    hir::Target::Local(_) | hir::Target::Parameter(_) => None,
+                })
             })
             .collect();
         if !looped.is_empty() {
-            self.deferred.in_loops.push(LoopCall {
+            update.deferred.in_loops.push(LoopCall {
                 callee: signature.id,
                 span: statement,
                 looped,
@@ -891,10 +997,15 @@ impl Statements<'_, '_> {
             let Some(target) = call.updated.get(ident.text()) else {
                 continue;
             };
-            let mode = self.cx.operators.get(callee).mode(ident.text());
+            let update = self
+                .update
+                .as_ref()
+                .expect("only an update operator's body has calls");
+            let cx = update.cx;
+            let mode = cx.operators.get(callee).mode(ident.text());
             let param = format!("{} {}", mode.map_or("var", hir::Mode::word), ident.text());
             let name = match target {
-                hir::Target::Variable(id) => self.cx.variables[id.0]
+                hir::Target::Variable(id) => cx.variables[id.0]
                     .as_ref()
                     .map_or_else(String::new, |v| v.name.clone()),
                 hir::Target::Local(id) => self.locals.get(*id).name.clone(),
@@ -911,8 +1022,10 @@ impl Statements<'_, '_> {
                 continue;
             }
             passed.push((target, param.clone(), span));
-            if let hir::Target::Variable(variable) = target {
-                self.deferred.passed.push(Passed {
+            if let hir::Target::Variable(variable) = target
+                && let Some(update) = &mut self.update
+            {
+                update.deferred.passed.push(Passed {
                     callee,
                     variable: *variable,
                     name,
@@ -1045,9 +1158,8 @@ impl Statements<'_, '_> {
             }
             Some(ast::ElseBranch::If(stmt)) => {
                 let site = self
-                    .cx
-                    .sites
-                    .at(trendy_syntax::span(stmt.syntax().text_range()));
+                    .around
+                    .site(trendy_syntax::span(stmt.syntax().text_range()));
                 self.if_stmt(&stmt, reported_to)
                     .map(|statement| hir::Block {
                         statements: vec![(site, statement)],
@@ -1336,12 +1448,11 @@ fn calls_in(block: &hir::Block, called: &mut Vec<hir::OperatorId>) {
     called.extend(block.called());
 }
 
-/// Names in the body of `within`: its parameters and its local variables,
-/// which hide variables of the same name, and the variables.
-pub(crate) struct BodyNames<'a, 'b> {
-    pub(crate) cx: &'a Context<'b>,
-    pub(crate) within: hir::OperatorId,
-    pub(crate) locals: &'a mut Locals,
+/// Names in a block of statements: its local variables, which hide variables
+/// of the same name, then those around it.
+struct BodyNames<'a> {
+    around: &'a mut (dyn Around + 'a),
+    locals: &'a mut Locals,
     /// What the `for` loops the statement being checked is in keep from
     /// changing.
     frozen: &'a [Frozen],
@@ -1355,103 +1466,90 @@ pub(crate) struct BodyNames<'a, 'b> {
     ended: &'a BTreeMap<String, Span>,
 }
 
-impl BodyNames<'_, '_> {
-    fn signature(&self) -> &Signature {
-        self.cx.operators.get(self.within)
-    }
-
-    /// What `name`, written at `span`, refers to, before what tests show
-    /// of its value.
-    fn found(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        if let Some(lookup) = self.signature().parameter(name) {
-            if self.signature().mode(name) == Some(hir::Mode::Out) {
-                self.outs.reads.push((name.to_string(), span));
-            }
-            return lookup;
-        }
-        match self.locals.find(name) {
-            Some(Local::Declared(id, ..)) => return Lookup::Found(hir::Expr::Local(id)),
-            Some(Local::Later(decl)) => {
+impl BodyNames<'_> {
+    /// What the local variable `name`, written at `span`, refers to, if it
+    /// is one, before what tests show of its value.
+    fn local(&self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Option<Lookup> {
+        Some(match self.locals.find(name)? {
+            Local::Declared(id, ..) => Lookup::Found(hir::Expr::Local(id)),
+            Local::Later(decl) => {
                 errors.push(errors::local_before_declaration(
                     name,
                     span,
                     decl,
-                    self.cx.declared.find(name, span).is_some(),
+                    self.around.is_variable(name, span),
                 ));
-                return Lookup::Reported;
+                Lookup::Reported
             }
-            Some(Local::Ended(decl)) => {
+            Local::Ended(decl) => {
                 errors.push(errors::local_out_of_scope(name, span, decl));
-                return Lookup::Reported;
+                Lookup::Reported
             }
-            Some(Local::Invalid) => return Lookup::Reported,
-            None => {}
+            Local::Invalid => Lookup::Reported,
+        })
+    }
+
+    /// Note a read at `span` of what `lookup` found, if it is an `out`
+    /// parameter, for [`Statements::settle`] to report.
+    fn read(&mut self, lookup: &Lookup, name: &str, span: Span) {
+        if let Lookup::Found(hir::Expr::Parameter(parameter)) = lookup
+            && self.around.is_out(parameter)
+        {
+            self.outs.reads.push((name.to_string(), span));
         }
-        if let Some(id) = self.cx.declared.find(name, span) {
-            // A variable with errors in its declaration is already reported.
-            return match self.cx.variables[id.0] {
-                Some(_) => Lookup::Found(hir::Expr::Variable(id)),
-                None => Lookup::Reported,
-            };
-        }
-        if let Some(relation) = self.cx.operators.get(self.within).per_relation(name) {
-            errors.push(errors::per_as_value(name, relation, span));
-            return Lookup::Reported;
-        }
-        if self.cx.namespaces.operator(name, span).is_some() {
-            errors.push(errors::operator_as_value(name, span, self.cx.operators));
-            return Lookup::Reported;
-        }
-        Lookup::Unknown
     }
 }
 
-impl Names for BodyNames<'_, '_> {
+impl Names for BodyNames<'_> {
     fn namespaces(&self) -> &Namespaces {
-        self.cx.namespaces
+        self.around.namespaces()
     }
 
     fn site(&self, at: Span) -> hir::Site {
-        self.cx.sites.at(at)
+        self.around.site(at)
     }
 
     fn operators(&self) -> &Operators {
-        self.cx.operators
+        self.around.operators()
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        let lookup = self.found(name, span, errors);
+        let lookup = self.local(name, span, errors).unwrap_or_else(|| {
+            let lookup = self.around.resolve(name, span, errors);
+            self.read(&lookup, name, span);
+            lookup
+        });
         let facts = self.narrowed;
         narrowed::narrow(facts, name, lookup, self)
     }
 
     fn resolve_variable(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        self.found(name, span, errors)
+        self.local(name, span, errors).unwrap_or_else(|| {
+            let lookup = self.around.resolve_variable(name, span, errors);
+            self.read(&lookup, name, span);
+            lookup
+        })
     }
 
     fn narrowing_ended(&self, name: &str) -> Option<Span> {
-        self.ended.get(name).copied()
+        self.ended
+            .get(name)
+            .copied()
+            .or_else(|| self.around.narrowing_ended(name))
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
-        self.signature()
-            .parameter_names()
-            .chain(self.locals.names())
-            .chain(self.cx.declared.names(at))
+        self.locals
+            .names()
             .map(str::to_string)
+            .chain(self.around.candidates(at))
             .collect()
     }
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
         match leaf {
-            hir::Expr::Variable(id) => self.cx.variables[id.0]
-                .as_ref()
-                .expect("only valid variables are resolved")
-                .ty
-                .clone(),
-            hir::Expr::Parameter(name) => self.signature().params[name].ty.clone(),
-            hir::Expr::Local(id) => self.locals.get(*id).ty.clone(),
-            _ => unreachable!("only variables, parameters and local variables are leaves"),
+            hir::Expr::Local(id) if self.locals.has(*id) => self.locals.get(*id).ty.clone(),
+            _ => self.around.leaf_type(leaf),
         }
     }
 
@@ -1459,28 +1557,40 @@ impl Names for BodyNames<'_, '_> {
         self.locals.fresh(local)
     }
 
+    fn next_local(&self) -> usize {
+        self.locals.next()
+    }
+
     fn hides(&self, name: &str) -> bool {
-        self.signature().is_parameter(name)
+        self.around.hides(name)
             || matches!(
                 self.locals.find(name),
                 Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
             )
     }
 
-    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
-        Some(&self.cx.operators.get(self.within).types)
+    fn tuple_at_hand(&self) -> Option<&hir::Heading> {
+        self.around.tuple_at_hand()
     }
 
-    fn checked(&mut self, id: hir::OperatorId, _: Span, _: &mut Vec<Diagnostic>) -> bool {
-        self.cx.checked(id)
+    fn unnumbered(&self) -> bool {
+        self.around.unnumbered()
+    }
+
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        self.around.type_parameters()
+    }
+
+    fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
+        self.around.checked(id, at, errors)
     }
 
     fn bindings(&self) -> ops::Bindings<'_> {
-        self.cx.bindings()
+        self.around.bindings()
     }
 }
 
-impl Assigning for BodyNames<'_, '_> {
+impl Assigning for BodyNames<'_> {
     /// The variable `name`, unless a `for` loop that the assignment is in
     /// goes through an array computed from it.
     fn assigned(
@@ -1490,12 +1600,10 @@ impl Assigning for BodyNames<'_, '_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee> {
         let assignee = self.variable(name, span, errors)?;
-        let frozen = self.frozen.iter().find(|frozen| {
-            frozen
-                .targets
-                .iter()
-                .any(|(target, _)| *target == assignee.target)
-        });
+        let frozen = self
+            .frozen
+            .iter()
+            .find(|frozen| frozen.targets.contains(&assignee.target));
         if let Some(frozen) = frozen {
             errors.push(errors::assigned_in_loop(name, span, frozen.array));
             return None;
@@ -1508,30 +1616,16 @@ impl Assigning for BodyNames<'_, '_> {
     }
 }
 
-impl BodyNames<'_, '_> {
-    /// The variable `name`, of the program or local, that an assignment at
-    /// `span` assigns, or `None` after reporting why it can't be.
+impl BodyNames<'_> {
+    /// The variable `name`, a local variable or else what's around them,
+    /// that an assignment at `span` assigns, or `None` after reporting why
+    /// it can't be.
     fn variable(
         &mut self,
         name: &str,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee> {
-        let cx = self.cx;
-        let signature = self.signature();
-        if signature.updates(name) {
-            let ty = signature.params[name].ty.clone();
-            let assignee = Assignee::parameter(name, ty, signature.param_origin(name));
-            if signature.mode(name) == Some(hir::Mode::Out) {
-                self.outs.targets.push((name.to_string(), span));
-            }
-            return Some(assignee);
-        }
-        if signature.is_parameter(name) {
-            let hidden = cx.declared.find(name, span).is_some();
-            errors.push(errors::assigned_parameter(name, span, hidden));
-            return None;
-        }
         match self.locals.find(name) {
             Some(Local::Declared(id, local, Declaration::Var(declaration))) => {
                 return Some(Assignee::local(id, local, declaration));
@@ -1549,7 +1643,7 @@ impl BodyNames<'_, '_> {
                     name,
                     span,
                     decl,
-                    cx.declared.find(name, span).is_some(),
+                    self.around.is_variable(name, span),
                 ));
                 return None;
             }
@@ -1560,6 +1654,152 @@ impl BodyNames<'_, '_> {
             // Its declaration's errors are already reported.
             Some(Local::Invalid) => return None,
             None => {}
+        }
+        let locals: Vec<&str> = self.locals.names().collect();
+        let assignee = self.around.assigned_around(name, span, &locals, errors)?;
+        if let hir::Target::Parameter(parameter) = &assignee.target
+            && self.around.is_out(parameter)
+        {
+            self.outs.targets.push((name.to_string(), span));
+        }
+        Some(assignee)
+    }
+}
+
+/// What is around an update operator's body: its parameters, and the
+/// program's variables, which it reads and assigns.
+struct UpdateNames<'a, 'b> {
+    cx: &'a Context<'b>,
+    within: hir::OperatorId,
+}
+
+impl UpdateNames<'_, '_> {
+    fn signature(&self) -> &Signature {
+        self.cx.operators.get(self.within)
+    }
+}
+
+impl Names for UpdateNames<'_, '_> {
+    fn namespaces(&self) -> &Namespaces {
+        self.cx.namespaces
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.cx.sites.at(at)
+    }
+
+    fn operators(&self) -> &Operators {
+        self.cx.operators
+    }
+
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        if let Some(lookup) = self.signature().parameter(name) {
+            return lookup;
+        }
+        if let Some(id) = self.cx.declared.find(name, span) {
+            // A variable with errors in its declaration is already reported.
+            return match self.cx.variables[id.0] {
+                Some(_) => Lookup::Found(hir::Expr::Variable(id)),
+                None => Lookup::Reported,
+            };
+        }
+        if let Some(relation) = self.signature().per_relation(name) {
+            errors.push(errors::per_as_value(name, relation, span));
+            return Lookup::Reported;
+        }
+        if self.cx.namespaces.operator(name, span).is_some() {
+            errors.push(errors::operator_as_value(name, span, self.cx.operators));
+            return Lookup::Reported;
+        }
+        Lookup::Unknown
+    }
+
+    fn narrowing_ended(&self, _: &str) -> Option<Span> {
+        None
+    }
+
+    fn candidates(&self, at: Span) -> Vec<String> {
+        self.signature()
+            .parameter_names()
+            .chain(self.cx.declared.names(at))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
+        match leaf {
+            hir::Expr::Variable(id) => self.cx.variables[id.0]
+                .as_ref()
+                .expect("only valid variables are resolved")
+                .ty
+                .clone(),
+            hir::Expr::Parameter(name) => self.signature().params[name].ty.clone(),
+            _ => unreachable!("only variables, parameters and local variables are leaves"),
+        }
+    }
+
+    fn fresh_local(&mut self, _: hir::Local) -> hir::LocalId {
+        unreachable!("the local variables of a body are its statements'")
+    }
+
+    fn next_local(&self) -> usize {
+        0
+    }
+
+    fn hides(&self, name: &str) -> bool {
+        self.signature().is_parameter(name)
+    }
+
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        Some(&self.cx.operators.get(self.within).types)
+    }
+
+    fn checked(&mut self, id: hir::OperatorId, _: Span, _: &mut Vec<Diagnostic>) -> bool {
+        self.cx.checked(id)
+    }
+
+    fn bindings(&self) -> ops::Bindings<'_> {
+        self.cx.bindings()
+    }
+}
+
+impl Around for UpdateNames<'_, '_> {
+    fn declaring(&self) -> Declaring<'_> {
+        Declaring::Operator(self.signature())
+    }
+
+    fn refused(&self, statement: &ast::Statement) -> Option<Diagnostic> {
+        let ast::Statement::Return(stmt) = statement else {
+            return None;
+        };
+        Some(errors::return_in_update(&self.signature().name, stmt))
+    }
+
+    fn is_variable(&self, name: &str, span: Span) -> bool {
+        self.cx.declared.find(name, span).is_some()
+    }
+
+    fn is_out(&self, name: &str) -> bool {
+        self.signature().mode(name) == Some(hir::Mode::Out)
+    }
+
+    fn assigned_around(
+        &mut self,
+        name: &str,
+        span: Span,
+        locals: &[&str],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        let cx = self.cx;
+        let signature = self.signature();
+        if signature.updates(name) {
+            let ty = signature.params[name].ty.clone();
+            return Some(Assignee::parameter(name, ty, signature.param_origin(name)));
+        }
+        if signature.is_parameter(name) {
+            let hidden = cx.declared.find(name, span).is_some();
+            errors.push(errors::assigned_parameter(name, span, hidden));
+            return None;
         }
         if let Some(id) = cx.declared.find(name, span) {
             // A variable with errors in its declaration is already reported.
@@ -1577,7 +1817,11 @@ impl BodyNames<'_, '_> {
         if let Some((kind, _)) = cx.namespaces.operator(name, span) {
             errors.push(errors::assigned_operator(name, span, kind));
         } else {
-            let variables: Vec<&str> = self.locals.names().chain(cx.declared.names(span)).collect();
+            let variables: Vec<&str> = locals
+                .iter()
+                .copied()
+                .chain(cx.declared.names(span))
+                .collect();
             errors.push(errors::unknown_name(name, span, "variable", &variables));
         }
         None

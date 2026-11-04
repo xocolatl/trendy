@@ -1584,6 +1584,65 @@ impl Statement {
         }
     }
 
+    /// The statement with each expression in it, and in the blocks within
+    /// it, replaced by what `f` makes of it.
+    #[must_use]
+    pub fn map_exprs(self, f: &mut dyn FnMut(Expr) -> Expr) -> Statement {
+        match self {
+            Statement::Call(call) => Statement::Call(Call {
+                args: call
+                    .args
+                    .into_iter()
+                    .map(|(name, arg)| (name, f(arg)))
+                    .collect(),
+                ..call
+            }),
+            Statement::Assign(assignments) => Statement::Assign(
+                assignments
+                    .into_iter()
+                    .map(|a| Assignment {
+                        value: f(a.value),
+                        ..a
+                    })
+                    .collect(),
+            ),
+            Statement::If(condition, then, otherwise) => {
+                let condition = f(condition);
+                Statement::If(condition, then.map_exprs(f), otherwise.map_exprs(f))
+            }
+            Statement::Loop(condition, body, check) => {
+                let condition = f(condition);
+                Statement::Loop(condition, body.map_exprs(f), check)
+            }
+            Statement::For(local, array, body) => {
+                let array = f(array);
+                Statement::For(local, array, body.map_exprs(f))
+            }
+            Statement::Fail(error) => Statement::Fail(f(error)),
+            Statement::Warn(error) => Statement::Warn(f(error)),
+            Statement::Transaction(collecting, body) => {
+                Statement::Transaction(collecting, body.map_exprs(f))
+            }
+        }
+    }
+
+    /// `f` of each expression in the statement, and in the blocks within it.
+    pub fn for_each_expr(&self, f: &mut dyn FnMut(&Expr)) {
+        match self {
+            Statement::Call(call) => call.args.values().for_each(&mut *f),
+            Statement::Assign(assignments) => assignments.iter().for_each(|a| f(&a.value)),
+            Statement::If(condition, ..)
+            | Statement::Loop(condition, ..)
+            | Statement::For(_, condition, _)
+            | Statement::Fail(condition)
+            | Statement::Warn(condition) => f(condition),
+            Statement::Transaction(..) => {}
+        }
+        for block in self.blocks() {
+            block.for_each_expr(f);
+        }
+    }
+
     /// The statement, in an operator instantiated with `types`.
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Statement {
@@ -1650,6 +1709,28 @@ pub struct Block {
 }
 
 impl Block {
+    /// The block with each expression in its statements, and those in the
+    /// blocks within them, replaced by what `f` makes of it.
+    #[must_use]
+    pub fn map_exprs(self, f: &mut dyn FnMut(Expr) -> Expr) -> Block {
+        Block {
+            statements: self
+                .statements
+                .into_iter()
+                .map(|(site, statement)| (site, statement.map_exprs(f)))
+                .collect(),
+            ..self
+        }
+    }
+
+    /// `f` of each expression in the block's statements, and those in the
+    /// blocks within them.
+    pub fn for_each_expr(&self, f: &mut dyn FnMut(&Expr)) {
+        for (_, statement) in &self.statements {
+            statement.for_each_expr(f);
+        }
+    }
+
     /// The block, in an operator instantiated with `types`.
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Block {
@@ -1944,6 +2025,12 @@ pub enum Expr {
     /// when compiling: each tuple of the heading's tuple type. Tuples that
     /// turn out equal become one when the program runs.
     Relation(Heading, Vec<Expr>),
+    /// A body or a value block whose statements decide what runs next: they
+    /// run, on the local variables they declare, whose memory is released
+    /// after, then its value is the last expression, which reads them. It
+    /// is computed when the program runs, never when compiling, as they
+    /// may not stop.
+    Run(Box<Block>, Box<Expr>),
     /// A tuple or relation without the named attributes (Algebra A's
     /// REMOVE). A projection is remove of the attributes not named. The names
     /// are attributes of the operand, and there is at least one.
@@ -2120,7 +2207,7 @@ impl Expr {
         match self {
             Expr::Constant(value) => value.ty(),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) | Expr::Call(_) => leaf(self),
-            Expr::Let(_, _, body) | Expr::At(_, body) => body.type_with(leaf),
+            Expr::Let(_, _, body) | Expr::At(_, body) | Expr::Run(_, body) => body.type_with(leaf),
             Expr::Array(element, _) => Type::Array(Box::new(element.clone())),
             Expr::Index(array, _) => match array.type_with(leaf) {
                 Type::Array(element) => *element,
@@ -2212,6 +2299,7 @@ impl Expr {
             // `to`, as its constraints are checked.
             Expr::Unary(UnaryOp::Negate(Numeric::Integer), _)
             | Expr::Fail(..)
+            | Expr::Run(..)
             | Expr::TreatAs(..)
             | Expr::Call(..)
             | Expr::SelectIn(..)
@@ -2374,6 +2462,10 @@ impl Expr {
             Expr::Let(local, value, body) => {
                 Expr::Let(local, Box::new(f(*value, 0)), Box::new(f(*body, 0)))
             }
+            Expr::Run(block, value) => {
+                let block = block.map_exprs(&mut |e| f(e, 0));
+                Expr::Run(Box::new(block), Box::new(f(*value, 0)))
+            }
             Expr::At(site, expr) => Expr::At(site, Box::new(f(*expr, 0))),
             Expr::Unary(op, operand) => Expr::Unary(op, Box::new(f(*operand, 0))),
             Expr::Binary(op, lhs, rhs) => {
@@ -2462,6 +2554,10 @@ impl Expr {
             | Expr::Parameter(_)
             | Expr::Local(_)
             | Expr::Current(..) => {}
+            Expr::Run(block, value) => {
+                block.for_each_expr(&mut |e| f(e, 0));
+                f(value, 0);
+            }
             Expr::Unary(_, operand)
             | Expr::At(_, operand)
             | Expr::Extract(operand, _)
@@ -2583,6 +2679,7 @@ impl Expr {
             Expr::Constant(value) => Expr::Constant(value.instantiated(types)),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) => self.clone(),
             Expr::Let(local, value, body) => Expr::Let(*local, inst(value), inst(body)),
+            Expr::Run(block, value) => Expr::Run(Box::new(block.instantiated(types)), inst(value)),
             Expr::At(site, expr) => Expr::At(*site, inst(expr)),
             Expr::Array(element, elements) => Expr::Array(
                 element.instantiated(types),

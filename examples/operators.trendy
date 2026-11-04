@@ -199,10 +199,37 @@ var spread := [
     dearest - lowest
 ];
 
+/* The powers of `base` up to `limit`. A read-only operator's
+   body can run statements, as an update operator's do, on its parameters
+   and local variables alone, before its value. A call of one whose
+   statements decide what runs next is made when the program runs, as they
+   may not stop. */
+operator powers{base: integer, limit: integer}: relation { value: integer } [
+    var result: relation { value: integer };
+    var at := 1;
+    while at <= limit loop [
+        insert result relation { { value: at } };
+        at := at * base;
+    ];
+    result
+];
+
 operator main{} [
     call debug_table{r: totals};
     call debug_table{r: affordable};
     call show{label: "half of 1200", value: half{n: 1200}};
+    call debug_table{r: powers{base: 3, limit: 30}};
+    /* A value block's statements do the same on its own local variables:
+       how many price rises of a tenth each dish has in it, for each tuple. */
+    call debug_table{r: dishes extend { rises := [
+        var cost := 100;
+        var count := 0;
+        while cost < price loop [
+            cost := cost + cost div 10;
+            count := count + 1;
+        ];
+        count
+    ] }};
     call rotate{next: "spicy " || special};
     call rotate{next: previous};
     /* A call with a variable as an argument is made when the program

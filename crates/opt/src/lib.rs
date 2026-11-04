@@ -77,52 +77,7 @@ struct Optimizer<'a> {
 
 impl Optimizer<'_> {
     fn block(&self, block: hir::Block) -> hir::Block {
-        hir::Block {
-            statements: block
-                .statements
-                .into_iter()
-                .map(|(site, s)| (site, self.statement(s)))
-                .collect(),
-            ..block
-        }
-    }
-
-    fn statement(&self, statement: hir::Statement) -> hir::Statement {
-        match statement {
-            hir::Statement::Call(call) => hir::Statement::Call(hir::Call {
-                args: call
-                    .args
-                    .into_iter()
-                    .map(|(name, arg)| (name, self.expr(arg)))
-                    .collect(),
-                ..call
-            }),
-            hir::Statement::Assign(assignments) => hir::Statement::Assign(
-                assignments
-                    .into_iter()
-                    .map(|a| hir::Assignment {
-                        value: self.expr(a.value),
-                        ..a
-                    })
-                    .collect(),
-            ),
-            hir::Statement::If(condition, then, otherwise) => hir::Statement::If(
-                self.expr(condition),
-                self.block(then),
-                self.block(otherwise),
-            ),
-            hir::Statement::Loop(condition, body, check) => {
-                hir::Statement::Loop(self.expr(condition), self.block(body), check)
-            }
-            hir::Statement::For(local, array, body) => {
-                hir::Statement::For(local, self.expr(array), self.block(body))
-            }
-            hir::Statement::Fail(error) => hir::Statement::Fail(self.expr(error)),
-            hir::Statement::Warn(error) => hir::Statement::Warn(self.expr(error)),
-            hir::Statement::Transaction(collecting, body) => {
-                hir::Statement::Transaction(collecting, self.block(body))
-            }
-        }
+        block.map_exprs(&mut |expr| self.expr(expr))
     }
 
     /// `expr`, and every expression in it, optimized: an AND of relations,

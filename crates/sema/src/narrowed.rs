@@ -405,6 +405,10 @@ impl Names for Narrowed<'_> {
         self.outer.fresh_local(local)
     }
 
+    fn next_local(&self) -> usize {
+        self.outer.next_local()
+    }
+
     fn hides(&self, name: &str) -> bool {
         self.outer.hides(name)
     }
@@ -468,6 +472,10 @@ impl Names for Unnarrowed<'_> {
 
     fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
         self.outer.fresh_local(local)
+    }
+
+    fn next_local(&self) -> usize {
+        self.outer.next_local()
     }
 
     fn hides(&self, name: &str) -> bool {

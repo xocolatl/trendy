@@ -362,6 +362,10 @@ impl Names for ConditionNames<'_, '_> {
         self.locals.fresh(local)
     }
 
+    fn next_local(&self) -> usize {
+        self.locals.next()
+    }
+
     fn hides(&self, _: &str) -> bool {
         false
     }

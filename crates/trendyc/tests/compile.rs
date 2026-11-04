@@ -216,6 +216,123 @@ const PARAMETERS: [&str; 16] = [
     "tuple { high: 1500, low: 937 }",
 ];
 
+/// What `operators` writes before `PARAMETERS`.
+const OPERATORS: &[&str] = &[
+    // Each dish's price with VAT, by a call for each tuple.
+    "┌─────────┬─────────────┬───────┐",
+    "│ country │ dish        │ total │",
+    "├─────────┼─────────────┼───────┤",
+    "│ Ghana   │ jollof rice │  1392 │",
+    "│ Japan   │ ramen       │  1044 │",
+    "│ Mexico  │ pozole      │   870 │",
+    "└─────────┴─────────────┴───────┘",
+    "┌────────┐",
+    "│ dish   │",
+    "├────────┤",
+    "│ pozole │",
+    "└────────┘",
+    r#""half of 1200""#,
+    "600",
+    // A read-only operator's statements, run when it is called.
+    "┌───────┐",
+    "│ value │",
+    "├───────┤",
+    "│     1 │",
+    "│     3 │",
+    "│     9 │",
+    "│    27 │",
+    "└───────┘",
+    // A value block's, for each tuple.
+    "┌─────────┬─────────────┬───────┬───────┐",
+    "│ country │ dish        │ price │ rises │",
+    "├─────────┼─────────────┼───────┼───────┤",
+    "│ Ghana   │ jollof rice │  1200 │    27 │",
+    "│ Japan   │ ramen       │   900 │    24 │",
+    "│ Mexico  │ pozole      │   750 │    22 │",
+    "└─────────┴─────────────┴───────┴───────┘",
+    // The second argument is `previous`, which `rotate` assigns.
+    r#""ramen → spicy ramen""#,
+    r#""spicy ramen""#,
+    r#""spicy ramen → ramen""#,
+    r#""ramen""#,
+    // Calls made when running, with `vat` at 16, then at 25.
+    "┌────────┐",
+    "│ dish   │",
+    "├────────┤",
+    "│ pozole │",
+    "│ ramen  │",
+    "└────────┘",
+    "┌────────┐",
+    "│ dish   │",
+    "├────────┤",
+    "│ pozole │",
+    "└────────┘",
+    "┌─────────┬─────────────┬───────┐",
+    "│ country │ dish        │ total │",
+    "├─────────┼─────────────┼───────┤",
+    "│ Ghana   │ jollof rice │  1500 │",
+    "│ Japan   │ ramen       │  1125 │",
+    "│ Mexico  │ pozole      │   937 │",
+    "└─────────┴─────────────┴───────┘",
+    // Generic operators, for texts, relations and relations of
+    // relations.
+    r#""specials""#,
+    r#"relation { v: text } { { v: "ramen" }, { v: "spicy ramen" } }"#,
+    r#""affordable on the menu""#,
+    "true",
+    r#""pairs""#,
+    "relation { v: relation { v: integer } } { { v: relation { v: integer } { { v: 1 }, { v: 2 } } }, { v: relation { v: integer } { { v: 3 }, { v: 4 } } } }",
+    // `per` arguments, for each dish, with `vat` at 25.
+    r#""with VAT""#,
+    "relation { v: integer } { { v: 937 }, { v: 1125 }, { v: 1500 } }",
+    r#""where from""#,
+    r#"relation { v: text } { { v: "jollof rice, Ghana" }, { v: "pozole, Mexico" }, { v: "ramen, Japan" } }"#,
+    // Only pozole, at 937, is under 1000.
+    r#""how many under 1000""#,
+    "1",
+    r#""before p""#,
+    r#"relation { v: text } { { v: "jollof rice" } }"#,
+    r#""some under 1000""#,
+    "true",
+    r#""every under 1000""#,
+    "false",
+    // `min` and `max`, of integers and of texts.
+    r#""prices with VAT""#,
+    "tuple { high: 1500, low: 937 }",
+    r#""names""#,
+    r#"tuple { high: "ramen", low: "jollof rice" }"#,
+    // `cost` of integers, 937, 1125 and 1500 twice and 300 more, and
+    // of approximate numbers, 1125 one and a half times and 300.
+    r#""two of each, delivered""#,
+    "relation { v: integer } { { v: 2174 }, { v: 2550 }, { v: 3300 } }",
+    r#""one and a half ramen, delivered""#,
+    "1.9875e3",
+    // With `vat` at 25: pozole at 937, and ramen at 1125.
+    r#""under 1200""#,
+    "tuple { dishes: 2, lowest: 937 }",
+    // `if`s: only pozole, at 937, is under 1000, and none under
+    // 500, whose mean is 0, with no division by zero.
+    r#""mean under 1000""#,
+    "937",
+    r#""mean under 500""#,
+    "0",
+    r#""how many under 1200""#,
+    r#""several""#,
+    r#""the menu's""#,
+    r#""dishes""#,
+    // Value blocks: the spread at 16, folded, and at 25, when
+    // running, 1500 less 937; pozole's band, at 937.
+    r#""spread""#,
+    "522",
+    r#""spread now""#,
+    "563",
+    r#""pozole""#,
+    r#""under 1000 by 63""#,
+    // Each `half`, of `vat` at 25, as the arguments' names choose.
+    r#""half the VAT""#,
+    "tuple { n: 12, x: 1.25e1 }",
+];
+
 #[test]
 fn operators() {
     let (code, stderr) = run_example("operators");
@@ -223,107 +340,7 @@ fn operators() {
     let lines: Vec<&str> = stderr.lines().collect();
     let (others, parameters) = lines.split_at(lines.len() - PARAMETERS.len());
     assert_eq!(parameters, PARAMETERS);
-    assert_eq!(
-        others,
-        [
-            // Each dish's price with VAT, by a call for each tuple.
-            "┌─────────┬─────────────┬───────┐",
-            "│ country │ dish        │ total │",
-            "├─────────┼─────────────┼───────┤",
-            "│ Ghana   │ jollof rice │  1392 │",
-            "│ Japan   │ ramen       │  1044 │",
-            "│ Mexico  │ pozole      │   870 │",
-            "└─────────┴─────────────┴───────┘",
-            "┌────────┐",
-            "│ dish   │",
-            "├────────┤",
-            "│ pozole │",
-            "└────────┘",
-            r#""half of 1200""#,
-            "600",
-            // The second argument is `previous`, which `rotate` assigns.
-            r#""ramen → spicy ramen""#,
-            r#""spicy ramen""#,
-            r#""spicy ramen → ramen""#,
-            r#""ramen""#,
-            // Calls made when running, with `vat` at 16, then at 25.
-            "┌────────┐",
-            "│ dish   │",
-            "├────────┤",
-            "│ pozole │",
-            "│ ramen  │",
-            "└────────┘",
-            "┌────────┐",
-            "│ dish   │",
-            "├────────┤",
-            "│ pozole │",
-            "└────────┘",
-            "┌─────────┬─────────────┬───────┐",
-            "│ country │ dish        │ total │",
-            "├─────────┼─────────────┼───────┤",
-            "│ Ghana   │ jollof rice │  1500 │",
-            "│ Japan   │ ramen       │  1125 │",
-            "│ Mexico  │ pozole      │   937 │",
-            "└─────────┴─────────────┴───────┘",
-            // Generic operators, for texts, relations and relations of
-            // relations.
-            r#""specials""#,
-            r#"relation { v: text } { { v: "ramen" }, { v: "spicy ramen" } }"#,
-            r#""affordable on the menu""#,
-            "true",
-            r#""pairs""#,
-            "relation { v: relation { v: integer } } { { v: relation { v: integer } { { v: 1 }, { v: 2 } } }, { v: relation { v: integer } { { v: 3 }, { v: 4 } } } }",
-            // `per` arguments, for each dish, with `vat` at 25.
-            r#""with VAT""#,
-            "relation { v: integer } { { v: 937 }, { v: 1125 }, { v: 1500 } }",
-            r#""where from""#,
-            r#"relation { v: text } { { v: "jollof rice, Ghana" }, { v: "pozole, Mexico" }, { v: "ramen, Japan" } }"#,
-            // Only pozole, at 937, is under 1000.
-            r#""how many under 1000""#,
-            "1",
-            r#""before p""#,
-            r#"relation { v: text } { { v: "jollof rice" } }"#,
-            r#""some under 1000""#,
-            "true",
-            r#""every under 1000""#,
-            "false",
-            // `min` and `max`, of integers and of texts.
-            r#""prices with VAT""#,
-            "tuple { high: 1500, low: 937 }",
-            r#""names""#,
-            r#"tuple { high: "ramen", low: "jollof rice" }"#,
-            // `cost` of integers, 937, 1125 and 1500 twice and 300 more, and
-            // of approximate numbers, 1125 one and a half times and 300.
-            r#""two of each, delivered""#,
-            "relation { v: integer } { { v: 2174 }, { v: 2550 }, { v: 3300 } }",
-            r#""one and a half ramen, delivered""#,
-            "1.9875e3",
-            // With `vat` at 25: pozole at 937, and ramen at 1125.
-            r#""under 1200""#,
-            "tuple { dishes: 2, lowest: 937 }",
-            // `if`s: only pozole, at 937, is under 1000, and none under
-            // 500, whose mean is 0, with no division by zero.
-            r#""mean under 1000""#,
-            "937",
-            r#""mean under 500""#,
-            "0",
-            r#""how many under 1200""#,
-            r#""several""#,
-            r#""the menu's""#,
-            r#""dishes""#,
-            // Value blocks: the spread at 16, folded, and at 25, when
-            // running, 1500 less 937; pozole's band, at 937.
-            r#""spread""#,
-            "522",
-            r#""spread now""#,
-            "563",
-            r#""pozole""#,
-            r#""under 1000 by 63""#,
-            // Each `half`, of `vat` at 25, as the arguments' names choose.
-            r#""half the VAT""#,
-            "tuple { n: 12, x: 1.25e1 }",
-        ]
-    );
+    assert_eq!(others, OPERATORS);
 }
 
 #[test]
@@ -4296,6 +4313,8 @@ const LOOKUPS: &str = "operator show{r: relation { a: integer }, t: relation { a
     call debug_table{r: q extend { per := sum{r: r extend { k := count{r: !!(t where b > x)} }, of: k} }};
     /* One bound in the loop may differ for each tuple: no lookup. */
     call debug_table{r: r extend { n := [ var u := t where b > 15; count{r: !!u} ] }};
+    call debug_table{r: relation { { a: 1, k: 0 }, { a: 1, k: 15 } } extend { n := [ var u := t where b > k; count{r: !!u} ] }};
+    call debug_table{r: relation { { a: 1, k: 0 }, { a: 1, k: 15 } } extend { n := [ var u := t; if k > 0 then [ u := t where b > k; ]; count{r: !!u} ] }};
     /* Computed only where it was: never, here, so nothing divides by zero. */
     call debug_table{r: (r where a > 100) extend { n := count{r: !!(t where 1 div z = 1)} }};
     call debug_table{r: r where a > 100 and count{r: !!(t where 1 div z = 1)} > 0};
@@ -4352,6 +4371,18 @@ fn image_relations_are_looked_up_once_per_loop() {
         "│ 2 │ 1 │",
         "│ 3 │ 0 │",
         "└───┴───┘",
+        "┌───┬────┬───┐",
+        "│ a │ k  │ n │",
+        "├───┼────┼───┤",
+        "│ 1 │  0 │ 2 │",
+        "│ 1 │ 15 │ 1 │",
+        "└───┴────┴───┘",
+        "┌───┬────┬───┐",
+        "│ a │ k  │ n │",
+        "├───┼────┼───┤",
+        "│ 1 │  0 │ 2 │",
+        "│ 1 │ 15 │ 1 │",
+        "└───┴────┴───┘",
         "┌───┬───┐",
         "│ a │ n │",
         "├───┼───┤",
@@ -4379,8 +4410,8 @@ fn image_relations_are_looked_up_once_per_loop() {
         lines[expected.len()..],
         [
             &division("2 div 0")[..],
-            site("lookups", 23).trim_end(),
-            called("lookups", "show", 27).trim_end(),
+            site("lookups", 25).trim_end(),
+            called("lookups", "show", 29).trim_end(),
         ],
         "{stderr}"
     );
@@ -4603,6 +4634,310 @@ fn a_restriction_by_its_first_attributes_finds_their_run() {
         lines[expected.len()..][0],
         division("1 div 0"),
         "a value that can fail is computed for the first tuple: {stderr}"
+    );
+}
+
+/// Read-only operators whose statements are run, in every place a call of
+/// one can be, of what's given back after the local variables holding it are
+/// given up.
+const READ_ONLY_STATEMENTS: &str = r#"/* A constraint that runs statements. */
+operator is_even{n: integer}: boolean [
+    var i := n;
+    while i >= 2 loop [
+        i := i - 2;
+    ];
+    i = 0
+];
+
+type even { { n: integer }, constraint is_even{n: n} };
+
+/* Generic: the larger of a relation's values, by a loop over an array. */
+operator largest{r: relation { x: T }, start: T}: T types { T: any ordered } [
+    var values: array T;
+    load values value from r order [asc x] keep {x};
+    var best := start;
+    for v in values loop [
+        if v > best then [
+            best := v;
+        ];
+    ];
+    best
+];
+
+/* Versions of a specification. */
+type figure union;
+type round is figure { { r: integer } };
+type square is figure { { s: integer } };
+
+operator sides{f: figure}: integer;
+
+operator sides{f: round}: integer [ 0 ];
+
+operator sides{f: square}: integer [
+    var n := 0;
+    while n < 4 loop [
+        n := n + 1;
+    ];
+    n
+];
+
+/* A text it builds, handed to its caller. */
+operator repeated{t: text, n: integer}: text [
+    var out := "";
+    var i := 0;
+    loop [
+        out := out || t;
+        i := i + 1;
+    ] while i < n;
+    out
+];
+
+/* A tuple holding text, and a relation holding text, from locals. */
+operator named{n: integer}: tuple { name: text, seen: relation { t: text } } [
+    var seen: relation { t: text };
+    var i := 0;
+    while i < n loop [
+        insert seen relation { { t: "t" || to_text{from: i} } };
+        i := i + 1;
+    ];
+    tuple { name: "n" || to_text{from: n}, seen: seen }
+];
+
+/* A transaction of its own, adding what fails to a local. */
+operator divided{a: integer, b: integer}: integer [
+    var q := -1;
+    var refused: relation transaction_collection;
+    transaction collecting refused [
+        q := a div b;
+    ];
+    q
+];
+
+/* An `update`, `delete` and a local of a program type. */
+operator kept{r: relation { x: integer }}: relation { x: integer, y: integer } [
+    var out := r extend { y := x * 2 };
+    delete out where x = 2;
+    update out { y := if x = 3 then 0 else y };
+    out
+];
+
+/* A `fail` statement, and its failure caught by the caller. */
+operator positive{n: integer}: integer [
+    if n <= 0 then [
+        fail failure{message: "not positive: " || to_text{from: n}};
+    ];
+    n
+];
+
+/* Called from a straight-line one, which isn't computed when compiling. */
+operator twice_even{n: integer}: boolean [
+    var a := is_even{n: n};
+    a and is_even{n: n * 2}
+];
+
+operator main{} [
+    var zero := parse_integer{from: "0"};
+    /* Known arguments, and arguments known only now. */
+    call debug_value{v: is_even{n: 4}};
+    call debug_value{v: is_even{n: 3 + zero}};
+    call debug_value{v: twice_even{n: 3}};
+    /* Selected, checking the constraint when running. */
+    call debug_value{v: even{n: 4}};
+    call debug_value{v: largest{r: relation { { x: 3 }, { x: 9 }, { x: 5 } }, start: 0}};
+    call debug_value{v: largest{r: relation { { x: "b" }, { x: "c" } }, start: "a"}};
+    call debug_value{v: sides{f: square{s: 2}}};
+    call debug_value{v: sides{f: round{r: 2}}};
+    call debug_value{v: repeated{t: "ab", n: 3}};
+    var kept_name := named{n: 2};
+    call debug_value{v: kept_name};
+    call debug_value{v: divided{a: 7, b: 2}};
+    call debug_value{v: divided{a: 7, b: zero}};
+    call debug_value{v: kept{r: relation { { x: 1 }, { x: 2 }, { x: 3 } }}};
+    /* For each tuple. */
+    var r := relation { { x: 1 }, { x: 2 }, { x: 3 } };
+    call debug_value{v: r extend { s := repeated{t: "z", n: x} }};
+    call debug_value{v: r where is_even{n: x}};
+    /* Its failure goes to the caller's transaction. */
+    var refused: relation transaction_collection;
+    var got := 0;
+    transaction collecting refused [
+        got := positive{n: zero};
+    ];
+    call debug_value{v: got};
+    call debug_value{v: count{r: refused}};
+    call debug_value{v: positive{n: 5}};
+    /* A selection that breaks it, with no transaction: the program fails. */
+    call debug_value{v: even{n: 3 + zero}};
+];
+"#;
+
+#[test]
+fn read_only_operators_run_statements() {
+    let (code, stderr) = run_source("read_only_statements", READ_ONLY_STATEMENTS);
+    let expected = [
+        "true",
+        "false",
+        "false",
+        "even{n: 4}",
+        "9",
+        r#""c""#,
+        "4",
+        "0",
+        r#""ababab""#,
+        r#"tuple { name: "n2", seen: relation { t: text } { { t: "t0" }, { t: "t1" } } }"#,
+        "3",
+        "-1",
+        "relation { x: integer, y: integer } { { x: 1, y: 2 }, { x: 3, y: 0 } }",
+        r#"relation { s: text, x: integer } { { s: "z", x: 1 }, { s: "zz", x: 2 }, { s: "zzz", x: 3 } }"#,
+        "relation { x: integer } { { x: 2 } }",
+        "0",
+        "1",
+        "5",
+    ];
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        (code, &lines[..expected.len()]),
+        (1, &expected[..]),
+        "{stderr}"
+    );
+    assert!(
+        lines[expected.len()].contains("even{n: 3} isn't a value of `even`"),
+        "{stderr}"
+    );
+}
+
+/// Value blocks whose statements are run, in every place one can be: in a
+/// statement's expression, whose own scope is in use, in another's
+/// statements, and for each tuple, of what's given back after their local
+/// variables are given up.
+const VALUE_BLOCK_STATEMENTS: &str = r#"var program_total := 5;
+type t { { n: integer }, constraint [ var i := n; while i >= 2 loop [ i := i - 2; ]; i = 0 ] };
+var scale := relation { { x: 1 }, { x: 2 } };
+
+/* In a straight-line read-only operator, which still folds where it can. */
+operator triple{n: integer}: integer [ n * 3 ];
+
+operator with_block{n: integer}: integer [
+    var base := triple{n: n};
+    base + [
+        var i := 0;
+        var s := 0;
+        while i < n loop [
+            s := s + i;
+            i := i + 1;
+        ];
+        s
+    ]
+];
+
+operator main{} [
+    var zero := parse_integer{from: "0"};
+    /* In a statement's expression, whose own scope is in use. */
+    var total := 1 + [
+        var s := 0;
+        for x in array [1, 2, 3] loop [
+            s := s + x;
+        ];
+        s
+    ];
+    call debug_value{v: total};
+    /* A text made in it, kept after. */
+    var word := [
+        var w := "";
+        var i := 0;
+        while i < 3 loop [
+            w := w || "ab";
+            i := i + 1;
+        ];
+        w
+    ];
+    call debug_value{v: word};
+    call debug_value{v: with_block{n: 4}};
+    call debug_value{v: with_block{n: 4 + zero}};
+    /* For each tuple, reading the tuple at hand. */
+    var r := relation { { x: 1 }, { x: 2 }, { x: 3 } };
+    call debug_value{v: r extend { y := [ var p := 1; var i := 0; while i < x loop [ p := p * 2; i := i + 1; ]; p ] }};
+    call debug_value{v: r where [ var keep := false; if x > 1 then [ keep := true; ]; keep ]};
+    /* An `if` statement choosing, a transaction and a `fail`. */
+    call debug_value{v: [ var a := 0; if zero = 0 then [ a := 7; ] else [ a := 8; ]; a ]};
+    call debug_value{v: [
+        var q := -1;
+        var e: relation transaction_collection;
+        transaction collecting e [
+            q := 1 div zero;
+        ];
+        tuple { q: q, failures: count{r: e} }
+    ]};
+    /* Reading a program variable and a parameter-like local around it. */
+    call debug_value{v: [ var s := program_total; if s > 1 then [ s := s + total; ]; s ]};
+    /* Nested, one inside another's statements. */
+    call debug_value{v: [
+        var out := 0;
+        var i := 0;
+        while i < 2 loop [
+            out := out + [
+                var j := 0;
+                var inner := 0;
+                while j < 3 loop [
+                    inner := inner + 1;
+                    j := j + 1;
+                ];
+                inner
+            ];
+            i := i + 1;
+        ];
+        out
+    ]};
+    /* Failing, inside a transaction of the operator's. */
+    var refused: relation transaction_collection;
+    var kept := 0;
+    transaction collecting refused [
+        kept := [
+            var i := 0;
+            var made := "x";
+            while i < 2 loop [
+                made := made || "y";
+                i := i + 1;
+            ];
+            1 div (zero * i)
+        ];
+    ];
+    call debug_value{v: kept};
+    call debug_value{v: count{r: refused}};
+    /* A constraint that has one. */
+    call debug_value{v: t{n: 4}};
+    /* A failure, nothing to catch it. */
+    call debug_value{v: t{n: 3 + zero}};
+];
+"#;
+
+#[test]
+fn value_blocks_run_statements() {
+    let (code, stderr) = run_source("value_block_statements", VALUE_BLOCK_STATEMENTS);
+    let expected = [
+        "7",
+        r#""ababab""#,
+        "18",
+        "18",
+        "relation { x: integer, y: integer } { { x: 1, y: 2 }, { x: 2, y: 4 }, { x: 3, y: 8 } }",
+        "relation { x: integer } { { x: 2 }, { x: 3 } }",
+        "7",
+        "tuple { failures: 1, q: -1 }",
+        "12",
+        "6",
+        "0",
+        "1",
+        "t{n: 4}",
+    ];
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        (code, &lines[..expected.len()]),
+        (1, &expected[..]),
+        "{stderr}"
+    );
+    assert!(
+        lines[expected.len()].contains("t{n: 3} isn't a value of `t`"),
+        "{stderr}"
     );
 }
 

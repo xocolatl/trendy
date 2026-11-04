@@ -588,12 +588,16 @@ pub(crate) fn value(
         return Some((value.clone(), ty));
     }
     // Nothing in one reads input (`Checker::call`), so what is left is a
-    // `fail`, computed now.
+    // `fail`, computed now, or a call of an operator whose statements are
+    // run, which only the program does.
     match crate::ops::evaluated(out, names.bindings()) {
-        Ok(out) => match crate::ops::known_value(&out) {
-            Some(value) => Some((value.clone(), ty)),
-            None => unreachable!("an expression of constants folds to a constant: {out:?}"),
-        },
+        Ok(out) => {
+            let value = crate::ops::known_value(&out).cloned();
+            if value.is_none() {
+                errors.push(errors::value_known_only_when_running(expr));
+            }
+            value.map(|value| (value, ty))
+        }
         Err(failed) => {
             errors.push(errors::failed(&failed, expr));
             None

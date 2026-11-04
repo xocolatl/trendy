@@ -991,6 +991,13 @@ impl Body {
         statements_of(&self.0)
     }
 
+    /// Whether a statement of the body decides what runs next (see
+    /// [`decides_what_runs`]).
+    #[must_use]
+    pub fn decides_what_runs(&self) -> bool {
+        decides_what_runs(self.statements())
+    }
+
     /// Where something missing from the end of the body goes: just before
     /// its `]`.
     #[must_use]
@@ -1018,6 +1025,23 @@ pub enum Statement {
     Transaction(TransactionStmt),
     /// A local variable's declaration, as a program variable's is written.
     Var(VarDecl),
+}
+
+/// Whether one of `statements` decides what runs next: an `if`, a loop, a
+/// transaction or a `fail`, so that they have to be run, where the others
+/// just name values one after another.
+pub fn decides_what_runs(mut statements: impl Iterator<Item = Statement>) -> bool {
+    statements.any(|statement| {
+        matches!(
+            statement,
+            Statement::If(_)
+                | Statement::While(_)
+                | Statement::Loop(_)
+                | Statement::For(_)
+                | Statement::Transaction(_)
+                | Statement::Fail(_)
+        )
+    })
 }
 
 /// The statements among `node`'s children.

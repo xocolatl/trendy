@@ -2647,11 +2647,13 @@ fn substitute(
         // Known, it needs no site.
         hir::Expr::At(site, expr) => hir::Expr::at(site, sub(expr)?),
         // A variable of the program's is known only when running: a
-        // read-only operator's value reads none.
+        // read-only operator's value reads none. Statements are run only
+        // then, as they may not stop.
         hir::Expr::Current(..)
         | hir::Expr::Constant(_)
         | hir::Expr::Parameter(_)
-        | hir::Expr::Variable(_) => expr,
+        | hir::Expr::Variable(_)
+        | hir::Expr::Run(..) => expr,
         hir::Expr::Call(called) => {
             let args = called
                 .args

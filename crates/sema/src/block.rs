@@ -4,14 +4,18 @@
 //! are its own, in scope in all of it, and hide no name around it but a
 //! variable of the program's; it changes nothing else. A local variable
 //! whose value is known when compiling is that value wherever it is used,
-//! and each other one is a `Let`, as in a read-only operator's body.
+//! and each other one is a `Let`, as in a read-only operator's body. One
+//! whose statements decide what runs next has them run, when the program
+//! runs (see [`hir::Expr::Run`]).
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, VarDecl};
 
 use crate::assign::{self, Assignee, Assigning};
+use crate::body::{self, Around};
 use crate::check::{Checker, Lookup, Names};
+use crate::locals::Declaring;
 use crate::types::Expected;
 use crate::{Namespaces, Operators, errors, locals, ops};
 
@@ -25,6 +29,9 @@ pub(crate) fn value(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
     let statements: Vec<ast::Statement> = block.statements().collect();
+    if ast::decides_what_runs(statements.iter().cloned()) {
+        return run(block, &statements, outer, expected, errors);
+    }
     let (mut names, mut ok) = BlockNames::new(outer, &statements, errors);
     let types = names
         .type_parameters()
@@ -52,17 +59,13 @@ pub(crate) fn value(
                 errors.push(errors::call_in_block(stmt));
                 ok = false;
             }
-            ast::Statement::If(stmt) => {
-                errors.push(errors::if_in_block(stmt));
-                ok = false;
-            }
-            ast::Statement::While(_) | ast::Statement::Loop(_) | ast::Statement::For(_) => {
-                errors.push(errors::loop_in_block(statement));
-                ok = false;
-            }
-            ast::Statement::Transaction(stmt) => {
-                errors.push(errors::transaction_in_block(stmt));
-                ok = false;
+            ast::Statement::If(_)
+            | ast::Statement::While(_)
+            | ast::Statement::Loop(_)
+            | ast::Statement::For(_)
+            | ast::Statement::Transaction(_)
+            | ast::Statement::Fail(_) => {
+                unreachable!("a block with them has its statements run")
             }
             ast::Statement::Warn(stmt) => {
                 errors.push(errors::warn_for_value(stmt, "a value block"));
@@ -70,10 +73,6 @@ pub(crate) fn value(
             }
             ast::Statement::Return(stmt) => {
                 errors.push(errors::return_in_block(stmt));
-                ok = false;
-            }
-            ast::Statement::Fail(stmt) => {
-                errors.push(errors::fail_statement_for_value(stmt, "a value block"));
                 ok = false;
             }
         }
@@ -89,6 +88,131 @@ pub(crate) fn value(
             hir::Expr::Let(id, Box::new(value), Box::new(body))
         })
     })
+}
+
+/// The value of `block`, of `statements`, one of which decides what runs
+/// next, as for [`value`]: its local variables join those of what it's in,
+/// which they follow.
+fn run(
+    block: &ast::ValueBlock,
+    statements: &[ast::Statement],
+    outer: &mut dyn Names,
+    expected: Option<&Expected>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    let written = block.value();
+    let mut around = Outside { outer: &mut *outer };
+    let (locals, value) = body::run(&mut around, statements, written.as_ref(), expected, errors);
+    for local in locals {
+        outer.fresh_local(local);
+    }
+    value
+}
+
+/// What is around a value block with statements that are run: the names
+/// `outer` resolves, none of which it assigns.
+struct Outside<'a> {
+    outer: &'a mut dyn Names,
+}
+
+impl Names for Outside<'_> {
+    fn namespaces(&self) -> &Namespaces {
+        self.outer.namespaces()
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.outer.site(at)
+    }
+
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        self.outer.resolve(name, span, errors)
+    }
+
+    fn resolve_variable(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        self.outer.resolve_variable(name, span, errors)
+    }
+
+    fn candidates(&self, at: Span) -> Vec<String> {
+        self.outer.candidates(at)
+    }
+
+    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
+        self.outer.leaf_type(leaf)
+    }
+
+    fn fresh_local(&mut self, _: hir::Local) -> hir::LocalId {
+        unreachable!("a block's statements have its local variables")
+    }
+
+    fn next_local(&self) -> usize {
+        self.outer.next_local()
+    }
+
+    fn hides(&self, name: &str) -> bool {
+        self.outer.hides(name)
+    }
+
+    fn tuple_at_hand(&self) -> Option<&hir::Heading> {
+        self.outer.tuple_at_hand()
+    }
+
+    fn unnumbered(&self) -> bool {
+        self.outer.unnumbered()
+    }
+
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        self.outer.type_parameters()
+    }
+
+    fn operators(&self) -> &Operators {
+        self.outer.operators()
+    }
+
+    fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
+        self.outer.checked(id, at, errors)
+    }
+
+    fn bindings(&self) -> ops::Bindings<'_> {
+        self.outer.bindings()
+    }
+
+    fn narrowing_ended(&self, name: &str) -> Option<Span> {
+        self.outer.narrowing_ended(name)
+    }
+}
+
+impl Around for Outside<'_> {
+    fn declaring(&self) -> Declaring<'_> {
+        Declaring::Block(&*self.outer)
+    }
+
+    fn refused(&self, statement: &ast::Statement) -> Option<Diagnostic> {
+        match statement {
+            ast::Statement::Call(stmt) => Some(errors::call_in_block(stmt)),
+            ast::Statement::Warn(stmt) => Some(errors::warn_for_value(stmt, "a value block")),
+            ast::Statement::Return(stmt) => Some(errors::return_in_block(stmt)),
+            _ => None,
+        }
+    }
+
+    fn is_variable(&self, _: &str, _: Span) -> bool {
+        false
+    }
+
+    fn assigned_around(
+        &mut self,
+        name: &str,
+        span: Span,
+        locals: &[&str],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        if self.outer.has_value(name, span) {
+            errors.push(errors::assigned_outside_block(name, span));
+        } else {
+            errors.push(errors::unknown_name(name, span, "variable", locals));
+        }
+        None
+    }
 }
 
 /// Names in a value block: its own local variables, then the names around
@@ -290,6 +414,10 @@ impl Names for BlockNames<'_> {
 
     fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
         self.outer.fresh_local(local)
+    }
+
+    fn next_local(&self) -> usize {
+        self.outer.next_local()
     }
 
     fn hides(&self, name: &str) -> bool {

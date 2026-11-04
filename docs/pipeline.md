@@ -816,7 +816,7 @@ before, which the fix for one that isn't does (A0015), of type
 `builtins::failures` checks is the compiler's
 (`hir::transaction_collection`, X0000) (A0004), and read, so an `out`
 parameter is assigned before (A0054). A transaction checks its block as a block of
-its own; a read-only operator and a value block have none (A0035).
+its own.
 An `if` statement whose condition is known when compiling runs only one
 block, and the other's failures aren't reported (`body::Statements`). A
 loop whose condition is known to be true would never end, since nothing
@@ -1110,11 +1110,32 @@ which nothing could stop without a conditional. No cycle has both, as no
 operator reads a variable. A variable's id is its first declaration's
 place among them, known before any is evaluated.
 
-A read-only operator's body declares and assigns its local variables, and
-ends with its value, of its result type (A0035): assigning a
-variable of the program's or a `call` would change something (A0034),
-which TTM RM Prescription 3 rules out, and which evaluating a call when
-compiling would skip. Its value stays one expression: each declaration
+A read-only operator's body ends with its value, of its result type
+(A0035): assigning a variable of the program's or a `call` would change
+something (A0034), which TTM RM Prescription 3 rules out, and which
+evaluating a call when compiling would skip. A body or a value block with
+a statement that decides what runs next, an `if`, a loop, a transaction or
+a `fail` (`ast::decides_what_runs`), is `hir::Expr::Run`: its statements,
+then its value. `body::run` checks both with the same `body::Statements`
+an update operator's body has, and the value in their scope. What differs
+is around them, a `body::Around`: the names they see past their own, whether
+they can assign one, and which statements are refused. An update body's is
+`body::UpdateNames`, a read-only one's `globals::ReadOnlyNames`, which reads
+and assigns only its parameters (A0050, A0034), and a value block's
+`block::Outside`, over the names around the block, wherever it is. The
+read-only operator's is checked with its value, on demand in `Globals`, so
+a cycle through its statements is found as any other is (A0036). A `Run` is
+never evaluated: `ops::substitute` leaves it, it has no known value, and
+so `ops::call` leaves a call that reaches one to the program, as they may
+not stop, and an initial value that needs one is reported (A0077).
+Lowering (`FunctionBuilder::run`) places its local variables, which hold
+references, as an update operator's do, in a scope of their own, so a
+statement's scope isn't reused by those inside it; then runs the statements
+and hands the result out whatever it is, as it may be a local variable's,
+which it then gives up. A lookup made before a loop over tuples can't serve
+an operand that reads a local variable bound inside it, by a `Let` or a
+`Run`, as that differs for each tuple (`Lookups::varying`).
+Any other body's value stays one expression: each declaration
 and assignment is an `Expr::Let` of a local variable of its own (each
 assignment gives one a new id, as `Locals::reassigned` does), so each value
 is computed once, however many times it is used, where substituting it
@@ -1134,11 +1155,15 @@ A value block (`ValueBlock`) is a `[` in an operand's place before a
 statement, which a `var` starts or a `;` ends; anything else in brackets
 is an array without its keyword. Its contents are a read-only body's, and
 braces before a `var`, as Rust writes a block, are fixed to brackets.
-Sema checks it with `block::BlockNames`, which resolves its own local
-variables and hands every other name to the names around it, as
-`TupleNames` does for the tuple at hand, and lets it assign only its own.
+One with a statement that decides what runs next is `hir::Expr::Run`, as
+above; any other stays a chain of `Let`s, and folds. Sema checks that with
+`block::BlockNames`, which resolves its own local variables and hands every
+other name to the names around it, as `TupleNames` does for the tuple at
+hand, and lets it assign only its own.
 Each local variable gets its id from those names (`Names::fresh_local`):
 from the operator's `Locals`, or, in an initial value, from the globals.
+A `Run`'s own numbering starts at `Names::next_local`, and its locals are
+adopted by those names when it ends.
 A local variable whose value is known when compiling is that value
 wherever its name is used, and each other one is a `Let`, so a block in
 an initial value is evaluated whole, but for values computed for each

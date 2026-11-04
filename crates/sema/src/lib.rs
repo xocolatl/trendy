@@ -3350,17 +3350,13 @@ var zero := seg{{len: 0}};{MAIN}"
         assert_eq!(errors[0].code, Code::TypeMismatch);
         assert!(errors[0].suggestions.is_empty());
         assert!(errors[0].help[0].contains("failure{message:"));
-        // A statement where a value goes.
-        for source in [
-            "operator f{}: integer [ fail failure{message: \"no\"}; 1 ];",
-            "var a: integer := [ fail failure{message: \"no\"}; 1 ];",
-        ] {
-            assert_eq!(
-                codes(&format!("{source}{MAIN}")),
-                [Code::Return],
-                "{source}"
-            );
-        }
+        // One in a value block runs when the program does.
+        assert_eq!(
+            codes(&format!(
+                "var a: integer := [ fail failure{{message: \"no\"}}; 1 ];{MAIN}"
+            )),
+            [Code::InitialValueWhenRunning]
+        );
     }
 
     #[test]
@@ -3450,12 +3446,8 @@ var zero := seg{{len: 0}};{MAIN}"
                 Code::TypeMismatch,
             ),
             (
-                "operator f{}: integer [ transaction [ var a := 1; ]; 1 ];\noperator main{} [];",
-                Code::Return,
-            ),
-            (
                 "var a: integer := [ transaction [ var b := 1; ]; 1 ];\noperator main{} [];",
-                Code::Return,
+                Code::InitialValueWhenRunning,
             ),
         ] {
             assert_eq!(codes(source), [code], "{source}");
@@ -9934,12 +9926,106 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             codes("[ var a := 1; call debug_value{v: a}; a ]"),
             [Code::ReadOnlyEffect]
         );
-        assert_eq!(
-            codes("[ var a := 1; if a > 0 then [ a := 2; ]; a ]"),
-            [Code::Return]
-        );
         // Its local variables are out of scope after it.
         assert_eq!(codes("[ var a := 1; a ] + a"), [Code::UnknownName]);
+    }
+
+    #[test]
+    fn a_value_block_runs_statements_on_its_own_local_variables() {
+        let in_f = |block: &str| {
+            format!(
+                "var total := 0;\noperator f{{n: integer}}: integer [ var m := 1; {block} ];{MAIN}"
+            )
+        };
+        for block in [
+            "[ var a := n; while a > 0 loop [ a := a - 1; ]; a ]",
+            "[ var a := n; loop [ a := a + 1; ] while a < 3; a ]",
+            "[ var s := 0; for x in array [n, m] loop [ s := s + x; ]; s ]",
+            "[ var a := 0; if n > m then [ a := 1; ] else [ a := 2; ]; a ]",
+            "[ if n < 0 then [ fail failure{message: \"no\"}; ]; n ]",
+            "[ var q := 0; var e: relation transaction_collection; transaction collecting e [ q := 1 div n; ]; q ]",
+            // A program's variable it hides, and blocks side by side.
+            "[ var total := n; if n > 0 then [ total := 1; ]; total ]",
+            "[ var a := 0; if n > 0 then [ var b := 1; a := b; ] else [ var b := 2; a := b; ]; a ]",
+            // Each in the other's statements.
+            "[ var a := 0; while a < 2 loop [ a := a + [ var i := 1; if n > 0 then [ i := 2; ]; i ]; ]; a ]",
+        ] {
+            let source = in_f(block);
+            assert!(
+                analyze_str(&source).is_ok(),
+                "{block}: {:#?}",
+                errors(&source)
+            );
+        }
+        // Each of these is the same as in a block without them.
+        let with_a_loop = |statement: &str| {
+            in_f(&format!(
+                "[ var a := 1; while a < 3 loop [ {statement} a := a + 1; ]; a ]"
+            ))
+        };
+        assert_eq!(
+            errors(&with_a_loop("m := a;"))[0].message,
+            "a value block can't assign `m`"
+        );
+        for (statement, code) in [
+            ("n := a;", Code::ReadOnlyEffect),
+            ("total := a;", Code::ReadOnlyEffect),
+            ("call debug_value{v: a};", Code::ReadOnlyEffect),
+            ("warn failure{message: \"no\"};", Code::Return),
+            ("return a;", Code::Return),
+            // A local variable hides nothing around the block.
+            ("var n := 1;", Code::DuplicateName),
+            ("var m := 1;", Code::DuplicateName),
+            ("var a := 1;", Code::DuplicateName),
+        ] {
+            assert_eq!(codes(&with_a_loop(statement)), [code], "{statement}");
+        }
+        for (block, code) in [
+            // What's around it is read as it is outside the block.
+            (
+                "[ var a := total; if a > 0 then [ a := 1; ]; a ]",
+                Code::VariableInReadOnly,
+            ),
+            // Its local variables are out of scope after it, and in the
+            // branches they aren't declared in.
+            (
+                "[ var a := 1; if a > 0 then [ a := 2; ]; a ] + a",
+                Code::UnknownName,
+            ),
+            ("[ if n > 0 then [ var b := 1; ]; b ]", Code::UnknownName),
+            (
+                "[ if n > 0 then [ b := 1; ]; var b := 0; b ]",
+                Code::LocalBeforeDeclaration,
+            ),
+            // Its value has the type expected.
+            (
+                "[ var t := \"a\"; if n > 0 then [ t := \"b\"; ]; t ]",
+                Code::TypeMismatch,
+            ),
+            // A loop's array and variable stay put.
+            (
+                "[ var x := array [1]; for y in x loop [ x := array [2]; ]; n ]",
+                Code::NotAssignable,
+            ),
+            (
+                "[ for y in array [1] loop [ y := 2; ]; n ]",
+                Code::NotAssignable,
+            ),
+        ] {
+            assert_eq!(codes(&in_f(block)), [code], "{block}");
+        }
+        // In an update operator, it reads what the operator reads, and an
+        // `out` parameter only once it is assigned.
+        assert!(analyze_str(&format!(
+            "var total := 0;\noperator f{{n: integer}} [ total := [ var a := total; if n > 0 then [ a := n; ]; a ]; ];{MAIN}"
+        ))
+        .is_ok());
+        assert_eq!(
+            codes(&format!(
+                "operator f{{out y: integer}} [ y := [ var a := y; if a > 0 then [ a := 1; ]; a ]; ];{MAIN}"
+            )),
+            [Code::UnassignedOut]
+        );
     }
 
     #[test]
@@ -9997,18 +10083,12 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             )),
             format!("operator f{{}} [ call g{{}}; ];\noperator g{{}} [];{MAIN}")
         );
-        // Only in an update operator.
-        assert_eq!(
-            codes(&format!(
-                "operator f{{n: integer}}: integer [ var i := n; while i > 0 loop [ i := i - 1; ]; i ];{MAIN}"
-            )),
-            [Code::Return]
-        );
+        // One in an initial value runs when the program does.
         assert_eq!(
             codes(&format!(
                 "var x := [ var i := 0; while i < 3 loop [ i := i + 1; ]; i ];{MAIN}"
             )),
-            [Code::Return]
+            [Code::InitialValueWhenRunning]
         );
     }
 
@@ -10075,12 +10155,163 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             message("for x in queue loop [];").0,
             Code::PointlessCondition
         );
+    }
+
+    #[test]
+    fn a_read_only_operator_runs_statements_on_what_it_is_given() {
+        // Each that an update operator has, on its parameters and local
+        // variables.
+        for body in [
+            "var i := n; while i > 0 loop [ i := i - 1; ]; i",
+            "var i := n; loop [ i := i + 1; ] while i < 3; i",
+            "var s := 0; for x in array [n, 1] loop [ s := s + x; ]; s",
+            "var x := 0; if n > 0 then [ x := 1; ] else [ x := 2; ]; x",
+            "if n < 0 then [ fail failure{message: \"no\"}; ]; n",
+            "var q := 0; var e: relation transaction_collection; transaction collecting e [ q := 1 div n; ]; q",
+            "var q := 0; transaction [ q := n; ]; q",
+            "var r := relation { { a: n } }; if n > 0 then [ insert r relation { { a: 0 } }; delete r where a = n; ]; count{r: r}",
+        ] {
+            let source = format!("operator f{{n: integer}}: integer [ {body} ];{MAIN}");
+            assert!(
+                analyze_str(&source).is_ok(),
+                "{body}: {:#?}",
+                errors(&source)
+            );
+        }
+        // They are run, and a call of it isn't computed when compiling,
+        // where one without them is.
+        let program = analyze_str(
+            "operator looped{n: integer}: integer [ var i := n; while i > 0 loop [ i := i - 1; ]; i ];\noperator plain{n: integer}: integer [ var i := n; i := i - 1; i ];\noperator main{} [ call debug_value{v: looped{n: 2}}; call debug_value{v: plain{n: 2}}; ];",
+        )
+        .unwrap();
+        let runs = |name: &str| {
+            let op = program.operators.iter().find(|o| o.name == name).unwrap();
+            let hir::OperatorKind::ReadOnly { value, .. } = &op.kind else {
+                panic!("read-only");
+            };
+            matches!(value, hir::Expr::Run(..))
+        };
+        assert_eq!((runs("looped"), runs("plain")), (true, false));
+        let body = main_body(
+            "operator looped{n: integer}: integer [ var i := n; while i > 0 loop [ i := i - 1; ]; i ];\noperator plain{n: integer}: integer [ var i := n; i := i - 1; i ];\noperator main{} [ call debug_value{v: looped{n: 2}}; call debug_value{v: plain{n: 2}}; ];",
+        );
+        assert!(matches!(argument(&body[0]), hir::Expr::Call(_)));
         assert_eq!(
-            codes(&format!(
-                "operator g{{}}: integer [ var n := 0; for x in array [1] loop [ n := n + x; ]; n ];{MAIN}"
-            )),
+            argument(&body[1]),
+            &hir::Expr::Constant(hir::Value::Integer(1))
+        );
+    }
+
+    #[test]
+    fn a_read_only_operators_statements_touch_nothing_else() {
+        let in_loop = |statement: &str| {
+            format!(
+                "var total := 0;\noperator f{{n: integer}}: integer [ var i := n; while i > 0 loop [ {statement} i := i - 1; ]; i ];{MAIN}"
+            )
+        };
+        // The program's variables, read, with the fix that passes it in.
+        let read = in_loop("i := i + total;");
+        assert_eq!(codes(&read), [Code::VariableInReadOnly]);
+        assert!(
+            fix(&read).contains("operator f{n: integer, total: integer}: integer"),
+            "{}",
+            fix(&read)
+        );
+        // Or assigned.
+        assert_eq!(codes(&in_loop("total := 1;")), [Code::ReadOnlyEffect]);
+        // A call of an update operator, which may change anything.
+        assert_eq!(
+            codes(&in_loop("call debug_value{v: i};")),
+            [Code::ReadOnlyEffect]
+        );
+        // A warning, which would be written.
+        assert_eq!(
+            codes(&in_loop("warn failure{message: \"no\"};")),
             [Code::Return]
         );
+        // Its parameters are given to it, as an update operator's `const`
+        // ones are.
+        assert_eq!(codes(&in_loop("n := 1;")), [Code::NotAssignable]);
+        // It has no early exit, as an update operator hasn't.
+        assert_eq!(codes(&in_loop("return i;")), [Code::Return]);
+        // And it ends with its value.
+        let source = format!(
+            "operator f{{n: integer}}: integer [ while n > 0 loop [ var i := 1; ]; ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::Return]);
+        // A loop's value is the value's type, as any is.
+        let source = format!(
+            "operator f{{n: integer}}: integer [ var t := \"a\"; if n > 0 then [ t := \"b\"; ]; t ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::TypeMismatch]);
+    }
+
+    #[test]
+    fn a_read_only_operator_whose_statements_are_run_doesnt_recurse() {
+        // In a value block.
+        let source = format!(
+            "operator f{{n: integer}}: integer [ [ var r := 0; if n > 0 then [ r := f{{n: n - 1}}; ]; r ] ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::Recursion]);
+        // Itself, which the fold would never reach.
+        let source = format!(
+            "operator f{{n: integer}}: integer [ var r := 0; if n > 0 then [ r := f{{n: n - 1}}; ]; r ];{MAIN}"
+        );
+        let found = errors(&source);
+        assert_eq!(codes(&source), [Code::Recursion], "{found:#?}");
+        assert_eq!(found[0].message, "`f` calls itself");
+        // Through an operator computed when it can be, each way around,
+        // reported once.
+        let source = format!(
+            "operator g{{n: integer}}: integer [ f{{n: n}} ];\noperator f{{n: integer}}: integer [ var r := 0; if n > 0 then [ r := g{{n: n - 1}}; ]; r ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::Recursion]);
+        // Through a type's constraint, which selecting a value checks.
+        let source = format!(
+            "type t {{ {{ n: integer }}, constraint fine{{n: n}} }};\noperator fine{{n: integer}}: boolean [ var ok := true; if n > 0 then [ ok := t{{n: 0}}.n = 0; ]; ok ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::Recursion]);
+        // Two that call neither themselves nor each other are fine.
+        let source = format!(
+            "operator a{{n: integer}}: integer [ var r := n; if n > 0 then [ r := b{{n: n}}; ]; r ];\noperator b{{n: integer}}: integer [ var r := n; if n > 1 then [ r := 1; ]; r ];{MAIN}"
+        );
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+    }
+
+    #[test]
+    fn an_initial_value_cant_wait_for_statements_to_run() {
+        let looped = "operator looped{n: integer}: integer [ var i := n; while i > 0 loop [ i := i - 1; ]; i ];\n";
+        for value in [
+            "looped{n: 2}",
+            // Through one computed when it can be.
+            "plain{n: 2}",
+            "plain{n: 2} + 1",
+            // Or its own statements.
+            "[ var i := 2; while i > 0 loop [ i := i - 1; ]; i ]",
+        ] {
+            let source = format!(
+                "{looped}operator plain{{n: integer}}: integer [ looped{{n: n}} ];\nvar x := {value};{MAIN}"
+            );
+            let found = errors(&source);
+            assert_eq!(
+                codes(&source),
+                [Code::InitialValueWhenRunning],
+                "{found:#?}"
+            );
+            assert_eq!(&source[found[0].span().start..found[0].span().end], value);
+        }
+        // With a type, too, and a selection whose constraint runs them.
+        let source = format!("{looped}var x: integer := looped{{n: 2}};{MAIN}");
+        assert_eq!(codes(&source), [Code::InitialValueWhenRunning]);
+        let source = format!(
+            "operator fine{{n: integer}}: boolean [ var ok := true; if n > 0 then [ ok := false; ]; ok ];\ntype t {{ {{ n: integer }}, constraint fine{{n: n}} }};\nvar x := t{{n: 0}};{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::InitialValueWhenRunning]);
+        // A read-only operator's value, and an update operator's, can wait.
+        let source = format!(
+            "{looped}operator plain{{n: integer}}: integer [ looped{{n: n}} ];\nvar x: integer;\noperator main{{}} [ x := plain{{n: 2}}; ];"
+        );
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
     }
 
     #[test]
@@ -10984,11 +11215,6 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             codes(&f("if n then [ call debug_value{v: n}; ];")),
             [Code::TypeMismatch]
         );
-        // A read-only operator chooses with an `if` expression.
-        let source = format!(
-            "operator g{{n: integer}}: integer [ var x := 0; if n > 0 then [ x := 1; ]; x ];{MAIN}"
-        );
-        assert_eq!(codes(&source), [Code::Return]);
     }
 
     #[test]

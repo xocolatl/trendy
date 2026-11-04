@@ -178,6 +178,7 @@ codes! {
     OtherRepresentation => "A0074",
     Qualifier => "A0075",
     BitGrouping => "A0076",
+    InitialValueWhenRunning => "A0077",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

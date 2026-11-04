@@ -3,7 +3,7 @@
 //! so that a name means one thing there, though one has no value before
 //! its declaration.
 
-use trendy_diag::Diagnostic;
+use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, VarDecl};
 
@@ -16,15 +16,55 @@ use crate::{errors, keys};
 /// checked is in, and of the blocks that have ended.
 #[derive(Default)]
 pub(crate) struct Locals {
+    /// The id of its first local variable: past those of what it is in, for
+    /// a value block's, which they join when it ends (see [`Locals::finish`]).
+    base: usize,
     /// The blocks the statement being checked is in, outermost first.
     scopes: Vec<Scope>,
     /// The declarations of the blocks that have ended, whose names are out
     /// of scope.
     ended: Vec<Declared>,
-    /// Every local variable, by id: one for each declaration, and, in a
-    /// read-only operator, one more for each assignment, which gives its
-    /// variable a new value from there on.
+    /// Every local variable, from `base`: one for each declaration, and, in
+    /// a read-only operator without statements that are run, one more for
+    /// each assignment, which gives its variable a new value from there on.
     all: Vec<hir::Local>,
+}
+
+/// What decides whether a block's local variable can have its name, around
+/// the block's own, which it can't have either: an operator's names, its
+/// parameters' and its local variables', each mean one thing wherever they
+/// are in scope, so a block's hide no other, though they hide the program's
+/// variables.
+#[derive(Clone, Copy)]
+pub(crate) enum Declaring<'a> {
+    /// The body of this operator.
+    Operator(&'a Signature),
+    /// A value block, whose names around it these are.
+    Block(&'a dyn Names),
+}
+
+impl Declaring<'_> {
+    /// How an error says where a local variable is declared again.
+    fn within(self) -> String {
+        match self {
+            Declaring::Operator(op) => format!("`{}`", op.name),
+            Declaring::Block(_) => "a value block".to_string(),
+        }
+    }
+
+    /// Why a local variable can't be named `name`, written at `span`, for
+    /// what's around its block, if it can't: `parameter` says where the
+    /// parameter of that name is written, if an operator's has it.
+    fn hidden(self, name: &str, span: Span, parameter: Option<Span>) -> Option<Diagnostic> {
+        match self {
+            Declaring::Operator(op) => op
+                .is_parameter(name)
+                .then(|| errors::local_named_as_parameter(name, span, parameter, &op.name)),
+            Declaring::Block(outer) => outer
+                .hides(name)
+                .then(|| errors::block_local_hides(name, span)),
+        }
+    }
 }
 
 /// A block's local variables: each declared in it, in order, and how many
@@ -77,6 +117,24 @@ pub(crate) enum Local<'a> {
 }
 
 impl Locals {
+    /// The local variables of a block within what has `base` of them.
+    pub(crate) fn from(base: usize) -> Self {
+        Locals {
+            base,
+            ..Locals::default()
+        }
+    }
+
+    /// The id the next local variable will have.
+    pub(crate) fn next(&self) -> usize {
+        self.base + self.all.len()
+    }
+
+    /// Whether `id` is one of these local variables.
+    pub(crate) fn has(&self, id: hir::LocalId) -> bool {
+        id.0 >= self.base
+    }
+
     /// The local variable named `name`, if there is one.
     pub(crate) fn find(&self, name: &str) -> Option<Local<'_>> {
         for scope in self.scopes.iter().rev() {
@@ -88,7 +146,7 @@ impl Locals {
             if let Some((index, declared)) = found {
                 return Some(match (&declared.decl, declared.current) {
                     (Declaration::Var(decl), _) if index >= scope.reached => Local::Later(decl),
-                    (_, Some(id)) => Local::Declared(id, &self.all[id.0], &declared.decl),
+                    (_, Some(id)) => Local::Declared(id, self.get(id), &declared.decl),
                     (_, None) => Local::Invalid,
                 });
             }
@@ -111,7 +169,7 @@ impl Locals {
 
     /// The local variable `id`.
     pub(crate) fn get(&self, id: hir::LocalId) -> &hir::Local {
-        &self.all[id.0]
+        &self.all[id.0 - self.base]
     }
 
     /// The id of `local`, the local variable `decl` declares, now checked,
@@ -128,7 +186,7 @@ impl Locals {
             return None;
         }
         scope.reached += 1;
-        let id = hir::LocalId(self.all.len());
+        let id = hir::LocalId(self.base + self.all.len());
         self.all.push(local?);
         declared.current = Some(id);
         Some(id)
@@ -137,7 +195,7 @@ impl Locals {
     /// The id of `local`, a value block's local variable, which its block
     /// keeps track of itself.
     pub(crate) fn fresh(&mut self, local: hir::Local) -> hir::LocalId {
-        let id = hir::LocalId(self.all.len());
+        let id = hir::LocalId(self.next());
         self.all.push(local);
         id
     }
@@ -146,8 +204,8 @@ impl Locals {
     /// read-only operator gives a new value: its name refers to it from
     /// here on.
     pub(crate) fn reassigned(&mut self, id: hir::LocalId) -> hir::LocalId {
-        let new = hir::LocalId(self.all.len());
-        self.all.push(self.all[id.0].clone());
+        let new = hir::LocalId(self.next());
+        self.all.push(self.get(id).clone());
         let declared = self
             .scopes
             .iter_mut()
@@ -159,24 +217,20 @@ impl Locals {
         new
     }
 
-    /// Enter a block, of `statements`, of the operator `op`, whose local
-    /// variables are in scope in all of it. Whether each has a name of its
-    /// own, after reporting each that doesn't: an operator's names, its
-    /// parameters' and its local variables', each mean one thing wherever
-    /// they are in scope, so a block's hide no other, though they hide the
-    /// program's variables.
+    /// Enter a block, of `statements`, whose local variables are in scope
+    /// in all of it. Whether each has a name of its own, after reporting
+    /// each that doesn't (see [`Declaring`]).
     pub(crate) fn enter(
         &mut self,
         statements: impl Iterator<Item = ast::Statement>,
-        op: &Signature,
+        declaring: Declaring,
         errors: &mut Vec<Diagnostic>,
     ) -> bool {
-        self.enter_scope(Scope::default(), statements, op, errors)
+        self.enter_scope(Scope::default(), statements, declaring, errors)
     }
 
-    /// Enter the block of a `for` loop, of `statements`, of the operator
-    /// `op`, whose variable is `name`, declared by the loop: `local`, in
-    /// scope in all of the block. Its id, if its name is its own, as for
+    /// Enter the block of a `for` loop, of `statements`, whose variable is
+    /// `name`, declared by the loop: `local`, in scope in all of the block. Its id, if its name is its own, as for
     /// [`Locals::enter`], and whether each of the block's local variables
     /// has one.
     pub(crate) fn enter_loop(
@@ -184,7 +238,7 @@ impl Locals {
         name: &ast::Name,
         local: hir::Local,
         statements: impl Iterator<Item = ast::Statement>,
-        op: &Signature,
+        declaring: Declaring,
         errors: &mut Vec<Diagnostic>,
     ) -> (Option<hir::LocalId>, bool) {
         let mut scope = Scope::default();
@@ -199,19 +253,14 @@ impl Locals {
                 &local.name,
                 span,
                 &first.decl,
-                &op.name,
+                &declaring.within(),
             ));
             None
-        } else if op.is_parameter(&local.name) {
-            errors.push(errors::local_named_as_parameter(
-                &local.name,
-                span,
-                None,
-                &op.name,
-            ));
+        } else if let Some(error) = declaring.hidden(&local.name, span, None) {
+            errors.push(error);
             None
         } else {
-            let id = hir::LocalId(self.all.len());
+            let id = hir::LocalId(self.next());
             scope.declared.push(Declared {
                 name: local.name.clone(),
                 decl: Declaration::Loop(name.clone()),
@@ -221,7 +270,7 @@ impl Locals {
             self.all.push(local);
             Some(id)
         };
-        let ok = self.enter_scope(scope, statements, op, errors);
+        let ok = self.enter_scope(scope, statements, declaring, errors);
         (id, ok && id.is_some())
     }
 
@@ -231,7 +280,7 @@ impl Locals {
         &mut self,
         mut scope: Scope,
         statements: impl Iterator<Item = ast::Statement>,
-        op: &Signature,
+        declaring: Declaring,
         errors: &mut Vec<Diagnostic>,
     ) -> bool {
         let mut ok = true;
@@ -253,23 +302,13 @@ impl Locals {
                     name,
                     &decl,
                     &first.decl,
-                    &format!("`{}`", op.name),
+                    &declaring.within(),
                 ));
                 ok = false;
-            } else if op.is_parameter(name) {
-                let parameter =
-                    op.decl
-                        .as_ref()
-                        .and_then(ast::Operator::params)
-                        .and_then(|params| {
-                            params.attributes().find_map(|a| {
-                                let name_node = a.name()?;
-                                (name_node.ident()?.text() == name).then(|| name_node.span())
-                            })
-                        });
-                errors.push(errors::local_named_as_parameter(
-                    name, span, parameter, &op.name,
-                ));
+            } else if let Some(error) =
+                declaring.hidden(name, span, written_parameter(declaring, name))
+            {
+                errors.push(error);
                 ok = false;
             } else {
                 scope.declared.push(Declared {
@@ -296,10 +335,27 @@ impl Locals {
         ids
     }
 
-    /// Every local variable, by id.
+    /// Every local variable, from the first's id on.
     pub(crate) fn finish(self) -> Vec<hir::Local> {
         self.all
     }
+}
+
+/// Where the parameter `name` of the operator `declaring` says is written,
+/// if it is that.
+fn written_parameter(declaring: Declaring, name: &str) -> Option<Span> {
+    let Declaring::Operator(op) = declaring else {
+        return None;
+    };
+    op.decl
+        .as_ref()
+        .and_then(ast::Operator::params)
+        .and_then(|params| {
+            params.attributes().find_map(|a| {
+                let name_node = a.name()?;
+                (name_node.ident()?.text() == name).then(|| name_node.span())
+            })
+        })
 }
 
 /// The local variables of `body`, the body of the operator `op`, its block
@@ -311,7 +367,7 @@ pub(crate) fn declarations(
     errors: &mut Vec<Diagnostic>,
 ) -> (Locals, bool) {
     let mut locals = Locals::default();
-    let ok = locals.enter(body.statements(), op, errors);
+    let ok = locals.enter(body.statements(), Declaring::Operator(op), errors);
     (locals, ok)
 }
 

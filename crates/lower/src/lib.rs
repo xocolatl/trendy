@@ -1259,11 +1259,12 @@ impl AtHand {
 
 /// The relations a loop over a relation's tuples looks up in (see
 /// [`FunctionBuilder::looked_up`]).
+#[derive(Default)]
 struct Lookups {
-    /// Whether each local variable, by id, was bound as the loop began: a
-    /// relation looked up in reads none bound in the loop, which can differ
-    /// for each tuple.
-    bound: Vec<bool>,
+    /// The local variables bound in the loop, as lowering reaches them,
+    /// which can differ for each tuple: a relation looked up in reads none
+    /// of them.
+    varying: Vec<hir::LocalId>,
     made: Vec<Lookup>,
 }
 
@@ -1496,14 +1497,24 @@ impl<'a> FunctionBuilder<'a> {
     /// pointers null, so that one assigned again, when the block runs
     /// again, has none to give up.
     fn block(&mut self, block: &hir::Block, cx: &mut Lowering) {
+        self.statements_of(block, cx);
+        self.release_locals_of(block, cx);
+    }
+
+    /// The statements of `block`.
+    fn statements_of(&mut self, block: &hir::Block, cx: &mut Lowering) {
         for (site, statement) in &block.statements {
             self.at(Some(*site), cx);
             self.statement(statement, cx);
         }
+    }
+
+    /// The release of the references `block`'s local variables hold.
+    fn release_locals_of(&mut self, block: &hir::Block, cx: &mut Lowering) {
         for id in &block.locals {
             let place = self.local_places[id.0]
                 .as_ref()
-                .expect("an update operator's local variables are placed first");
+                .expect("a block's local variables are placed first");
             if place.holds {
                 let descriptor = cx.descriptor(&self.locals[id.0].ty);
                 self.insts.push(lir::Inst::CallRuntime {
@@ -1558,6 +1569,74 @@ impl<'a> FunctionBuilder<'a> {
             self.at(outer, cx);
         }
         place
+    }
+
+    /// Have each loop over a relation's tuples that the code being lowered
+    /// is in count the local variables `bound` as differing for each tuple
+    /// (see [`Lookups`]).
+    fn bound_in_loops(&mut self, bound: &[hir::LocalId]) {
+        for at_hand in &mut self.tuples {
+            if let Some(lookups) = &mut at_hand.lookups {
+                lookups.varying.extend(bound);
+            }
+        }
+    }
+
+    /// The value of a body or a value block whose statements decide what
+    /// runs next: its `block`'s statements, then `value`, which reads the
+    /// local variables they assign, computed in a scope of its own, handed
+    /// out to the one it is in whatever it is, as it may be one of them,
+    /// which gives it up after. Those are placed here, unless the function
+    /// has placed them, holding references as an update operator's do, null
+    /// from the function's entry on, so that its failure exit and a
+    /// transaction's rollback release each, as a `Let`'s binding (see
+    /// `lets`). Its statements have scopes of their own, which the
+    /// statement this is in may be using.
+    fn run(&mut self, block: &hir::Block, value: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let declared = block.declared();
+        self.bound_in_loops(&declared);
+        let mut loops = Vec::new();
+        block.each_statement(&mut |statement| {
+            if let hir::Statement::For(variable, ..) = statement {
+                loops.push(*variable);
+            }
+        });
+        for id in declared.into_iter().filter(|id| !loops.contains(id)) {
+            let ty = self.locals[id.0].ty.clone();
+            let holds = cx.points(&ty);
+            let place = if let Some(place) = &self.local_places[id.0] {
+                place.value.clone()
+            } else {
+                let value = self.slot(cx.layout(&ty));
+                self.local_places[id.0] = Some(LocalPlace {
+                    value: value.clone(),
+                    holds,
+                });
+                value
+            };
+            if holds {
+                self.lets.push((place, ty));
+            }
+        }
+        let ty = self.type_of(value);
+        let result = self.slot(cx.layout(&ty));
+        let (outer_scope, outer_site) = (self.scope.take(), self.site);
+        self.nested_scope(cx, |this, cx| {
+            this.statements_of(block, cx);
+            let src = this.place(value, cx);
+            this.insts.push(lir::Inst::Copy {
+                dst: result.clone(),
+                src,
+                layout: cx.layout(&ty),
+            });
+            this.scoped |= cx.points(&ty);
+            vec![(result.clone(), ty.clone())]
+        });
+        self.scope = outer_scope;
+        self.release_locals_of(block, cx);
+        self.site = outer_site;
+        self.after_call(cx);
+        result
     }
 
     /// The value of `expr`, a chain of `Let`s, each binding a local
@@ -1673,6 +1752,7 @@ impl<'a> FunctionBuilder<'a> {
         value: &hir::Expr,
         cx: &mut Lowering,
     ) -> (lir::Place, hir::Type) {
+        self.bound_in_loops(&[id]);
         let ty = self.locals[id.0].ty.clone();
         let points = cx.points(&ty);
         if !points {
@@ -3803,6 +3883,7 @@ impl<'a> FunctionBuilder<'a> {
                 .clone(),
             hir::Expr::At(site, expr) => self.place_at(*site, expr, cx),
             hir::Expr::Let(..) => self.let_chain(expr, cx),
+            hir::Expr::Run(block, value) => self.run(block, value, cx),
             hir::Expr::Parameter(name) if self.pointers.contains_key(name) => {
                 self.pointee(name, cx)
             }
@@ -4708,15 +4789,11 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
         body: impl FnOnce(&mut Self, &lir::Place, &lir::Place, &mut Lowering),
     ) {
-        let bound = self.local_places.iter().map(Option::is_some).collect();
         let mut made = Vec::new();
         self.each_tuple(src, tuple, cx, |this, at_hand, index, cx| {
             this.tuples.push(AtHand {
                 place: at_hand.clone(),
-                lookups: Some(Lookups {
-                    bound,
-                    made: Vec::new(),
-                }),
+                lookups: Some(Lookups::default()),
             });
             body(this, &at_hand, index, cx);
             made = this
@@ -5737,13 +5814,9 @@ impl<'a> FunctionBuilder<'a> {
             return None;
         }
         let read = operand.tuple_read(0);
-        let bound_in_loop = |i: usize| {
-            self.local_places[i].is_some() && !lookups.bound.get(i).copied().unwrap_or(false)
-        };
         let varies = read.whole
             || !read.attributes.is_empty()
-            || (0..self.local_places.len())
-                .any(|i| bound_in_loop(i) && operand.reads_local(hir::LocalId(i)));
+            || lookups.varying.iter().any(|id| operand.reads_local(*id));
         (!varies).then_some((operand, key))
     }
 
