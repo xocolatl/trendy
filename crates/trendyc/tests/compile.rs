@@ -8463,6 +8463,329 @@ fn a_closure_of_many_values_gives_up_what_it_is_asked_about() {
     assert!(peak < 195 << 20, "{peak} bytes");
 }
 
+/// A join of 10 tuples with 250,000, a thousand times, on an attribute that comes first
+/// in name order or doesn't, or the same as a semijoin: which took 170 billion
+/// instructions, and 0.7 at most now, as it reads all the larger's tuples only until it
+/// has earned an index.
+#[test]
+fn a_join_costs_about_the_same_whatever_its_attributes_are_called() {
+    for (name, key, other, query) in [
+        ("first", "a", "z", "small_one join big_one"),
+        ("second", "z", "a", "small_one join big_one"),
+        ("first_semijoin", "a", "z", "big_one matching small_one"),
+        ("second_semijoin", "z", "a", "big_one matching small_one"),
+    ] {
+        let source = format!(
+            "heading big := {{ {key}: integer, {other}: integer }};
+heading small := {{ {key}: integer }};
+
+operator rounds{{big_one: relation big, small_one: relation small, left: integer, seen: integer}}: integer [
+    if left = 0
+        then seen
+        else rounds{{big_one, small_one, left: left - 1, seen: seen + count{{r: {query}}}}}
+];
+
+operator main{{}} [
+    const numbers := series{{from: 1, to: 250000}};
+    const big_one := numbers extend {{ {key} := value, {other} := (value * 7919) mod 250007 }} remove {{value}};
+    const small_one := series{{from: 1, to: 10}} extend {{ {key} := value * 1000 }} remove {{value}};
+    call debug_value{{v: rounds{{big_one, small_one, left: 1000, seen: 0}}}};
+];
+"
+        );
+        let start = std::time::Instant::now();
+        let (code, stderr) = run_source(&format!("join_names_{name}"), &source);
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(stderr.trim(), "10000", "{name}");
+        // Sorting the larger each time takes ten seconds.
+        let taken = start.elapsed();
+        assert!(taken.as_secs() < 4, "{name}: {taken:?}");
+    }
+}
+
+/// Each way of finding what agrees gives the same tuples, in canonical order: the
+/// attributes in common first in each operand or not, in operands of about one size,
+/// which are sorted, or of very different sizes, the larger read as it is or galloped
+/// through, either way round, with what `where` says they should be to check by.
+#[test]
+fn a_join_finds_the_same_tuples_whichever_way_it_looks() {
+    let mut programs = 0;
+    for (key, big_other, small_other) in [
+        ("a", "m", "n"),
+        ("z", "b", "c"),
+        ("k", "b", "n"),
+        ("k", "m", "c"),
+    ] {
+        for few in [1, 3, 6] {
+            for many in [8, 200] {
+                programs += 1;
+                // The greatest value of the attribute `big` has.
+                let top = many.min(10);
+                let source = format!(
+                    "operator main{{}} [
+    var big := series{{from: 1, to: {many}}} extend {{ {key} := value mod 11, {big_other} := value }} remove {{value}};
+    var small := series{{from: 1, to: {few}}} extend {{ {key} := value * 2, {small_other} := value }} remove {{value}};
+    var keys := small{{{key}}};
+    var none := keys where {key} < 0;
+    var wanted := big where {key} = 2 or ({few} >= 3 and ({key} = 4 or {key} = 6)) or ({few} >= 6 and ({key} = 8 or {key} = 10 or {key} = 12));
+    call debug_value{{v: (big matching keys) = wanted}};
+    call debug_value{{v: (big matching small) = wanted}};
+    call debug_value{{v: (big not matching keys) = (big minus wanted)}};
+    call debug_value{{v: (big not matching none) = big}};
+    call debug_value{{v: is_empty{{r: big matching none}}}};
+    call debug_value{{v: join{{big, keys}} = wanted}};
+    call debug_value{{v: join{{keys, big}} = wanted}};
+    call debug_value{{v: is_empty{{r: join{{big, none}}}}}};
+    call debug_value{{v: (keys matching big) = (keys where {key} <= {top})}};
+    call debug_value{{v: join{{big, small}}{{{key}, {big_other}}} = wanted}};
+    call debug_value{{v: join{{small, big}}{{{key}, {small_other}}} = (small where {key} <= {top})}};
+    call debug_value{{v: count{{r: join{{big, small}}}} = count{{r: wanted}}}};
+];
+"
+                );
+                let name = format!("join_ways_{key}_{big_other}_{few}_{many}");
+                let (code, stderr) = run_source(&name, &source);
+                assert_eq!(code, 0, "{name}: {stderr}");
+                let wrong: Vec<_> = stderr
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| *line != "true")
+                    .collect();
+                assert!(wrong.is_empty(), "{name}: {wrong:?}\n{source}");
+                assert_eq!(stderr.lines().count(), 12, "{name}");
+            }
+        }
+    }
+    assert_eq!(programs, 24);
+}
+
+/// A join of a few tuples with many, again and again, on attributes that don't come
+/// first, reads them all only until they have earned an index: without one, these would
+/// take over a minute.
+#[test]
+fn an_index_makes_each_join_follow_the_smaller() {
+    let source = "heading big := { z: integer, a: integer };
+heading small := { z: integer };
+
+operator rounds{big_one: relation big, small_one: relation small, left: integer, seen: integer}: integer [
+    if left = 0
+        then seen
+        else rounds{big_one, small_one, left: left - 1, seen: seen + count{r: small_one join big_one}}
+];
+
+operator main{} [
+    const big_one := series{from: 1, to: 250000} extend { z := value, a := (value * 7919) mod 250007 } remove {value};
+    const small_one := series{from: 1, to: 10} extend { z := value * 1000 } remove {value};
+    call debug_value{v: rounds{big_one, small_one, left: 100000, seen: 0}};
+];
+";
+    let start = std::time::Instant::now();
+    let (code, stderr) = run_source("join_earns_index", source);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.trim(), "1000000");
+    let taken = start.elapsed();
+    assert!(taken.as_secs() < 20, "{taken:?}");
+}
+
+/// What agrees on two attributes with another between them, which aren't in order
+/// though the first is, and values the smaller has several tuples of, read from the
+/// larger as it is.
+#[test]
+fn a_join_finds_what_agrees_on_several_attributes_and_many_tuples() {
+    let (code, stderr) = run_source(
+        "join_several",
+        r"
+operator main{} [
+    var big := series{from: 1, to: 200} extend { a := value mod 3, m := value, z := value mod 5 } remove {value};
+    var wanted := relation { { a: 1, z: 1 }, { a: 2, z: 4 } };
+    call debug_value{v: (big matching wanted) = (big where (a = 1 and z = 1) or (a = 2 and z = 4))};
+    call debug_value{v: join{big, wanted} = (big where (a = 1 and z = 1) or (a = 2 and z = 4))};
+    call debug_value{v: join{wanted, big} = (big where (a = 1 and z = 1) or (a = 2 and z = 4))};
+    call debug_value{v: count{r: big not matching wanted}};
+
+    var many := series{from: 1, to: 800} extend { z := value mod 11, b := value } remove {value};
+    var several := series{from: 1, to: 30} extend { z := value mod 3, c := value } remove {value};
+    call debug_value{v: count{r: join{many, several}}};
+    call debug_value{v: count{r: join{several, many}}};
+    call debug_value{v: count{r: join{many where b <= 12, several}}};
+    call debug_value{v: count{r: many matching several}};
+];
+",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["true", "true", "true", "173", "2180", "2180", "40", "218"]
+    );
+}
+
+/// An index has to go with the tuples it is of: made again in memory that has been
+/// freed, of as many tuples, in another order, or moved to make room for more, and
+/// something else of as many tuples made where they were.
+#[test]
+fn an_index_is_not_of_what_comes_after_its_tuples() {
+    let (code, stderr) = run_source(
+        "kept_index_reused",
+        r"
+operator joined{big: relation { z: integer, b: integer }, few: relation { z: integer }}: integer [
+    count{r: big join few}
+];
+
+operator again{big: relation { z: integer, b: integer }, few: relation { z: integer }}: integer [
+    var i := 0;
+    var found := 0;
+    while i < 20 loop [
+        found := joined{big, few};
+        i := i + 1;
+    ];
+    found
+];
+
+operator main{} [
+    const few := series{from: 1, to: 40} extend { z := value * 100 } remove {value};
+    var big := series{from: 1, to: 5000} extend { z := value, b := value } remove {value};
+    var round := 0;
+    while round < 8 loop [
+        call debug_value{v: again{big, few}};
+        big := big replace { z := (z * 7919) mod 10007 };
+        round := round + 1;
+    ];
+
+    const shape := series{from: 1, to: 5000} extend { z := value, b := value } remove {value};
+    var moved := shape replace { z := (z * 7919) mod 10007 };
+    call debug_value{v: again{big: moved, few}};
+    insert moved series{from: 6000, to: 20000} extend { z := (value * 7919) mod 10007, b := value } remove {value};
+    call debug_value{v: again{big: moved, few}};
+    var multiplier := 3;
+    while multiplier < 20 loop [
+        const other := shape replace { z := (z * multiplier) mod 10007 };
+        call debug_value{v: again{big: other, few}};
+        multiplier := 2 * multiplier - 1;
+    ];
+];
+",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "40", "21", "21", "19", "20", "22", "19", "20", "21", "77", "27", "40", "24", "20",
+        ]
+    );
+}
+
+/// A relation joined again and again gets an index, after sixteen joins, which must go
+/// when the tuples it is of do: changed where they are, or freed, and something else
+/// made in their memory.
+#[test]
+fn an_index_a_relation_has_earned_goes_when_its_tuples_do() {
+    let (code, stderr) = run_source(
+        "kept_index",
+        r"
+operator joined{big: relation { z: integer, b: integer }, few: relation { z: integer }}: integer [
+    count{r: big join few}
+];
+
+/* Enough joins to have earned an index, then what the last of them finds. */
+operator again{big: relation { z: integer, b: integer }, few: relation { z: integer }}: integer [
+    var i := 0;
+    var found := 0;
+    while i < 20 loop [
+        found := joined{big, few};
+        i := i + 1;
+    ];
+    found
+];
+
+operator main{} [
+    var big := series{from: 1, to: 5000} extend { z := value * 2, b := value } remove {value};
+    var few := series{from: 1, to: 3} extend { z := value * 2 } remove {value};
+    call debug_value{v: again{big, few}};
+    /* Added to where it is: there is room, as it has just been made smaller. */
+    delete big where b = 1;
+    call debug_value{v: big join few};
+    call debug_value{v: again{big, few}};
+    insert big relation { { z: 4, b: 9001 } };
+    call debug_value{v: big join few};
+    call debug_value{v: big matching few where z = 4};
+    call debug_value{v: count{r: big not matching few}};
+    call debug_value{v: again{big, few}};
+    delete big where z = 4;
+    call debug_value{v: big join few};
+    call debug_value{v: again{big, few}};
+    /* A copy keeps what it was, and the index, while the other changes. */
+    const held := big;
+    insert big relation { { z: 2, b: 9002 } };
+    call debug_value{v: again{big, few}};
+    call debug_value{v: again{big: held, few}};
+    delete big where b = 9002;
+    /* Made again and again, each likely in memory one before it has gone from. */
+    var round := 0;
+    while round < 6 loop [
+        big := big replace { z := z + 2 };
+        call debug_value{v: again{big, few}};
+        round := round + 1;
+    ];
+    /* More relations than it keeps indexes of, each still right, then a first again. */
+    var other := 1;
+    while other <= 10 loop [
+        const each := series{from: 1, to: 4096 + other} extend { z := value * other, b := value } remove {value};
+        call debug_value{v: again{big: each, few}};
+        other := other + 1;
+    ];
+    call debug_value{v: again{big, few}};
+    /* On other attributes of one relation, two indexes of it at once. */
+    const pairs := series{from: 1, to: 5000} extend { x := value mod 70, y := value mod 71, b := value } remove {value};
+    const on_x := relation { { x: 3 } };
+    const on_y := relation { { y: 3 } };
+    var i := 0;
+    var seen := 0;
+    while i < 20 loop [
+        seen := count{r: pairs join on_x} * 100000 + count{r: pairs join on_y};
+        i := i + 1;
+    ];
+    call debug_value{v: seen};
+];
+",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let relation = "relation { b: integer, z: integer }";
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "3".to_string(),
+            format!("{relation} {{ {{ b: 2, z: 4 }}, {{ b: 3, z: 6 }} }}"),
+            "2".to_string(),
+            format!("{relation} {{ {{ b: 2, z: 4 }}, {{ b: 3, z: 6 }}, {{ b: 9001, z: 4 }} }}"),
+            format!("{relation} {{ {{ b: 2, z: 4 }}, {{ b: 9001, z: 4 }} }}"),
+            "4997".to_string(),
+            "3".to_string(),
+            format!("{relation} {{ {{ b: 3, z: 6 }} }}"),
+            "1".to_string(),
+            "2".to_string(),
+            "1".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "3".to_string(),
+            "3".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+            "0".to_string(),
+            "1".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "7200071".to_string(),
+        ]
+    );
+}
+
 /// A number read from a tuple that holds something else, which printed 1000: the tuple
 /// was given up after the statement that last read it, making all of it zero, and the
 /// constant was only another name for part of it. Whatever else the tuple holds.

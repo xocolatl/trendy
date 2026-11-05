@@ -809,6 +809,7 @@ unsafe fn release_buffer(buffer: *mut u8) {
             return;
         }
         if let Some(desc) = counted.desc.as_ref() {
+            KEPT.forget(buffer);
             let element = desc.element();
             if element.points {
                 for i in 0..counted.len {
@@ -1402,10 +1403,11 @@ pub struct Source {
     pub offset: usize,
 }
 
-/// Tuples of [`trendy_rt_and`]'s operands that agree on the common
-/// attributes: those in `lhs` from `lhs_start` to `lhs_end`, and those in
-/// `rhs` from `rhs_start` to `rhs_end`, of the sorted tuples.
+/// Tuples of the operands of a join or a semijoin that agree on the common
+/// attributes: those of the left operand from `lhs_start` to `lhs_end`, and those of
+/// the right from `rhs_start` to `rhs_end`, in the orders [`Matches`] has them.
 #[cfg(not(test))]
+#[derive(Clone, Copy)]
 struct Group {
     lhs_start: usize,
     lhs_end: usize,
@@ -1471,17 +1473,34 @@ pub unsafe extern "C" fn trendy_rt_and(
             dst.write_unaligned(Text { bytes, len });
             return Ok(());
         }
-        let mut lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size)?;
-        let mut rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size)?;
-        let (lhs_sorted, rhs_sorted) = (lhs_sorted.values(), rhs_sorted.values());
-        let (mut groups, total) = matching_runs(common, lhs_sorted, rhs_sorted)?;
+        let (lhs, rhs) = (
+            Operand::of(common, lhs, lhs_count, lhs_desc, true),
+            Operand::of(common, rhs, rhs_count, rhs_desc, false),
+        );
+        let (mut lhs_pointers, mut rhs_pointers) = (None, None);
+        let matches = Matches::of(common, lhs, rhs, &mut lhs_pointers, &mut rhs_pointers)?;
+        let mut groups = Growing::<Group>::with_room(lhs.count.min(rhs.count))?;
+        let mut total = 0_usize;
+        matches.each_group(common, &mut |group| {
+            let Some(sum) = (group.lhs_end - group.lhs_start)
+                .checked_mul(group.rhs_end - group.rhs_start)
+                .and_then(|n| n.checked_add(total))
+            else {
+                return Err(out_of_memory());
+            };
+            total = sum;
+            groups.push(group)
+        })?;
 
         let size = result.element().size;
         let (bytes, len) = made_canonical(total, result, |joined| {
             let mut k = 0;
-            for group in &*groups.values() {
-                for &l in &lhs_sorted[group.lhs_start..group.lhs_end] {
-                    for &r in &rhs_sorted[group.rhs_start..group.rhs_end] {
+            for at in 0..groups.len {
+                let group = groups.at(at);
+                for i in group.lhs_start..group.lhs_end {
+                    let l = matches.lhs.at(i);
+                    for j in group.rhs_start..group.rhs_end {
+                        let r = matches.rhs.at(j);
                         let to = joined.add(k * size);
                         for (attr, source) in result_attrs.iter().zip(sources) {
                             let from = if source.from == 1 { r } else { l };
@@ -2139,6 +2158,7 @@ unsafe fn with_room(
             hold_reserved(buffer);
             return Ok(copy);
         }
+        KEPT.forget(buffer);
         if held.room >= bytes {
             return Ok(buffer);
         }
@@ -2281,6 +2301,7 @@ unsafe fn removed_from(
         let len = count - gone;
         let held = header(buffer);
         if held.count == 1 {
+            KEPT.forget(buffer);
             let (mut kept, mut from) = (0, 0);
             for (first, last) in ranges {
                 let before = first - from;
@@ -2510,33 +2531,68 @@ pub unsafe extern "C" fn trendy_rt_matching(
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
         let common = array(common, common_count.read_unaligned());
         let negated = negated.read_unaligned() == 1;
-        let mut lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size)?;
-        let mut rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size)?;
-        let (lhs_sorted, rhs_sorted) = (lhs_sorted.values(), rhs_sorted.values());
         let size = lhs_desc.element().size;
-        let kept = Temp::<u8>::new(lhs_count * size)?;
-        let kept = kept.ptr();
-        let (mut count, mut j) = (0, 0);
-        // Both sorted on the common attributes, so each tuple of `lhs` is
-        // matched by moving forward through `rhs`.
-        for &tuple in &*lhs_sorted {
-            while j < rhs_sorted.len()
-                && on_common(common, (rhs_sorted[j], false), (tuple, true)).is_lt()
-            {
-                j += 1;
+        let (left, right) = (
+            Operand::of(common, lhs, lhs_count, lhs_desc, true),
+            Operand::of(common, rhs, rhs_count, rhs_desc, false),
+        );
+        let (mut lhs_pointers, mut rhs_pointers) = (None, None);
+        let matches = Matches::of(common, left, right, &mut lhs_pointers, &mut rhs_pointers)?;
+        // Which of the left operand's tuples have a match, by where they are.
+        let mut marks = Temp::<u64>::zeroed(lhs_count / 64 + 1)?;
+        let marks = marks.values();
+        matches.each_group(common, &mut |group| {
+            for i in group.lhs_start..group.lhs_end {
+                let position = matches.lhs.at(i).offset_from_unsigned(lhs);
+                // Tuples that take no memory are one at most, the first.
+                let position = position.checked_div(size).unwrap_or(0);
+                marks[position / 64] |= 1 << (position % 64);
             }
-            let matched = j < rhs_sorted.len()
-                && on_common(common, (rhs_sorted[j], false), (tuple, true)).is_eq();
-            if matched != negated {
-                core::ptr::copy_nonoverlapping(tuple, kept.add(count * size), size);
-                count += 1;
+            Ok(())
+        })?;
+        // The bits of the tuples kept, a word at a time, those past the last clear.
+        if negated {
+            for word in marks.iter_mut() {
+                *word = !*word;
             }
+            marks[lhs_count / 64] &= (1 << (lhs_count % 64)) - 1;
         }
-        let canonical = canonical(kept, count, lhs_desc)?;
-        dst.write_unaligned(Text {
-            bytes: canonical.0,
-            len: canonical.1,
-        });
+        let kept = marks.iter().map(|word| word.count_ones() as usize).sum();
+        // In the order they are in, each stretch of them together.
+        let (bytes, len) = made_in_order(kept, lhs_desc, |out| {
+            let mut written = 0;
+            let mut stretch: Option<(usize, usize)> = None;
+            let mut copy = |(start, end): (usize, usize)| {
+                let bytes = (end - start) * size;
+                core::ptr::copy_nonoverlapping(lhs.add(start * size), out.add(written), bytes);
+                written += bytes;
+            };
+            for (word, &bits) in marks.iter().enumerate() {
+                let mut bits = bits;
+                while bits != 0 {
+                    let first = bits.trailing_zeros() as usize;
+                    let run = (bits >> first).trailing_ones() as usize;
+                    let (start, end) = (word * 64 + first, word * 64 + first + run);
+                    stretch = match stretch {
+                        Some((from, to)) if to == start => Some((from, end)),
+                        Some(done) => {
+                            copy(done);
+                            Some((start, end))
+                        }
+                        None => Some((start, end)),
+                    };
+                    bits = if first + run == 64 {
+                        0
+                    } else {
+                        bits & (u64::MAX << (first + run))
+                    };
+                }
+            }
+            if let Some(done) = stretch {
+                copy(done);
+            }
+        })?;
+        dst.write_unaligned(Text { bytes, len });
         Ok(())
     })
 }
@@ -2572,7 +2628,7 @@ pub unsafe extern "C" fn trendy_rt_tclose(
         };
         let value = &*from.desc;
         let (tuples, count) = read_slice(src);
-        let laid = Arcset::Laid {
+        let laid = Ordered::Laid {
             at: tuples,
             size: element.size,
         };
@@ -2708,7 +2764,7 @@ unsafe fn closure_of(
         };
         let (tuples, count) = read_slice(src);
         if forward {
-            let tuples = Arcset::Laid {
+            let tuples = Ordered::Laid {
                 at: tuples,
                 size: element.size,
             };
@@ -2720,7 +2776,7 @@ unsafe fn closure_of(
             by_second.sort_unstable_by(|a, b| {
                 order(a.add(second.offset), b.add(second.offset), &*second.desc)
             });
-            let paths = Paths::new(count, Arcset::Pointed(by_second), second, first)?;
+            let paths = Paths::new(count, Ordered::Pointed(by_second), second, first)?;
             paths_written(paths, starts, desc, false)
         }
     }
@@ -3022,28 +3078,43 @@ fn each_bit(mut word: u64, mut act: impl FnMut(usize)) {
     }
 }
 
-/// The tuples of a relation of arcs, in some order.
+/// A relation's tuples, in some order.
 #[cfg(not(test))]
 #[derive(Clone, Copy)]
-enum Arcset<'a> {
+enum Ordered<'a> {
     /// One after another, each `size` bytes, from `at`.
     Laid { at: *const u8, size: usize },
     /// Each where it says.
     Pointed(&'a [*const u8]),
+    /// Laid out as for [`Ordered::Laid`], in the order of their positions.
+    Positions {
+        at: *const u8,
+        size: usize,
+        positions: &'a [u32],
+    },
 }
 
 #[cfg(not(test))]
-impl Arcset<'_> {
+impl Ordered<'_> {
     /// The tuple numbered `i`.
     ///
     /// # Safety
     ///
     /// There must be one.
+    #[inline]
     unsafe fn at(self, i: usize) -> *const u8 {
-        match self {
-            // SAFETY: guaranteed by the caller.
-            Arcset::Laid { at, size } => unsafe { at.add(i * size) },
-            Arcset::Pointed(pointers) => pointers[i],
+        // SAFETY: guaranteed by the caller. A merge reads these more than it does
+        // anything else, so they aren't checked again.
+        unsafe {
+            match self {
+                Ordered::Laid { at, size } => at.add(i * size),
+                Ordered::Pointed(pointers) => *pointers.get_unchecked(i),
+                Ordered::Positions {
+                    at,
+                    size,
+                    positions,
+                } => at.add(*positions.get_unchecked(i) as usize * size),
+            }
         }
     }
 }
@@ -3054,7 +3125,7 @@ impl Arcset<'_> {
 #[cfg(not(test))]
 struct Paths<'a> {
     count: usize,
-    tuples: Arcset<'a>,
+    tuples: Ordered<'a>,
     from: &'a Attr,
     to: &'a Attr,
     /// A bit for each tuple, set if it is the first of those from its value, and
@@ -3067,7 +3138,7 @@ struct Paths<'a> {
 #[cfg(not(test))]
 impl<'a> Paths<'a> {
     /// The search of `count` of `tuples`. Fails if there is no memory.
-    fn new(count: usize, tuples: Arcset<'a>, from: &'a Attr, to: &'a Attr) -> Fallible<Self> {
+    fn new(count: usize, tuples: Ordered<'a>, from: &'a Attr, to: &'a Attr) -> Fallible<Self> {
         Ok(Paths {
             count,
             tuples,
@@ -3208,7 +3279,7 @@ impl<'a> Paths<'a> {
             let found = core::slice::from_raw_parts(found.ptr(), len);
             Arcs::of(
                 len,
-                Arcset::Pointed(found),
+                Ordered::Pointed(found),
                 [self.from.offset, self.to.offset],
                 value,
             )
@@ -3264,7 +3335,7 @@ impl Arcs {
     /// this.
     unsafe fn of(
         len: usize,
-        tuples: Arcset<'_>,
+        tuples: Ordered<'_>,
         offsets: [usize; 2],
         value: &TypeDesc,
     ) -> Fallible<Arcs> {
@@ -3403,8 +3474,13 @@ type Numbers = Growing<u32>;
 impl<T: Copy> Growing<T> {
     /// None yet, with room for a few. Fails if there is no memory for them.
     fn new() -> Fallible<Self> {
+        Self::with_room(4)
+    }
+
+    /// None yet, with room for `room` or a few. Fails if there is no memory for them.
+    fn with_room(room: usize) -> Fallible<Self> {
         Ok(Growing {
-            memory: Temp::new(4)?,
+            memory: Temp::new(room.max(4))?,
             len: 0,
         })
     }
@@ -3716,32 +3792,6 @@ unsafe fn on_common(
     core::cmp::Ordering::Equal
 }
 
-/// The `count` tuples at `tuples`, each `size` bytes, of the left operand
-/// of [`trendy_rt_and`] if `is_lhs`, and else the right, sorted by their
-/// values for the `common` attributes: an array of pointers to them, in
-/// memory of the caller's own. Fails if there is no memory for it.
-///
-/// # Safety
-///
-/// `tuples` must point to `count` valid tuples of that operand.
-#[cfg(not(test))]
-unsafe fn sorted_on(
-    common: &[Common],
-    is_lhs: bool,
-    tuples: *const u8,
-    count: usize,
-    size: usize,
-) -> Fallible<Temp<*const u8>> {
-    // SAFETY: guaranteed by the caller.
-    unsafe {
-        let mut sorted = pointers(tuples, count, size)?;
-        sorted
-            .values()
-            .sort_unstable_by(|x, y| on_common(common, (*x, is_lhs), (*y, is_lhs)));
-        Ok(sorted)
-    }
-}
-
 /// Pointers to the `count` tuples or elements at `values`, each `size`
 /// bytes, in order, in memory of the caller's own, for sorting. Fails if
 /// there is no memory for them.
@@ -3760,60 +3810,682 @@ unsafe fn pointers(values: *const u8, count: usize, size: usize) -> Fallible<Tem
     Ok(pointers)
 }
 
-/// The runs of tuples of `lhs` and of `rhs`, both sorted on the `common`
-/// attributes, that agree on them, in new memory, and how many tuples they
-/// make: the size of each run of `lhs` times the size of its run of `rhs`.
-/// Fails if that is more than memory can hold.
+/// An operand of a join or a semijoin.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct Operand {
+    tuples: *const u8,
+    count: usize,
+    size: usize,
+    /// Whether it is the left operand, which says where the common attributes are.
+    is_lhs: bool,
+    /// Whether its tuples are in order on the common attributes as they are: those
+    /// attributes come first in name order, which is what they are sorted by.
+    in_order: bool,
+}
+
+#[cfg(not(test))]
+impl Operand {
+    /// The `count` tuples at `tuples`, of the relation `desc` describes, as the left
+    /// operand if `is_lhs` and otherwise the right, of an operation on `common`.
+    ///
+    /// # Safety
+    ///
+    /// `desc` must describe a relation with those attributes, whose names are in the
+    /// order `common` has them.
+    unsafe fn of(
+        common: &[Common],
+        tuples: *const u8,
+        count: usize,
+        desc: &TypeDesc,
+        is_lhs: bool,
+    ) -> Operand {
+        // SAFETY: guaranteed by the caller.
+        let (attributes, size) = unsafe { (attributes(desc), desc.element().size) };
+        // Two attributes are at one place only if the first takes no memory, so has
+        // one value, which orders nothing.
+        let in_order = attributes
+            .iter()
+            .zip(common)
+            .all(|(attr, c)| attr.offset == if is_lhs { c.lhs } else { c.rhs })
+            && common.len() <= attributes.len();
+        Operand {
+            tuples,
+            count,
+            size,
+            is_lhs,
+            in_order,
+        }
+    }
+
+    /// Pointers to its tuples, in order on `common`, those that agree in the order they
+    /// are in. Fails if there is no memory for them.
+    ///
+    /// # Safety
+    ///
+    /// Its tuples must be valid.
+    unsafe fn sorted_on(self, common: &[Common]) -> Fallible<Temp<*const u8>> {
+        // SAFETY: guaranteed by the caller; they are written, as `pointers` does.
+        unsafe {
+            let mut sorted = pointers(self.tuples, self.count, self.size)?;
+            sorted.values().sort_unstable_by(|x, y| {
+                on_common(common, (*x, self.is_lhs), (*y, self.is_lhs)).then(x.cmp(y))
+            });
+            Ok(sorted)
+        }
+    }
+
+    /// Its tuples, as they are laid out.
+    fn laid(self) -> Ordered<'static> {
+        Ordered::Laid {
+            at: self.tuples,
+            size: self.size,
+        }
+    }
+
+    /// Its tuples, in order on `common`: as they are, or otherwise through pointers to
+    /// them, sorted, in `pointers`. Fails if there is no memory for them.
+    ///
+    /// # Safety
+    ///
+    /// Its tuples must be valid.
+    unsafe fn ordered<'a>(
+        self,
+        common: &[Common],
+        pointers: &'a mut Option<Temp<*const u8>>,
+    ) -> Fallible<Ordered<'a>> {
+        if self.in_order {
+            return Ok(self.laid());
+        }
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let sorted = pointers.insert(self.sorted_on(common)?);
+            Ok(Ordered::Pointed(sorted.values()))
+        }
+    }
+}
+
+/// The first of `start..end` for which `before` is false, all those before it being
+/// those for which it is true, looking from `start` by steps that double, so that it
+/// takes about the logarithm of how far that is, rather than of all of it: one
+/// comparison, if that is `start`.
+#[cfg(not(test))]
+fn gallop(start: usize, end: usize, before: impl Fn(usize) -> bool) -> usize {
+    let (mut known, mut step) = (start, 1);
+    loop {
+        let next = known.saturating_add(step - 1).min(end);
+        if next == end || !before(next) {
+            return partition_point(known, next, before);
+        }
+        known = next + 1;
+        step = step.saturating_mul(2);
+    }
+}
+
+/// How to find the tuples of the two operands of a join or a semijoin that agree on the
+/// common attributes. Where the larger is in order, as it is if those attributes come
+/// first in it, or through an index it has earned ([`Kept`]), this gallops through it
+/// from the smaller, so that the time follows the smaller. If the larger is much larger,
+/// and in no such order, it is read as it is, never sorted, each tuple looking for its
+/// match in the smaller. Otherwise both are sorted on them, and merged.
+#[cfg(not(test))]
+struct Matches<'a> {
+    /// The left operand's tuples, in the order [`Group`]s say where they are in.
+    lhs: Ordered<'a>,
+    lhs_count: usize,
+    /// The right operand's.
+    rhs: Ordered<'a>,
+    rhs_count: usize,
+    /// If one is read as it is: that one, and the other, which has been sorted.
+    scan: Option<(Operand, Operand)>,
+}
+
+/// How many times larger an operand must be to be read as it is, rather than sorted: with
+/// less between them, what it takes to look for each of its tuples comes to more than
+/// sorting them would have.
+#[cfg(not(test))]
+const SCANNED_FROM: usize = 8;
+
+#[cfg(not(test))]
+impl<'a> Matches<'a> {
+    /// How to find those of `lhs` and `rhs`, on `common`, with `lhs_pointers` and
+    /// `rhs_pointers` for what needs sorting. Fails if there is no memory.
+    ///
+    /// # Safety
+    ///
+    /// Their tuples must be valid, and `common` their attributes in common.
+    unsafe fn of(
+        common: &[Common],
+        lhs: Operand,
+        rhs: Operand,
+        lhs_pointers: &'a mut Option<Temp<*const u8>>,
+        rhs_pointers: &'a mut Option<Temp<*const u8>>,
+    ) -> Fallible<Matches<'a>> {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let larger = if lhs.count > rhs.count { lhs } else { rhs };
+            let smaller = if lhs.count > rhs.count { rhs } else { lhs };
+            if smaller.count == 0 {
+                return Ok(Matches {
+                    lhs: lhs.laid(),
+                    lhs_count: lhs.count,
+                    rhs: rhs.laid(),
+                    rhs_count: rhs.count,
+                    scan: None,
+                });
+            }
+            let kept = if larger.in_order {
+                None
+            } else {
+                KEPT.positions(common, larger, smaller.count)
+            };
+            let scanned =
+                !larger.in_order && kept.is_none() && larger.count / SCANNED_FROM > smaller.count;
+            let order = |side: Operand, pointers| match kept {
+                Some(positions) if side.is_lhs == larger.is_lhs => Ok(Ordered::Positions {
+                    at: side.tuples,
+                    size: side.size,
+                    positions,
+                }),
+                _ if scanned && side.is_lhs == larger.is_lhs => Ok(side.laid()),
+                _ => side.ordered(common, pointers),
+            };
+            Ok(Matches {
+                lhs: order(lhs, lhs_pointers)?,
+                lhs_count: lhs.count,
+                rhs: order(rhs, rhs_pointers)?,
+                rhs_count: rhs.count,
+                scan: scanned.then_some((larger, smaller)),
+            })
+        }
+    }
+
+    /// `found` with each run of tuples of one that agree with a run of the other. Fails
+    /// if `found` does, or there is no memory.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Matches::of`].
+    unsafe fn each_group(
+        &self,
+        common: &[Common],
+        found: &mut dyn FnMut(Group) -> Fallible,
+    ) -> Fallible {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            match self.scan {
+                Some((larger, smaller)) => self.scanning(common, larger, smaller, found),
+                None => self.merging(common, found),
+            }
+        }
+    }
+
+    /// [`Matches::each_group`], both being in order on `common`. Merging compares
+    /// little else, so the usual kinds of order are decided once rather than each time.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Matches::of`].
+    unsafe fn merging(
+        &self,
+        common: &[Common],
+        found: &mut dyn FnMut(Group) -> Fallible,
+    ) -> Fallible {
+        let counts = (self.lhs_count, self.rhs_count);
+        // SAFETY: guaranteed by the caller; each is of as many tuples as its count says.
+        unsafe {
+            match (self.lhs, self.rhs) {
+                (Ordered::Pointed(lhs), Ordered::Pointed(rhs)) => merged(
+                    common,
+                    |i| *lhs.get_unchecked(i),
+                    |j| *rhs.get_unchecked(j),
+                    counts,
+                    found,
+                ),
+                (
+                    Ordered::Laid {
+                        at: lhs,
+                        size: lhs_size,
+                    },
+                    Ordered::Laid {
+                        at: rhs,
+                        size: rhs_size,
+                    },
+                ) => merged(
+                    common,
+                    |i| lhs.add(i * lhs_size),
+                    |j| rhs.add(j * rhs_size),
+                    counts,
+                    found,
+                ),
+                (lhs, rhs) => merged(common, |i| lhs.at(i), |j| rhs.at(j), counts, found),
+            }
+        }
+    }
+
+    /// [`Matches::each_group`], reading `larger` as it is, each tuple looking in
+    /// `smaller`, which is in order on `common`. A filter says of most that have no match
+    /// that they haven't, without looking.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Matches::of`].
+    unsafe fn scanning(
+        &self,
+        common: &[Common],
+        larger: Operand,
+        smaller: Operand,
+        found: &mut dyn FnMut(Group) -> Fallible,
+    ) -> Fallible {
+        use core::cmp::Ordering;
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let in_order = if smaller.is_lhs { self.lhs } else { self.rhs };
+            let filter = Filter::of(common, smaller, in_order)?;
+            for i in 0..larger.count {
+                let tuple = larger.tuples.add(i * larger.size);
+                if filter
+                    .as_ref()
+                    .is_some_and(|filter| !filter.may_have(common, tuple, larger.is_lhs))
+                {
+                    continue;
+                }
+                let against = |k: usize| {
+                    on_common(
+                        common,
+                        (in_order.at(k), smaller.is_lhs),
+                        (tuple, larger.is_lhs),
+                    )
+                };
+                let start = partition_point(0, smaller.count, |k| against(k) == Ordering::Less);
+                if start == smaller.count || against(start) != Ordering::Equal {
+                    continue;
+                }
+                let end = gallop(start + 1, smaller.count, |k| against(k) == Ordering::Equal);
+                found(if larger.is_lhs {
+                    Group {
+                        lhs_start: i,
+                        lhs_end: i + 1,
+                        rhs_start: start,
+                        rhs_end: end,
+                    }
+                } else {
+                    Group {
+                        lhs_start: start,
+                        lhs_end: end,
+                        rhs_start: i,
+                        rhs_end: i + 1,
+                    }
+                })?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `found` with each run of the `counts.0` tuples `lhs` gives that agrees on `common`
+/// with a run of the `counts.1` tuples `rhs` gives, both in order on them: each going on
+/// from where the other has got to, by [`gallop`].
 ///
 /// # Safety
 ///
-/// `lhs` and `rhs` must point to valid tuples of [`trendy_rt_and`]'s left
-/// and right operands.
+/// `lhs` and `rhs` must give valid tuples of the left and the right operand.
 #[cfg(not(test))]
-unsafe fn matching_runs(
+unsafe fn merged(
     common: &[Common],
-    lhs: &[*const u8],
-    rhs: &[*const u8],
-) -> Fallible<(Temp<Group>, usize)> {
+    lhs: impl Fn(usize) -> *const u8,
+    rhs: impl Fn(usize) -> *const u8,
+    (lhs_count, rhs_count): (usize, usize),
+    found: &mut dyn FnMut(Group) -> Fallible,
+) -> Fallible {
     use core::cmp::Ordering;
-    let mut groups = Temp::<Group>::new(lhs.len().min(rhs.len()))?;
-    let (mut count, mut total) = (0, 0usize);
+    // SAFETY: guaranteed by the caller.
+    let between =
+        |i: usize, j: usize| unsafe { on_common(common, (lhs(i), true), (rhs(j), false)) };
     let (mut i, mut j) = (0, 0);
-    // SAFETY: guaranteed by the caller; the array has room for a run per
-    // tuple of the shorter operand, and each run holds at least one.
+    while i < lhs_count && j < rhs_count {
+        match between(i, j) {
+            Ordering::Less => i = gallop(i + 1, lhs_count, |k| between(k, j).is_lt()),
+            Ordering::Greater => j = gallop(j + 1, rhs_count, |k| between(i, k).is_gt()),
+            Ordering::Equal => {
+                let lhs_end = gallop(i + 1, lhs_count, |k| between(k, j).is_eq());
+                let rhs_end = gallop(j + 1, rhs_count, |k| between(i, k).is_eq());
+                found(Group {
+                    lhs_start: i,
+                    lhs_end,
+                    rhs_start: j,
+                    rhs_end,
+                })?;
+                (i, j) = (lhs_end, rhs_end);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Which values of the common attributes a relation's tuples might have: a bit for
+/// each of their hashes, a good many more bits than there are tuples, so that a value
+/// none has rarely finds one set, which costs far less than looking for it.
+#[cfg(not(test))]
+struct Filter {
+    bits: Temp<u64>,
+    /// How far to shift a hash to leave the place of its bit.
+    shift: u32,
+}
+
+/// How many tuples make a filter worth having: fewer are as quickly searched.
+#[cfg(not(test))]
+const FILTERED_FROM: usize = 4;
+
+#[cfg(not(test))]
+impl Filter {
+    /// The filter of the `count` tuples of `of`, which are `found` in order, unless they
+    /// are too few, or no common attribute is of a type this can hash, and so says
+    /// nothing. Fails if there is no memory for it.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Matches::of`].
+    unsafe fn of(common: &[Common], of: Operand, found: Ordered<'_>) -> Fallible<Option<Filter>> {
+        let hashes = |c: &Common| {
+            // SAFETY: guaranteed by the caller.
+            let kind = unsafe { (*c.desc).kind };
+            matches!(kind, KIND_INTEGER | KIND_TEXT)
+        };
+        if of.count < FILTERED_FROM || !common.iter().any(hashes) {
+            return Ok(None);
+        }
+        let Some(places) = of
+            .count
+            .checked_mul(16)
+            .and_then(usize::checked_next_power_of_two)
+        else {
+            return Ok(None);
+        };
+        let mut bits = Temp::<u64>::zeroed((places / 64).max(1))?;
+        let shift = 64 - places.trailing_zeros();
+        // SAFETY: guaranteed by the caller; each bit's place is within them.
+        unsafe {
+            let words = bits.values();
+            for k in 0..of.count {
+                let place = place_in(hash_on(common, found.at(k), of.is_lhs), shift);
+                words[place / 64] |= 1 << (place % 64);
+            }
+        }
+        Ok(Some(Filter { bits, shift }))
+    }
+
+    /// Whether a tuple of the operand it isn't of, as the left operand if `is_lhs`, could
+    /// agree with one of those it is of.
+    ///
+    /// # Safety
+    ///
+    /// `tuple` must be valid.
+    unsafe fn may_have(&self, common: &[Common], tuple: *const u8, is_lhs: bool) -> bool {
+        // SAFETY: guaranteed by the caller; the place is within them, as it was above.
+        unsafe {
+            let place = place_in(hash_on(common, tuple, is_lhs), self.shift);
+            let word = self.bits.ptr().add(place / 64).read();
+            (word >> (place % 64)) & 1 == 1
+        }
+    }
+}
+
+/// The place of the bit of `hash` in a [`Filter`] that shifts it by `shift`.
+#[cfg(not(test))]
+fn place_in(hash: u64, shift: u32) -> usize {
+    usize::try_from(hash >> shift).unwrap_or_else(|_| internal_error("too many bits"))
+}
+
+/// A hash of the common attributes of `tuple`, the left operand's if `is_lhs`: equal
+/// for tuples that agree on them, as it reads only integers and texts, whose equal
+/// values have equal bytes. Its top bits are what vary most.
+///
+/// # Safety
+///
+/// `tuple` must be a valid tuple of that operand.
+#[cfg(not(test))]
+unsafe fn hash_on(common: &[Common], tuple: *const u8, is_lhs: bool) -> u64 {
+    const MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mix = |hash: u64, word: u64| (hash ^ word).wrapping_mul(MULTIPLIER).rotate_left(29);
+    let mut hash = 0;
+    // SAFETY: guaranteed by the caller.
     unsafe {
-        while i < lhs.len() && j < rhs.len() {
-            match on_common(common, (lhs[i], true), (rhs[j], false)) {
-                Ordering::Less => i += 1,
-                Ordering::Greater => j += 1,
-                Ordering::Equal => {
-                    let run = |tuples: &[*const u8], start: usize, is_lhs: bool| {
-                        let same = |t: &*const u8| {
-                            on_common(common, (tuples[start], is_lhs), (*t, is_lhs)).is_eq()
-                        };
-                        start + 1 + tuples[start + 1..].iter().take_while(|t| same(t)).count()
-                    };
-                    let (lhs_end, rhs_end) = (run(lhs, i, true), run(rhs, j, false));
-                    let Some(sum) = (lhs_end - i)
-                        .checked_mul(rhs_end - j)
-                        .and_then(|n| n.checked_add(total))
-                    else {
-                        return Err(out_of_memory());
-                    };
-                    total = sum;
-                    groups.ptr().add(count).write(Group {
-                        lhs_start: i,
-                        lhs_end,
-                        rhs_start: j,
-                        rhs_end,
-                    });
-                    count += 1;
-                    (i, j) = (lhs_end, rhs_end);
+        for c in common {
+            let value = tuple.add(if is_lhs { c.lhs } else { c.rhs });
+            match (*c.desc).kind {
+                KIND_INTEGER => hash = mix(hash, value.cast::<u64>().read_unaligned()),
+                KIND_TEXT => {
+                    let (bytes, len) = read_slice(value);
+                    for &byte in array(bytes, len) {
+                        hash = mix(hash, u64::from(byte));
+                    }
+                    hash = mix(hash, len as u64);
+                }
+                _ => {}
+            }
+        }
+    }
+    hash.wrapping_mul(MULTIPLIER)
+}
+
+/// How many indexes the program keeps at a time, past which the one least recently
+/// used goes.
+#[cfg(not(test))]
+const KEPT_INDEXES: usize = 8;
+
+/// How many common attributes a kept index can be on.
+#[cfg(not(test))]
+const KEPT_ATTRIBUTES: usize = 4;
+
+/// How many tuples a relation must have for an index to be worth keeping.
+#[cfg(not(test))]
+const KEPT_FROM: usize = 4096;
+
+/// How many times its tuples must have been read through before a relation gets one,
+/// as sorting them takes about as long as this: so a relation joined fewer times
+/// never pays for one, and one that is joined more pays no more than twice what
+/// knowing that from the start would have cost.
+#[cfg(not(test))]
+const KEPT_AFTER: usize = 16;
+
+/// A relation's tuples' positions, in order on some of its attributes, which lasts as
+/// long as the relation does, or what has been spent so far without one.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct KeptIndex {
+    /// The relation's tuples, or null if this is of nothing.
+    tuples: *const u8,
+    count: usize,
+    /// The attributes it is in order on: where each is in a tuple, and its type.
+    on: [(usize, *const TypeDesc); KEPT_ATTRIBUTES],
+    on_count: usize,
+    /// How many tuples have been read for want of it.
+    read: usize,
+    /// The positions, `count` of them, in `malloc`'s memory, or null until it is made.
+    positions: *mut u32,
+    /// When it was last used, by [`Kept::clock`].
+    used: u64,
+}
+
+/// The indexes the program keeps, of relations that are joined again and again with
+/// far smaller ones, whose common attributes don't come first, so that each join would
+/// otherwise read all their tuples.
+///
+/// One is keyed by the address of the tuples, so it must go when that stops meaning
+/// the same tuples: when the buffer is freed ([`release_buffer`]), or changed where it
+/// is ([`with_room`], [`removed_from`]), the only things that change a relation's
+/// tuples once it has been made.
+#[cfg(not(test))]
+struct Kept {
+    indexes: core::cell::UnsafeCell<[KeptIndex; KEPT_INDEXES]>,
+    /// How many are of something, so that freeing a buffer needn't look if none is.
+    in_use: core::cell::Cell<usize>,
+    clock: core::cell::Cell<u64>,
+}
+
+// SAFETY: the program runs on one thread.
+#[cfg(not(test))]
+unsafe impl Sync for Kept {}
+
+#[cfg(not(test))]
+const NO_INDEX: KeptIndex = KeptIndex {
+    tuples: core::ptr::null(),
+    count: 0,
+    on: [(0, core::ptr::null()); KEPT_ATTRIBUTES],
+    on_count: 0,
+    read: 0,
+    positions: core::ptr::null_mut(),
+    used: 0,
+};
+
+#[cfg(not(test))]
+static KEPT: Kept = Kept {
+    indexes: core::cell::UnsafeCell::new([NO_INDEX; KEPT_INDEXES]),
+    in_use: core::cell::Cell::new(0),
+    clock: core::cell::Cell::new(0),
+};
+
+#[cfg(not(test))]
+impl Kept {
+    /// The positions of `larger`'s tuples in order on `common`, if it has an index on
+    /// them, or has now earned one, and the `smaller` tuples it is joined with are few
+    /// enough for searching it to be quicker than reading it.
+    ///
+    /// # Safety
+    ///
+    /// Its tuples must be valid, and `common` its attributes in common with the other
+    /// operand. Nothing else may be using what this has given before.
+    unsafe fn positions(
+        &self,
+        common: &[Common],
+        larger: Operand,
+        smaller: usize,
+    ) -> Option<&'static [u32]> {
+        if larger.count < KEPT_FROM {
+            return None;
+        }
+        // Galloping from each of the smaller, as far as they are apart.
+        let apart = larger.count / smaller.max(1);
+        let searches = smaller.saturating_mul(apart.ilog2() as usize + 1);
+        if searches >= larger.count
+            || common.len() > KEPT_ATTRIBUTES
+            || u32::try_from(larger.count).is_err()
+        {
+            return None;
+        }
+        let mut on = [(0, core::ptr::null()); KEPT_ATTRIBUTES];
+        for (place, c) in on.iter_mut().zip(common) {
+            *place = (if larger.is_lhs { c.lhs } else { c.rhs }, c.desc);
+        }
+        // SAFETY: guaranteed by the caller; nothing else holds the table, and
+        // what `positions` points to is written.
+        unsafe {
+            let indexes = &mut *self.indexes.get();
+            let at = indexes.iter().position(|index| {
+                index.tuples == larger.tuples
+                    && index.count == larger.count
+                    && index.on_count == common.len()
+                    && index.on == on
+            });
+            let now = self.clock.get() + 1;
+            self.clock.set(now);
+            let index = if let Some(at) = at {
+                &mut indexes[at]
+            } else {
+                let oldest = indexes
+                    .iter_mut()
+                    .min_by_key(|index| index.used)
+                    .unwrap_or_else(|| internal_error("no kept indexes"));
+                if oldest.tuples.is_null() {
+                    self.in_use.set(self.in_use.get() + 1);
+                } else if !oldest.positions.is_null() {
+                    free(oldest.positions.cast());
+                }
+                *oldest = KeptIndex {
+                    tuples: larger.tuples,
+                    count: larger.count,
+                    on,
+                    on_count: common.len(),
+                    ..NO_INDEX
+                };
+                oldest
+            };
+            index.used = now;
+            if index.positions.is_null() {
+                index.read = index.read.saturating_add(larger.count);
+                if index.read < larger.count.saturating_mul(KEPT_AFTER) {
+                    return None;
+                }
+                index.positions = sorted_positions(common, larger);
+                // Without the memory, it goes on reading them, which needs none.
+                index.read = 0;
+                if index.positions.is_null() {
+                    return None;
+                }
+            }
+            Some(core::slice::from_raw_parts(index.positions, larger.count))
+        }
+    }
+
+    /// Forget each index of the tuples at `tuples`, which are going, or changing.
+    ///
+    /// # Safety
+    ///
+    /// Nothing else may be using what this has given.
+    unsafe fn forget(&self, tuples: *const u8) {
+        if self.in_use.get() == 0 {
+            return;
+        }
+        // SAFETY: guaranteed by the caller; nothing else holds the table.
+        unsafe {
+            for index in &mut *self.indexes.get() {
+                if index.tuples == tuples {
+                    if !index.positions.is_null() {
+                        free(index.positions.cast());
+                    }
+                    *index = NO_INDEX;
+                    self.in_use.set(self.in_use.get() - 1);
                 }
             }
         }
-        groups.len = count;
-        Ok((groups, total))
+    }
+}
+
+/// The positions of `operand`'s tuples, in order on `common`, those that agree in
+/// the order they are in, in `malloc`'s memory, or null if there is no memory for them,
+/// which fails nothing, as it can go on without them.
+///
+/// # Safety
+///
+/// Its tuples must be valid, and its count fit 32 bits, with more than one tuple.
+#[cfg(not(test))]
+unsafe fn sorted_positions(common: &[Common], operand: Operand) -> *mut u32 {
+    // SAFETY: guaranteed by the caller; `malloc` has no preconditions, and there is a
+    // position for each of the tuples, each within the relation.
+    unsafe {
+        let positions = malloc(operand.count * size_of::<u32>()).cast::<u32>();
+        let pointers = malloc(operand.count * size_of::<*const u8>()).cast::<*const u8>();
+        if !positions.is_null() && !pointers.is_null() {
+            for i in 0..operand.count {
+                pointers.add(i).write(operand.tuples.add(i * operand.size));
+            }
+            let sorted = core::slice::from_raw_parts_mut(pointers, operand.count);
+            sorted.sort_unstable_by(|x, y| {
+                on_common(common, (*x, operand.is_lhs), (*y, operand.is_lhs)).then(x.cmp(y))
+            });
+            for (i, pointer) in sorted.iter().enumerate() {
+                let position = pointer.offset_from_unsigned(operand.tuples) / operand.size;
+                let position =
+                    u32::try_from(position).unwrap_or_else(|_| internal_error("too many tuples"));
+                positions.add(i).write(position);
+            }
+            free(pointers.cast());
+            return positions;
+        }
+        free(positions.cast());
+        free(pointers.cast());
+        core::ptr::null_mut()
     }
 }
 

@@ -1821,8 +1821,9 @@ as one operator of two words (`Words::NotMatching`), and checked as `join`
 is, of relations only. They become `Semijoin` and `Antijoin`, rather than
 `And` with the right operand projected, and a difference, which would
 compute the left operand twice. Lowering calls `trendy_rt_matching`, with
-the common attributes as for `And`; it sorts both operands on them and
-keeps the left's tuples that do, or don't, have a match, in one pass.
+the common attributes as for `And`; it finds what agrees as `And` does, marks
+the left's tuples that have a match, and copies those that do, or don't, in the
+order they are in, so its result needs no sorting.
 
 Relations are ordered by inclusion: an ordering comparison of relations
 resolves to `Compare(…, Compared::Relation)`, which folds as subset, and
@@ -2412,11 +2413,30 @@ the canonical order follows attribute names. Lowering passes the runtime
 the result's descriptor and an array of each result attribute's offset in
 the operand's tuples, so the runtime never matches attributes by name.
 
-An AND (`hir::Expr::And`) calls `trendy_rt_and`, which sorts both operands'
-tuples on their common attributes and merges them: each run of tuples of
-one that agree on them pairs with the matching run of the other. The
-results are sorted into the canonical order, into memory released like a
-text's. A product, of operands with no attribute in common, is made in
+An AND (`hir::Expr::And`) calls `trendy_rt_and`. How it finds the tuples that agree
+(`Matches`) depends on the operands' sizes and order, and not on the attributes'
+names by more than a small factor, as attributes are unordered (RM Proscription 1),
+though tuples are sorted by name. An operand is in order on the common attributes if
+they come first in its name order. If the larger is in order, it is galloped through
+from the smaller, which is sorted if it has to be, so the time follows the smaller.
+If it isn't, and is more than `SCANNED_FROM` times the smaller, it is read as it is,
+never sorted, each tuple looking for its match in the smaller, past a hash filter
+that says of most with none that they have none: and its order is the result's, if
+the smaller adds no attributes. Otherwise both are sorted and merged.
+
+Read as it is, a larger operand costs its size each time, which no order of the
+smaller can help, so one that keeps being joined with far smaller ones earns an index
+(`Kept`): its tuples' positions in order on those attributes, which is then what is
+galloped through. It gets one once it has been read `KEPT_AFTER` times, about what
+sorting it costs, so that a relation joined fewer times never pays for one, and one
+joined more pays no more than twice what knowing that from the start would have
+cost. There are `KEPT_INDEXES` at most, the least recently used going, each keyed by
+the address and number of the tuples, so it must go when those stop meaning the same
+tuples: `release_buffer` when the buffer is freed, and `with_room` and `removed_from`,
+the only things that change a relation's tuples where they are.
+
+The results are sorted into the canonical order, if they aren't in it, into memory
+released like a text's. A product, of operands with no attribute in common, is made in
 that order where it can be (`product`): if all one operand's attributes come
 before all the other's in name order, each of its tuples with each of the
 other's is that order, so the result is written as it is made, with no
