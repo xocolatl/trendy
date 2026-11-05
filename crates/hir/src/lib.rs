@@ -25,8 +25,8 @@ pub struct Program {
     /// Each file of the program, by [`FileId`], its units' and those that
     /// come with the compiler: the path a failure in it writes it by.
     pub files: Vec<String>,
-    /// The constraints on the variables, which their initial values
-    /// satisfy.
+    /// The constraints on the variables, which their initial values satisfy, or
+    /// the program checks as it starts if the compiler can't say.
     pub constraints: Vec<VariableConstraint>,
     /// Each type's immediate subtypes, by its name: a union type's, what
     /// a value of it can be, of which the largest decides how much room it
@@ -3796,6 +3796,12 @@ pub struct VariableConstraint {
     pub parts: Vec<ConstraintPart>,
     /// The condition as it is written.
     pub written: String,
+    /// Where it is declared, which a failure to check it as the program starts
+    /// says.
+    pub site: Site,
+    /// Whether the program checks it as it starts, as the compiler can't compute
+    /// its condition of the variables' initial values, which otherwise satisfy it.
+    pub checked_at_start: bool,
 }
 
 /// A part of a constraint's condition (see [`VariableConstraint::parts`]),

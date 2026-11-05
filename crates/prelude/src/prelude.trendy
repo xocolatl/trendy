@@ -460,17 +460,13 @@ operator message{error: overlapping_subtypes}: text [
 ];
 
 operator message{error: constraint_violated}: text [
-    "the statement breaks the constraint `"
-        || error.constraint
-        || "`: `"
-        || error.condition
-        || "` is false"
+    "the constraint `" || error.constraint || "` is broken: `" || error.condition || "` is false"
 ];
 
 operator message{error: constraint_violated_by}: text [
-    "the statement breaks the constraint `"
+    "the constraint `"
         || error.constraint
-        || "`: `"
+        || "` is broken: `"
         || error.condition
         || "` is false of "
         || error.tuples

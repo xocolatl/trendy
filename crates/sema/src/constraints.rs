@@ -51,7 +51,11 @@ fn constraint(
     // Of the initial values, checked again, so that a part that fails is
     // reported where it is, as in an initial value.
     let mut initial = ConditionNames::new(cx, true);
-    let holds = initial.value(&written, errors)? == hir::Value::Boolean(true);
+    let holds = match initial.value(&written, errors) {
+        Initially::Known(value) => Some(value == hir::Value::Boolean(true)),
+        Initially::Unknown => None,
+        Initially::Reported => return None,
+    };
     if names.mentioned.is_empty() {
         let file = ast::SourceFile::cast(decl.syntax().parent()?)?;
         let removal = sections::removal(&file, decl.syntax());
@@ -63,7 +67,7 @@ fn constraint(
         ));
         return None;
     }
-    if !holds {
+    if holds == Some(false) {
         let breaches = initial.breaches(&written);
         let mentioned: Vec<&str> = names.mentioned.keys().map(String::as_str).collect();
         errors.push(errors::constraint_broken_initially(
@@ -86,7 +90,20 @@ fn constraint(
         variables: names.mentioned.values().copied().collect(),
         parts,
         written: written.syntax().text().to_string(),
+        site: cx.sites.at(decl.span()),
+        checked_at_start: holds.is_none(),
     })
+}
+
+/// What a condition on the variables is of their initial values, when compiling.
+enum Initially {
+    /// Its value.
+    Known(hir::Value),
+    /// What only the program can compute, as it reads a constant the compiler can't
+    /// compute, or runs statements.
+    Unknown,
+    /// Nothing, as it has errors, already reported, such as a part that fails.
+    Reported,
 }
 
 /// The names in a constraint's condition, as [`parts`] checks it, which
@@ -126,12 +143,10 @@ fn part<N: PartNames>(
     let mut errors = Vec::new();
     let condition = Checker::new(&mut names).expr(written, Some(boolean), &mut errors)?;
     let breaking = match form(written) {
-        Form::Within { from, within } => {
-            let from = Checker::new(&mut names).expr(&from, None, &mut errors)?;
-            let within = Checker::new(&mut names).expr(&within, None, &mut errors)?;
-            ops::combined(from, within, hir::Combination::Minus).ok()
-        }
-        Form::Empty(relation) => Checker::new(&mut names).expr(&relation, None, &mut errors),
+        Form::Within { from, within } => relation_of(&from, &mut names, &mut errors)
+            .zip(relation_of(&within, &mut names, &mut errors))
+            .and_then(|(from, within)| ops::combined(from, within, hir::Combination::Minus).ok()),
+        Form::Empty(relation) => relation_of(&relation, &mut names, &mut errors),
         Form::And(_) | Form::Other => None,
     };
     Some(hir::ConstraintPart {
@@ -140,6 +155,19 @@ fn part<N: PartNames>(
         locals: names.locals(),
         written: written.syntax().text().to_string(),
     })
+}
+
+/// `written` checked with `names`, if it is a relation: a form says what breaks a
+/// condition only of relations, as `<=` compares other values too, and a unit's own
+/// `is_empty` can take them.
+fn relation_of<N: Names>(
+    written: &Expr,
+    names: &mut N,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    let mut checker = Checker::new(names);
+    let value = checker.expr(written, None, errors)?;
+    matches!(checker.ty(&value), hir::Type::Relation(_)).then_some(value)
 }
 
 /// The conjuncts of `written`, a condition: the operands of each `and` it
@@ -161,13 +189,13 @@ fn unparenthesized(written: &Expr) -> Expr {
     }
 }
 
-/// What a condition's form says of what makes it false.
+/// What a condition's form says of what makes it false, if what it compares or
+/// tests are relations.
 enum Form {
     /// `a and b`, or `and{a, b}`: its operands, each of which makes it
     /// false when it is.
     And(Vec<Expr>),
-    /// `a <= b`, or `b >= a`, of relations: the tuples of `from` that
-    /// aren't in `within`.
+    /// `a <= b`, or `b >= a`: the tuples of `from` that aren't in `within`.
     Within { from: Expr, within: Expr },
     /// `is_empty{r: e}`: the tuples of `e`.
     Empty(Expr),
@@ -237,16 +265,19 @@ impl<'c, 'a> ConditionNames<'c, 'a> {
         }
     }
 
-    /// The value of `written`, a condition or a part of one, of the
-    /// variables' initial values, which these names stand for: `None` after
-    /// reporting why it has none, such as a part that fails.
-    fn value(&mut self, written: &Expr, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
-        let checked = Checker::new(self).expr(written, None, errors)?;
+    /// What `written`, a condition or a part of one, is of the variables'
+    /// initial values, which these names stand for.
+    fn value(&mut self, written: &Expr, errors: &mut Vec<Diagnostic>) -> Initially {
+        let Some(checked) = Checker::new(self).expr(written, None, errors) else {
+            return Initially::Reported;
+        };
         match ops::evaluated(checked, self.cx.bindings()) {
-            Ok(computed) => ops::known_value(&computed).cloned(),
+            Ok(computed) => ops::known_value(&computed)
+                .cloned()
+                .map_or(Initially::Unknown, Initially::Known),
             Err(failed) => {
                 errors.push(errors::failed(&failed, written));
-                None
+                Initially::Reported
             }
         }
     }
@@ -255,7 +286,10 @@ impl<'c, 'a> ConditionNames<'c, 'a> {
     /// as [`ConditionNames::value`] has it, though errors, which it can't
     /// have, aren't reported.
     fn known(&mut self, written: &Expr) -> Option<hir::Value> {
-        self.value(written, &mut Vec::new())
+        match self.value(written, &mut Vec::new()) {
+            Initially::Known(value) => Some(value),
+            Initially::Unknown | Initially::Reported => None,
+        }
     }
 
     /// What makes `written`, a condition false of the initial values,

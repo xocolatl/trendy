@@ -2101,7 +2101,7 @@ fn constraints() {
             "│ Tanzania │ Swahili  │ Kiswahili │",
             "└──────────┴──────────┴───────────┘",
             "3",
-            r#""the statement breaks the constraint `official_somewhere`: `languages{language} <= official{language}` is false of relation { language: text } { { language: \"Esperanto\" } }""#,
+            r#""the constraint `official_somewhere` is broken: `languages{language} <= official{language}` is false of relation { language: text } { { language: \"Esperanto\" } }""#,
         ]
     );
 }
@@ -2117,7 +2117,7 @@ fn a_statement_that_breaks_a_constraint_fails() {
     assert_eq!(
         stderr,
         format!(
-            "1\nerror[R0023]: the statement breaks the constraint `known_countries`: `official{{country}} <= countries` is false of relation {{ country: text }} {{ {{ country: \"India\" }} }}\n{}",
+            "1\nerror[R0023]: the constraint `known_countries` is broken: `official{{country}} <= countries` is false of relation {{ country: text }} {{ {{ country: \"India\" }} }}\n{}",
             site("constraint_broken", 15)
         )
     );
@@ -2129,7 +2129,7 @@ fn a_statement_that_breaks_a_constraint_fails() {
     assert_eq!(
         stderr,
         format!(
-            "error[R0023]: the statement breaks the constraint `stocked`: `stock > 0` is false\n{}",
+            "error[R0023]: the constraint `stocked` is broken: `stock > 0` is false\n{}",
             site("constraint_broken_by_var", 14)
         )
     );
@@ -8253,6 +8253,158 @@ fn constants() {
             "3",
             "-1e0",
         ]
+    );
+}
+
+/// A constraint the compiler can't compute of the initial values, as it reads a
+/// constant it can't compute or runs statements, is checked as the program starts, at
+/// its declaration, before anything `main` does, and at each assignment as any is.
+#[test]
+fn a_constraint_the_compiler_cant_check_is_checked_as_the_program_starts() {
+    let doubling = "operator doubling{n: integer}: integer [
+    var i := n;
+    while i < 8 loop [
+        i := i * 2;
+    ];
+    i
+];
+";
+    let three = "const three := max{r: series{from: 1, to: 3}, of: value};\n";
+    // Broken from the start, reading a constant, and running statements.
+    for (name, source, line) in [
+        (
+            "start_constant",
+            format!(
+                "{three}var v := relation {{ {{ x: 1 }}, {{ x: 2 }}, {{ x: 3 }}, {{ x: 4 }} }};\nconstraint few := count{{r: v}} <= three;\n\noperator main{{}} [\n    call debug_value{{v: \"main\"}};\n];\n"
+            ),
+            3,
+        ),
+        (
+            "start_statements",
+            format!(
+                "{doubling}var v := 9;\nconstraint few := v < doubling{{n: 1}};\n\noperator main{{}} [\n    call debug_value{{v: \"main\"}};\n];\n"
+            ),
+            9,
+        ),
+    ] {
+        let (code, stderr) = run_source(name, &source);
+        assert_eq!(code, 1, "{name}: {stderr}");
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert!(
+            lines[0].starts_with("error[R0023]: the constraint `few` is broken: `"),
+            "{stderr}"
+        );
+        assert!(lines[1].ends_with(&format!(".trendy:{line}:1")), "{stderr}");
+        assert_eq!(lines.len(), 2, "{stderr}");
+    }
+}
+
+/// What a constraint the program checks as it starts reads, and what comes after
+/// that check.
+#[test]
+fn after_a_constraint_is_checked_as_the_program_starts() {
+    // Holding then, and broken by a statement, of the tuples that break it.
+    let (code, stderr) = run_source(
+        "start_holds",
+        r#"const a := series{from: 1, to: 3} rename {value as x};
+var v := relation { { x: 1 } };
+constraint few := count{r: v} <= max{r: a, of: x};
+constraint known := v <= a;
+
+operator main{} [
+    call debug_value{v: "main"};
+    insert v relation { { x: 9 } };
+    call debug_value{v: "not here"};
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[0], "\"main\"", "{stderr}");
+    assert_eq!(
+        lines[1],
+        "error[R0023]: the constraint `known` is broken: `v <= a` is false of relation { x: integer } { { x: 9 } }"
+    );
+    assert!(lines[2].ends_with("start_holds.trendy:8:5"), "{stderr}");
+    // Broken from the start, of the tuples that break it.
+    let (code, stderr) = run_source(
+        "start_tuples",
+        r#"const a := series{from: 1, to: 3} rename {value as x};
+var v := relation { { x: 1 }, { x: 9 } };
+constraint known := v <= a;
+
+operator main{} [
+    call debug_value{v: "main"};
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines[0],
+        "error[R0023]: the constraint `known` is broken: `v <= a` is false of relation { x: integer } { { x: 9 } }"
+    );
+    assert!(lines[1].ends_with("start_tuples.trendy:3:1"), "{stderr}");
+    // A constant it reads that fails, needed as the program starts.
+    let (code, stderr) = run_source(
+        "start_fails",
+        r#"const broken := 1 div (max{r: series{from: 0, to: 0}, of: value});
+var v := relation { { x: 1 } };
+constraint c := count{r: v} <= broken;
+
+operator main{} [
+    call debug_value{v: "main"};
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.starts_with("error[R0002]"), "{stderr}");
+    assert!(!stderr.contains("\"main\""), "{stderr}");
+    // Holding throughout, and then `main` runs at no site of the constraint's: a
+    // failure says only what `main` called.
+    let three = "const three := max{r: series{from: 1, to: 3}, of: value};\n";
+    let (code, stderr) = run_source(
+        "start_then_main",
+        &format!(
+            "{three}var v := relation {{ {{ x: 1 }} }};\nconstraint few := count{{r: v}} <= three;\n\noperator deep{{n: integer}}: integer [\n    1 div n\n];\n\noperator main{{}} [\n    call debug_value{{v: three}};\n    call debug_value{{v: deep{{n: three - 3}}}};\n];\n"
+        ),
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[0], "3", "{stderr}");
+    assert!(lines[2].ends_with("start_then_main.trendy:6:5"), "{stderr}");
+    assert!(
+        lines[3].contains("in `deep`, called at") && lines[3].ends_with(":11:5"),
+        "{stderr}"
+    );
+    assert_eq!(lines.len(), 4, "{stderr}");
+}
+
+/// `<=` and `>=` compare other values than relations, whose constraints say only
+/// that they are false.
+#[test]
+fn a_constraint_can_compare_any_values() {
+    let (code, stderr) = run_source(
+        "scalar_constraint",
+        r#"var v := relation { { x: 1 } };
+constraint up_to_three := count{r: v} <= 3;
+constraint at_least_one := 1 <= count{r: v};
+constraint named := "a" <= "b" or count{r: v} >= 0;
+
+operator main{} [
+    insert v relation { { x: 2 }, { x: 3 } };
+    call debug_value{v: count{r: v}};
+    insert v relation { { x: 4 } };
+    call debug_value{v: "not here"};
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[0], "3", "{stderr}");
+    assert_eq!(
+        lines[1],
+        "error[R0023]: the constraint `up_to_three` is broken: `count{r: v} <= 3` is false"
     );
 }
 

@@ -72,6 +72,7 @@ fn entry(
     let written = Written::new(&mut b, waiting, cx);
     let given = Given::new(&mut b, cx);
     b.catching(handle, |b| {
+        b.constraints_checked_at_start(cx);
         b.insts.push(lir::Inst::Call {
             function: main,
             args: given.as_ref().map(|given| given.args.clone()),
@@ -2506,44 +2507,64 @@ impl<'a> FunctionBuilder<'a> {
             .collect();
         let program = self.program;
         for (index, constraint) in program.constraints.iter().enumerate() {
-            if constraint.variables.is_disjoint(&variables) {
-                continue;
+            if !constraint.variables.is_disjoint(&variables) {
+                self.variable_constraint_checked(index, cx);
             }
-            for (part, written) in constraint.parts.iter().enumerate() {
+        }
+    }
+
+    /// Check the constraints the compiler can't check of the variables' initial
+    /// values, each at its own site, leaving the program at the one it is at for
+    /// `main`.
+    fn constraints_checked_at_start(&mut self, cx: &mut Lowering) {
+        let program = self.program;
+        for (index, constraint) in program.constraints.iter().enumerate() {
+            if constraint.checked_at_start {
+                self.at(Some(constraint.site), cx);
+                self.scoped(|this| this.variable_constraint_checked(index, cx));
+                self.site = None;
+                self.after_call(cx);
+            }
+        }
+    }
+
+    /// Check each part of the constraint `index`, in turn.
+    fn variable_constraint_checked(&mut self, index: usize, cx: &mut Lowering) {
+        let constraint = &self.program.constraints[index];
+        for (part, written) in constraint.parts.iter().enumerate() {
+            let checked = Checked {
+                constraint: index,
+                part,
+                tuples: false,
+            };
+            let holds = self.slot(scalar_layout(hir::Scalar::Boolean));
+            self.call_constraint(checked, holds.clone(), cx);
+            let (kept, broken) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: holds,
+                    then: kept,
+                    otherwise: broken,
+                },
+                broken,
+            );
+            let name = self.text(&constraint.name, cx);
+            let condition = self.text(&written.written, cx);
+            let tuples = written.breaking.is_some().then(|| {
+                let tuples = self.slot(scalar_layout(hir::Scalar::Text));
                 let checked = Checked {
-                    constraint: index,
-                    part,
-                    tuples: false,
+                    tuples: true,
+                    ..checked
                 };
-                let holds = self.slot(scalar_layout(hir::Scalar::Boolean));
-                self.call_constraint(checked, holds.clone(), cx);
-                let (kept, broken) = (self.new_block(), self.new_block());
-                self.end_block(
-                    lir::Terminator::Branch {
-                        condition: holds,
-                        then: kept,
-                        otherwise: broken,
-                    },
-                    broken,
-                );
-                let name = self.text(&constraint.name, cx);
-                let condition = self.text(&written.written, cx);
-                let tuples = written.breaking.is_some().then(|| {
-                    let tuples = self.slot(scalar_layout(hir::Scalar::Text));
-                    let checked = Checked {
-                        tuples: true,
-                        ..checked
-                    };
-                    self.call_constraint(checked, tuples.clone(), cx);
-                    tuples
-                });
-                let failure = lir::Failure::ConstraintViolated {
-                    constraint: name,
-                    condition,
-                    tuples,
-                };
-                self.fail(failure, kept);
-            }
+                self.call_constraint(checked, tuples.clone(), cx);
+                tuples
+            });
+            let failure = lir::Failure::ConstraintViolated {
+                constraint: name,
+                condition,
+                tuples,
+            };
+            self.fail(failure, kept);
         }
     }
 
@@ -8268,6 +8289,12 @@ mod tests {
                 written: "stock > 0".to_string(),
             }],
             written: "stock > 0".to_string(),
+            site: hir::Site {
+                file: hir::FileId(0),
+                line: 1,
+                column: 1,
+            },
+            checked_at_start: false,
         });
         let lowered = lower_program(&program);
         let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();

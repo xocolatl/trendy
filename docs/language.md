@@ -3816,6 +3816,10 @@ operator main{} [
   where its form says: the tuples of `a` that aren't in `b`, for
   `a <= b`, and of `b` that aren't in `a`, for `a >= b`; the tuples of
   `e`, for `is_empty{r: e}`; and the operands of an `and` that are false.
+  One the compiler can't compute of them, as it reads a constant computed when
+  the program runs (see [Constants](#constants)) or calls an operator that
+  runs statements, is checked as the program starts, before `main`, and fails
+  as a statement that breaks it does, at its declaration.
 - **Every statement that assigns a variable it mentions is checked as it
   ends:** an assignment, an `assign` block, a call that passes the
   variable to a `var` or `out` parameter, and a transaction that adds its

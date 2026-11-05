@@ -1355,8 +1355,8 @@ variable is. The constraint the program keeps is its parts, the operands
 of its `and`s (`constraints::conjuncts`, by `Form`, which recognizes the
 forms that say what breaks them for the compile-time labels too), each a
 `hir::ConstraintPart` checked again for its condition, with, for `a <= b`
-and `a >= b`, the relation `a minus b`, or for `is_empty{r: e}`, `e`, of
-the tuples that make it false, those that can't fail sorted first, and
+and `a >= b` of relations, the relation `a minus b`, or for `is_empty{r: e}`
+of one, `e` (`relation_of`), of the tuples that make it false, those that can't fail sorted first, and
 the variables it mentions.
 
 Lowering checks a constraint after each statement that assigns, itself,
@@ -1369,7 +1369,12 @@ reading the variables), and a part that is false ends the statement with
 `lir::Failure::ConstraintViolated`, with the tuples written by `to_text`
 where the part has them, which the runtime makes a `constraint_violated`
 or a `constraint_violated_by` of (`trendy_rt_constraint_violated`,
-`_by`), as it does for the language's other failures.
+`_by`), as it does for the language's other failures. Sema can't compute some
+conditions of the initial values (`Initially::Unknown`): what reads a constant
+the compiler can't compute, or runs statements. Then the entry checks that
+constraint first, at its declaration (`VariableConstraint::checked_at_start`,
+`constraints_checked_at_start`), as nothing else says that the initial values
+satisfy it.
 
 A database shares the variables' namespace, and its relvars and
 constraints are named within it (`databases::check`, after the globals). A

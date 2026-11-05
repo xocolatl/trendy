@@ -30,6 +30,13 @@ constraint known_countries := official{country} <= countries{country};
 constraint known_languages := official{language} <= languages{language};
 constraint official_somewhere := languages{language} <= official{language};
 
+/* No more official languages than this, which the compiler doesn't compute, as
+   `series` runs a loop, so it can't check this of the initial values: the
+   program does as it starts, and whenever a statement assigns `official`. */
+const most_official := max{r: series{from: 1, to: 20}, of: value};
+
+constraint not_too_many := count{r: official} <= most_official;
+
 /* Quechua, official in Peru and Bolivia: a language and where it is
    official, assigned at once, as neither holds without the other. */
 operator add_quechua{} [

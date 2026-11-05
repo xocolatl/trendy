@@ -10066,28 +10066,31 @@ const VARIABLE_CONSTRAINT_RULE: &str = "a constraint, `constraint name := condit
 pub(crate) fn variable_free_constraint(
     name: &str,
     condition: &Expr,
-    holds: bool,
+    holds: Option<bool>,
     removal: Edit,
 ) -> Diagnostic {
     let d = Diagnostic::error(
         Code::ConstantConstraint,
         format!("the constraint `{name}` mentions no variable"),
         condition.span(),
-        if holds {
-            "true whatever the variables are"
-        } else {
-            "false whatever the variables are"
+        match holds {
+            Some(true) => "true whatever the variables are",
+            Some(false) => "false whatever the variables are",
+            None => "the same whatever the variables are",
         },
     )
     .with_note(VARIABLE_CONSTRAINT_RULE);
-    if holds {
-        d.with_note("one true whatever the variables are says nothing about them")
-            .with_suggestion("delete the constraint", vec![removal])
-    } else {
-        d.with_note(
-            "one false whatever the variables are can never hold, so the program could never start",
-        )
-        .with_help("write the condition on the variables whose values it is to keep true")
+    let help = "write the condition on the variables whose values it is to keep true";
+    match holds {
+        Some(true) => d
+            .with_note("one true whatever the variables are says nothing about them")
+            .with_suggestion("delete the constraint", vec![removal]),
+        Some(false) => d
+            .with_note(
+                "one false whatever the variables are can never hold, so the program could never start",
+            )
+            .with_help(help),
+        None => d.with_help(help),
     }
 }
 

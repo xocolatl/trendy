@@ -11105,6 +11105,56 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
     }
 
     #[test]
+    fn a_constraints_form_says_what_breaks_it_only_of_relations() {
+        let breaking = |condition: &str, operators: &str| {
+            let source = format!(
+                "var v := relation {{ {{ x: 1 }} }};\nvar n := 1;\nvar t := \"a\";\n{operators}constraint c := {condition};\n{MAIN}"
+            );
+            let program = analyze_str(&source).unwrap();
+            program.constraints[0].parts[0].breaking.is_some()
+        };
+        assert!(breaking("v <= v", ""));
+        assert!(breaking("v >= v", ""));
+        assert!(breaking("is_empty{r: v where x > 1}", ""));
+        for condition in ["count{r: v} <= 3", "3 >= count{r: v}", "t <= \"b\""] {
+            assert!(!breaking(condition, ""), "{condition}");
+        }
+        let own = "operator is_empty{r: integer}: boolean [ r = 1 ];\n";
+        assert!(!breaking("is_empty{r: n}", own));
+    }
+
+    #[test]
+    fn a_constraint_the_compiler_cant_compute_is_for_the_program_to_check() {
+        let doubling = "operator doubling{n: integer}: integer [ var i := n; while i < 8 loop [ i := i * 2; ]; i ];\n";
+        let three = "const three := max{r: series{from: 1, to: 3}, of: value};\n";
+        let at_start = |source: String| {
+            let source = format!("var v := 1;\n{source}\n{MAIN}");
+            analyze_str(&source).unwrap().constraints[0].checked_at_start
+        };
+        assert!(!at_start("constraint c := v = 1;".to_string()));
+        assert!(at_start(format!("{three}constraint c := v <= three;")));
+        assert!(at_start(format!(
+            "{doubling}constraint c := v <= doubling{{n: 1}};"
+        )));
+        // What the initial values are known to break is still an error.
+        let source = format!("var v := 1;\n{doubling}constraint c := v > 5;\n{MAIN}");
+        assert_eq!(codes(&source), [Code::ConstraintViolated]);
+        let source = format!(
+            "var v := 1;\n{doubling}constraint c := v > 5 and v <= doubling{{n: 1}};\n{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::ConstraintViolated]);
+        // And one that mentions no variable, which it can't say is true.
+        let source = format!("{three}constraint c := three > 0;\n{MAIN}");
+        let found = errors(&source);
+        assert_eq!(found[0].code, Code::ConstantConstraint, "{found:#?}");
+        assert_eq!(
+            found[0].primary.message,
+            "the same whatever the variables are"
+        );
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+    }
+
+    #[test]
     fn a_local_constant_is_never_assigned() {
         let update = "operator inc{var n: integer} [ n := n + 1; ];\n";
         let fill = "operator fill{out n: integer} [ n := 1; ];\n";

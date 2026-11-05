@@ -221,11 +221,11 @@ fn constraint(
     };
     let condition = Checker::new(&mut names).expr(&written, Some(&boolean), errors)?;
     if names.mentioned.is_empty() {
-        // Known when compiling, as it mentions nothing that changes.
+        // Known when compiling if it can be, as it mentions nothing that changes.
         let holds = ops::evaluated(condition, cx.bindings())
             .ok()
             .and_then(|computed| ops::known_value(&computed).cloned())
-            == Some(hir::Value::Boolean(true));
+            .map(|value| value == hir::Value::Boolean(true));
         let file = ast::SourceFile::cast(decl.syntax().parent()?)?;
         let removal = sections::removal(&file, decl.syntax());
         errors.push(errors::variable_free_constraint(
