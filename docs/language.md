@@ -143,11 +143,18 @@ operator main{} [];
   specification, and dispatch finds the version for its arguments'
   types, whatever unit calls it, so there is nothing about a version to
   export.
-- **What the interface mentions is in the interface** (A0067): its
-  operators' parameters' and results' types, its headings' attributes',
-  and its types' components' and supertypes'. An operator's body, and a
-  type's constraints and conversions, are the unit's own, and can use
-  what its implementation declares.
+- **The interface sees only interfaces, and the implementation sees both** (A0067):
+  a name written in the interface, in an operator's heading, a heading's attributes,
+  a type's components, supertype and constraints, or a constant's value, means what
+  this unit's interface, the prelude's or that of a unit its `uses` names declares.
+  What the interface reads is what other units read, so nothing in it is a name they
+  can't look up, and a condition it states is one they can compute themselves. The
+  fix declares it there: an operator by its heading, leaving its body, and a type, a
+  heading or a constant whole. An operator's body and a type's conversions are in the
+  implementation, so they can use anything, and what is only in their way stays
+  private. A unit's own implementation hides nothing from its interface: a name
+  only the implementation declares, that the prelude also does, means the prelude's
+  there.
 - **A type the interface declares is declared with its possible
   representations,** its logical interface (TTM RM Prescription 4): the
   interface writes their components, its constraints, a representation's
@@ -2440,6 +2447,149 @@ operator main{} [
   as anything that reads a source of random numbers or the time must be, so that a
   program that calls them won't change when they do.
 
+### Dates and times
+
+`trendy.time`, a unit that comes with the compiler, which a unit uses with
+`uses { trendy.time };`, has `date`, `time`, `timestamp` and `offset_timestamp`. It
+is trendy, so nothing in it is built in. Its interface, what a unit that uses it sees:
+
+```
+/* Dates and times: a day of the calendar, a time of day, an instant, and an
+   instant with the UTC offset it was written at. A unit that has them uses this
+   one, `uses { trendy.time };`. */
+interface
+
+/* A date: how many days it is after 1970-01-01, negative before it, or its year,
+   month and day, on the Gregorian calendar, whose rules reach every year, with 1 BC
+   as year 0. It is within 10,000,000,000,000 days of 1970-01-01, about 27 billion
+   years either way, and ordered by its days. */
+type date {
+    { days: integer, constraint days >= -10_000_000_000_000 and days <= 10_000_000_000_000 },
+    {
+        year: integer,
+        month: integer,
+        day: integer,
+        constraint year >= -30_000_000_000 and year <= 30_000_000_000,
+        constraint month >= 1 and month <= 12,
+        constraint day >= 1 and day <= days_in_month{year, month},
+    },
+    order [asc days],
+};
+
+/* How many days `month` of `year` has, 28 to 31. */
+operator days_in_month{
+    year: integer,
+    month: integer,
+    constraint month >= 1 and month <= 12,
+}: integer;
+
+/* A time of day: how many nanoseconds it is after midnight, or its hour, minute,
+   second and nanosecond. Every day has 86,400 seconds: there are no leap seconds,
+   so a `second` of 60 isn't one. Ordered by its nanoseconds. */
+type time {
+    { nanos_of_day: integer, constraint nanos_of_day >= 0 and nanos_of_day < 86_400_000_000_000 },
+    {
+        hour: integer,
+        minute: integer,
+        second: integer,
+        nanosecond: integer,
+        constraint hour >= 0 and hour < 24,
+        constraint minute >= 0 and minute < 60,
+        constraint second >= 0 and second < 60,
+        constraint nanosecond >= 0 and nanosecond < 1_000_000_000,
+    },
+    order [asc nanos_of_day],
+};
+
+/* An instant: a date and a time, in UTC. Every date and every time make one, so
+   selecting it can't fail. Ordered by its date, then its time. */
+type timestamp {
+    { date: date, time: time },
+    order [asc date, asc time],
+};
+
+/* An instant with the offset from UTC it was written at, in seconds, ahead of UTC if
+   positive and less than a day either way: a `timestamp`, or the year, month, day,
+   hour, minute, second and nanosecond the clock there showed. The same instant at
+   two offsets is two values, so to compare instants, compare their `timestamp`s.
+   Ordered by its `timestamp`, then its offset. */
+type offset_timestamp {
+    {
+        timestamp: timestamp,
+        utc_offset: integer,
+        constraint utc_offset > -86_400 and utc_offset < 86_400,
+    },
+    {
+        year: integer,
+        month: integer,
+        day: integer,
+        hour: integer,
+        minute: integer,
+        second: integer,
+        nanosecond: integer,
+        utc_offset: integer,
+        constraint year >= -30_000_000_000 and year <= 30_000_000_000,
+        constraint month >= 1 and month <= 12,
+        constraint day >= 1 and day <= days_in_month{year, month},
+        constraint hour >= 0 and hour < 24,
+        constraint minute >= 0 and minute < 60,
+        constraint second >= 0 and second < 60,
+        constraint nanosecond >= 0 and nanosecond < 1_000_000_000,
+    },
+    order [asc timestamp, asc utc_offset],
+};
+```
+
+```trendy
+uses { trendy.time };
+
+const new_year := date{year: 2024, month: 3, day: 20};
+const equinox := timestamp{
+    date: new_year,
+    time: time{hour: 3, minute: 6, second: 26, nanosecond: 0},
+};
+
+operator main{} [
+    call debug_value{v: new_year.days};
+    call debug_value{v: date{days: new_year.days + 30}.month};
+    call debug_value{v: equinox.time.hour};
+    var kathmandu := offset_timestamp{timestamp: equinox, utc_offset: 20_700};
+    call debug_value{v: kathmandu.hour};
+    call debug_value{v: kathmandu.minute};
+    var lima := offset_timestamp{timestamp: equinox, utc_offset: -18_000};
+    call debug_value{v: lima.day};
+    call debug_value{v: lima = kathmandu};
+    call debug_value{v: lima.timestamp = kathmandu.timestamp};
+];
+```
+
+- **A `timestamp` is a `date` and a `time`,** with no constraint of its own, so
+  `timestamp{date: d, time: t}` can't fail, whatever the date and the time. `t.date`
+  and `t.time` read them, without computing anything, and it is in UTC.
+- **An `offset_timestamp` is a `timestamp` and where it was written:** its other
+  representation is what the clock there showed, `kathmandu.hour`, which can be
+  another date, and `offset_timestamp{year: …, utc_offset: …}` selects one from that.
+  `utc_offset` is the same component in both (see [Possible
+  representations](#a-programs-own-types)). The offset is part of the value, as it
+  can be read (RM Prescriptions 5 and 8), so the same instant at two offsets is two
+  values, unequal, and they don't join: compare their `timestamp`s for the instant.
+- **Every value can be read, at the ends too:** a `date` is within
+  10,000,000,000,000 days of 1970-01-01, about 27 billion years, far enough from
+  overflowing that every conversion works, so a clock past the last date, which an
+  offset can show, reads as the year it is, and selects the value again.
+- **No leap seconds:** every day has 86,400 seconds, so `second: 60` fails (R0017).
+- **`days_in_month{year, month}`** is the rule a `date` is checked by, so a program can
+  check a date before selecting one, which otherwise stops it.
+- **No arithmetic yet,** and no `+` between them. Compute with a component and select
+  the result, `date{days: d.days + 30}`, as the error on `d + 30` says (A0022). There
+  is no type of intervals yet, and nothing reads the clock.
+- **Text isn't a date,** but `"2024-03-05"` where a `date` is expected is fixed to
+  `date{year: 2024, month: 3, day: 5}`, and so are ISO 8601's forms of the others
+  (A0004). `datetime` and `instant` are fixed to `timestamp`, and `datetimeoffset` to
+  `offset_timestamp` (A0003).
+- **Written in the stored representation,** as every value is, for now:
+  `date{days: 19802}`.
+
 ## Variables
 
 ```trendy
@@ -3126,9 +3276,10 @@ operator main{} [
   its cartesian ones. Components of two representations in one order
   are an error (A0059).
 - **Each component is in one representation** (A0008), since its name
-  says which, and each conversion computes each component it should,
-  once, of its type (A0009, A0008, A0004), and reads no variable
-  (A0050), so a value is the same in any representation.
+  says which, unless both conversions carry it unchanged, `c := c`, which makes it
+  the stored one's, the same component in both. Each conversion computes each
+  component it should, once, of its type (A0009, A0008, A0004), and reads no
+  variable (A0050), so a value is the same in any representation.
 - **Exactly one representation is stored,** and each other has `to` and
   `from`, once each (A0059, A0008). `to` and `from` the wrong way round
   are swapped by the fix.
@@ -6855,6 +7006,10 @@ line after a comment on its own line, such as a file's header, is kept.
 | `x += 1`, `x++`, `++x` | `x := x + 1;` |
 | `BLOB`, `bytea`, `VARBINARY`, `bytes`, `byte[]` | `array byte` |
 | `u8`, `uint8`, `octet` | `byte` |
+| `datetime`, `Instant`, `timestamptz` | `timestamp`, of `trendy.time` |
+| `datetimeoffset`, `OffsetDateTime` | `offset_timestamp`, of `trendy.time` |
+| `'2024-03-05'::date`, `DATE '2024-03-05'` | `date{year: 2024, month: 3, day: 5}` |
+| `d + 30`, of a date | `date{days: d.days + 30}` |
 | `X'DEADBEEF'`, `'\xdeadbeef'::bytea` | `x"deadbeef"` |
 | `b"ab"`, `b'ab'` | `x"6162"` |
 | `b'a'`, `0x61u8`, a C `'a'` as a number | `x'61'` |

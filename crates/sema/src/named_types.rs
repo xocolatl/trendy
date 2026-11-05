@@ -131,10 +131,9 @@ struct Names<'n> {
 
 /// Whether `representation`, of the type `name`, with the conversions `to`
 /// and `from`, converts the right way round, and has components of its
-/// own, none of those `seen` so far, after reporting why not: a subtype's
-/// representation can have its supertype's component, the same one, if it
-/// carries it unchanged both ways, as TTM's circle's `ctr` is its
-/// ellipse's.
+/// own, none of those `seen` so far, after reporting why not: it can have
+/// another's component, the same one, if it carries it unchanged both ways,
+/// as TTM's circle's `ctr` is its ellipse's.
 fn both_ways(
     name: &str,
     representation: &ast::Representation,
@@ -161,16 +160,17 @@ fn both_ways(
         ok = false;
     }
     for (component, span) in own {
-        let inherited = names.inherited.filter(|i| has(&i.taken, &component));
-        if inherited.is_some() && carries(to, &component) && carries(from, &component) {
+        if has(seen, &component) && carries(to, &component) && carries(from, &component) {
             continue;
         }
+        let inherited = names.inherited.filter(|i| has(&i.taken, &component));
         if let Some((_, first)) = seen.iter().find(|(n, _)| *n == component) {
             errors.push(errors::component_in_two(
                 name,
                 &component,
                 (span, *first),
                 inherited.map(|i| i.supertype),
+                has(names.stored, &component),
             ));
             ok = false;
         } else {

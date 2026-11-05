@@ -22,6 +22,11 @@ use crate::{Kind, Namespace, Namespaces, scope, sections};
 /// as it is written.
 const TYPE_ALIASES: &[(&str, &str)] = &[
     ("bigint", "integer"),
+    ("datetime", "timestamp"),
+    ("datetimeoffset", "offset_timestamp"),
+    ("instant", "timestamp"),
+    ("offsetdatetime", "offset_timestamp"),
+    ("timestamptz", "timestamp"),
     ("binary", "array byte"),
     ("bit", "boolean"),
     ("blob", "array byte"),
@@ -287,7 +292,11 @@ pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagno
     const MESSAGE: &str = "program has no `main` operator";
     const ENTRY_NOTE: &str = "execution starts in the operator named `main`";
 
-    let at = file.span();
+    // What its last section sees, its implementation, if it has one.
+    let at = match file.span() {
+        whole if whole.start < whole.end => Span::new(whole.end - 1, whole.end),
+        empty => empty,
+    };
     if let Some(span) = namespaces.variable("main", at) {
         return Diagnostic::error(
             Code::MissingMain,
@@ -466,6 +475,7 @@ pub(crate) fn unknown_type(
     let name = ident.text();
     let span = trendy_syntax::span(ident.text_range());
     if let Some(d) = name_clash(name, span, Namespace::Type, namespaces)
+        .or_else(|| implementation_only(ident, namespaces))
         .or_else(|| implementation_uses(ident, namespaces))
         .or_else(|| unused_unit(ident, Kind::Defined, namespaces))
     {
@@ -619,6 +629,7 @@ pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> D
     let name = ident.text();
     let span = trendy_syntax::span(ident.text_range());
     if let Some(d) = name_clash(name, span, Namespace::Type, namespaces)
+        .or_else(|| implementation_only(ident, namespaces))
         .or_else(|| implementation_uses(ident, namespaces))
         .or_else(|| unused_unit(ident, Kind::Heading, namespaces))
     {
@@ -1117,6 +1128,9 @@ pub(crate) fn type_mismatch(
     let rewritten = match (declared, written_literal(expr), value) {
         (hir::Type::Scalar(scalar), Some(written), Some(value)) => {
             rewrite_literal(*scalar, value, &written)
+        }
+        (declared, Some(_), Some(hir::Value::Text(text))) => {
+            crate::written_times::selection(declared, text)
         }
         (declared, Some(_), Some(value)) => rewrite_as_bytes(declared, value),
         _ => None,
@@ -6857,6 +6871,7 @@ pub(crate) fn component_in_two(
     component: &str,
     (span, first): (Span, Span),
     supertype: Option<&str>,
+    stored: bool,
 ) -> Diagnostic {
     let d = Diagnostic::error(
         Code::DuplicateAttribute,
@@ -6874,6 +6889,10 @@ pub(crate) fn component_in_two(
             .with_help(format!(
                 "carry `{component}` unchanged both ways, or rename it"
             )),
+        // The stored one's can be carried, as `{component} := {component}` reads it.
+        None if stored => d.with_help(format!(
+            "carry `{component}` unchanged both ways, `{component} := {component}`, or rename one of them"
+        )),
         None => d.with_help("rename one of them"),
     }
 }
@@ -7470,6 +7489,18 @@ fn plural(ty: &hir::Type) -> String {
     }
 }
 
+/// The first number `defined` is stored as, which a fix can compute with, if it is
+/// stored as nothing but its one component.
+fn numeric_component(defined: &hir::Defined) -> Option<&str> {
+    let mut components = defined.components.attributes();
+    match (components.next(), components.next()) {
+        (Some((name, hir::Type::Scalar(scalar))), None) if hir::Numeric::of(*scalar).is_some() => {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
 /// The rule that keeps the operator `op`, written `token`, from operands
 /// of type `ty`. Other languages convert a scalar to the type an operator
 /// takes, but no tuple, relation or array, whose operators are their own.
@@ -7540,6 +7571,17 @@ pub(crate) fn wrong_operand_type(
     let hir::Type::Scalar(scalar) = *ty else {
         return match (op, ty) {
             (_, hir::Type::Parameter(p)) => kind_help(d, op, p, token.text(), kinds),
+            (
+                Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Negate,
+                hir::Type::Defined(defined),
+            ) => match numeric_component(defined) {
+                Some(component) => d.with_help(format!(
+                    "a type of the program's own has no arithmetic: compute with a component, and select the result, as `{}{{{component}: x.{component} {} 1}}`",
+                    defined.written(),
+                    token.text()
+                )),
+                None => d,
+            },
             (Operator::Compare(_), hir::Type::Defined(defined)) => d
                 .with_note(format!(
                     "`{}` has no order, so its values can only be compared with `=` and `<>`, equal when their components are",
@@ -9264,7 +9306,7 @@ pub(crate) fn unchosen_operator(
 }
 
 /// What a unit's sections hold, for the notes of their errors.
-const SECTIONS_RULE: &str = "a unit's interface declares the types, headings and operators other units see, each operator by its heading alone, and its implementation gives each such operator's body, repeating its heading; the unit's variables, its versions and anything else no other unit sees are its implementation's";
+const SECTIONS_RULE: &str = "a unit's interface declares the types, headings and operators other units see, each operator by its heading alone, and its implementation gives each such operator's body, repeating its heading; the unit's variables, its versions and anything else no other unit sees are its implementation's; the interface sees only interfaces, and the implementation sees both";
 
 /// The span of `decl`'s name, or of all of it if it has none.
 fn operator_name_span(decl: &ast::Operator) -> Span {
@@ -10073,25 +10115,73 @@ pub(crate) fn interface_constraint(decl: &ast::ConstraintDecl, moved: Vec<Edit>)
     .with_suggestion("move it to the implementation", moved)
 }
 
-/// The type or heading `name`, which its unit's interface mentions at `at`
-/// but only its implementation declares, at `declared`. `moved` moves the
-/// declaration to the interface.
-pub(crate) fn implementation_name(
-    name: &str,
-    at: Span,
-    declared: Span,
-    moved: Vec<Edit>,
-) -> Diagnostic {
-    Diagnostic::error(
+/// The name `token` writes, in an interface, which sees only interfaces, if only its
+/// unit's implementation declares it: with a fix that moves a type, a heading or a
+/// constant to the interface, or declares an operator there, keeping its body.
+pub(crate) fn implementation_only(
+    token: &SyntaxToken,
+    namespaces: &Namespaces,
+) -> Option<Diagnostic> {
+    let name = token.text();
+    let at = trendy_syntax::span(token.text_range());
+    if namespaces.section_at(at) != ast::Section::Interface {
+        return None;
+    }
+    let file = token.parent_ancestors().find_map(SourceFile::cast)?;
+    let declared: Vec<ast::Item> = file
+        .items()
+        .filter(|item| {
+            ast::section_of(item.syntax()) == ast::Section::Implementation
+                && item_name(item).is_some_and(|ident| ident.text() == name)
+        })
+        .collect();
+    let first = declared.first()?;
+    let declared_at = item_name(first).map_or_else(
+        || trendy_syntax::span(first.syntax().text_range()),
+        |ident| trendy_syntax::span(ident.text_range()),
+    );
+    let d = Diagnostic::error(
         Code::InterfaceDeclaration,
         format!("the interface mentions `{name}`, which only the implementation declares"),
         at,
         "only the implementation's",
     )
-    .with_secondary(declared, "declared in the implementation")
+    .with_secondary(declared_at, "declared in the implementation")
     .with_note(SECTIONS_RULE)
-    .with_note("a unit's interface is what other units see of it, so what it mentions is in the interface too")
-    .with_suggestion("move its declaration to the interface", moved)
+    .with_note("the interface sees only interfaces, as it is what other units read, and the implementation sees both, so what the interface uses is declared there");
+    Some(match first {
+        // A variable is the implementation's, whatever reads it.
+        ast::Item::Variable(_) => {
+            d.with_help("a unit's variables are its implementation's, so read it there")
+        }
+        ast::Item::Operator(op) => {
+            match (declared.len(), sections::declared_in_interface(&file, op)) {
+                (1, Some(edits)) => {
+                    d.with_suggestion("declare it in the interface, by its heading", edits)
+                }
+                _ => d.with_help(format!(
+                    "declare the `{name}` it uses in the interface, by its heading"
+                )),
+            }
+        }
+        item => d.with_suggestion(
+            "move its declaration to the interface",
+            sections::moved(&file, item.syntax(), ast::Section::Interface),
+        ),
+    })
+}
+
+/// The name `item` declares, unless it completes what the interface declares, which
+/// the interface sees.
+fn item_name(item: &ast::Item) -> Option<SyntaxToken> {
+    let name = match item {
+        ast::Item::Operator(decl) => decl.name(),
+        ast::Item::Heading(decl) => decl.name(),
+        ast::Item::Type(decl) if decl.interface().is_none() => decl.name(),
+        ast::Item::Variable(decl) | ast::Item::Constant(decl) => decl.name(),
+        _ => None,
+    };
+    name?.ident()
 }
 
 /// The version `decl` is, in its unit's interface: a version is its

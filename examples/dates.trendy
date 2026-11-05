@@ -1,0 +1,83 @@
+uses { trendy.time };
+
+/* Dates and times: a date, a time of day, an instant, and an instant with the offset
+   it was written at. Nowruz starts at one instant, the equinox, and each city's clock
+   shows it differently, on another date in Lima. Each city's name is in its own
+   language too. */
+const nowruz := date{year: 2024, month: 3, day: 20};
+const equinox := timestamp{date: nowruz, time: time{hour: 3, minute: 6, second: 26, nanosecond: 0}};
+
+var clocks := relation {
+    { city: "Tehran", native: "تهران", utc_offset: 12_600 },
+    { city: "Kabul", native: "کابل", utc_offset: 16_200 },
+    { city: "Baku", native: "Bakı", utc_offset: 14_400 },
+    { city: "Lima", native: "Lima", utc_offset: -18_000 },
+}
+key { city };
+
+/* What each city's clock shows at `at`. */
+operator shown{
+    r: relation { city: text, native: text, utc_offset: integer },
+    at: timestamp,
+}: relation { city: text, day: integer, hour: integer, minute: integer } [
+    (r extend {
+        day := offset_timestamp{timestamp: at, utc_offset}.day,
+        hour := offset_timestamp{timestamp: at, utc_offset}.hour,
+        minute := offset_timestamp{timestamp: at, utc_offset}.minute,
+    }){
+        city,
+        day,
+        hour,
+        minute,
+    }
+];
+
+/* There is no `+` of dates: compute with its days, and select the result. Thirteen
+   days on is Sizdah Bedar. */
+operator days_after{d: date, n: integer}: date [
+    date{days: d.days + n}
+];
+
+operator main{} [
+    call debug_table{r: shown{r: clocks, at: equinox}};
+    call debug_value{v: nowruz.days};
+    var sizdah := days_after{d: nowruz, n: 12};
+    call debug_value{v: tuple { month: sizdah.month, day: sizdah.day }};
+
+    /* A leap day, and the century that isn't one. */
+    call debug_value{
+        v: date{year: 2024, month: 3, day: 1}.days - date{year: 2024, month: 2, day: 28}.days,
+    };
+    call debug_value{
+        v: date{year: 1900, month: 3, day: 1}.days - date{year: 1900, month: 2, day: 28}.days,
+    };
+
+    /* Selected in what the clock showed, the same instant at another offset is
+       another value, whose `timestamp` is the same. */
+    var tehran := offset_timestamp{
+        year: 2024,
+        month: 3,
+        day: 20,
+        hour: 6,
+        minute: 36,
+        second: 26,
+        nanosecond: 0,
+        utc_offset: 12_600,
+    };
+    var lima := offset_timestamp{timestamp: equinox, utc_offset: -18_000};
+    call debug_value{v: tehran.timestamp = equinox};
+    call debug_value{v: tehran = lima};
+    call debug_value{v: tehran.timestamp = lima.timestamp};
+    call debug_value{v: lima < tehran};
+
+    /* Ordered by the date, then the time. */
+    var later := timestamp{date: nowruz, time: time{hour: 3, minute: 6, second: 26, nanosecond: 1}};
+    call debug_value{v: equinox < later};
+    call debug_value{v: max{
+        r: relation {
+            { at: equinox },
+            { at: later },
+        },
+        of: at,
+    }.time.nanosecond};
+];

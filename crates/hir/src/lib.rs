@@ -1022,9 +1022,17 @@ impl Library {
     /// it is qualified, as that one's is.
     #[must_use]
     pub fn is_byte(identity: &str) -> bool {
+        Library::is_type_of(identity, "trendy.prelude", Library::BYTE)
+    }
+
+    /// Whether `identity` is what the program calls the type `name` of the unit
+    /// `unit` that comes with the compiler, as for [`Library::is_byte`]. Its
+    /// name, without the unit's, if nothing else declares one of that name.
+    #[must_use]
+    pub fn is_type_of(identity: &str, unit: &str, name: &str) -> bool {
         match identity.rsplit_once("::") {
-            Some((unit, name)) => unit == "trendy.prelude" && name == Library::BYTE,
-            None => identity == Library::BYTE,
+            Some((of, written)) => of == unit && written == name,
+            None => identity == name,
         }
     }
 

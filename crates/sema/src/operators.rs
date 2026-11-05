@@ -497,6 +497,20 @@ impl Operators {
             .map(|signature| signature.id)
     }
 
+    /// The operators named `name` that `unit` declares, in either section.
+    pub(crate) fn declared_in(
+        &self,
+        name: &str,
+        unit: hir::FileId,
+    ) -> impl Iterator<Item = &Signature> {
+        self.by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|&id| self.get(id))
+            .filter(move |s| s.unit == unit)
+    }
+
     /// The operators named `name` that `viewer` sees: its own unit's, then
     /// the prelude's, then the used units', by their names, as they are in
     /// no order, each unit's in the order they are defined. Its own unit's

@@ -19,8 +19,8 @@ the compiler was built), listed in `trendy_prelude::UNITS`: the prelude,
 built-in types and most built-in operators, and whose implementation
 defines operators in trendy; `trendy.files`,
 which declares the operators that read files, built-ins too, and the
-errors only they give; and the catalog, `trendy.catalog` (see
-[sema](#sema-trendy_sema)). The loader parses them (`trendy_load::library`),
+errors only they give; `trendy.uuid` and `trendy.time`, of ordinary trendy;
+and the catalog, `trendy.catalog` (see [sema](#sema-trendy_sema)). The loader parses them (`trendy_load::library`),
 and drivers give them to sema next to the program's units' files, the
 library as a list, in which sema finds the prelude and the catalog by
 their names. Sema checks them together, as one program (`ast::Program`,

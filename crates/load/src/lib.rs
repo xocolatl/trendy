@@ -422,6 +422,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "trendy.time",
                 "trendy.uuid",
                 "trendy.files",
                 "trendy.catalog",

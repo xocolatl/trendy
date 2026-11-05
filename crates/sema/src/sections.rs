@@ -5,7 +5,8 @@
 //! see, each operator by its heading alone; the implementation repeats an
 //! interface operator's heading with its body, and keeps the unit's
 //! variables, its versions, and whatever else no other unit sees. What
-//! comes before either section's header is the implementation's.
+//! comes before either section's header is the implementation's. The interface
+//! sees only interfaces, and the implementation sees both.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,32 +16,12 @@ use trendy_syntax::{SyntaxKind, SyntaxNode};
 
 use crate::errors;
 
-/// Report what `file`'s interface can't have that its signatures don't
-/// show: variables, which a unit never exports, and constraints on them,
-/// and names of types or
-/// headings only its implementation declares, which other units couldn't
-/// see (A0067), each once.
+/// Report what `file`'s interface can't have: variables, which a unit never
+/// exports, and constraints on them (A0067). What it can see is lookup's to say
+/// (see [`crate::errors::implementation_only`]).
 pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
     uses_placement(file, errors);
     types_completed(file, errors);
-    let mut implementation: BTreeMap<String, SyntaxNode> = BTreeMap::new();
-    for item in file.items() {
-        let (name, node) = match &item {
-            // The part of a type the interface declares, which it completes.
-            Item::Type(decl) if decl.interface().is_some() => continue,
-            Item::Type(decl) => (decl.name(), decl.syntax()),
-            Item::Heading(decl) => (decl.name(), decl.syntax()),
-            _ => continue,
-        };
-        if ast::section_of(node) == Section::Implementation
-            && let Some(ident) = name.and_then(|n| n.ident())
-        {
-            implementation
-                .entry(ident.text().to_string())
-                .or_insert_with(|| node.clone());
-        }
-    }
-    let mut reported = BTreeSet::new();
     for item in file.items() {
         if let Item::Variable(decl) = &item {
             if ast::section_of(decl.syntax()) == Section::Interface {
@@ -57,20 +38,6 @@ pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
                 errors.push(errors::interface_constraint(
                     decl,
                     moved(file, decl.syntax(), Section::Implementation),
-                ));
-            }
-            continue;
-        }
-        for (name, at) in mentioned(&item) {
-            let Some(declared) = implementation.get(&name) else {
-                continue;
-            };
-            if reported.insert(name.clone()) {
-                errors.push(errors::implementation_name(
-                    &name,
-                    at,
-                    declared_at(declared),
-                    moved(file, declared, Section::Interface),
                 ));
             }
         }
@@ -462,59 +429,6 @@ pub(crate) fn into_interface_uses(file: &SourceFile, unit: &str) -> Vec<Edit> {
     edits
 }
 
-/// The names of types and headings `item`, if it is in its unit's
-/// interface, mentions where other units see them, unqualified, as a
-/// qualified one is another unit's, each with where: an
-/// operator's parameters' and result's types, a database's relvar's type,
-/// a heading's attributes', and
-/// a type's components' and supertype's. Its body, its constraints and its
-/// conversions are its unit's own.
-fn mentioned(item: &Item) -> Vec<(String, Span)> {
-    let parts: Vec<SyntaxNode> = match item {
-        Item::Operator(op) if ast::section_of(op.syntax()) == Section::Interface => op
-            .params()
-            .map(|p| p.syntax().clone())
-            .into_iter()
-            .chain(op.result().map(|r| r.syntax().clone()))
-            .collect(),
-        Item::Relvar(decl) | Item::Constant(decl)
-            if ast::section_of(decl.syntax()) == Section::Interface =>
-        {
-            decl.type_expr()
-                .map(|t| t.syntax().clone())
-                .into_iter()
-                .collect()
-        }
-        Item::Heading(decl) if ast::section_of(decl.syntax()) == Section::Interface => decl
-            .heading()
-            .map(|h| h.syntax().clone())
-            .into_iter()
-            .collect(),
-        Item::Type(decl) if ast::section_of(decl.syntax()) == Section::Interface => decl
-            .representations()
-            .filter_map(|r| r.components())
-            .map(|h| h.syntax().clone())
-            .chain(decl.supertype().map(|s| s.syntax().clone()))
-            .collect(),
-        _ => Vec::new(),
-    };
-    parts
-        .iter()
-        .flat_map(SyntaxNode::descendants)
-        .filter_map(|node| {
-            // A qualified name is another unit's.
-            let (qualifier, ident) = ast::type_reference(&node)?;
-            if qualifier.is_some() {
-                return None;
-            }
-            Some((
-                ident.text().to_string(),
-                trendy_syntax::span(ident.text_range()),
-            ))
-        })
-        .collect()
-}
-
 /// Where the declaration `node` is named, for a label.
 fn declared_at(node: &SyntaxNode) -> Span {
     let name = ast::TypeDecl::cast(node.clone())
@@ -537,6 +451,32 @@ pub(crate) fn moved(file: &SourceFile, node: &SyntaxNode, to: Section) -> Vec<Ed
     let declaration =
         text[start - file_start..usize::from(node.text_range().end()) - file_start].to_string();
     vec![removal(file, node), written_at_end(file, to, &declaration)]
+}
+
+/// The edits that declare the operator `op`, of `file`'s implementation, in its
+/// interface too, by its heading, with the comments just before it, which say what
+/// it is to the units that see it, leaving its definition where it is. `None` if it
+/// has no body to leave.
+pub(crate) fn declared_in_interface(file: &SourceFile, op: &ast::Operator) -> Option<Vec<Edit>> {
+    let node = op.syntax();
+    let start = attached_start(node);
+    let text = file.syntax().text().to_string();
+    let file_start = usize::from(file.syntax().text_range().start());
+    let body = usize::from(op.body()?.syntax().text_range().start());
+    let heading = text[start - file_start..body - file_start].trim_end();
+    let mut edits = vec![written_at_end(
+        file,
+        Section::Interface,
+        &format!("{heading};"),
+    )];
+    let own_start = usize::from(node.text_range().start());
+    if start != own_start {
+        edits.push(Edit {
+            span: Span::new(start, own_start),
+            replacement: String::new(),
+        });
+    }
+    Some(edits)
 }
 
 /// The edit that removes the declaration `node`, of `file`, with the

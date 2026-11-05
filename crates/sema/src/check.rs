@@ -616,6 +616,12 @@ impl<'a> Checker<'a> {
                     errors.push(errors::database_as_value(name, span));
                     return None;
                 }
+                if let Some(ident) = name_ref.ident()
+                    && let Some(error) = errors::implementation_only(&ident, namespaces)
+                {
+                    errors.push(error);
+                    return None;
+                }
                 if let Some((meant, written)) = self.constant_elsewhere(name_ref, name, span) {
                     errors.push(errors::constant_as_value(name, written, &meant));
                     return None;
@@ -1202,7 +1208,10 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) {
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-        if self.names.namespaces().constant(name, span).is_some() {
+        // What is declared, where it can't be seen, whatever else it looks like.
+        if let Some(error) = errors::implementation_only(ident, self.names.namespaces()) {
+            errors.push(error);
+        } else if self.names.namespaces().constant(name, span).is_some() {
             errors.push(errors::constant_called(name, span, written));
         } else if self.names.has_value(name, span) {
             errors.push(errors::not_an_operator(name, span, "a value"));

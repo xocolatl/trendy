@@ -17,6 +17,7 @@ mod ops;
 mod scope;
 mod sections;
 mod types;
+mod written_times;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -95,7 +96,21 @@ fn units_checked(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
         sections::check(unit, errors);
     }
     files.used_have_a_use(errors);
-    check(files, errors)
+    let checked = check(files, errors);
+    // What the interface mentions several times, reported at the first, as its
+    // fix is the same.
+    errors.sort_by_key(|d| d.span().start);
+    let mut seen: Vec<(String, Vec<trendy_diag::Suggestion>)> = Vec::new();
+    errors.retain(|d| {
+        if d.code != trendy_diag::Code::InterfaceDeclaration || d.suggestions.is_empty() {
+            return true;
+        }
+        let fix = (d.message.clone(), d.suggestions.clone());
+        let first = !seen.contains(&fix);
+        seen.push(fix);
+        first
+    });
+    checked
 }
 
 /// Check the units that come with the compiler, the `library`, alone, as
@@ -559,8 +574,7 @@ fn entry(
 ) -> Option<hir::OperatorId> {
     // The main unit's own, not another's it sees.
     let mains: Vec<&operators::Signature> = operators
-        .overloads("main", file.span())
-        .filter(|s| s.unit == namespaces.unit_at(file.span()))
+        .declared_in("main", namespaces.unit_at(file.span()))
         .collect();
     let main = mains
         .iter()
@@ -810,6 +824,12 @@ impl Namespaces {
     /// The unit `at` is in, whose declarations a name written there sees.
     pub(crate) fn unit_at(&self, at: Span) -> hir::FileId {
         self.units.at(at)
+    }
+
+    /// The section of its unit `at` is in, which says what a name written there
+    /// sees.
+    pub(crate) fn section_at(&self, at: Span) -> ast::Section {
+        self.viewer(at).section
     }
 
     /// The kind named `name`.
@@ -14968,6 +14988,477 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         })
     }
 
+    /// The value of `expression`, of `trendy.time`, folded.
+    fn time_value(expression: &str) -> String {
+        let vars = variables(&format!("uses {{ trendy.time }};\nvar a := {expression};"));
+        vars[0].init.to_string()
+    }
+
+    #[test]
+    fn dates_count_days_from_1970() {
+        // As Python's `datetime` has them.
+        for (year, month, day, days) in [
+            (1970, 1, 1, 0),
+            (1969, 12, 31, -1),
+            (2000, 2, 29, 11_016),
+            (1900, 3, 1, -25_508),
+            (1600, 2, 29, -135_081),
+            (1, 1, 1, -719_162),
+            (9999, 12, 31, 2_932_896),
+            (2024, 3, 20, 19_802),
+        ] {
+            let selected = format!("date{{year: {year}, month: {month}, day: {day}}}");
+            assert_eq!(time_value(&format!("{selected}.days")), days.to_string());
+            let back = format!("date{{days: {days}}}");
+            assert_eq!(time_value(&format!("{back}.year")), year.to_string());
+            assert_eq!(time_value(&format!("{back}.month")), month.to_string());
+            assert_eq!(time_value(&format!("{back}.day")), day.to_string());
+        }
+        // Year 0 is 1 BC, a leap year, and before it, the years go on down.
+        assert_eq!(time_value("date{year: 0, month: 2, day: 29}.year"), "0");
+        assert_eq!(time_value("date{year: -4, month: 2, day: 29}.day"), "29");
+        for broken in [
+            "date{year: 2023, month: 2, day: 29}",
+            "date{year: 1900, month: 2, day: 29}",
+            "date{year: 2024, month: 13, day: 1}",
+            "date{year: 2024, month: 4, day: 31}",
+            "date{year: 2024, month: 1, day: 0}",
+            "date{days: 10_000_000_000_001}",
+            "date{days: -10_000_000_000_001}",
+            "date{year: 30_000_000_001, month: 1, day: 1}",
+            "date{year: 30_000_000_000, month: 1, day: 1}",
+            // Far enough out to overflow, were it not for the bound.
+            "date{year: 1_000_000_000_000_000_000, month: 1, day: 1}",
+            "time{nanos_of_day: -1}",
+            "time{nanos_of_day: 86_400_000_000_000}",
+            "time{hour: 24, minute: 0, second: 0, nanosecond: 0}",
+            "time{hour: 0, minute: 60, second: 0, nanosecond: 0}",
+            "time{hour: 23, minute: 59, second: 60, nanosecond: 0}",
+            // Not only at the day's end, where it would run past it anyway.
+            "time{hour: 12, minute: 0, second: 60, nanosecond: 0}",
+            "offset_timestamp{year: 2024, month: 3, day: 5, hour: 12, minute: 0, second: 60, nanosecond: 0, utc_offset: 0}",
+            "offset_timestamp{year: 2024, month: 3, day: 5, hour: 12, minute: 60, second: 0, nanosecond: 0, utc_offset: 0}",
+            "offset_timestamp{year: 2024, month: 3, day: 5, hour: 24, minute: 0, second: 0, nanosecond: 0, utc_offset: 0}",
+            "offset_timestamp{year: 2024, month: 2, day: 30, hour: 0, minute: 0, second: 0, nanosecond: 0, utc_offset: 0}",
+            "offset_timestamp{year: 2024, month: 13, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0, utc_offset: 0}",
+            "offset_timestamp{year: 2024, month: 3, day: 5, hour: 0, minute: 0, second: 0, nanosecond: 1_000_000_000, utc_offset: 0}",
+            "time{hour: 0, minute: 0, second: 0, nanosecond: 1_000_000_000}",
+        ] {
+            let source = format!("uses {{ trendy.time }};\nvar a := {broken};{MAIN}");
+            assert_eq!(codes(&source), [Code::BrokenConstraint], "{broken}");
+        }
+        // The date first, whatever the times, then the time.
+        let at = |days: i64, nanos: i64| {
+            format!("timestamp{{date: date{{days: {days}}}, time: time{{nanos_of_day: {nanos}}}}}")
+        };
+        assert_eq!(time_value(&format!("{} < {}", at(1, 5), at(2, 0))), "true");
+        assert_eq!(time_value(&format!("{} < {}", at(1, 0), at(1, 5))), "true");
+        // Each end of the range is a date.
+        assert_eq!(
+            time_value("date{days: 10_000_000_000_000}.year"),
+            "27379072039"
+        );
+        assert_eq!(
+            time_value("date{days: -10_000_000_000_000}.year"),
+            "-27379068100"
+        );
+    }
+
+    #[test]
+    fn a_time_is_the_nanoseconds_of_its_day() {
+        assert_eq!(
+            time_value("time{hour: 0, minute: 0, second: 0, nanosecond: 0}.nanos_of_day"),
+            "0"
+        );
+        assert_eq!(
+            time_value(
+                "time{hour: 23, minute: 59, second: 59, nanosecond: 999_999_999}.nanos_of_day"
+            ),
+            "86399999999999"
+        );
+        for (read, value) in [
+            ("hour", 13),
+            ("minute", 7),
+            ("second", 9),
+            ("nanosecond", 5),
+        ] {
+            assert_eq!(
+                time_value(&format!("time{{nanos_of_day: 47_229_000_000_005}}.{read}")),
+                value.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn an_offset_is_part_of_the_value_and_moves_the_clock() {
+        let at = |date: &str, time: &str| format!("timestamp{{date: {date}, time: {time}}}");
+        let noon = at(
+            "date{year: 2024, month: 3, day: 5}",
+            "time{hour: 12, minute: 0, second: 0, nanosecond: 7}",
+        );
+        let offset =
+            |seconds: i64| format!("offset_timestamp{{timestamp: {noon}, utc_offset: {seconds}}}");
+        // Ahead of UTC, the clock shows later, and behind, earlier.
+        assert_eq!(time_value(&format!("{}.hour", offset(3_600))), "13");
+        assert_eq!(time_value(&format!("{}.hour", offset(-3_600))), "11");
+        assert_eq!(time_value(&format!("{}.minute", offset(20_700))), "45");
+        assert_eq!(time_value(&format!("{}.nanosecond", offset(20_700))), "7");
+        assert_eq!(
+            time_value(&format!("{}.utc_offset", offset(20_700))),
+            "20700"
+        );
+        // Past midnight, each way, onto the next month.
+        let last = at(
+            "date{year: 2024, month: 2, day: 29}",
+            "time{hour: 23, minute: 30, second: 0, nanosecond: 0}",
+        );
+        let first = at(
+            "date{year: 2024, month: 3, day: 1}",
+            "time{hour: 0, minute: 30, second: 0, nanosecond: 0}",
+        );
+        let later = format!("offset_timestamp{{timestamp: {last}, utc_offset: 3_600}}");
+        assert_eq!(time_value(&format!("{later}.month")), "3");
+        assert_eq!(time_value(&format!("{later}.day")), "1");
+        assert_eq!(time_value(&format!("{later}.hour")), "0");
+        let earlier = format!("offset_timestamp{{timestamp: {first}, utc_offset: -3_600}}");
+        assert_eq!(time_value(&format!("{earlier}.month")), "2");
+        assert_eq!(time_value(&format!("{earlier}.day")), "29");
+        assert_eq!(time_value(&format!("{earlier}.hour")), "23");
+        // The same instant at two offsets: two values, and one instant.
+        assert_eq!(
+            time_value(&format!("{} = {}", offset(0), offset(3_600))),
+            "false"
+        );
+        assert_eq!(
+            time_value(&format!(
+                "{}.timestamp = {}.timestamp",
+                offset(0),
+                offset(3_600)
+            )),
+            "true"
+        );
+        assert_eq!(
+            time_value(&format!("{} < {}", offset(0), offset(3_600))),
+            "true"
+        );
+        // The instant first, whatever the offsets.
+        let later_by_a_nanosecond = at(
+            "date{year: 2024, month: 3, day: 5}",
+            "time{hour: 12, minute: 0, second: 0, nanosecond: 8}",
+        );
+        assert_eq!(
+            time_value(&format!(
+                "offset_timestamp{{timestamp: {later_by_a_nanosecond}, utc_offset: 0}} > {}",
+                offset(3_600)
+            )),
+            "true"
+        );
+        // Selected by the clock, it is the same value.
+        let written = "offset_timestamp{year: 2024, month: 3, day: 5, hour: 17, minute: 45, second: 0, nanosecond: 7, utc_offset: 20_700}";
+        assert_eq!(
+            time_value(&format!("{written} = {}", offset(20_700))),
+            "true"
+        );
+        // Past the last date, read, and selected again, it is what it was.
+        let end = at(
+            "date{days: 10_000_000_000_000}",
+            "time{nanos_of_day: 86_399_999_999_999}",
+        );
+        let past = format!("offset_timestamp{{timestamp: {end}, utc_offset: 86_399}}");
+        assert_eq!(time_value(&format!("{past}.day")), "21");
+        let again = format!(
+            "offset_timestamp{{year: {past}.year, month: {past}.month, day: {past}.day, hour: {past}.hour, minute: {past}.minute, second: {past}.second, nanosecond: {past}.nanosecond, utc_offset: {past}.utc_offset}} = {past}"
+        );
+        assert_eq!(time_value(&again), "true");
+        for broken in [86_400, -86_400] {
+            let source = format!(
+                "uses {{ trendy.time }};\nvar a := {};{MAIN}",
+                offset(broken)
+            );
+            assert_eq!(codes(&source), [Code::BrokenConstraint], "{broken}");
+        }
+    }
+
+    #[test]
+    fn a_component_carried_unchanged_is_in_both_representations() {
+        let shared = |to: &str, from: &str| {
+            format!(
+                "type t {{\n    {{ a: integer, b: integer }},\n    {{ c: integer, b: integer }}\n        to {{ a := c, {to} }}\n        from {{ c := a, {from} }},\n}};\n"
+            )
+        };
+        let carried = shared("b := b", "b := b");
+        let vars = variables(&format!(
+            "{carried}var one := t{{c: 1, b: 2}};\nvar a := one.a;\nvar b := one.b;\nvar same := one = t{{a: 1, b: 2}};"
+        ));
+        assert_eq!(vars[1].init.to_string(), "1");
+        assert_eq!(vars[2].init.to_string(), "2");
+        assert_eq!(vars[3].init.to_string(), "true");
+        // Anything else makes it two components of one name.
+        for (to, from) in [("b := b + 1", "b := b"), ("b := b", "b := b - 1")] {
+            let source = format!("{}operator main{{}} [];", shared(to, from));
+            let errors = errors(&source);
+            assert_eq!(errors[0].code, Code::DuplicateAttribute, "{errors:#?}");
+            assert!(errors[0].help[0].contains("`b := b`"), "{errors:#?}");
+        }
+        // Of two that aren't the stored one, there is nothing to carry.
+        let source = "type t {\n    { a: integer },\n    { b: integer } to { a := b } from { b := a },\n    { b: integer, c: integer } to { a := b + c } from { b := a, c := 0 },\n};\noperator main{} [];";
+        let errors = errors(source);
+        assert_eq!(errors[0].code, Code::DuplicateAttribute, "{errors:#?}");
+        assert_eq!(errors[0].help[0], "rename one of them");
+    }
+
+    #[test]
+    fn other_languages_ways_with_dates_and_times_are_fixed() {
+        let start = "uses { trendy.time };\n";
+        let fixed = |written: &str| fix(&format!("{start}{written}{MAIN}"));
+        for (written, right) in [
+            ("var a: datetime := 1;", "var a: timestamp := 1;"),
+            ("var a: DateTime := 1;", "var a: timestamp := 1;"),
+            ("var a: Instant := 1;", "var a: timestamp := 1;"),
+            ("var a: timestamptz := 1;", "var a: timestamp := 1;"),
+            (
+                "var a: datetimeoffset := 1;",
+                "var a: offset_timestamp := 1;",
+            ),
+            (
+                "var a: OffsetDateTime := 1;",
+                "var a: offset_timestamp := 1;",
+            ),
+            (
+                "var a: date := \"2024-03-05\";",
+                "var a: date := date{year: 2024, month: 3, day: 5};",
+            ),
+            (
+                "var a: time := \"13:07:09.5\";",
+                "var a: time := time{hour: 13, minute: 7, second: 9, nanosecond: 500000000};",
+            ),
+            (
+                "var a: timestamp := \"2024-03-05T13:07:09Z\";",
+                "var a: timestamp := timestamp{date: date{year: 2024, month: 3, day: 5}, time: time{hour: 13, minute: 7, second: 9, nanosecond: 0}};",
+            ),
+            (
+                "var a: timestamp := \"2024-03-05 13:07:09\";",
+                "var a: timestamp := timestamp{date: date{year: 2024, month: 3, day: 5}, time: time{hour: 13, minute: 7, second: 9, nanosecond: 0}};",
+            ),
+            (
+                "var a: offset_timestamp := \"2024-03-05T18:52:09+05:45\";",
+                "var a: offset_timestamp := offset_timestamp{year: 2024, month: 3, day: 5, hour: 18, minute: 52, second: 9, nanosecond: 0, utc_offset: 20700};",
+            ),
+            (
+                "var a: offset_timestamp := \"2024-03-05 13:07:09-05:00\";",
+                "var a: offset_timestamp := offset_timestamp{year: 2024, month: 3, day: 5, hour: 13, minute: 7, second: 9, nanosecond: 0, utc_offset: -18000};",
+            ),
+        ] {
+            assert_eq!(fixed(written), format!("{start}{right}{MAIN}"), "{written}");
+        }
+        // Each fix compiles, if what it writes is a value.
+        let good = format!("{start}var a: date := \"2024-03-05\";{MAIN}");
+        assert!(analyze_str(&fix(&good)).is_ok(), "{}", fix(&good));
+        // A date that isn't one is the selector's to report, once it is written.
+        let bad = fix(&format!("{start}var a: date := \"2024-02-30\";{MAIN}"));
+        assert_eq!(codes(&bad), [Code::BrokenConstraint]);
+        // Not of this form, and of no other type, there is only the other way.
+        for written in [
+            "var a: date := \"March 5\";",
+            "var a: date := \"2024-3-5\";",
+            "var a: integer := \"2024-03-05\";",
+            "var a: timestamp := \"2024-03-05\";",
+        ] {
+            let source = format!("{start}{written}{MAIN}");
+            assert!(
+                fix(&source).contains(": text :=") || !fix(&source).contains("year:"),
+                "{written}"
+            );
+        }
+        // A program's own `date` isn't `trendy.time`'s.
+        let own = "type date { { n: integer } };\nvar a: date := \"2024-03-05\";\n";
+        assert!(!fix(&format!("{own}{MAIN}")).contains("year:"));
+        // Arithmetic is of a component.
+        let errors = errors(&format!("{start}var a := date{{days: 0}} + 1;{MAIN}"));
+        assert_eq!(errors[0].code, Code::WrongOperandType);
+        assert!(
+            errors[0].help[0].contains("`date{days: x.days + 1}`"),
+            "{errors:#?}"
+        );
+        // Of a type of several components, which to compute with isn't known.
+        let source = format!(
+            "{start}var a := timestamp{{date: date{{days: 0}}, time: time{{nanos_of_day: 0}}}} - 1;{MAIN}"
+        );
+        let found = self::errors(&source);
+        assert_eq!(found[0].code, Code::WrongOperandType);
+        assert!(found[0].help.is_empty(), "{found:#?}");
+    }
+
+    /// The program of `interface` and `implementation`, with a `main`.
+    fn sectioned(interface: &str, implementation: &str) -> String {
+        format!(
+            "interface\n\n{interface}\n\nimplementation\n\n{implementation}\n\noperator main{{}} [];\n"
+        )
+    }
+
+    #[test]
+    fn an_interface_sees_only_interfaces() {
+        let mention = "the interface mentions";
+        let is_small = "operator is_small{a: integer}: boolean [\n    a < 5\n];";
+        // Each thing an interface can write, of what its implementation declares.
+        for (interface, implementation) in [
+            (
+                "type t { { a: integer, constraint is_small{a} } };",
+                is_small,
+            ),
+            (
+                "type t { { a: integer, constraint is_small{a: a} } };",
+                is_small,
+            ),
+            ("const shown := is_small{a: 1};", is_small),
+            (
+                "operator f{a: integer, constraint is_small{a: a}};",
+                &format!("{is_small}\n\noperator f{{a: integer}} [];"),
+            ),
+            (
+                "type t { { a: integer, constraint a < low } };",
+                "const low := 3;",
+            ),
+            ("const shown := low + 1;", "const low := 3;"),
+            (
+                "operator f{a: secret};",
+                "type secret { { s: integer } };\n\noperator f{a: secret} [];",
+            ),
+            (
+                "type t { { a: secret } };",
+                "type secret { { s: integer } };",
+            ),
+            (
+                "heading h := { a: secret };",
+                "type secret { { s: integer } };",
+            ),
+            (
+                "operator f{a: relation h};",
+                "heading h := { x: integer };\n\noperator f{a: relation h} [];",
+            ),
+            // A type named in a constraint, not only in a signature.
+            (
+                "type t { { a: integer, constraint is_empty{r: relation h {}} } };",
+                "heading h := { x: integer };",
+            ),
+        ] {
+            let source = sectioned(interface, implementation);
+            let found = errors(&source);
+            assert_eq!(
+                found[0].code,
+                Code::InterfaceDeclaration,
+                "{interface}: {found:#?}"
+            );
+            assert!(
+                found[0].message.starts_with(mention),
+                "{interface}: {found:#?}"
+            );
+            let fixed = fix(&source);
+            let after = analyze_str(&fixed);
+            assert!(
+                after
+                    .as_ref()
+                    .err()
+                    .is_none_or(|e| e.iter().all(|d| !d.message.starts_with(mention))),
+                "{fixed}\n{after:#?}"
+            );
+        }
+        // The implementation sees both.
+        let both = sectioned(
+            "type t { { a: integer } };\n\noperator f{}: t;",
+            "operator g{}: t [\n    f{}\n];\n\noperator f{}: t [\n    t{a: 1}\n];",
+        );
+        assert!(analyze_str(&both).is_ok(), "{both}");
+        // An operator's body stays where it is, its comment goes with its heading.
+        let commented = sectioned(
+            "type t { { a: integer, constraint is_small{a: a} } };",
+            "/* Whether it is small. */\noperator is_small{a: integer}: boolean [\n    a < 5\n];",
+        );
+        let fixed = fix(&commented);
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        let (interface, implementation) = fixed.split_once("implementation").unwrap();
+        assert!(
+            interface
+                .contains("/* Whether it is small. */\noperator is_small{a: integer}: boolean;"),
+            "{fixed}"
+        );
+        assert!(implementation.contains("a < 5"), "{fixed}");
+        assert!(!implementation.contains("/* Whether"), "{fixed}");
+        // Declared, it isn't Tutorial D's `IS_T`, whatever its name looks like.
+        let named_like_a_test = sectioned(
+            "type percentage { { n: integer, constraint is_percentage{n} } };",
+            "operator is_percentage{n: integer}: boolean [\n    n >= 0 and n <= 100\n];",
+        );
+        assert_eq!(codes(&named_like_a_test), [Code::InterfaceDeclaration]);
+        assert!(analyze_str(&fix(&named_like_a_test)).is_ok());
+        // Mentioned twice, reported once, as the fix is one.
+        let twice = sectioned(
+            "type t { { a: integer, constraint a < low and a > -low } };",
+            "const low := 3;",
+        );
+        assert_eq!(codes(&twice), [Code::InterfaceDeclaration]);
+        // Of several overloads, the one meant isn't certain.
+        let overloads = sectioned(
+            "type t { { a: integer, constraint is_small{a: a} } };",
+            "operator is_small{a: integer}: boolean [\n    a < 5\n];\n\noperator is_small{b: integer}: boolean [\n    b < 6\n];",
+        );
+        let found = errors(&overloads);
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+        assert!(found[0].help[0].contains("by its heading"), "{found:#?}");
+        // A variable stays in the implementation.
+        let variable = sectioned(
+            "type t { { a: integer, constraint a < kept } };",
+            "var kept := 3;",
+        );
+        let found = errors(&variable);
+        assert_eq!(found[0].code, Code::InterfaceDeclaration, "{found:#?}");
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+        // What only the implementation declares hides nothing from the interface:
+        // there, the name is the prelude's, and in the implementation, its own.
+        let own = sectioned(
+            "type t { { a: array integer, constraint length{a: a} > 0 } };",
+            "operator length{of: integer}: integer [\n    of\n];\n\nvar one := length{of: 1};",
+        );
+        let program = analyze_str(&own);
+        assert!(program.is_ok(), "{own}\n{program:#?}");
+        // Another unit sees the interface, not the implementation.
+        let unit = sectioned(
+            "operator f{}: integer;",
+            "operator g{}: integer [\n    1\n];\n\noperator f{}: integer [\n    g{}\n];",
+        );
+        let found = analyze_units(&[
+            (
+                "program",
+                "uses { lib };\n\nvar a := g{};\n\noperator main{} [];",
+            ),
+            ("lib", &unit),
+        ])
+        .unwrap_err();
+        assert_eq!(found[0].code, Code::UnknownName, "{found:#?}");
+    }
+
+    #[test]
+    fn days_in_month_is_the_rule_a_date_is_checked_by() {
+        for (year, month, days) in [
+            (2024, 2, 29),
+            (2023, 2, 28),
+            (2000, 2, 29),
+            (1900, 2, 28),
+            (2024, 1, 31),
+            (2024, 4, 30),
+            (2024, 12, 31),
+        ] {
+            assert_eq!(
+                time_value(&format!("days_in_month{{year: {year}, month: {month}}}")),
+                days.to_string()
+            );
+        }
+        let source = format!(
+            "uses {{ trendy.time }};\nvar a := days_in_month{{year: 2024, month: 13}};{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::BrokenCallConstraint]);
+    }
+
     #[test]
     fn a_unit_has_main_or_an_interface_or_both() {
         let codes = |units: &[(&str, &str)]| -> Vec<Code> {
@@ -15035,6 +15526,13 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         // One with `main` can be run on its own, so it is of use.
         let tool = "operator main{} [];";
         assert!(analyze_units(&[("program", main), ("helper", tool)]).is_ok());
+        // But a program starts in its own `main`, not one in a unit it uses.
+        let errors = analyze_units(&[
+            ("program", "uses { helper };\n\noperator f{} [];"),
+            ("helper", tool),
+        ])
+        .unwrap_err();
+        assert_eq!(errors[0].code, Code::MissingMain, "{errors:#?}");
     }
 
     #[test]

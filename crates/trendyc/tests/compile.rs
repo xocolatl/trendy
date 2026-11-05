@@ -9481,3 +9481,210 @@ fn check_writes_nothing_and_needs_no_main_of_a_unit_with_an_interface() {
     assert!(!out.status.success());
     assert!(String::from_utf8(out.stderr).unwrap().starts_with("usage:"));
 }
+
+#[test]
+fn dates() {
+    let (code, stderr) = run_example("dates");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "┌────────┬─────┬──────┬────────┐",
+            "│ city   │ day │ hour │ minute │",
+            "├────────┼─────┼──────┼────────┤",
+            "│ Baku   │  20 │    7 │      6 │",
+            "│ Kabul  │  20 │    7 │     36 │",
+            "│ Lima   │  19 │   22 │      6 │",
+            "│ Tehran │  20 │    6 │     36 │",
+            "└────────┴─────┴──────┴────────┘",
+            "19802",
+            "tuple { day: 1, month: 4 }",
+            "2",
+            "1",
+            "true",
+            "false",
+            "true",
+            "true",
+            "true",
+            "1",
+        ]
+    );
+}
+
+/// Every day of a whole cycle of the calendar, which then repeats, either way
+/// from 1970.
+#[test]
+fn dates_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "dates_running",
+        r#"
+uses { trendy.time };
+
+operator main{} [
+    var start := parse_integer{from: "-146097"};
+    var days := start;
+    var previous := date{days: days - 1};
+    var wrong := 0;
+    while days <= 146097 loop [
+        var d := date{days};
+        var back := date{year: d.year, month: d.month, day: d.day};
+        var follows := if d.day = 1 then
+                previous.day >= 28
+                    and (d.month = previous.month + 1
+                        or d.month = 1 and previous.month = 12 and d.year = previous.year + 1)
+            else
+                d.day = previous.day + 1 and d.month = previous.month and d.year = previous.year;
+        if back <> d or not follows then [
+            wrong := wrong + 1;
+        ];
+        previous := d;
+        days := days + 1;
+    ];
+    call debug_value{v: wrong};
+];
+"#,
+    );
+    assert_eq!((code, stderr.as_str()), (0, "0\n"));
+}
+
+/// What an offset does at each end of the range, and what the types are like
+/// to use, with nothing known when compiling.
+#[test]
+fn timestamps_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "timestamps_running",
+        r#"
+uses { trendy.time };
+
+operator main{} [
+    var start := parse_integer{from: "0"};
+    var dates := array [
+        date{days: start},
+        date{days: start + 10_000_000_000_000},
+        date{days: start - 10_000_000_000_000},
+    ];
+    var clocks := array [
+        time{nanos_of_day: 0},
+        time{nanos_of_day: 1},
+        time{hour: 12, minute: 0, second: 0, nanosecond: 0},
+        time{nanos_of_day: 86_399_999_999_999},
+    ];
+    var offsets := array [-86_399, -18_000, 0, 1, 20_700, 86_399];
+    var mismatched := 0;
+    var seen := 0;
+    for d in dates loop [
+        for t in clocks loop [
+            for o in offsets loop [
+                var at := offset_timestamp{timestamp: timestamp{date: d, time: t}, utc_offset: o};
+                var again := offset_timestamp{
+                    year: at.year,
+                    month: at.month,
+                    day: at.day,
+                    hour: at.hour,
+                    minute: at.minute,
+                    second: at.second,
+                    nanosecond: at.nanosecond,
+                    utc_offset: at.utc_offset,
+                };
+                seen := seen + 1;
+                if again <> at then [
+                    mismatched := mismatched + 1;
+                ];
+            ];
+        ];
+    ];
+    call debug_value{v: tuple { mismatched, seen }};
+
+    /* Stored, ordered and keyed like anything else. */
+    var a := timestamp{date: dates[1], time: clocks[2]};
+    var b := timestamp{date: dates[1], time: clocks[3]};
+    var c := timestamp{date: dates[3], time: clocks[4]};
+    call debug_value{v: tuple { ab: a < b, ca: c < a, arrays: array [c] < array [a] }};
+    var rows := relation { { at: a, n: 1 }, { at: c, n: 2 } } key { at };
+    call debug_value{v: min{r: rows, of: at}.date.year};
+    var sorted: array timestamp;
+    load sorted value from relation { { at: a }, { at: b }, { at: c } } order [desc at];
+    call debug_value{v: sorted[3] = c};
+
+    /* A change in one representation, the offset carried. */
+    var here := offset_timestamp{timestamp: a, utc_offset: 3_600};
+    update here { utc_offset := 0 };
+    call debug_value{v: here.timestamp = a};
+    update here { hour := 5, utc_offset := 3_600 };
+    call debug_value{v: tuple { hour: here.hour, utc: here.timestamp.time.hour }};
+
+    /* Past the end of a date's range, selecting fails as a constraint does. */
+    var year := start + 30_000_000_000;
+    call debug_value{v: offset_timestamp{
+        year,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        nanosecond: 0,
+        utc_offset: 0,
+    }};
+];
+"#,
+    );
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    assert_eq!(code, 1, "{stderr}");
+    let printed = "tuple { mismatched: 0, seen: 72 }
+tuple { ab: true, arrays: true, ca: true }
+-27379068100
+true
+true
+tuple { hour: 5, utc: 4 }
+";
+    assert!(
+        stderr.starts_with(&format!("{printed}error[{broken}]: date{{days: ")),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn csv_files_load_dates_and_times() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let path = dir.join("dates.csv");
+    std::fs::write(
+        &path,
+        "city,year,month,day,hour,minute,second,nano,offset\nTehran,2024,3,20,6,36,26,0,12600\nLima,2024,3,19,22,6,26,0,-18000\n",
+    )
+    .unwrap();
+    let (code, stderr) = run_source(
+        "dates_csv",
+        &format!(
+            "
+uses {{ trendy.files, trendy.time }};
+
+operator main{{}} [
+    var rows: array tuple {{ city: text, at: offset_timestamp }};
+    var columns := tuple {{
+        city: 1,
+        at: tuple {{
+            year: 2,
+            month: 3,
+            day: 4,
+            hour: 5,
+            minute: 6,
+            second: 7,
+            nanosecond: 8,
+            utc_offset: 9,
+        }},
+    }};
+    call load_csv{{path: {path:?}, header: true, columns, out rows}};
+    call debug_value{{v: rows[1].at.timestamp = rows[2].at.timestamp}};
+    call debug_value{{v: rows[1].at = rows[2].at}};
+    call debug_value{{v: rows[2].at.timestamp.date.day}};
+    var days: array tuple {{ on: date }};
+    var of_days := tuple {{ on: tuple {{ year: 2, month: 3, day: 4 }} }};
+    call load_csv{{path: {path:?}, header: true, columns: of_days, out rows: days}};
+    call debug_value{{v: days[2].on.days}};
+];
+"
+        ),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr, "true\nfalse\n20\n19801\n");
+}

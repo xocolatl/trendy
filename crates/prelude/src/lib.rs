@@ -3,8 +3,9 @@
 //! which declares the built-in types and most built-in operators, which the
 //! compiler implements, and defines others in trendy; the catalog
 //! ([`CATALOG`]), which describes the program's units, and whose
-//! constraints are the rules between them; and `trendy.files` ([`FILES`]),
-//! which reads files, for the units that use it.
+//! constraints are the rules between them; `trendy.files` ([`FILES`]), which
+//! reads files; and `trendy.uuid` ([`UUID`]) and `trendy.time` ([`TIME`]), of
+//! ordinary trendy, for the units that use them.
 //!
 //! Drivers parse them, as [`UNITS`] lists them, alongside the program and
 //! hand them all to sema. Only these units may declare `builtin`
@@ -61,6 +62,14 @@ pub const UUID: Unit = Unit {
     source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/uuid.trendy"),
 };
 
+/// `trendy.time`, dates, times of day and instants.
+pub const TIME: Unit = Unit {
+    name: "trendy.time",
+    path: "<time>",
+    source: include_str!("time.trendy"),
+    source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/time.trendy"),
+};
+
 /// Every unit that comes with the compiler, in the order their texts
 /// follow a program's units' in its spans: the prelude last.
-pub const UNITS: [Unit; 4] = [UUID, FILES, CATALOG, PRELUDE];
+pub const UNITS: [Unit; 5] = [TIME, UUID, FILES, CATALOG, PRELUDE];

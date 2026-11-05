@@ -220,13 +220,15 @@ impl Units {
         Viewer { unit, section }
     }
 
-    /// Whether `viewer` sees a declaration of `unit`'s, in its `section`:
-    /// every one of its own unit's, and those of the interface of the
-    /// prelude and of a unit its section uses, which, for the
-    /// implementation, are its interface's too.
+    /// Whether `viewer` sees a declaration of `unit`'s, in its `section`: from an
+    /// implementation, every one of its own unit's, and from an interface, its own
+    /// unit's interface; and from either, the interface of the prelude and of a unit
+    /// its section uses, which, for the implementation, are its interface's too.
     pub(crate) fn sees(&self, viewer: Viewer, unit: hir::FileId, section: Section) -> bool {
-        viewer.unit == unit
-            || section == Section::Interface && (unit == self.prelude() || self.uses(viewer, unit))
+        if viewer.unit == unit {
+            return viewer.section == Section::Implementation || section == Section::Interface;
+        }
+        section == Section::Interface && (unit == self.prelude() || self.uses(viewer, unit))
     }
 
     /// The order in which `viewer` lists what the units `a` and `b` declare:
@@ -418,7 +420,7 @@ impl<T> Declared<T> {
         let first = |unit: hir::FileId| {
             entries
                 .iter()
-                .find(|e| e.unit == unit)
+                .find(|e| e.unit == unit && units.sees(viewer, e.unit, e.section))
                 .map(|e| (e.unit, &e.value))
         };
         let mut used: Vec<(hir::FileId, &T)> = Vec::new();

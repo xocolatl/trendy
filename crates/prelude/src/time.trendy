@@ -1,0 +1,249 @@
+/* Dates and times: a day of the calendar, a time of day, an instant, and an
+   instant with the UTC offset it was written at. A unit that has them uses this
+   one, `uses { trendy.time };`. */
+interface
+
+/* A date: how many days it is after 1970-01-01, negative before it, or its year,
+   month and day, on the Gregorian calendar, whose rules reach every year, with 1 BC
+   as year 0. It is within 10,000,000,000,000 days of 1970-01-01, about 27 billion
+   years either way, and ordered by its days. */
+type date {
+    { days: integer, constraint days >= -10_000_000_000_000 and days <= 10_000_000_000_000 },
+    {
+        year: integer,
+        month: integer,
+        day: integer,
+        constraint year >= -30_000_000_000 and year <= 30_000_000_000,
+        constraint month >= 1 and month <= 12,
+        constraint day >= 1 and day <= days_in_month{year, month},
+    },
+    order [asc days],
+};
+
+/* How many days `month` of `year` has, 28 to 31. */
+operator days_in_month{
+    year: integer,
+    month: integer,
+    constraint month >= 1 and month <= 12,
+}: integer;
+
+/* A time of day: how many nanoseconds it is after midnight, or its hour, minute,
+   second and nanosecond. Every day has 86,400 seconds: there are no leap seconds,
+   so a `second` of 60 isn't one. Ordered by its nanoseconds. */
+type time {
+    { nanos_of_day: integer, constraint nanos_of_day >= 0 and nanos_of_day < 86_400_000_000_000 },
+    {
+        hour: integer,
+        minute: integer,
+        second: integer,
+        nanosecond: integer,
+        constraint hour >= 0 and hour < 24,
+        constraint minute >= 0 and minute < 60,
+        constraint second >= 0 and second < 60,
+        constraint nanosecond >= 0 and nanosecond < 1_000_000_000,
+    },
+    order [asc nanos_of_day],
+};
+
+/* An instant: a date and a time, in UTC. Every date and every time make one, so
+   selecting it can't fail. Ordered by its date, then its time. */
+type timestamp {
+    { date: date, time: time },
+    order [asc date, asc time],
+};
+
+/* An instant with the offset from UTC it was written at, in seconds, ahead of UTC if
+   positive and less than a day either way: a `timestamp`, or the year, month, day,
+   hour, minute, second and nanosecond the clock there showed. The same instant at
+   two offsets is two values, so to compare instants, compare their `timestamp`s.
+   Ordered by its `timestamp`, then its offset. */
+type offset_timestamp {
+    {
+        timestamp: timestamp,
+        utc_offset: integer,
+        constraint utc_offset > -86_400 and utc_offset < 86_400,
+    },
+    {
+        year: integer,
+        month: integer,
+        day: integer,
+        hour: integer,
+        minute: integer,
+        second: integer,
+        nanosecond: integer,
+        utc_offset: integer,
+        constraint year >= -30_000_000_000 and year <= 30_000_000_000,
+        constraint month >= 1 and month <= 12,
+        constraint day >= 1 and day <= days_in_month{year, month},
+        constraint hour >= 0 and hour < 24,
+        constraint minute >= 0 and minute < 60,
+        constraint second >= 0 and second < 60,
+        constraint nanosecond >= 0 and nanosecond < 1_000_000_000,
+    },
+    order [asc timestamp, asc utc_offset],
+};
+
+implementation
+
+const nanos_per_day := 86_400_000_000_000;
+const nanos_per_second := 1_000_000_000;
+
+/* `a` divided by `b`, which is positive, rounded down, as `div` rounds towards zero. */
+operator floor_div{a: integer, b: integer}: integer [
+    if a >= 0 then a div b else (a - b + 1) div b
+];
+
+/* What is left of `a` after `floor_div`, from 0 up to `b`. */
+operator floor_mod{a: integer, b: integer}: integer [
+    a - floor_div{a, b} * b
+];
+
+operator is_leap_year{year: integer}: boolean [
+    year mod 4 = 0 and (year mod 100 <> 0 or year mod 400 = 0)
+];
+
+operator days_in_month{year: integer, month: integer}: integer [
+    if month = 2
+        then (if is_leap_year{year} then 29 else 28)
+        else if month = 4 or month = 6 or month = 9 or month = 11
+        then 30
+        else 31
+];
+
+/* The days after 1970-01-01 of a date on the calendar. Years count from March, so
+   that a leap day comes last, in eras of 400 years, each 146,097 days, whose days
+   are the same in every era. */
+operator days_from_civil{year: integer, month: integer, day: integer}: integer [
+    var march_year := if month <= 2 then year - 1 else year;
+    var era := floor_div{a: march_year, b: 400};
+    var year_of_era := march_year - era * 400;
+    var day_of_year := (153 * ((month + 9) mod 12) + 2) div 5 + day - 1;
+    var day_of_era := year_of_era * 365 + year_of_era div 4 - year_of_era div 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+];
+
+/* The date on the calendar of `days` after 1970-01-01, the other way. */
+operator civil_from_days{days: integer}: tuple { year: integer, month: integer, day: integer } [
+    var shifted := days + 719_468;
+    var era := floor_div{a: shifted, b: 146_097};
+    var day_of_era := shifted - era * 146_097;
+    var year_of_era := (day_of_era
+            - day_of_era div 1_460
+            + day_of_era div 36_524
+            - day_of_era div 146_096)
+        div 365;
+    var day_of_year := day_of_era - (365 * year_of_era + year_of_era div 4 - year_of_era div 100);
+    var month_from_march := (5 * day_of_year + 2) div 153;
+    var month := if month_from_march < 10 then month_from_march + 3 else month_from_march - 9;
+    tuple {
+        year: year_of_era + era * 400 + (if month <= 2 then 1 else 0),
+        month,
+        day: day_of_year - (153 * month_from_march + 2) div 5 + 1,
+    }
+];
+
+/* The nanoseconds of the day of a time on the clock. */
+operator nanos_from_clock{
+    hour: integer,
+    minute: integer,
+    second: integer,
+    nanosecond: integer,
+}: integer [
+    ((hour * 60 + minute) * 60 + second) * nanos_per_second + nanosecond
+];
+
+/* The time on the clock of `nanos` of the day. */
+operator clock_from_nanos{
+    nanos: integer,
+}: tuple { hour: integer, minute: integer, second: integer, nanosecond: integer } [
+    tuple {
+        hour: nanos div (3_600 * nanos_per_second),
+        minute: nanos div (60 * nanos_per_second) mod 60,
+        second: nanos div nanos_per_second mod 60,
+        nanosecond: nanos mod nanos_per_second,
+    }
+];
+
+/* The nanoseconds of the day of `timestamp` by the clock at `utc_offset`, which can
+   run past the day either way, as the clock there can show another date. */
+operator offset_nanos{timestamp: timestamp, utc_offset: integer}: integer [
+    timestamp.time.nanos_of_day + utc_offset * nanos_per_second
+];
+
+/* The date of `timestamp` by the clock at `utc_offset`, as a date on the calendar.
+   At either end of a `date`'s range, it can be a day past it. */
+operator offset_civil{
+    timestamp: timestamp,
+    utc_offset: integer,
+}: tuple { year: integer, month: integer, day: integer } [
+    civil_from_days{
+        days: timestamp.date.days
+            + floor_div{a: offset_nanos{timestamp, utc_offset}, b: nanos_per_day},
+    }
+];
+
+/* The time of `timestamp` by the clock at `utc_offset`. */
+operator offset_clock{
+    timestamp: timestamp,
+    utc_offset: integer,
+}: tuple { hour: integer, minute: integer, second: integer, nanosecond: integer } [
+    clock_from_nanos{nanos: floor_mod{a: offset_nanos{timestamp, utc_offset}, b: nanos_per_day}}
+];
+
+type date {
+    { year: integer, month: integer, day: integer }
+        to { days := days_from_civil{year, month, day} }
+        from {
+            year := civil_from_days{days}.year,
+            month := civil_from_days{days}.month,
+            day := civil_from_days{days}.day,
+        },
+};
+
+type time {
+    { hour: integer, minute: integer, second: integer, nanosecond: integer }
+        to { nanos_of_day := nanos_from_clock{hour, minute, second, nanosecond} }
+        from {
+            hour := clock_from_nanos{nanos: nanos_of_day}.hour,
+            minute := clock_from_nanos{nanos: nanos_of_day}.minute,
+            second := clock_from_nanos{nanos: nanos_of_day}.second,
+            nanosecond := clock_from_nanos{nanos: nanos_of_day}.nanosecond,
+        },
+};
+
+type offset_timestamp {
+    {
+        year: integer,
+        month: integer,
+        day: integer,
+        hour: integer,
+        minute: integer,
+        second: integer,
+        nanosecond: integer,
+        utc_offset: integer,
+    }
+        to {
+            timestamp := [
+                var utc := nanos_from_clock{hour, minute, second, nanosecond}
+                    - utc_offset * nanos_per_second;
+                timestamp{
+                    date: date{
+                        days: days_from_civil{year, month, day}
+                            + floor_div{a: utc, b: nanos_per_day},
+                    },
+                    time: time{nanos_of_day: floor_mod{a: utc, b: nanos_per_day}},
+                }
+            ],
+            utc_offset := utc_offset,
+        }
+        from {
+            year := offset_civil{timestamp, utc_offset}.year,
+            month := offset_civil{timestamp, utc_offset}.month,
+            day := offset_civil{timestamp, utc_offset}.day,
+            hour := offset_clock{timestamp, utc_offset}.hour,
+            minute := offset_clock{timestamp, utc_offset}.minute,
+            second := offset_clock{timestamp, utc_offset}.second,
+            nanosecond := offset_clock{timestamp, utc_offset}.nanosecond,
+            utc_offset := utc_offset,
+        },
+};
