@@ -70,7 +70,10 @@ with the text for one that isn't a value of its type (R0014). `sqrt`,
 (R0018). `to_code_points` and `from_code_points` are runtime calls too
 (`trendy_rt_to_code_points`, `trendy_rt_from_code_points`), which make
 and read an array of code points' stored components, `{ value: integer
-}`, given its descriptor. A built-in's signature can name a type the
+}`, given its descriptor. `to_characters` is one as well, and a character of one ASCII byte, from it
+or `load_csv`, points to the runtime's own bytes for it (`ASCII_CHARACTERS`),
+after a header that says they are never released, as a buffer compiled into
+a program is, so that an array of them takes no memory but its own. A built-in's signature can name a type the
 prelude defines in trendy, whose values the compiler makes, as theirs
 name `code_point`: sema checks the prelude declares it as the compiler
 makes its values (`builtins::library`, X0000), and the signatures take

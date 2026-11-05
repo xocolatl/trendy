@@ -9688,3 +9688,74 @@ operator main{{}} [
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stderr, "true\nfalse\n20\n19801\n");
 }
+
+/// ASCII characters share bytes that are never released, which nothing can tell
+/// from one with bytes of its own, however it is held and given up.
+#[test]
+fn ascii_characters_behave_as_any_other() {
+    let (code, stderr) = run_source(
+        "ascii_characters",
+        r#"
+var kept: array character;
+
+operator first{of: text}: character [
+    to_characters{from: of}[1]
+];
+
+operator main{} [
+    var word := "né" || "a\r\nb";
+    var characters := to_characters{from: word};
+    call debug_value{v: characters};
+    call debug_value{v: from_characters{from: characters} = word};
+    call debug_value{v: length{a: characters}};
+    call debug_value{v: characters[1] = 'n'};
+    call debug_value{v: characters[1] < characters[2]};
+    call debug_value{v: to_text{from: characters[1]}};
+    call debug_value{v: from_character{from: characters[3]} || "!"};
+
+    /* Kept past the statements and the operators that made them, and given up. */
+    var i := 0;
+    while i < 1000 loop [
+        kept := to_characters{from: "kept" || "é"};
+        kept := kept || array [first{of: "z"}];
+        i := i + 1;
+    ];
+    call debug_value{v: kept};
+    kept[1] := first{of: "é"};
+    kept[2] := first{of: "q"};
+    call debug_value{v: kept};
+
+    /* In relations, as keys too, and sorted. */
+    var rows := relation {
+        { c: first{of: "b"}, n: 1 },
+        { c: first{of: "a"}, n: 2 },
+        { c: first{of: "é"}, n: 3 },
+    }
+    key { c };
+    call debug_value{v: rows};
+    call debug_value{v: max{r: rows, of: c}};
+    var sorted: array character;
+    load sorted value from rows{c} order [desc c];
+    call debug_value{v: sorted};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            r"array ['n', 'é', 'a', '\r\n', 'b']",
+            "true",
+            "5",
+            "true",
+            "true",
+            r#""'n'""#,
+            r#""a!""#,
+            "array ['k', 'e', 'p', 't', 'é', 'z']",
+            "array ['é', 'q', 'p', 't', 'é', 'z']",
+            "relation { c: character, n: integer } { { c: 'a', n: 2 }, { c: 'b', n: 1 }, { c: 'é', n: 3 } }",
+            "'é'",
+            "array ['é', 'b', 'a']",
+        ]
+    );
+}

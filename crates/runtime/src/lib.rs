@@ -376,6 +376,53 @@ pub struct Header {
 /// [`Header::count`] of a buffer compiled into the program.
 pub const IMMORTAL: u64 = u64::MAX;
 
+/// The bytes of a character of one ASCII byte, after a header that says they are
+/// never released, as a buffer compiled into a program is. Every such character
+/// shares one, so that an array of them takes no memory but its own.
+#[repr(C)]
+struct AsciiCharacter {
+    header: Header,
+    byte: u8,
+}
+
+// SAFETY: nothing writes to one: its header's `count` is `IMMORTAL`, which no
+// reference changes, and its `desc`, the only thing that keeps it from being `Sync`
+// by itself, is null.
+unsafe impl Sync for AsciiCharacter {}
+
+static ASCII_CHARACTERS: [AsciiCharacter; 128] = {
+    let mut characters = [const {
+        AsciiCharacter {
+            header: Header {
+                count: IMMORTAL,
+                len: 0,
+                desc: core::ptr::null(),
+                room: 1,
+            },
+            byte: 0,
+        }
+    }; 128];
+    let mut byte = 0_u8;
+    while byte < 128 {
+        characters[byte as usize].byte = byte;
+        byte += 1;
+    }
+    characters
+};
+
+/// The text value of `character`, if it is one ASCII byte, whose bytes no statement
+/// needs to allocate or hold.
+fn ascii_character(character: &str) -> Option<Text> {
+    // One byte of UTF-8 is ASCII.
+    match *character.as_bytes() {
+        [byte] => Some(Text {
+            bytes: &raw const ASCII_CHARACTERS[usize::from(byte)].byte,
+            len: 1,
+        }),
+        _ => None,
+    }
+}
+
 /// The size of a [`Header`]: a multiple of 8, so that the buffer after it
 /// is aligned for any value.
 #[cfg(not(test))]
@@ -5546,7 +5593,10 @@ pub unsafe extern "C" fn trendy_rt_to_characters(
         };
         let characters = allocate_buffer(size, desc)?;
         for (i, character) in trendy_text::characters(text).enumerate() {
-            let value = scope_text(character)?;
+            let value = match ascii_character(character) {
+                Some(value) => value,
+                None => scope_text(character)?,
+            };
             copy_element(
                 characters,
                 characters.add(i * element.size),
@@ -7461,7 +7511,11 @@ unsafe fn try_read_field(
                 .map(|x| dst.cast::<f64>().write_unaligned(x)),
             KIND_BOOLEAN => trendy_text::parse_boolean(value).map(|b| dst.write(u8::from(b))),
             KIND_CHARACTER if trendy_text::is_one_character(value) => {
-                dst.cast::<Text>().write_unaligned(scope_text(value)?);
+                let character = match ascii_character(value) {
+                    Some(character) => character,
+                    None => scope_text(value)?,
+                };
+                dst.cast::<Text>().write_unaligned(character);
                 Ok(())
             }
             KIND_CHARACTER => Err(trendy_text::Unparsable::Malformed),
@@ -8250,6 +8304,37 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_ascii_character_shares_bytes_never_released() {
+        assert_eq!(
+            core::mem::offset_of!(AsciiCharacter, byte),
+            size_of::<Header>()
+        );
+        for byte in 0..128_u8 {
+            let written = [byte];
+            let character = core::str::from_utf8(&written).unwrap();
+            let value = ascii_character(character).unwrap();
+            let (bytes, len) = (value.bytes, value.len);
+            assert_eq!(len, 1);
+            // SAFETY: it points to its entry's byte, after its header.
+            unsafe {
+                assert_eq!(*bytes, byte);
+                let header = bytes
+                    .sub(size_of::<Header>())
+                    .cast::<Header>()
+                    .read_unaligned();
+                assert_eq!(header.count, IMMORTAL);
+                assert!(header.desc.is_null());
+            }
+            // The same bytes, however many times it is asked for.
+            assert_eq!(ascii_character(character).unwrap().bytes, bytes);
+        }
+        // Anything else has bytes of its own.
+        for character in ["é", "🇸🇪", "\r\n", "e\u{301}", ""] {
+            assert!(ascii_character(character).is_none(), "{character}");
+        }
+    }
 
     fn scalar(kind: u8, size: usize) -> TypeDesc {
         TypeDesc {
