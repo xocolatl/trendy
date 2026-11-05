@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use trendy_diag::{CodeKind, Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr, Said};
-use trendy_syntax::{SyntaxKind, SyntaxToken};
+use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::narrowed::{self, Facts};
 use crate::operators::{ArgumentNames, Chosen, Operators, Param, Signature};
@@ -139,11 +139,22 @@ pub(crate) trait Names {
     /// run follow it, and join these when it ends.
     fn next_local(&self) -> usize;
 
+    /// What `name` means here, of what a local variable declared here can't hide:
+    /// a parameter, a local variable or an attribute of the tuple at hand. It may
+    /// hide a variable of the program's.
+    fn around(&self, name: &str) -> Option<Meaning>;
+
     /// Whether a local variable named `name`, declared here, would hide a
-    /// name that means something here: a parameter, a local variable or an
-    /// attribute of the tuple at hand. It may hide a variable of the
-    /// program's.
-    fn hides(&self, name: &str) -> bool;
+    /// name that means something here (see [`Names::around`]).
+    fn hides(&self, name: &str) -> bool {
+        self.around(name).is_some()
+    }
+
+    /// What the attribute `name` of the tuple at hand, the nearest one with it, hides,
+    /// of what [`Names::around`] says: what it would mean just outside that tuple.
+    fn hidden_by_attribute(&self, _name: &str) -> Option<Meaning> {
+        None
+    }
 
     /// The heading of the tuple at hand, `Current(0, …)`, if there is one:
     /// in the values of an `extend` or a `replace`.
@@ -185,6 +196,14 @@ pub(crate) trait Names {
     /// showed of its value, in the branch or block being checked, so that
     /// an error that needs it narrowed can say why it isn't.
     fn narrowing_ended(&self, name: &str) -> Option<Span>;
+}
+
+/// What a name means in an operator, nearer than a variable of the program's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Meaning {
+    Parameter,
+    LocalVariable,
+    Attribute,
 }
 
 /// A call's arguments, as written.
@@ -439,6 +458,74 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// What the attribute `name` hides, where `within` compares it with itself: what it
+    /// would mean just outside that tuple, how to say it, where it is declared, if that is
+    /// known, and how a constant can read it, if one can.
+    fn hidden_by(&self, name: &str, within: &ast::BinaryExpr) -> Option<errors::Hidden> {
+        let namespaces = self.namespaces();
+        let comparison = within.syntax();
+        // A loop's condition is computed again, after what the loop changes.
+        let once = |statement: SyntaxNode| {
+            (statement.kind() != SyntaxKind::WhileStmt).then_some(statement)
+        };
+        let around = declared_around(comparison, name);
+        let statement = |(_, scope): &(Span, SyntaxNode)| {
+            statement_within(comparison, Some(scope)).and_then(once)
+        };
+        let (what, declared, before) = match self.names.hidden_by_attribute(name) {
+            Some(Meaning::Parameter) => (
+                "parameter",
+                around.as_ref().map(|(at, _)| *at),
+                around.as_ref().and_then(statement),
+            ),
+            Some(Meaning::LocalVariable) => (
+                "local variable",
+                around.as_ref().map(|(at, _)| *at),
+                around.as_ref().and_then(|found| {
+                    statement(found).filter(|statement| {
+                        found.0.end <= trendy_syntax::span(statement.text_range()).start
+                    })
+                }),
+            ),
+            Some(Meaning::Attribute) => ("attribute further out", None, None),
+            None => {
+                let at = within.span();
+                if let Some(declared) = namespaces.constant(name, at) {
+                    let before = statement_within(comparison, None).or_else(|| {
+                        comparison.ancestors().find(|node| {
+                            node.parent()
+                                .is_some_and(|file| ast::SourceFile::cast(file).is_some())
+                        })
+                    });
+                    ("constant", Some(declared), before)
+                } else {
+                    // A read-only operator reads no variables, nor a constant.
+                    let before = statement_within(comparison, None)
+                        .and_then(once)
+                        .filter(errors::callable);
+                    ("variable", Some(namespaces.variable(name, at)?), before)
+                }
+            }
+        };
+        // Whatever a name can mean is written in the program, whose tree this is.
+        let is_taken = |candidate: &str| {
+            comparison.ancestors().last().is_some_and(|program| {
+                program
+                    .descendants_with_tokens()
+                    .filter_map(trendy_syntax::SyntaxElement::into_token)
+                    .any(|token| token.kind() == SyntaxKind::Ident && token.text() == candidate)
+            })
+        };
+        Some(errors::Hidden {
+            what: format!("the {what} `{name}`"),
+            declared,
+            read_before: before.map(|statement| errors::ReadBefore {
+                constant: trendy_diag::unused_name(name, is_taken),
+                statement,
+            }),
+        })
+    }
+
     /// `binary`, written `expr`, an operator between two scalar operands,
     /// or a comparison: neither a connective, a join nor a restriction,
     /// which have their own checks.
@@ -459,6 +546,18 @@ impl<'a> Checker<'a> {
         let Resolved::Binary(op) = resolved else {
             unreachable!("a connective, which `Checker::connective` checks");
         };
+        if let hir::BinaryOp::Compare(comparison, _) = op
+            && let Some(attribute) = attribute_compared_with_itself(&lhs, &rhs)
+        {
+            let hidden = self.hidden_by(attribute, binary);
+            errors.push(errors::compared_with_itself(
+                binary,
+                attribute,
+                comparison,
+                hidden.as_ref(),
+            ));
+            return None;
+        }
         if let hir::BinaryOp::Compare(..) = op
             && !self.orders_checked(
                 &self.ty(&lhs),
@@ -3132,6 +3231,56 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// The name of the attribute of the tuple at hand that `lhs` and `rhs` both are, the
+/// outermost one of it, if they are the same.
+fn attribute_compared_with_itself<'e>(lhs: &'e hir::Expr, rhs: &hir::Expr) -> Option<&'e str> {
+    fn outermost(expr: &hir::Expr) -> Option<&str> {
+        match expr {
+            hir::Expr::Extract(of, name) if matches!(**of, hir::Expr::Current(..)) => Some(name),
+            hir::Expr::Extract(of, _) | hir::Expr::Components(of) => outermost(of),
+            _ => None,
+        }
+    }
+    (lhs == rhs).then(|| outermost(lhs)).flatten()
+}
+
+/// Where the parameter or local variable `name` is declared, for what is written at
+/// `at`, and the block, the loop or the operator it is declared in: the nearest of those
+/// around it that declares one.
+fn declared_around(at: &SyntaxNode, name: &str) -> Option<(Span, SyntaxNode)> {
+    let named = |n: &ast::Name| n.ident().is_some_and(|ident| ident.text() == name);
+    at.ancestors().find_map(|scope| {
+        let local = scope
+            .children()
+            .filter_map(ast::VarDecl::cast)
+            .filter_map(|decl| decl.name())
+            .find(named);
+        let looped = ast::ForStmt::cast(scope.clone())
+            .and_then(|stmt| stmt.variable())
+            .filter(named);
+        let parameter = ast::Operator::cast(scope.clone())
+            .and_then(|operator| operator.params())
+            .and_then(|params| params.attributes().find(|a| a.is_named(name)))
+            .and_then(|attribute| attribute.name());
+        let declared = local.or(looped).or(parameter)?;
+        Some((declared.span(), scope))
+    })
+}
+
+/// The innermost statement `at` is in, or a block's value, with no expression between
+/// it and `scope`, or the file, so that no tuple's attributes are in scope there.
+fn statement_within(at: &SyntaxNode, scope: Option<&SyntaxNode>) -> Option<SyntaxNode> {
+    at.ancestors().find(|node| {
+        node.parent()
+            .is_some_and(|block| matches!(block.kind(), SyntaxKind::Body | SyntaxKind::ValueBlock))
+            && !node
+                .ancestors()
+                .skip(1)
+                .take_while(|around| Some(around) != scope)
+                .any(|around| Expr::cast(around).is_some())
+    })
+}
+
 /// `result`, of what is written `expr`, after reporting why not, if computing it
 /// fails.
 fn reported(
@@ -4043,8 +4192,20 @@ impl Names for TupleNames<'_> {
         self.outer.next_local()
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.heading.get(name).is_some() || self.outer.hides(name)
+    fn around(&self, name: &str) -> Option<Meaning> {
+        if self.heading.get(name).is_some() {
+            Some(Meaning::Attribute)
+        } else {
+            self.outer.around(name)
+        }
+    }
+
+    fn hidden_by_attribute(&self, name: &str) -> Option<Meaning> {
+        if self.heading.get(name).is_some() {
+            self.outer.around(name)
+        } else {
+            self.outer.hidden_by_attribute(name)
+        }
     }
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {
@@ -4194,11 +4355,28 @@ impl Names for ComponentNames<'_> {
         self.outer.next_local()
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.defined
+    fn around(&self, name: &str) -> Option<Meaning> {
+        if self
+            .defined
             .possible_representations()
             .any(|h| h.get(name).is_some())
-            || self.outer.hides(name)
+        {
+            Some(Meaning::Attribute)
+        } else {
+            self.outer.around(name)
+        }
+    }
+
+    fn hidden_by_attribute(&self, name: &str) -> Option<Meaning> {
+        if self
+            .defined
+            .possible_representations()
+            .any(|h| h.get(name).is_some())
+        {
+            self.outer.around(name)
+        } else {
+            self.outer.hidden_by_attribute(name)
+        }
     }
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {

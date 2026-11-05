@@ -3065,11 +3065,28 @@ pub(crate) fn out_result(
 
 /// Whether a `call` statement can go where `node` is: in an update
 /// operator's body, not a value block's or a read-only operator's.
-fn callable(node: &trendy_syntax::SyntaxNode) -> bool {
+pub(crate) fn callable(node: &trendy_syntax::SyntaxNode) -> bool {
     node.ancestors()
         .take_while(|a| a.kind() != SyntaxKind::ValueBlock)
         .find_map(trendy_syntax::ast::Operator::cast)
         .is_some_and(|op| op.result().is_none())
+}
+
+/// `statement` inserted before `node`: on a line of its own, if `node` starts one.
+fn statement_before(node: &trendy_syntax::SyntaxNode, statement: &str) -> Edit {
+    let starts_line = node
+        .first_token()
+        .and_then(|first| first.prev_token())
+        .is_none_or(|before| before.kind().is_trivia() && before.text().contains('\n'));
+    let separator = if starts_line {
+        format!("\n{}", indentation(node))
+    } else {
+        " ".to_string()
+    };
+    Edit {
+        span: Span::empty(trendy_syntax::span(node.text_range()).start),
+        replacement: format!("{statement}{separator}"),
+    }
 }
 
 /// The spaces and tabs before `node` on its line.
@@ -4879,10 +4896,7 @@ pub(crate) fn undeclared_collecting(
     .with_note(COLLECTION)
     .with_suggestion(
         format!("declare it before the transaction: `{declaration}`"),
-        vec![Edit {
-            span: Span::empty(stmt.span().start),
-            replacement: format!("{declaration}\n{}", indentation(stmt.syntax())),
-        }],
+        vec![statement_before(stmt.syntax(), &declaration)],
     )
 }
 
@@ -10113,6 +10127,100 @@ pub(crate) fn interface_constraint(decl: &ast::ConstraintDecl, moved: Vec<Edit>)
     .with_note(SECTIONS_RULE)
     .with_note("a constraint is as visible as the variables it mentions: a unit's are its implementation's, and what is true of them is the unit's to keep")
     .with_suggestion("move it to the implementation", moved)
+}
+
+/// What an attribute hides: how to say it, where it is declared, if that is known, and
+/// how a constant can read it first, if one can.
+pub(crate) struct Hidden {
+    pub(crate) what: String,
+    pub(crate) declared: Option<Span>,
+    pub(crate) read_before: Option<ReadBefore>,
+}
+
+/// A constant that can read what an attribute hides, declared before `statement`, where
+/// nothing does, by a name nothing there has.
+pub(crate) struct ReadBefore {
+    pub(crate) constant: String,
+    pub(crate) statement: trendy_syntax::SyntaxNode,
+}
+
+/// `binary`, a comparison of the attribute `attribute` of the tuple at hand with
+/// itself, by `comparison`, which is always true or always false. If the attribute hides
+/// a name, that is surely what one side meant, which a constant can read beforehand, and
+/// which side doesn't matter to `=` and `<>`, which the other comparisons leave to help.
+pub(crate) fn compared_with_itself(
+    binary: &ast::BinaryExpr,
+    attribute: &str,
+    comparison: hir::Comparison,
+    hidden: Option<&Hidden>,
+) -> Diagnostic {
+    let always = match comparison {
+        hir::Comparison::Equal | hir::Comparison::LessOrEqual | hir::Comparison::GreaterOrEqual => {
+            "true"
+        }
+        hir::Comparison::NotEqual | hir::Comparison::Less | hir::Comparison::Greater => "false",
+    };
+    let written = binary.syntax().text().to_string();
+    let d = Diagnostic::error(
+        Code::ComparedWithItself,
+        format!("`{written}` compares the attribute `{attribute}` with itself"),
+        binary.span(),
+        format!("always {always}, of every tuple"),
+    )
+    .with_note("a tuple's attributes hide other names of theirs, in a `where`, an `extend` and the like, so a name there means the attribute, on both sides");
+    let Some(hidden) = hidden else {
+        return d.with_help("compare it with another attribute or a value, or leave this out");
+    };
+    let d = match hidden.declared {
+        Some(at) => d.with_secondary(at, "hidden there"),
+        None => d,
+    };
+    let hides = format!(
+        "`{attribute}` means the attribute here, so this can't read {}",
+        hidden.what
+    );
+    let Some(read) = &hidden.read_before else {
+        return d.with_help(format!(
+            "{hides}: rename it, and compare the attribute with that"
+        ));
+    };
+    let declaration = format!("const {} := {attribute};", read.constant);
+    let reads = format!(
+        "read it into a constant before this, `{declaration}`, and compare the attribute with that"
+    );
+    let is_symmetric = matches!(
+        comparison,
+        hir::Comparison::Equal | hir::Comparison::NotEqual
+    );
+    let name = binary
+        .rhs()
+        .filter(|_| is_symmetric)
+        .and_then(|rhs| written_attribute(&rhs));
+    match name {
+        Some(name) => d.with_help(hides).with_suggestion(
+            reads,
+            vec![
+                statement_before(&read.statement, &declaration),
+                Edit {
+                    span: trendy_syntax::span(name.text_range()),
+                    replacement: read.constant.clone(),
+                },
+            ],
+        ),
+        None => d.with_help(format!("{hides}: {reads}")),
+    }
+}
+
+/// The name that `expr`, the same attribute as the other side, is written as, in
+/// parentheses or with what it extracts from it, if that is all it is, and not what the
+/// compiler made it from more.
+fn written_attribute(expr: &Expr) -> Option<SyntaxToken> {
+    match expr {
+        Expr::Name(name) => name.ident(),
+        Expr::Paren(paren) => written_attribute(&paren.inner()?),
+        Expr::Extract(extract) => written_attribute(&extract.operand()?),
+        _ => None,
+    }
 }
 
 /// The name `token` writes, in an interface, which sees only interfaces, if only its

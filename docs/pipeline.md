@@ -348,6 +348,21 @@ a type's constraints and order is parsed and left to sema (A0064), which
 knows which of the type's components it can be a key of. Whitespace is attached to the innermost node that is open when it
 appears, so whitespace between definitions belongs to the file.
 
+A keyword declared as a name (P0017) means something else to the parser everywhere
+the name is used, and each of those would report something else again, none of them
+the cause. So `parse` can parse twice. A file that parses without an error uses every
+keyword as one, so nothing below touches it. Otherwise `keyword_names` finds the
+declarations from the tokens around each keyword, as `heading group`, `type where {`
+and `{ union: 1 }` are nowhere the grammar looks for a name, and from the first
+parse's errors for `var remove`, `remove := 1` and the like. A keyword that parse took
+as one, with no error about it or the token after it, isn't a name: `kind remove {a}`
+of a variable named `kind` declares nothing, and `var var := 1;` starts with a keyword,
+as the token after it is one too. The second parse takes each declared word as a name
+everywhere else. So one mistake gives one error, at the first declaration, whose fix
+renames every one of those and leaves the keyword's own uses alone. A use the parser
+can read as the keyword stays one, as `true` does in `operator f{true: integer}` and
+then `1 + true`, for sema to report.
+
 Expressions use precedence climbing. From tightest to loosest: the prefix
 operators `not`, `-` and `+`; `*`, `/`, `div` and `mod`; `+`, `-` and
 `||`; the joins, `join`, `times` and `compose`; the comparisons, which don't chain (P0015, with a fix that compares
@@ -1251,6 +1266,15 @@ exactly those parameters, each name has a value and the projection fits, and
 adds the fix to the call to the projection's error if it doesn't. A name alone
 that names no parameter has no name, in choosing among operators of a name
 too (`ArgumentNames::alone`).
+
+`Checker::infixed` reports a comparison whose operands are, after folding, the same
+attribute of a tuple in scope (A0081). `Names::hidden_by_attribute` says what that
+attribute hides, and `Checker::hidden_by` where a constant can read it: before the
+innermost statement with no expression between it and what declares the name, so no
+tuple's attributes are in scope there. `=` and `<>` get the fix that declares it and
+reads it on the right, when that is written as the attribute's name. An order, where
+which side reads it is a decision, gets the same as help. What a constant can't read,
+as in a `while`'s condition, which is computed again, gets help to rename it.
 
 The kinds, which only the prelude declares (A0013), are in `Namespaces`,
 each with the built-in types that declare it. Loading the prelude reads the

@@ -14,7 +14,7 @@ use trendy_syntax::ast::{self, VarDecl};
 
 use crate::assign::{self, Assignee, Assigning};
 use crate::body::{self, Around};
-use crate::check::{Checker, Lookup, Names};
+use crate::check::{Checker, Lookup, Meaning, Names};
 use crate::locals::Declaring;
 use crate::operators::Signature;
 use crate::types::Expected;
@@ -159,8 +159,12 @@ impl Names for Outside<'_> {
         self.outer.next_local()
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.outer.hides(name)
+    fn around(&self, name: &str) -> Option<Meaning> {
+        self.outer.around(name)
+    }
+
+    fn hidden_by_attribute(&self, name: &str) -> Option<Meaning> {
+        self.outer.hidden_by_attribute(name)
     }
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {
@@ -445,8 +449,16 @@ impl Names for BlockNames<'_> {
         self.outer.next_local()
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.own(name).is_some() || self.outer.hides(name)
+    fn around(&self, name: &str) -> Option<Meaning> {
+        if self.own(name).is_some() {
+            Some(Meaning::LocalVariable)
+        } else {
+            self.outer.around(name)
+        }
+    }
+
+    fn hidden_by_attribute(&self, name: &str) -> Option<Meaning> {
+        self.outer.hidden_by_attribute(name)
     }
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {

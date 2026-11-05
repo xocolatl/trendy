@@ -11,7 +11,7 @@ use trendy_syntax::SyntaxKind;
 use trendy_syntax::ast::{self, AstNode, Expr};
 
 use crate::body::Context;
-use crate::check::{Checker, Lookup, Names};
+use crate::check::{Checker, Lookup, Meaning, Names};
 use crate::locals::Locals;
 use crate::operators::Operators;
 use crate::types::{Expected, Origin};
@@ -416,8 +416,8 @@ impl Names for ConditionNames<'_, '_> {
         self.locals.next()
     }
 
-    fn hides(&self, _: &str) -> bool {
-        false
+    fn around(&self, _: &str) -> Option<Meaning> {
+        None
     }
 
     fn checked(&mut self, id: hir::OperatorId, _: Span, _: &mut Vec<Diagnostic>) -> bool {

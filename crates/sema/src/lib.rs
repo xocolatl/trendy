@@ -15460,6 +15460,393 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
     }
 
     #[test]
+    fn an_attribute_compared_with_itself_is_reported() {
+        let cities = "var cities := relation { { n: \"Lagos\", q: 1 } };\n";
+        let main = "operator main{} [];";
+        // Whichever comparison, always true or always false, wherever it is.
+        for (condition, always) in [
+            ("n = n", "true"),
+            ("n <= n", "true"),
+            ("n >= n", "true"),
+            ("n <> n", "false"),
+            ("n < n", "false"),
+            ("n > n", "false"),
+            ("(n) = n", "true"),
+            ("q = 1 and n = n", "true"),
+            ("n = n or q = 1", "true"),
+            ("not (n = n)", "true"),
+            // What the compiler can tell is the attribute, written another way.
+            ("n = n || \"\"", "true"),
+            ("q = q + 0", "true"),
+        ] {
+            let source = format!("{cities}var a := cities where {condition};\n{main}");
+            let found = errors(&source);
+            assert_eq!(found.len(), 1, "{condition}: {found:#?}");
+            assert_eq!(found[0].code, Code::ComparedWithItself, "{condition}");
+            assert_eq!(
+                found[0].primary.message,
+                format!("always {always}, of every tuple"),
+                "{condition}"
+            );
+            assert!(found[0].help[0].contains("another attribute"), "{found:#?}");
+        }
+        let source = format!("{cities}var a := cities extend {{ same := q = q }};\n{main}");
+        assert_eq!(codes(&source), [Code::ComparedWithItself]);
+        // In `update` and `delete`, and a nested attribute.
+        let body = |statement: &str| format!("{cities}operator main{{}} [ {statement} ];");
+        assert_eq!(
+            codes(&body("delete cities where q = q;")),
+            [Code::ComparedWithItself]
+        );
+        assert_eq!(
+            codes(&body("update cities { q := 1 } where q = q;")),
+            [Code::ComparedWithItself]
+        );
+        let nested = "var r := relation { { p: tuple { x: 1 } } };\nvar a := r where p.x = p.x;\n";
+        assert_eq!(
+            codes(&format!("{nested}{main}")),
+            [Code::ComparedWithItself]
+        );
+        // Of a component.
+        let component = "type c { { re: integer } };\nvar r := relation { { p: c{re: 1} } };\nvar a := r where p.re = p.re;\n";
+        let found = errors(&format!("{component}{main}"));
+        assert_eq!(found[0].code, Code::ComparedWithItself, "{found:#?}");
+        assert!(found[0].message.contains("the attribute `p`"), "{found:#?}");
+        // Different attributes, and what isn't an attribute, are as they were.
+        for fine in [
+            format!("{cities}var a := cities where n = n || \"x\";\n{main}"),
+            format!("{cities}var a := cities where q = 1;\n{main}"),
+            format!("var r := relation {{ {{ a: 1, b: 1 }} }};\nvar s := r where a = b;\n{main}"),
+            format!(
+                "var r := relation {{ {{ a: 1, b: 2 }} }};\nvar x := 1;\nvar same := x = x;\n{main}"
+            ),
+            format!("operator f{{t: tuple {{ a: integer }}}}: boolean [ (t.a = t.a) ];\n{main}"),
+            format!(
+                "{cities}operator f{{m: text}}: relation {{ n: text, q: integer }} [ relation {{ {{ n: m, q: 1 }} }} where n = m ];\n{main}"
+            ),
+        ] {
+            let program = analyze_str(&fine);
+            assert!(program.is_ok(), "{fine}\n{program:#?}");
+        }
+    }
+
+    #[test]
+    fn an_attribute_compared_with_itself_says_what_it_hides() {
+        let main = "operator main{} [];";
+        // What it says it hides, and where it says that is declared: the text
+        // just before that, if the program says.
+        let says = |source: &str, what: &str, declared_after: Option<&str>| {
+            let found = errors(source);
+            assert_eq!(found[0].code, Code::ComparedWithItself, "{found:#?}");
+            let help = &found[0].help[0];
+            assert!(help.contains(what), "{what}: {help}");
+            let starts: Vec<_> = found[0].secondary.iter().map(|l| l.span.start).collect();
+            let expected: Vec<_> = declared_after
+                .iter()
+                .map(|before| source.find(before).unwrap() + before.len())
+                .collect();
+            assert_eq!(starts, expected, "{what}: {source}");
+        };
+        let relation = "relation { n: text, q: integer }";
+        let parameter = "the parameter `n`";
+        says(
+            &format!("operator f{{r: {relation}, n: text}}: {relation} [ r where n = n ];\n{main}"),
+            parameter,
+            Some(&format!("{relation}, ")),
+        );
+        says(
+            &format!(
+                "operator f{{r: {relation}, n: text}} [ call debug_table{{r: r where n = n}}; ];\n{main}"
+            ),
+            parameter,
+            Some(&format!("{relation}, ")),
+        );
+        let local = "the local variable `n`";
+        says(
+            &format!(
+                "operator f{{r: {relation}}} [ var n := \"a\"; call debug_table{{r: r where n = n}}; ];\n{main}"
+            ),
+            local,
+            Some("[ var "),
+        );
+        says(
+            &format!(
+                "operator f{{r: {relation}}}: {relation} [ var n := \"a\"; r where n = n ];\n{main}"
+            ),
+            local,
+            Some("[ var "),
+        );
+        says(
+            &format!(
+                "operator f{{r: {relation}, a: array text}} [ for n in a loop [ call debug_table{{r: r where n = n}}; ]; ];\n{main}"
+            ),
+            local,
+            Some("[ for "),
+        );
+        // In a block inside the one that declares it.
+        says(
+            &format!(
+                "operator f{{r: {relation}, b: boolean}} [ var n := \"a\"; if b then [ call debug_table{{r: r where n = n}}; ]; ];\n{main}"
+            ),
+            local,
+            Some("[ var "),
+        );
+        let cities = "var cities := relation { { n: \"Lagos\", q: 1 } };\n";
+        says(
+            &format!("const n := \"a\";\n{cities}var a := cities where n = n;\n{main}"),
+            "the constant `n`",
+            Some("const "),
+        );
+        says(
+            &format!(
+                "var n := \"a\";\n{cities}operator main{{}} [ call debug_table{{r: cities where n = n}}; ];"
+            ),
+            "the variable `n`",
+            Some("var "),
+        );
+        // What the tuple further out hides, of a name the one at hand doesn't have.
+        says(
+            &format!(
+                "operator f{{r: {relation}, s: relation {{ m: text }}, n: text}}: relation {{ n: text, q: integer, c: integer }} [ r extend {{ c := count{{r: s where n = n}} }} ];\n{main}"
+            ),
+            parameter,
+            Some("{ m: text }, "),
+        );
+        // An attribute further out, of a tuple around this one, which isn't declared
+        // in any one place.
+        says(
+            &format!(
+                "var r := relation {{ {{ n: 1 }} }};\nvar s := relation {{ {{ n: 1 }} }};\nvar a := r extend {{ c := count{{r: s where n = n}} }};\n{main}"
+            ),
+            "the attribute further out `n`",
+            None,
+        );
+    }
+
+    /// That each program's only error has a fix that gives the other, which has none.
+    fn fixes_to(cases: &[(String, String)]) {
+        for (source, expected) in cases {
+            assert_eq!(fix(source), *expected);
+            let program = analyze_str(expected);
+            assert!(program.is_ok(), "{expected}\n{program:#?}");
+        }
+    }
+
+    #[test]
+    fn an_attribute_compared_with_itself_is_fixed_by_a_constant_before_the_statement() {
+        let main = "operator main{} [];";
+        let r = "relation { n: text, q: integer }";
+        fixes_to(&[
+            // On the line it is written on, or on a line of its own.
+            (
+                format!("operator f{{r: {r}, n: text}}: {r} [ r where n = n ];\n{main}"),
+                format!(
+                    "operator f{{r: {r}, n: text}}: {r} [ const n_ := n; r where n = n_ ];\n{main}"
+                ),
+            ),
+            (
+                format!("operator f{{r: {r}, n: text}}: {r} [r where n <> n];\n{main}"),
+                format!(
+                    "operator f{{r: {r}, n: text}}: {r} [const n_ := n; r where n <> n_];\n{main}"
+                ),
+            ),
+            (
+                format!(
+                    "operator f{{r: {r}, n: text}} [\n    call debug_table{{r: r where n = n}};\n];\n{main}"
+                ),
+                format!(
+                    "operator f{{r: {r}, n: text}} [\n    const n_ := n;\n    call debug_table{{r: r where n = n_}};\n];\n{main}"
+                ),
+            ),
+            // In the innermost block, with what a loop has changed by then.
+            (
+                format!(
+                    "operator f{{r: {r}, n: text, b: boolean}} [\n    if b then [\n        call debug_table{{r: r where n = n}};\n    ];\n];\n{main}"
+                ),
+                format!(
+                    "operator f{{r: {r}, n: text, b: boolean}} [\n    if b then [\n        const n_ := n;\n        call debug_table{{r: r where n = n_}};\n    ];\n];\n{main}"
+                ),
+            ),
+            (
+                format!(
+                    "operator f{{r: {r}}} [\n    var n := \"a\";\n    while n <> \"aaa\" loop [\n        n := n || \"a\";\n        call debug_table{{r: r where n = n}};\n    ];\n];\n{main}"
+                ),
+                format!(
+                    "operator f{{r: {r}}} [\n    var n := \"a\";\n    while n <> \"aaa\" loop [\n        n := n || \"a\";\n        const n_ := n;\n        call debug_table{{r: r where n = n_}};\n    ];\n];\n{main}"
+                ),
+            ),
+            (
+                format!(
+                    "operator f{{r: {r}, a: array text}} [ for n in a loop [ call debug_table{{r: r where n = n}}; ]; ];\n{main}"
+                ),
+                format!(
+                    "operator f{{r: {r}, a: array text}} [ for n in a loop [ const n_ := n; call debug_table{{r: r where n = n_}}; ]; ];\n{main}"
+                ),
+            ),
+            // Before the statement, of what is inside no tuple's scope: a block in a
+            // `where` would read the attribute, and an `assign` has only assignments.
+            (
+                format!(
+                    "operator f{{r: {r}, n: text}}: {r} [ r where [ var a := 1; n = n and q = a ] ];\n{main}"
+                ),
+                format!(
+                    "operator f{{r: {r}, n: text}}: {r} [ const n_ := n; r where [ var a := 1; n = n_ and q = a ] ];\n{main}"
+                ),
+            ),
+            (
+                format!(
+                    "operator f{{r: {r}, n: text}} [\n    var x := r;\n    var y := 0;\n    assign {{ x := r where n = n; y := 1; }};\n];\n{main}"
+                ),
+                format!(
+                    "operator f{{r: {r}, n: text}} [\n    var x := r;\n    var y := 0;\n    const n_ := n;\n    assign {{ x := r where n = n_; y := 1; }};\n];\n{main}"
+                ),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn an_attribute_compared_with_itself_is_fixed_by_a_constant_reading_what_it_hides() {
+        let main = "operator main{} [];";
+        let r = "relation { n: text, q: integer }";
+        let cities = "var cities := relation { { n: \"Lagos\", q: 1 } };\n";
+        fixes_to(&[
+            // A local variable of a value block, in that block, wherever that is.
+            (
+                format!(
+                    "operator f{{r: {r}}}: integer [ var c := [ var n := \"a\"; count{{r: r where n = n}} ]; c ];\n{main}"
+                ),
+                format!(
+                    "operator f{{r: {r}}}: integer [ var c := [ var n := \"a\"; const n_ := n; count{{r: r where n = n_}} ]; c ];\n{main}"
+                ),
+            ),
+            // The program's: in an operator, or among its definitions, for a constant.
+            (
+                format!(
+                    "const n := \"a\";\n{cities}operator main{{}} [\n    call debug_table{{r: cities where n = n}};\n];"
+                ),
+                format!(
+                    "const n := \"a\";\n{cities}operator main{{}} [\n    const n_ := n;\n    call debug_table{{r: cities where n = n_}};\n];"
+                ),
+            ),
+            (
+                format!("const n := \"a\";\n{cities}var a := cities where n = n;\n{main}"),
+                format!(
+                    "const n := \"a\";\n{cities}const n_ := n;\nvar a := cities where n = n_;\n{main}"
+                ),
+            ),
+            (
+                format!(
+                    "var n := \"a\";\n{cities}operator main{{}} [\n    call debug_table{{r: cities where n = n}};\n];"
+                ),
+                format!(
+                    "var n := \"a\";\n{cities}operator main{{}} [\n    const n_ := n;\n    call debug_table{{r: cities where n = n_}};\n];"
+                ),
+            ),
+            // What it is written as: only the name changes.
+            (
+                format!("operator f{{r: {r}, n: text}}: {r} [ r where n = (n) ];\n{main}"),
+                format!(
+                    "operator f{{r: {r}, n: text}}: {r} [ const n_ := n; r where n = (n_) ];\n{main}"
+                ),
+            ),
+            (
+                format!(
+                    "operator f{{r: relation {{ p: tuple {{ x: integer }} }}, p: tuple {{ x: integer }}}}: relation {{ p: tuple {{ x: integer }} }} [ r where p.x = p.x ];\n{main}"
+                ),
+                format!(
+                    "operator f{{r: relation {{ p: tuple {{ x: integer }} }}, p: tuple {{ x: integer }}}}: relation {{ p: tuple {{ x: integer }} }} [ const p_ := p; r where p.x = p_.x ];\n{main}"
+                ),
+            ),
+            // By a name nothing in the program has.
+            (
+                format!("operator f{{r: {r}, n: text, n_: text}}: {r} [ r where n = n ];\n{main}"),
+                format!(
+                    "operator f{{r: {r}, n: text, n_: text}}: {r} [ const n_2 := n; r where n = n_2 ];\n{main}"
+                ),
+            ),
+        ]);
+        // Not even a name of the program's, which it would hide from what reads that.
+        let source = format!(
+            "const n_ := \"x\";\noperator f{{r: {r}, n: text}}: {r} [ r where n = n and n_ = \"x\" ];\n{main}"
+        );
+        assert!(fix(&source).contains("const n_2 := n;"), "{}", fix(&source));
+        // Nor that the tuple has, where its heading is written in another unit.
+        let found = analyze_units(&[
+            ("program", "uses { lib };\noperator f{r: relation row, n: text}: relation row [ r where n = n ];\noperator main{} [];"),
+            ("lib", "interface\nheading row := { n: text, n_: text };"),
+        ])
+        .unwrap_err();
+        assert_eq!(found[0].code, Code::ComparedWithItself, "{found:#?}");
+        assert!(
+            found[0].suggestions[0]
+                .message
+                .contains("`const n_2 := n;`"),
+            "{found:#?}"
+        );
+    }
+
+    #[test]
+    fn an_attribute_compared_with_itself_has_help_where_a_fix_would_be_a_guess() {
+        let main = "operator main{} [];";
+        let r = "relation { n: text, q: integer }";
+        let cities = "var cities := relation { { n: \"Lagos\", q: 1 } };\n";
+        let help = |source: &str| {
+            let found = errors(source);
+            assert_eq!(
+                found[0].code,
+                Code::ComparedWithItself,
+                "{source}: {found:#?}"
+            );
+            assert!(found[0].suggestions.is_empty(), "{source}: {found:#?}");
+            found[0].help[0].clone()
+        };
+        // Which side reads it, of an order, or of what the compiler made one side from.
+        for condition in ["q < q", "q <= q", "q > q", "q >= q"] {
+            let source =
+                format!("operator f{{r: {r}, q: integer}}: {r} [ r where {condition} ];\n{main}");
+            assert!(
+                help(&source).contains("`const q_ := q;`"),
+                "{}",
+                help(&source)
+            );
+        }
+        for (condition, parameter) in [("n = n || \"\"", "n: text"), ("q = q + 0", "q: integer")] {
+            let source =
+                format!("operator f{{r: {r}, {parameter}}}: {r} [ r where {condition} ];\n{main}");
+            assert!(
+                help(&source).contains("into a constant"),
+                "{}",
+                help(&source)
+            );
+        }
+        // A loop's condition, computed again; what a constant can't read, before it
+        // is declared or where it can't read a variable; and an attribute, which
+        // no statement can read.
+        for source in [
+            format!(
+                "operator f{{r: {r}, n: text}} [\n    while count{{r: r where n = n}} > 0 loop [ ];\n];\n{main}"
+            ),
+            format!(
+                "var n := \"a\";\n{cities}operator main{{}} [\n    while count{{r: cities where n = n}} > 0 loop [ ];\n];"
+            ),
+            format!(
+                "operator f{{r: {r}}} [\n    call debug_table{{r: r where n = n}};\n    var n := \"a\";\n];\n{main}"
+            ),
+            format!("var n := \"a\";\noperator f{{r: {r}}}: {r} [ r where n = n ];\n{main}"),
+            format!("var n := \"a\";\n{cities}var a := cities where n = n;\n{main}"),
+            format!(
+                "var r := relation {{ {{ n: 1 }} }};\nvar s := relation {{ {{ n: 1 }} }};\nvar a := r extend {{ c := count{{r: s where n = n}} }};\n{main}"
+            ),
+        ] {
+            assert!(
+                help(&source).contains("rename it"),
+                "{source}: {}",
+                help(&source)
+            );
+        }
+    }
+
+    #[test]
     fn a_unit_has_main_or_an_interface_or_both() {
         let codes = |units: &[(&str, &str)]| -> Vec<Code> {
             checked_unit(units).iter().map(|e| e.code).collect()

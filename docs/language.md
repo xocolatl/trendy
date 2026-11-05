@@ -6025,6 +6025,10 @@ operator main{} [
   satisfies a condition or doesn't, so `where` takes relations (A0022).
 - **The tuple's attributes hide other names,** as in `extend`, and
   `!!s` is its image relation in `s`.
+- **An attribute compared with itself is an error** (A0081): `where n = n` is true of
+  every tuple. When `n` is a parameter's name too, the attribute hides that only in the
+  `where`, so `const wanted := n;` before it reads the parameter, which keeps its name,
+  and `where n = wanted` compares them.
 - **Computed for each tuple** when the program runs, or when compiling if
   the relation is known then, where a failure names the tuple.
 - **A join or a product is restricted as it is made.** When compiling,
@@ -6836,7 +6840,10 @@ are case-sensitive. The keywords are `operator`, `var`, `const`, `call`, `builti
 `union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
 `as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign`,
 `return`, `if`, `then`, `else`, `while`, `loop`, `for` and
-`transaction`, all lowercase, and a keyword can't be a name (P0017).
+`transaction`, all lowercase, and a keyword can't be a name (P0017). A
+keyword declared as a name is reported once, there, whatever else the word
+would then have made of the rest of the file, and the fix renames it wherever it
+is a name, leaving what uses it as the keyword as it is.
 `type` is a keyword only after `builtin` and before a type's name, `key`
 only where a variable's keys go, `value` and `from` only in `tuple from` and `value from`, and
 `load`, `from`, `order`, `asc` and `desc` only in a load, `in` only

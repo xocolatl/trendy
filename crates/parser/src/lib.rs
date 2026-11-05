@@ -1,5 +1,6 @@
 mod errors;
 mod imports;
+mod keyword_names;
 mod sequences;
 mod unordered;
 
@@ -28,9 +29,29 @@ pub struct Parse {
 /// exactly.
 #[must_use]
 pub fn parse(source: &str, lexed: Lexed) -> Parse {
+    let first = parsed(source, &lexed.tokens, lexed.errors.clone());
+    let named = keyword_names::used(source, &lexed.tokens, &first);
+    if named.is_empty() {
+        return first;
+    }
+    // Parsed as what it was meant to be, so that nothing else cascades.
+    let tokens = keyword_names::as_identifiers(&lexed.tokens, &named);
+    let mut second = parsed(source, &tokens, lexed.errors);
+    second
+        .errors
+        .retain(|error| !keyword_names::is_of_the_second_parse(error, &tokens, &named));
+    second
+        .errors
+        .extend(keyword_names::errors(source, &lexed.tokens, &named));
+    second.errors.sort_by_key(|d| d.span().start);
+    second
+}
+
+/// The tree of `source`, of the tokens `tokens`, with `errors`, what the lexer found.
+fn parsed(source: &str, tokens: &[Token], errors: Vec<Diagnostic>) -> Parse {
     let mut parser = Parser {
         source,
-        tokens: &lexed.tokens,
+        tokens,
         pos: 0,
         last_end: None,
         form: errors::OPERATOR_FORM,
@@ -42,7 +63,7 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
         body_front: None,
         headers: Vec::new(),
         builder: TreeBuilder::new(),
-        errors: lexed.errors,
+        errors,
     };
     parser.source_file();
     parser.flush_missing();
@@ -10941,14 +10962,275 @@ type rule { { constraint: text } };",
                     Code::KeywordAsName,
                     "`remove` is a keyword, so it can't be a name"
                 ),
-                (
-                    Code::KeywordAsName,
-                    "`remove` is a keyword, so it can't be a name"
-                ),
             ],
-            "and nothing cascades"
+            "once each, and nothing cascades"
         );
         // A missing name before the next definition stays a missing name.
+        assert_eq!(
+            parse_str("operator\nvar x := 1;").errors[0].code,
+            Code::MissingToken
+        );
+    }
+
+    /// `source` with its errors' first fixes applied.
+    fn fixed(source: &str, errors: &[Diagnostic]) -> String {
+        let mut edits: Vec<_> = errors
+            .iter()
+            .filter_map(|d| d.suggestions.first())
+            .flat_map(|s| s.edits.clone())
+            .collect();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.span.start));
+        let mut fixed = source.to_string();
+        for edit in edits {
+            fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+        }
+        fixed
+    }
+
+    #[test]
+    fn a_keyword_declared_as_a_name_is_reported_once_with_a_fix_that_renames_it() {
+        let main = "operator main{} [];";
+        for source in [
+            // Declared at the top level, and used in every way a name of that kind is.
+            format!(
+                "heading group := {{ gid: integer, name: text }};\nvar g: relation group;\nvar h: tuple group;\noperator f{{a: relation group}}: integer [ count{{r: a}} ];\n{main}"
+            ),
+            format!(
+                "type group {{ {{ a: integer }} }};\nvar g: group := group{{a: 1}};\nvar h: array group;\nvar i := g is group;\n{main}"
+            ),
+            "var group := 1;\nvar b := group + 1;\nvar c := array [group];\noperator main{} [ call debug_value{v: group}; group := 2; ];".to_string(),
+            format!("const group := 1;\nvar b := group;\n{main}"),
+            format!(
+                "operator group{{a: integer}}: integer [ a ];\nvar b := group{{a: 1}};\n{main}"
+            ),
+            format!("database group;\n{main}"),
+            format!("kind group {{ < }};\n{main}"),
+            format!("constraint group := 1 = 1;\n{main}"),
+            // In a heading, a selector, a parameter, and what reads them.
+            format!(
+                "operator f{{group: integer}}: integer [ group + 1 ];\nvar b := f{{group: 2}};\n{main}"
+            ),
+            format!("operator f{{out group: integer}} [ group := 1; ];\n{main}"),
+            format!("operator f{{var group: integer}} [ group := 1; ];\n{main}"),
+            format!("var a: tuple {{ group: integer }};\nvar b := a.group;\n{main}"),
+            format!(
+                "var a := relation {{ {{ group: 1 }} }};\nvar b := a where group = 1;\nvar c := a{{group}};\n{main}"
+            ),
+            format!("var a := tuple {{ group: 1 }};\n{main}"),
+            format!("var a := relation {{ {{ x: 1 }} }} extend {{ group := x }};\n{main}"),
+            format!(
+                "var a := relation {{ {{ x: 1 }} }} rename {{ x as group }};\nvar b := a where group = 1;\n{main}"
+            ),
+            // In a body.
+            "operator main{} [ var group := 1; call debug_value{v: group}; ];".to_string(),
+            "operator main{} [ for group in array [1] loop [ call debug_value{v: group}; ]; ];"
+                .to_string(),
+            // Used before it is declared, as a unit's declarations are in no order.
+            format!("var g: relation group;\nheading group := {{ a: integer }};\n{main}"),
+        ] {
+            let parse = parse_str(&source);
+            let found: Vec<_> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(
+                found,
+                [Code::KeywordAsName],
+                "{source}\n{:#?}",
+                parse.errors
+            );
+            let error = &parse.errors[0];
+            let at = &source[error.primary.span.start..error.primary.span.end];
+            assert_eq!(at, "group", "{source}");
+            let after = fixed(&source, &parse.errors);
+            assert!(after.contains("group_"), "{after}");
+            let parse = parse_str(&after);
+            assert_eq!(parse.errors.len(), 0, "{after}\n{:#?}", parse.errors);
+        }
+        // Where it is first declared.
+        let source = format!("var g: relation group;\nheading group := {{ a: integer }};\n{main}");
+        let at = parse_str(&source).errors[0].primary.span.start;
+        assert_eq!(at, source.find("heading group").unwrap() + "heading ".len());
+    }
+
+    #[test]
+    fn every_keyword_declared_as_a_name_is_reported_once() {
+        let main = "operator main{} [];";
+        let contexts = [
+            format!(
+                "heading group := {{ gid: integer, name: text }};\nvar g: relation group;\n{main}"
+            ),
+            format!("type group {{ {{ a: integer }} }};\nvar g: group;\n{main}"),
+            format!("var group := 1;\nvar b := 1 + group;\n{main}"),
+            format!("const group := 1;\n{main}"),
+            format!("operator group{{a: integer}}: integer [ a ];\n{main}"),
+            format!("database group;\n{main}"),
+            format!("operator f{{group: integer}}: integer [ 1 + group ];\n{main}"),
+            format!("var a: tuple {{ group: integer }};\nvar b := a.group;\n{main}"),
+            format!("var a := tuple {{ group: 1 }};\n{main}"),
+            format!("var a := relation {{ {{ x: 1 }} }} rename {{ x as group }};\n{main}"),
+            "operator main{} [ var group := 1; call debug_value{v: group}; ];".to_string(),
+        ];
+        let mut wrong = Vec::new();
+        for keyword in SyntaxKind::ALL.into_iter().filter(|k| k.is_keyword()) {
+            let word = keyword.fixed_text().unwrap();
+            for context in &contexts {
+                let source = context.replace("group", word);
+                let parse = parse_str(&source);
+                let codes: Vec<_> = parse.errors.iter().map(|e| e.code).collect();
+                let fixed_clean = parse_str(&fixed(&source, &parse.errors)).errors.is_empty();
+                if codes != [Code::KeywordAsName] || !fixed_clean {
+                    wrong.push(format!("{source}\n    {codes:?}, fix clean: {fixed_clean}"));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} wrong:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+
+    #[test]
+    fn what_a_keyword_is_used_as_stays_as_it_is() {
+        let main = "operator main{} [];";
+        // A real `group` is the keyword, so it isn't renamed.
+        let source = format!(
+            "heading group := {{ a: integer }};\nvar g: relation group;\nvar r := relation {{ {{ a: 1, b: 2 }} }};\nvar h := r group {{ x := {{a}} }};\n{main}"
+        );
+        let parse = parse_str(&source);
+        assert_eq!(parse.errors.len(), 1, "{:#?}", parse.errors);
+        let after = fixed(&source, &parse.errors);
+        assert!(after.contains("heading group_ := "), "{after}");
+        assert!(after.contains("relation group_;"), "{after}");
+        assert!(after.contains("r group { x := {a} }"), "{after}");
+        assert!(parse_str(&after).errors.is_empty(), "{after}");
+        // Two keywords, each once.
+        let source = format!(
+            "heading group := {{ a: integer }};\nvar g: relation group;\nheading where := {{ b: integer }};\nvar w: tuple where;\n{main}"
+        );
+        let parse = parse_str(&source);
+        assert_eq!(parse.errors.len(), 2, "{:#?}", parse.errors);
+        assert!(parse_str(&fixed(&source, &parse.errors)).errors.is_empty());
+        // A name the fix would clash with is passed over, in any part of the file.
+        let source = format!("var group_ := 1;\nvar group_2 := 2;\nvar group := 3;\n{main}");
+        let after = fixed(&source, &parse_str(&source).errors);
+        assert!(after.contains("var group_3 := 3;"), "{after}");
+    }
+
+    #[test]
+    fn what_only_looks_like_a_keyword_declared_as_a_name_is_not_one() {
+        let main = "operator main{} [];";
+        // A variable named after a word that starts a declaration, and the operator
+        // after it, or an attribute with such a name.
+        for valid in [
+            format!(
+                "var kind := relation {{ {{ a: 1, b: 2 }} }};\nvar c := kind remove {{a}};\n{main}"
+            ),
+            format!(
+                "var type := relation {{ {{ a: 1, b: 2 }} }};\nvar c := type rename {{ a as d }};\n{main}"
+            ),
+            format!(
+                "var heading := relation {{ {{ a: 1, b: 2 }} }};\nvar c := heading extend {{ d := a }};\n{main}"
+            ),
+            format!(
+                "var r := relation {{ {{ type: true, heading: true }} }};\nvar s := r where type and heading;\nvar t := tuple from s;\nvar u := t.type and t.heading;\n{main}"
+            ),
+            format!(
+                "var a := 1;\nvar b := treat a as array integer;\nvar c := treat a as tuple {{ d: integer }};\nvar e := treat a as relation {{ d: integer }};\n{main}"
+            ),
+            // The keyword itself.
+            format!(
+                "type f union;\ntype e is f {{ {{ a: tuple {{ b: integer }}, c: array integer }} }};\n{main}"
+            ),
+        ] {
+            let parse = parse_str(&valid);
+            assert!(parse.errors.is_empty(), "{valid}\n{:#?}", parse.errors);
+        }
+        // What only looks like one, among statements, where a definition can't start.
+        for valid in [
+            "operator f{kind: relation { a: integer, b: integer }}: relation { b: integer } [\n    var x := 1;\n    kind remove {a}\n];",
+            "operator f{heading: relation { a: integer }}: relation { a: integer, b: integer } [\n    var x := 1;\n    heading extend { b := a }\n];",
+            "operator f{type: relation { a: integer }}: relation { b: integer } [\n    var x := 1;\n    type rename {a as b}\n];",
+        ] {
+            let parse = parse_str(valid);
+            assert!(parse.errors.is_empty(), "{valid}\n{:#?}", parse.errors);
+        }
+        // Nor with something else wrong, among statements or in an expression.
+        for source in [
+            "operator f{kind: relation { a: integer, b: integer }}: relation { b: integer } [\n    var x := 1 2;\n    kind remove {a}\n];",
+            "var kind := relation { { a: 1 } };\nvar c := kind where { a: 1 };",
+        ] {
+            let parse = parse_str(source);
+            assert!(!parse.errors.is_empty(), "{source}");
+            assert!(
+                parse.errors.iter().all(|e| e.code != Code::KeywordAsName),
+                "{source}\n{:#?}",
+                parse.errors
+            );
+        }
+    }
+
+    #[test]
+    fn a_keyword_declared_as_a_name_is_reported_where_it_is_declared() {
+        let main = "operator main{} [];";
+        // A definition starts at the file's start, after a section's word, or after
+        // the last definition, however that ends.
+        for (source, found) in [
+            (
+                "heading group := { a: integer };",
+                &[Code::KeywordAsName][..],
+            ),
+            (
+                "interface\nheading group := { a: integer };",
+                &[Code::KeywordAsName],
+            ),
+            (
+                "implementation\nheading group := { a: integer };",
+                &[Code::KeywordAsName],
+            ),
+            (
+                "operator f{} []\nheading group := { a: integer };",
+                &[Code::MissingToken, Code::KeywordAsName],
+            ),
+            (
+                "heading a := { b: integer }\nheading group := { c: integer };",
+                &[Code::MissingToken, Code::KeywordAsName],
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<_> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, found, "{source}\n{:#?}", parse.errors);
+        }
+        // Where nothing declares it, a use is where the fix starts, and renames it.
+        for source in [
+            "operator main{} [ group := 1; ];".to_string(),
+            "operator main{} [ call group{}; ];".to_string(),
+        ] {
+            let parse = parse_str(&source);
+            assert_eq!(parse.errors.len(), 1, "{source}: {:#?}", parse.errors);
+            let after = fixed(&source, &parse.errors);
+            assert!(after.contains("group_"), "{after}");
+            assert!(parse_str(&after).errors.is_empty(), "{after}");
+        }
+        // Where something does, that is where it is reported, wherever the use is.
+        for source in [
+            "operator main{} [ group := 1; ];\nvar group := 1;",
+            "var group := 1;\noperator main{} [ group := 1; ];",
+        ] {
+            let parse = parse_str(source);
+            assert_eq!(parse.errors.len(), 1, "{:#?}", parse.errors);
+            let at = source.find("var group").unwrap() + "var ".len();
+            assert_eq!(parse.errors[0].primary.span.start, at, "{source}");
+            assert_eq!(parse.errors[0].suggestions[0].edits.len(), 2);
+        }
+        // In the order of the file, with what else is wrong.
+        let parse = parse_str(&format!("var group := 1;\nvar a 1;\n{main}"));
+        assert_eq!(
+            parse.errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::KeywordAsName, Code::MissingToken],
+            "{:#?}",
+            parse.errors
+        );
+        // A keyword where a name goes, but with nothing to say it is one, is what it was.
         assert_eq!(
             parse_str("operator\nvar x := 1;").errors[0].code,
             Code::MissingToken

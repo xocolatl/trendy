@@ -24,6 +24,18 @@ pub struct Span {
     pub end: usize,
 }
 
+/// A name for a fix to give what it adds or renames, after `word`: `word_`, or `word_2`
+/// and so on, the first that isn't `taken`.
+pub fn unused_name(word: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut name = format!("{word}_");
+    let mut number = 1;
+    while taken(&name) {
+        number += 1;
+        name = format!("{word}_{number}");
+    }
+    name
+}
+
 impl Span {
     #[must_use]
     pub fn new(start: usize, end: usize) -> Self {

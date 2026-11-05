@@ -10,7 +10,9 @@ use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{Assignee, Assigning, Declared};
-use crate::check::{self, Checker, Lookup, Names, Representation, Written, argument_names};
+use crate::check::{
+    self, Checker, Lookup, Meaning, Names, Representation, Written, argument_names,
+};
 use crate::locals::{Declaration, Declaring, Local, Locals};
 use crate::narrowed::{self, Facts};
 use crate::operators::{Chosen, Operators, Signature};
@@ -1674,12 +1676,15 @@ impl Names for BodyNames<'_> {
         self.locals.next()
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.around.hides(name)
-            || matches!(
-                self.locals.find(name),
-                Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
-            )
+    fn around(&self, name: &str) -> Option<Meaning> {
+        if matches!(
+            self.locals.find(name),
+            Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
+        ) {
+            Some(Meaning::LocalVariable)
+        } else {
+            self.around.around(name)
+        }
     }
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {
@@ -1899,8 +1904,10 @@ impl Names for UpdateNames<'_, '_> {
         0
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.signature().is_parameter(name)
+    fn around(&self, name: &str) -> Option<Meaning> {
+        self.signature()
+            .is_parameter(name)
+            .then_some(Meaning::Parameter)
     }
 
     fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {

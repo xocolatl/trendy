@@ -13,7 +13,7 @@ use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{self, Assignee, Assigning};
 use crate::body::{Around, Growing};
-use crate::check::{Checker, Lookup, Names};
+use crate::check::{Checker, Lookup, Meaning, Names};
 use crate::locals::{self, Declaration, Declaring, Local, Locals};
 use crate::operators::{CallConstraint, FromType, Made, Operators, Signature};
 use crate::types::{self, Expected, Origin};
@@ -1237,8 +1237,8 @@ impl Names for Globals<'_> {
         self.block_locals.len()
     }
 
-    fn hides(&self, _: &str) -> bool {
-        false
+    fn around(&self, _: &str) -> Option<Meaning> {
+        None
     }
 
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
@@ -1448,12 +1448,17 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         self.locals.next()
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.signature().is_parameter(name)
-            || matches!(
-                self.locals.find(name),
-                Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
-            )
+    fn around(&self, name: &str) -> Option<Meaning> {
+        if self.signature().is_parameter(name) {
+            Some(Meaning::Parameter)
+        } else if matches!(
+            self.locals.find(name),
+            Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
+        ) {
+            Some(Meaning::LocalVariable)
+        } else {
+            None
+        }
     }
 
     fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {

@@ -185,6 +185,7 @@ codes! {
     CallConstraint => "A0078",
     ProjectionOrCall => "A0079",
     ConstantWithoutValue => "A0080",
+    ComparedWithItself => "A0081",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

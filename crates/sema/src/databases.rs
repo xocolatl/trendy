@@ -12,7 +12,7 @@ use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::body::Context;
-use crate::check::{Checker, Lookup, Names};
+use crate::check::{Checker, Lookup, Meaning, Names};
 use crate::constraints::{self, PartNames};
 use crate::locals::Locals;
 use crate::operators::Operators;
@@ -356,8 +356,8 @@ impl Names for DatabaseNames<'_, '_> {
         self.locals.next()
     }
 
-    fn hides(&self, _: &str) -> bool {
-        false
+    fn around(&self, _: &str) -> Option<Meaning> {
+        None
     }
 
     fn checked(&mut self, id: hir::OperatorId, _: Span, _: &mut Vec<Diagnostic>) -> bool {

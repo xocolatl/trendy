@@ -19,7 +19,7 @@ use trendy_syntax::SyntaxKind;
 use trendy_syntax::ast::{self, AstNode, Expr};
 
 use crate::Namespaces;
-use crate::check::{Checker, Lookup, Names};
+use crate::check::{Checker, Lookup, Meaning, Names};
 use crate::operators::{Operators, Signature};
 use crate::ops;
 use crate::types;
@@ -419,8 +419,12 @@ impl Names for Narrowed<'_> {
         self.outer.next_local()
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.outer.hides(name)
+    fn around(&self, name: &str) -> Option<Meaning> {
+        self.outer.around(name)
+    }
+
+    fn hidden_by_attribute(&self, name: &str) -> Option<Meaning> {
+        self.outer.hidden_by_attribute(name)
     }
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {
@@ -502,8 +506,12 @@ impl Names for Unnarrowed<'_> {
         self.outer.next_local()
     }
 
-    fn hides(&self, name: &str) -> bool {
-        self.outer.hides(name)
+    fn around(&self, name: &str) -> Option<Meaning> {
+        self.outer.around(name)
+    }
+
+    fn hidden_by_attribute(&self, name: &str) -> Option<Meaning> {
+        self.outer.hidden_by_attribute(name)
     }
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {

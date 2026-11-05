@@ -1154,8 +1154,9 @@ pub(crate) fn assign_as(assigning: Assigning, span: Span, name: &str, value: &st
     )
 }
 
-/// The keyword `found`, used as a name.
-pub(crate) fn keyword_as_name(found: Found) -> Diagnostic {
+/// The keyword `word`, at `span`, used as a name: what makes the parser say so, and
+/// the rest of what it says, by the second parse (see [`crate::keyword_names`]).
+fn keyword_error(word: &str, span: Span) -> Diagnostic {
     let keywords: Vec<&str> = SyntaxKind::ALL
         .into_iter()
         .filter(|k| k.is_keyword())
@@ -1163,15 +1164,25 @@ pub(crate) fn keyword_as_name(found: Found) -> Diagnostic {
         .collect();
     Diagnostic::error(
         Code::KeywordAsName,
-        format!("`{}` is a keyword, so it can't be a name", found.text),
-        found.span,
+        format!("`{word}` is a keyword, so it can't be a name"),
+        span,
         "a keyword",
     )
     .with_note(format!("the keywords are `{}`", keywords.join("`, `")))
-    .with_help(format!(
-        "choose another name, such as `{0}_` or `my_{0}`, and use it wherever this one is used",
-        found.text
-    ))
+}
+
+/// The keyword `found`, where a name goes, which the file is parsed again for.
+pub(crate) fn keyword_as_name(found: Found) -> Diagnostic {
+    keyword_error(found.text, found.span)
+}
+
+/// The keyword `word`, declared as a name at `span`, whose `edits` rename it, wherever
+/// it is used as one, to `renamed`.
+pub(crate) fn keyword_named(word: &str, span: Span, renamed: &str, edits: Vec<Edit>) -> Diagnostic {
+    keyword_error(word, span).with_suggestion(
+        format!("rename it `{renamed}`, here and wherever it is used as a name"),
+        edits,
+    )
 }
 
 /// `old: new`, `found` being the `:`, in a renaming. `neighbors` are the
