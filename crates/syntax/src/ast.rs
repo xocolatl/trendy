@@ -2902,6 +2902,8 @@ pub enum LiteralValue {
     Approximate(f64),
     Text(String),
     Character(String),
+    Byte(u8),
+    Bytes(Vec<u8>),
 }
 
 /// Why a literal has no value.
@@ -2946,6 +2948,25 @@ impl Literal {
                     .ok_or(LiteralError::ApproximateTooLarge);
             }
             _ => {}
+        }
+        if token.kind() == SyntaxKind::ByteLiteral {
+            let bytes = text
+                .strip_prefix("x'")
+                .and_then(|t| t.strip_suffix('\''))
+                .and_then(|body| literal::hex_bytes(body).ok())
+                .ok_or(LiteralError::Malformed)?;
+            return match *bytes.as_slice() {
+                [byte] => Ok(LiteralValue::Byte(byte)),
+                _ => Err(LiteralError::Malformed),
+            };
+        }
+        if token.kind() == SyntaxKind::BytesLiteral {
+            return text
+                .strip_prefix("x\"")
+                .and_then(|t| t.strip_suffix('"'))
+                .and_then(|body| literal::hex_bytes(body).ok())
+                .map(LiteralValue::Bytes)
+                .ok_or(LiteralError::Malformed);
         }
         if token.kind() == SyntaxKind::CharacterLiteral {
             let (value, problems) = text

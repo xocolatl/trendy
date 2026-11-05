@@ -1081,15 +1081,25 @@ pub(crate) fn array_selector(
     }
 }
 
-pub(crate) fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
+/// The value of `literal`, written `expr`: of a byte, or an array of them,
+/// selected as a value of `byte` is, so of the most specific type it is of.
+pub(crate) fn literal_value(
+    literal: &Literal,
+    expr: &Expr,
+    checker: &mut Checker<'_>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    let constant = |value| Some(hir::Expr::Constant(value));
     match literal.value() {
-        Ok(LiteralValue::Boolean(value)) => Some(hir::Value::Boolean(value)),
-        Ok(LiteralValue::Integer(value)) => Some(hir::Value::Integer(value)),
+        Ok(LiteralValue::Boolean(value)) => constant(hir::Value::Boolean(value)),
+        Ok(LiteralValue::Integer(value)) => constant(hir::Value::Integer(value)),
         Ok(LiteralValue::Approximate(value)) => {
-            Some(hir::Value::Approximate(hir::Approximate::new(value)))
+            constant(hir::Value::Approximate(hir::Approximate::new(value)))
         }
-        Ok(LiteralValue::Text(value)) => Some(hir::Value::Text(value)),
-        Ok(LiteralValue::Character(value)) => Some(hir::Value::Character(value)),
+        Ok(LiteralValue::Text(value)) => constant(hir::Value::Text(value)),
+        Ok(LiteralValue::Character(value)) => constant(hir::Value::Character(value)),
+        Ok(LiteralValue::Byte(byte)) => checker.byte_literal(byte, expr, errors),
+        Ok(LiteralValue::Bytes(bytes)) => checker.bytes_literal(&bytes, expr, errors),
         Err(LiteralError::IntegerTooLarge) => {
             errors.push(errors::integer_out_of_range(literal.span()));
             None

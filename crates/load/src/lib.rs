@@ -267,7 +267,15 @@ mod tests {
     fn the_units_that_come_with_the_compiler_are_its_own_text() {
         let library = library();
         let names: Vec<&str> = library.iter().map(|u| u.name.as_str()).collect();
-        assert_eq!(names, ["trendy.files", "trendy.catalog", "trendy.prelude"]);
+        assert_eq!(
+            names,
+            [
+                "trendy.uuid",
+                "trendy.files",
+                "trendy.catalog",
+                "trendy.prelude"
+            ]
+        );
         for unit in &library {
             assert!(
                 unit.parse.errors.is_empty(),

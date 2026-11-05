@@ -104,6 +104,7 @@ codes! {
     QualifiedForm => "P0058",
     Assertion => "P0059",
     CharacterLiteral => "P0060",
+    ByteLiteral => "P0061",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",

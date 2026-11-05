@@ -59,6 +59,10 @@ pub(crate) enum Resolved {
     Identity,
     Unary(hir::UnaryOp),
     Binary(hir::BinaryOp),
+    /// `and`, `or` or `xor` of bytes, bit by bit.
+    Bytes(hir::Bitwise),
+    /// `not` of a byte, of each of its eight bits.
+    NotByte,
     /// `and`, `or` or `xor`, or another that is one of them of its
     /// operands, the left one negated if `not_left`: `a implies b` is `not
     /// a or b`.
@@ -101,8 +105,8 @@ impl Operator {
     }
 
     /// Whether the operator is a connective: `and`, `or`, `xor` or
-    /// `implies`, of booleans, or, but for `implies`, of integers, bit by
-    /// bit.
+    /// `implies`, of booleans, or, but for `implies`, of integers or bytes,
+    /// bit by bit.
     fn is_connective(self) -> bool {
         matches!(
             self,
@@ -185,7 +189,7 @@ impl Operator {
     pub(crate) fn takes(self) -> &'static str {
         match self {
             Operator::Not | Operator::And | Operator::Or | Operator::Xor => {
-                "booleans, or integers, bit by bit"
+                "booleans, or integers or bytes, bit by bit"
             }
             Operator::Implies => "booleans",
             Operator::Negate
@@ -197,7 +201,7 @@ impl Operator {
             Operator::Div | Operator::Mod | Operator::ShiftLeft | Operator::ShiftRight => {
                 "integers"
             }
-            Operator::Concatenate => "text",
+            Operator::Concatenate => "text or arrays",
             Operator::Compare(hir::Comparison::Equal | hir::Comparison::NotEqual) => {
                 "two values of the same type"
             }
@@ -207,58 +211,90 @@ impl Operator {
         }
     }
 
+    /// The operator, of operands of `ty`, which isn't a scalar type. Tuples have
+    /// only equality; relations are ordered by inclusion, and arrays element by
+    /// element, of elements that are ordered.
+    fn resolve_of_non_scalar(self, ty: &hir::Type) -> Option<Resolved> {
+        use hir::BinaryOp as B;
+        match (self, ty) {
+            (Operator::Concatenate, hir::Type::Array(_)) => {
+                Some(Resolved::Binary(B::ConcatenateArrays))
+            }
+            (Operator::Not, hir::Type::Defined(defined))
+                if hir::Library::is_byte(&defined.name) =>
+            {
+                Some(Resolved::NotByte)
+            }
+            (Operator::And | Operator::Or | Operator::Xor, hir::Type::Defined(defined))
+                if hir::Library::is_byte(&defined.name) =>
+            {
+                Some(Resolved::Bytes(match self {
+                    Operator::And => hir::Bitwise::And,
+                    Operator::Or => hir::Bitwise::Or,
+                    _ => hir::Bitwise::Xor,
+                }))
+            }
+            (Operator::Compare(comparison), hir::Type::Array(_))
+                if ty.has(hir::Requirement::Order) =>
+            {
+                Some(Resolved::Binary(B::Compare(
+                    comparison,
+                    hir::Compared::Array,
+                )))
+            }
+            (
+                Operator::Compare(
+                    comparison @ (hir::Comparison::Equal | hir::Comparison::NotEqual),
+                ),
+                _,
+            )
+            | (Operator::Compare(comparison), hir::Type::Relation(_)) => Some(Resolved::Binary(
+                B::Compare(comparison, hir::Compared::of(ty)),
+            )),
+            // A type of the program's own with an order.
+            (Operator::Compare(comparison), hir::Type::Defined(defined))
+                if defined.order.is_some() =>
+            {
+                Some(Resolved::Binary(B::Compare(
+                    comparison,
+                    hir::Compared::Defined,
+                )))
+            }
+            (Operator::Compare(comparison), hir::Type::Parameter(p))
+                if p.any == hir::Any::Relation =>
+            {
+                Some(Resolved::Binary(B::Compare(
+                    comparison,
+                    hir::Compared::of(ty),
+                )))
+            }
+            // A kind that requires the operator.
+            (_, hir::Type::Parameter(p))
+                if self.requirement().is_some_and(|r| p.any.requires(r)) =>
+            {
+                let numeric = hir::Numeric::Parameter(p.index);
+                match self {
+                    Operator::Compare(comparison) => Some(Resolved::Binary(B::Compare(
+                        comparison,
+                        hir::Compared::of(ty),
+                    ))),
+                    Operator::Plus => Some(Resolved::Identity),
+                    Operator::Add => Some(Resolved::Binary(B::Add(numeric))),
+                    Operator::Multiply => Some(Resolved::Binary(B::Multiply(numeric))),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// The operator for operands of type `ty`, or `None` if it doesn't take
     /// them: `/` doesn't take integers, nor `div` and `mod` approximate
     /// numbers, and tuples and relations only have `=` and `<>`.
     pub(crate) fn resolve(self, ty: &hir::Type) -> Option<Resolved> {
         use hir::BinaryOp as B;
         let hir::Type::Scalar(scalar) = *ty else {
-            // Tuples have only equality; relations are ordered by inclusion.
-            return match (self, ty) {
-                (
-                    Operator::Compare(
-                        comparison @ (hir::Comparison::Equal | hir::Comparison::NotEqual),
-                    ),
-                    _,
-                )
-                | (Operator::Compare(comparison), hir::Type::Relation(_)) => Some(
-                    Resolved::Binary(B::Compare(comparison, hir::Compared::of(ty))),
-                ),
-                // A type of the program's own with an order.
-                (Operator::Compare(comparison), hir::Type::Defined(defined))
-                    if defined.order.is_some() =>
-                {
-                    Some(Resolved::Binary(B::Compare(
-                        comparison,
-                        hir::Compared::Defined,
-                    )))
-                }
-                (Operator::Compare(comparison), hir::Type::Parameter(p))
-                    if p.any == hir::Any::Relation =>
-                {
-                    Some(Resolved::Binary(B::Compare(
-                        comparison,
-                        hir::Compared::of(ty),
-                    )))
-                }
-                // A kind that requires the operator.
-                (_, hir::Type::Parameter(p))
-                    if self.requirement().is_some_and(|r| p.any.requires(r)) =>
-                {
-                    let numeric = hir::Numeric::Parameter(p.index);
-                    match self {
-                        Operator::Compare(comparison) => Some(Resolved::Binary(B::Compare(
-                            comparison,
-                            hir::Compared::of(ty),
-                        ))),
-                        Operator::Plus => Some(Resolved::Identity),
-                        Operator::Add => Some(Resolved::Binary(B::Add(numeric))),
-                        Operator::Multiply => Some(Resolved::Binary(B::Multiply(numeric))),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
+            return self.resolve_of_non_scalar(ty);
         };
         let numeric = hir::Numeric::of(scalar);
         let connective = |connective, not_left| Resolved::Connective {
@@ -477,14 +513,15 @@ pub(crate) fn check_operands(
 
 /// The type the operands of `op`, a connective written `token`, are
 /// expected to have, given what they are on their own, `own`: booleans,
-/// or integers, bit by bit, but for `implies`, which takes only booleans.
+/// or integers or bytes, bit by bit, but for `implies`, which takes only booleans.
 /// It is the context's, `expected`, if the operator takes it and an
 /// operand valid on its own has it, or none has a type the operator takes.
 /// Otherwise it is the operands', so that operands that agree are
 /// reported together, as the result, and not one by one: booleans, if one
 /// is a boolean, as an integer among booleans is likelier a boolean
-/// written as in C, and else integers if one is an integer. Of none, as
-/// of `and{}`, it is booleans.
+/// written as in C, else bytes if one is a byte, as an integer among bytes is
+/// a byte written as a number, and else integers if one is an integer. Of
+/// none, as of `and{}`, it is booleans.
 pub(crate) fn connected(
     op: Operator,
     token: &SyntaxToken,
@@ -493,41 +530,59 @@ pub(crate) fn connected(
     expected: Option<&Expected>,
 ) -> Expected {
     let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
-    let integer = hir::Type::Scalar(hir::Scalar::Integer);
     if let Operands::Fixed(_) = op.operands() {
         return Expected {
             ty: boolean,
             origin: Origin::Operator(token.clone()),
         };
     }
-    // The first operand valid on its own of type `ty`, as what expects it.
-    let first = |ty: &hir::Type| {
+    // The first operand valid on its own of a type `wanted`, as what expects it.
+    let first = |wanted: &dyn Fn(&hir::Type) -> bool| {
         operands
             .iter()
             .zip(&own.checked)
             .find_map(|(operand, checked)| match checked {
-                Some(types::Alone::Valid((_, of))) if of == ty => Some(Expected {
-                    ty: ty.clone(),
+                Some(types::Alone::Valid((_, of))) if wanted(of) => Some(Expected {
+                    ty: of.clone(),
                     origin: Origin::Value(operand.clone()?),
                 }),
                 _ => None,
             })
     };
-    let (booleans, integers) = (first(&boolean), first(&integer));
+    let integer = hir::Type::Scalar(hir::Scalar::Integer);
+    let booleans = first(&|ty| *ty == boolean);
+    let integers = first(&|ty| *ty == integer);
+    let bytes = first(&|ty| has_bits(ty) && *ty != integer);
     let context = expected.filter(|e| {
         op.resolve(&e.ty).is_some()
-            && (own.types().any(|ty| *ty == e.ty) || (booleans.is_none() && integers.is_none()))
+            && (own.types().any(|ty| *ty == e.ty)
+                || (booleans.is_none() && integers.is_none() && bytes.is_none()))
     });
     match context {
         Some(context) => Expected {
             ty: context.ty.clone(),
             origin: context.origin.operand(token),
         },
-        None => booleans.or(integers).unwrap_or(Expected {
+        None => booleans.or(bytes).or(integers).unwrap_or(Expected {
             ty: boolean,
             origin: Origin::Operator(token.clone()),
         }),
     }
+}
+
+/// Whether `and`, `or`, `xor` and `not` of values of type `ty` work on their
+/// bits: an integer's or a byte's.
+pub(crate) fn has_bits(ty: &hir::Type) -> bool {
+    match ty {
+        hir::Type::Scalar(hir::Scalar::Integer) => true,
+        hir::Type::Defined(defined) => hir::Library::is_byte(&defined.name),
+        _ => false,
+    }
+}
+
+/// The number the byte `byte` is.
+pub(crate) fn number_of_byte(byte: hir::Expr) -> hir::Expr {
+    extract(components(byte), "value".to_string())
 }
 
 /// A projection, `r{a, b}`, or its complement, `r remove {c}`.

@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use trendy_diag::{Code, Diagnostic, Edit, Span};
 use trendy_syntax::literal::{self, ApproximateProblem, IntProblem, TextProblem};
 use trendy_syntax::{SyntaxKind, is_ident_continue, is_ident_start};
@@ -32,6 +34,13 @@ pub fn lex(source: &str) -> Lexed {
         let after = |pred: &dyn Fn(char) -> bool| scan_while(source, start + c.len_utf8(), pred);
         let (kind, end) = if c.is_whitespace() {
             (SyntaxKind::Whitespace, after(&char::is_whitespace))
+        } else if let Some(quote) = bytes_quote(&source[start..]) {
+            let kind = if quote == '"' {
+                SyntaxKind::BytesLiteral
+            } else {
+                SyntaxKind::ByteLiteral
+            };
+            (kind, bytes_literal(source, start, quote, &mut errors))
         } else if is_ident_start(c) {
             let end = after(&is_ident_continue);
             let kind = SyntaxKind::keyword(&source[start..end]).unwrap_or(SyntaxKind::Ident);
@@ -307,6 +316,209 @@ fn character_literal(source: &str, start: usize, errors: &mut Vec<Diagnostic>) -
     literal_end
 }
 
+/// The quote `text` starts a literal of bytes with, after its prefix: `x`, or
+/// the `X` of SQL or the `b` or `B` of Python, Rust and SQL, which are
+/// reported. Only a literal puts a quote straight after a name, so that a
+/// variable `x` is still one.
+fn bytes_quote(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let prefix = chars.next()?;
+    let quote = chars.next()?;
+    (matches!(prefix, 'x' | 'X' | 'b' | 'B') && matches!(quote, '\'' | '"')).then_some(quote)
+}
+
+/// The end of the literal of bytes starting at `start`, with a prefix and then
+/// `quote`. One that doesn't end on its line runs to the line's end, or to just
+/// before a `;` there, as a text literal does. What is wrong with it is reported,
+/// keeping its kind, so that nothing else cascades.
+fn bytes_literal(source: &str, start: usize, quote: char, errors: &mut Vec<Diagnostic>) -> usize {
+    let body_start = start + 2;
+    let line_end = scan_while(source, body_start, &|c| c != '\n' && c != '\r');
+    let mut escaped = false;
+    let mut closing = None;
+    for (i, c) in source[body_start..line_end].char_indices() {
+        if c == quote && !escaped {
+            closing = Some(body_start + i);
+            break;
+        }
+        escaped = !escaped && c == '\\';
+    }
+    let end = closing.unwrap_or_else(|| {
+        let line = source[body_start..line_end].trim_end();
+        let before = line.strip_suffix(';').map_or(line, str::trim_end);
+        body_start + before.len()
+    });
+    let literal_end = end + usize::from(closing.is_some());
+    let span = Span::new(start, literal_end);
+    let body = &source[body_start..end];
+    let prefix = &source[start..=start];
+    if closing.is_none() {
+        errors.push(unterminated_bytes(span, prefix, quote, body));
+    } else if matches!(prefix, "b" | "B") {
+        errors.push(byte_string(span, quote, body));
+    } else if let Some(problem) = hex_problem(span, prefix, quote, body) {
+        errors.push(problem);
+    }
+    literal_end
+}
+
+/// What is wrong with the literal of bytes at `span`, with the prefix `prefix`, `x`
+/// or `X`, and the body `body` between its `quote`s, if anything is.
+fn hex_problem(span: Span, prefix: &str, quote: char, body: &str) -> Option<Diagnostic> {
+    let bytes = match literal::hex_bytes(body) {
+        Ok(bytes) => bytes,
+        Err(problem) => return Some(invalid_hex(span, quote, &problem)),
+    };
+    let one_byte = bytes.len() == 1;
+    if prefix == "x" && (quote == '"' || one_byte) {
+        return None;
+    }
+    let replacement = if quote == '\'' && one_byte {
+        format!("x'{body}'")
+    } else {
+        format!("x\"{body}\"")
+    };
+    Some(if prefix == "x" {
+        not_one_byte(span, bytes.len(), replacement)
+    } else {
+        uppercase_bytes_prefix(span, replacement)
+    })
+}
+
+/// The literal of bytes at `span`, in `quote`s, with the digits `problem` says
+/// are wrong.
+fn invalid_hex(span: Span, quote: char, problem: &literal::HexProblem) -> Diagnostic {
+    match problem {
+        literal::HexProblem::Digit { digit, at } => {
+            let at = span.start + 2 + at;
+            Diagnostic::error(
+                Code::ByteLiteral,
+                format!("`{digit}` isn't a hexadecimal digit"),
+                Span::new(at, at + digit.len_utf8()),
+                "not one of `0` to `9` or `a` to `f`",
+            )
+            .with_note(BYTE_LITERAL)
+        }
+        literal::HexProblem::Underscores { fixed } => Diagnostic::error(
+            Code::ByteLiteral,
+            "an underscore in a literal of bytes goes between two digits",
+            span,
+            "an underscore that separates nothing",
+        )
+        .with_note(BYTE_LITERAL)
+        .with_suggestion(
+            "remove it",
+            vec![Edit {
+                span,
+                replacement: format!("x{quote}{fixed}{quote}"),
+            }],
+        ),
+        literal::HexProblem::Odd { digits } => Diagnostic::error(
+            Code::ByteLiteral,
+            "a byte is two hexadecimal digits",
+            span,
+            match digits {
+                1 => "1 digit".to_string(),
+                n => format!("{n} digits, an odd number"),
+            },
+        )
+        .with_note(BYTE_LITERAL)
+        .with_help("write each byte's two digits: `x'07'` is the byte 7"),
+    }
+}
+
+/// The byte literal at `span`, of `bytes` bytes: other languages' `x'…'`
+/// holds any number, which `replacement` does here.
+fn not_one_byte(span: Span, bytes: usize, replacement: String) -> Diagnostic {
+    let label = match bytes {
+        0 => "no byte".to_string(),
+        n => format!("{n} bytes"),
+    };
+    Diagnostic::error(
+        Code::ByteLiteral,
+        "a byte literal in single quotes is one byte",
+        span,
+        label,
+    )
+    .with_note(BYTE_LITERAL)
+    .with_suggestion(
+        format!("for an array of bytes, write `{replacement}`"),
+        vec![Edit { span, replacement }],
+    )
+}
+
+/// SQL's `X'7F'`, at `span`, which `replacement` writes here.
+fn uppercase_bytes_prefix(span: Span, replacement: String) -> Diagnostic {
+    Diagnostic::error(
+        Code::ByteLiteral,
+        "a literal of bytes starts with a lowercase `x`",
+        span,
+        "SQL's spelling",
+    )
+    .with_note(BYTE_LITERAL)
+    .with_suggestion(
+        format!("write `{replacement}`"),
+        vec![Edit { span, replacement }],
+    )
+}
+
+/// Python's, Rust's or SQL's `b"abc"`, at `span`, of the body `body` between its
+/// `quote`s, written in hexadecimal if that is certainly what it means: of ASCII
+/// characters, with no escapes to decode, and not only `0` and `1` between single
+/// quotes, which are bits in SQL.
+fn byte_string(span: Span, quote: char, body: &str) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ByteLiteral,
+        "bytes are written in hexadecimal",
+        span,
+        "Python's, Rust's or SQL's spelling",
+    )
+    .with_note(BYTE_LITERAL);
+    let bits = quote == '\'' && body.len() > 1 && body.chars().all(|c| matches!(c, '0' | '1'));
+    if !body.is_ascii() || body.contains('\\') || bits {
+        return d.with_help("write the bytes it means in hexadecimal: `b\"ab\"` is `x\"6162\"`");
+    }
+    let digits = body.bytes().fold(String::new(), |mut digits, byte| {
+        write!(digits, "{byte:02x}").expect("a string takes what is written to it");
+        digits
+    });
+    let replacement = if quote == '\'' && body.len() == 1 {
+        format!("x'{digits}'")
+    } else {
+        format!("x\"{digits}\"")
+    };
+    d.with_suggestion(
+        format!("write `{replacement}`"),
+        vec![Edit { span, replacement }],
+    )
+}
+
+/// The literal of bytes at `span`, with the prefix `prefix` and the body
+/// `body`, which has no closing `quote`: fixed by adding it, if it is otherwise
+/// right.
+fn unterminated_bytes(span: Span, prefix: &str, quote: char, body: &str) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ByteLiteral,
+        "unterminated literal of bytes",
+        span,
+        format!("this literal has no closing `{quote}`"),
+    )
+    .with_note("a literal of bytes must end on the line it starts")
+    .with_note(BYTE_LITERAL);
+    let closes = prefix == "x"
+        && literal::hex_bytes(body).is_ok_and(|bytes| quote == '"' || bytes.len() == 1);
+    if !closes {
+        return d;
+    }
+    d.with_suggestion(
+        format!("insert `{quote}`"),
+        vec![Edit {
+            span: Span::empty(span.end),
+            replacement: quote.to_string(),
+        }],
+    )
+}
+
 /// `'''` at `span`.
 fn quote_without_backslash(span: Span) -> Diagnostic {
     Diagnostic::error(
@@ -381,6 +593,8 @@ fn unterminated_character(span: Span, body: &str, one: bool) -> Diagnostic {
 
 /// What a character literal is.
 const CHARACTER_LITERAL: &str = r"a character literal is one character between single quotes, what a reader sees as one, as `'a'` or `'🇸🇪'`; text is written between double quotes, and a single quote in a character literal is `\'`";
+
+const BYTE_LITERAL: &str = r#"a byte is two hexadecimal digits between `x'` and `'`, as `x'7f'`, and an array of bytes is pairs of them between `x"` and `"`, as `x"dead_beef"`, an underscore between any two digits"#;
 
 fn unexpected_character(c: char, span: Span) -> Diagnostic {
     // Invisible characters are unreadable between backticks, so non-ASCII
@@ -1134,5 +1348,103 @@ mod tests {
             pos = token.span.end;
         }
         assert_eq!(pos, source.len());
+    }
+
+    /// The fix of the only error `written`, a literal of bytes, has, applied.
+    fn bytes_fixed(written: &str) -> String {
+        let lexed = lex(written);
+        assert_eq!(lexed.errors.len(), 1, "{written}: {:#?}", lexed.errors);
+        assert_eq!(lexed.errors[0].code, Code::ByteLiteral, "{written}");
+        let suggestion = &lexed.errors[0].suggestions[0];
+        let [edit] = suggestion.edits.as_slice() else {
+            panic!("{written}: {suggestion:#?}");
+        };
+        let mut fixed = written.to_string();
+        fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+        fixed
+    }
+
+    #[test]
+    fn literals_of_bytes() {
+        for byte in ["x'7f'", "x'7F'", "x'7_f'"] {
+            assert_eq!(kinds(byte), [ByteLiteral], "{byte}");
+            assert!(lex(byte).errors.is_empty(), "{byte}");
+        }
+        for bytes in ["x\"\"", "x\"dead\"", "x\"DE_AD\"", "x\"7f\""] {
+            assert_eq!(kinds(bytes), [BytesLiteral], "{bytes}");
+            assert!(lex(bytes).errors.is_empty(), "{bytes}");
+        }
+        // Only a quote straight after it makes `x` a literal's.
+        assert_eq!(kinds("x"), [Ident]);
+        assert_eq!(kinds("xor"), [XorKw]);
+        assert_eq!(kinds("x 'a'"), [Ident, Whitespace, CharacterLiteral]);
+        assert_eq!(kinds("x \"a\""), [Ident, Whitespace, TextLiteral]);
+        assert_eq!(kinds("ax'a'"), [Ident, CharacterLiteral]);
+        assert_eq!(kinds("x'7f';"), [ByteLiteral, Semicolon]);
+    }
+
+    #[test]
+    fn literals_of_bytes_are_fixed_when_what_they_mean_is_certain() {
+        for (written, right) in [
+            // SQL's, of any number of bytes.
+            ("x'dead'", "x\"dead\""),
+            ("x''", "x\"\""),
+            ("X'7F'", "x'7F'"),
+            ("X'DEADBEEF'", "x\"DEADBEEF\""),
+            ("X\"dead\"", "x\"dead\""),
+            // Python's and Rust's.
+            ("b\"abc\"", "x\"616263\""),
+            ("b'a'", "x'61'"),
+            ("b'abc'", "x\"616263\""),
+            ("B\"a\"", "x\"61\""),
+            ("b\"\"", "x\"\""),
+            ("b''", "x\"\""),
+            // Stray underscores.
+            ("x\"_ab\"", "x\"ab\""),
+            ("x'7f_'", "x'7f'"),
+            ("x\"a__b\"", "x\"a_b\""),
+            // An end left out.
+            ("x\"dead", "x\"dead\""),
+            ("x\"dead;", "x\"dead\";"),
+            ("x'7f;", "x'7f';"),
+        ] {
+            assert_eq!(bytes_fixed(written), right, "{written}");
+        }
+        for (written, message) in [
+            // The digit left out could be any.
+            ("x'7'", "a byte is two hexadecimal digits"),
+            ("x\"abc\"", "a byte is two hexadecimal digits"),
+            // Not a digit, and only it is pointed at.
+            ("x\"zz\"", "`z` isn't a hexadecimal digit"),
+            ("x'g0'", "`g` isn't a hexadecimal digit"),
+            // Not ASCII, an escape to decode, or SQL's bits.
+            ("b\"caf\u{e9}\"", "bytes are written in hexadecimal"),
+            ("b\"a\\n\"", "bytes are written in hexadecimal"),
+            ("b'0101'", "bytes are written in hexadecimal"),
+            // An end left out, of what closing it won't fix.
+            ("x'dead", "unterminated literal of bytes"),
+            ("x\"abc", "unterminated literal of bytes"),
+            ("X'7f", "unterminated literal of bytes"),
+        ] {
+            let lexed = lex(written);
+            assert_eq!(lexed.errors.len(), 1, "{written}: {:#?}", lexed.errors);
+            assert_eq!(lexed.errors[0].code, Code::ByteLiteral, "{written}");
+            assert_eq!(lexed.errors[0].message, message, "{written}");
+            assert!(lexed.errors[0].suggestions.is_empty(), "{written}");
+        }
+        // A quote after a backslash is still inside it.
+        let lexed = lex("b\"a\\\"b\";");
+        assert_eq!(kinds("b\"a\\\"b\";"), [BytesLiteral, Semicolon]);
+        assert_eq!(lexed.errors.len(), 1, "{:#?}", lexed.errors);
+        let at = lex("x\"azz\"").errors[0].primary.span;
+        assert_eq!((at.start, at.end), (3, 4));
+        // What is wrong is told apart from how many there are.
+        assert_eq!(lex("x'dead'").errors[0].primary.message, "2 bytes");
+        assert_eq!(lex("x''").errors[0].primary.message, "no byte");
+        assert_eq!(lex("x'7'").errors[0].primary.message, "1 digit");
+        assert_eq!(
+            lex("x\"abc\"").errors[0].primary.message,
+            "3 digits, an odd number"
+        );
     }
 }

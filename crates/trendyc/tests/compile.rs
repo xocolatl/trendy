@@ -6095,6 +6095,9 @@ fn arrays() {
             "3",
             // Equal only in the same order.
             "tuple { copied: true, reordered: false }",
+            // One after the other, and ordered, a prefix first.
+            "array [1200, 950, 220, 300]",
+            "tuple { earlier_element: true, prefix: true }",
             // Generic over the elements' type.
             "1200",
             r#""Amara""#,
@@ -8233,6 +8236,66 @@ fn a_closure_of_one_value_gives_up_its_operand() {
     assert!(peak < 195 << 20, "{peak} bytes");
 }
 
+/// Arrays the program computes: `||` holds what its elements point to, and `<` is
+/// element by element, one that runs out first coming first.
+#[test]
+fn arrays_concatenate_and_compare_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "arrays_running",
+        r#"
+type n { { v: integer }, order [asc v] };
+
+var kept: array text;
+
+operator joined{a: array text, b: array text}: array text [
+    a || b
+];
+
+operator main{} [
+    var one := "a" || "b";
+    kept := joined{a: array [one], b: array [one || "c", "d"]};
+    one := "gone";
+    call debug_value{v: kept};
+    call debug_value{v: kept || array text []};
+    var i := array [1, 2];
+    call debug_value{v: i || array [3]};
+    call debug_value{v: i < array [1, 3]};
+    call debug_value{v: i < array [1]};
+    call debug_value{v: i >= array [1, 2]};
+    call debug_value{v: array [one] < array ["h"]};
+    call debug_value{v: array [n{v: i[1]}] < array [n{v: i[2]}]};
+    call debug_value{v: array [i[1] = 1] > array [i[1] = 2]};
+    call debug_value{v: array [array [i[1]]] < array [array [i[2]]]};
+    var rows := relation { { a: i }, { a: i || array [0] }, { a: array [0] } };
+    call debug_value{v: max{r: rows, of: a}};
+    call debug_value{v: min{r: rows, of: a}};
+    var ordered: array array integer;
+    load ordered value from rows order [desc a] keep {a};
+    call debug_value{v: ordered};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "array [\"ab\", \"abc\", \"d\"]",
+            "array [\"ab\", \"abc\", \"d\"]",
+            "array [1, 2, 3]",
+            "true",
+            "false",
+            "true",
+            "true",
+            "true",
+            "true",
+            "true",
+            "array [1, 2, 0]",
+            "array [0]",
+            "array [array [1, 2, 0], array [1, 2], array [0]]",
+        ]
+    );
+}
+
 #[test]
 fn characters() {
     let (code, stderr) = run_example("characters");
@@ -8836,4 +8899,528 @@ operator main{} [
     let (code, stderr) = build_and_run(&main, &dir.join("constant_units"), &workspace_root());
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stderr.lines().collect::<Vec<_>>(), ["6", "2", "6"]);
+}
+
+/// A type's constraints keep each integer in a range that takes fewer bytes,
+/// which nothing a program can write can tell.
+#[test]
+fn values_stored_in_fewer_bytes_behave_as_any_other() {
+    let (code, stderr) = run_source(
+        "narrowed",
+        r#"type level { { value: integer, constraint value >= 0 and value <= 0xFF }, order [asc value] };
+type word { { value: integer, constraint value >= 0 and value < 0x10000 }, order [asc value] };
+type pair { { hi: level, lo: level } };
+type small { { v: integer, name: text, constraint v >= 0, constraint v < 10 }, order [asc v, asc name] };
+type negative { { v: integer, constraint v >= -1 and v <= 1 } };
+type parent { { v: integer, constraint v >= 0 and v <= 9 } };
+type child is parent { constraint v = 1 };
+
+var table := relation { { l: level{value: 3} }, { l: level{value: 200} } };
+
+operator twice{w: word}: word [
+    word{value: w.value * 2}
+];
+
+operator main{} [
+    var l := level{value: 255};
+    call debug_value{v: l};
+    call debug_value{v: l.value};
+    var n := 7;
+    var w := word{value: n * 1000};
+    call debug_value{v: twice{w: w}};
+    update w { value := value + 1 };
+    call debug_value{v: w.value};
+    call debug_value{v: array [level{value: n}, l]};
+    call debug_value{v: array [level{value: n}, l][2].value};
+    call debug_value{v: level{value: n} < l};
+    call debug_value{v: level{value: n} = level{value: 7}};
+    call debug_value{v: array [level{value: n}] < array [l]};
+    call debug_value{v: pair{hi: l, lo: level{value: n}}};
+    call debug_value{v: pair{hi: l, lo: level{value: n}}.lo.value};
+    var s := small{v: n, name: "x"};
+    call debug_value{v: s};
+    call debug_value{v: s.v + 1};
+    call debug_value{v: s < small{v: 8, name: "a"}};
+    call debug_value{v: negative{v: n - 8}};
+    call debug_value{v: parent{v: n - 6} is child};
+    call debug_value{v: parent{v: n - 6}.v};
+    call debug_value{v: table};
+    call debug_table{r: table};
+    call debug_value{v: max{r: table, of: l}};
+    call debug_value{v: count{r: table where l.value > n}};
+    var rows := (series{from: 1, to: 3} extend { l := level{value: value * 50} }){l};
+    call debug_value{v: rows};
+    var sorted: array level;
+    load sorted value from rows order [desc l] keep {l};
+    call debug_value{v: sorted};
+    var keyed := relation { { l: level{value: 1}, n: 1 } } key { l };
+    insert keyed relation { { l: l, n: 2 } };
+    call debug_value{v: keyed};
+    call debug_value{v: to_code_points{from: "aé"}};
+    call debug_value{v: from_code_points{from: to_code_points{from: "aé🌍"}}};
+    call debug_value{v: code_point{value: 0x1F30D}.character};
+    call debug_value{v: to_code_points{from: "z"}[1] > code_point{value: 1}};
+    var big := level{value: n * 100};
+    call debug_value{v: "not here"};
+];
+"#,
+    );
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    let printed = r#"level{value: 255}
+255
+word{value: 14000}
+7001
+array [level{value: 7}, level{value: 255}]
+255
+true
+true
+true
+pair{hi: level{value: 255}, lo: level{value: 7}}
+7
+small{name: "x", v: 7}
+8
+true
+negative{v: -1}
+true
+1
+relation { l: level } { { l: level{value: 3} }, { l: level{value: 200} } }
+┌───────────────────┐
+│ l                 │
+├───────────────────┤
+│ level{value: 3}   │
+│ level{value: 200} │
+└───────────────────┘
+level{value: 200}
+1
+relation { l: level } { { l: level{value: 50} }, { l: level{value: 100} }, { l: level{value: 150} } }
+array [level{value: 150}, level{value: 100}, level{value: 50}]
+relation { l: level, n: integer } { { l: level{value: 1}, n: 1 }, { l: level{value: 255}, n: 2 } }
+array [code_point{value: 97}, code_point{value: 233}]
+"aé🌍"
+'🌍'
+true
+"#;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "{printed}error[{broken}]: level{{value: 700}} isn't a value of `level`: it breaks the constraint `value >= 0 and value <= 0xFF`"
+        )),
+        "{stderr}"
+    );
+}
+
+/// A field of a CSV file is checked as a value of its type, whose stored
+/// components are narrower than what it is read into.
+#[test]
+fn csv_files_load_values_stored_in_fewer_bytes() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let path = dir.join("narrowed.csv");
+    std::fs::write(&path, "id,level\n1,200\n2,300\n").unwrap();
+    let (code, stderr) = run_source(
+        "narrowed_csv",
+        &format!(
+            "
+uses {{ trendy.files }};
+
+type level {{ {{ value: integer, constraint value >= 0 and value <= 0xFF }} }};
+
+operator main{{}} [
+    var rows: array tuple {{ id: integer, level: level }};
+    var columns := tuple {{ id: 1, level: tuple {{ value: 2 }} }};
+    call load_csv{{path: {path:?}, header: true, columns: columns, out rows: rows}};
+];
+"
+        ),
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("line 3 of ") && stderr.contains("level{value: 300}"),
+        "{stderr}"
+    );
+    std::fs::write(&path, "id,level\n1,200\n2,30\n").unwrap();
+    let (code, stderr) = run_source(
+        "narrowed_csv_loaded",
+        &format!(
+            "
+uses {{ trendy.files }};
+
+type level {{ {{ value: integer, constraint value >= 0 and value <= 0xFF }} }};
+
+operator main{{}} [
+    var rows: array tuple {{ id: integer, level: level }};
+    var columns := tuple {{ id: 1, level: tuple {{ value: 2 }} }};
+    call load_csv{{path: {path:?}, header: true, columns: columns, out rows: rows}};
+    call debug_value{{v: rows}};
+    call debug_value{{v: rows[2].level.value + 1}};
+];
+"
+        ),
+    );
+    assert_eq!(
+        (code, stderr.as_str()),
+        (
+            0,
+            "array [tuple { id: 1, level: level{value: 200} }, tuple { id: 2, level: level{value: 30} }]\n31\n"
+        )
+    );
+    // Side by side, with no room between them for an integer.
+    std::fs::write(&path, "low,high\n1,200\n2,30\n").unwrap();
+    let (code, stderr) = run_source(
+        "narrowed_csv_side_by_side",
+        &format!(
+            "
+uses {{ trendy.files }};
+
+type level {{ {{ value: integer, constraint value >= 0 and value <= 0xFF }} }};
+
+type range {{
+    {{
+        low: integer,
+        high: integer,
+        constraint low >= 0 and low <= 0xFF,
+        constraint high >= 0 and high <= 0xFF,
+    }}
+}};
+
+operator main{{}} [
+    var rows: array tuple {{ high: level, low: level }};
+    var columns := tuple {{ high: tuple {{ value: 2 }}, low: tuple {{ value: 1 }} }};
+    call load_csv{{path: {path:?}, header: true, columns: columns, out rows: rows}};
+    call debug_value{{v: rows}};
+    var ranges: array tuple {{ r: range }};
+    var of_a_range := tuple {{ r: tuple {{ low: 1, high: 2 }} }};
+    call load_csv{{path: {path:?}, header: true, columns: of_a_range, out rows: ranges}};
+    call debug_value{{v: ranges}};
+];
+"
+        ),
+    );
+    assert_eq!(
+        (code, stderr.as_str()),
+        (
+            0,
+            "array [tuple { high: level{value: 200}, low: level{value: 1} }, tuple { high: level{value: 30}, low: level{value: 2} }]\narray [tuple { r: range{high: 200, low: 1} }, tuple { r: range{high: 30, low: 2} }]\n"
+        )
+    );
+}
+
+#[test]
+fn bytes() {
+    let (code, stderr) = run_example("bytes");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "┌────────┬─────────────┐",
+            "│ format │ magic       │",
+            "├────────┼─────────────┤",
+            "│ ELF    │ x\"7f454c46\" │",
+            "│ PDF    │ x\"25504446\" │",
+            "│ PNG    │ x\"89504e47\" │",
+            "│ gzip   │ x\"1f8b\"     │",
+            "└────────┴─────────────┘",
+            "x\"89504e470d0a1a0a\"",
+            "8",
+            "x'89'",
+            "137",
+            "x'09'",
+            "'9'",
+            "x'76'",
+            "x'07'",
+            "true",
+            "┌────────┬─────────────┐",
+            "│ format │ magic       │",
+            "├────────┼─────────────┤",
+            "│ PNG    │ x\"89504e47\" │",
+            "└────────┴─────────────┘",
+            "\"x\\\"7f45\\\"\"",
+        ]
+    );
+}
+
+#[test]
+fn uuids() {
+    let (code, stderr) = run_example("uuid");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "┌──────────────────────────────────────┬───────────┬───────────┐",
+            "│ as_text                              │ name      │ version   │",
+            "├──────────────────────────────────────┼───────────┼───────────┤",
+            "│ 017f22e2-79b0-7cc3-98c4-dc0c0c07398f │ timed     │ version 7 │",
+            "│ 6ba7b810-9dad-11d1-80b4-00c04fd430c8 │ namespace │ another   │",
+            "│ 919108f7-52d1-4320-9bac-f847db4148a8 │ random    │ version 4 │",
+            "└──────────────────────────────────────┴───────────┴───────────┘",
+            "uuid{bytes: x\"017f22e279b07cc398c4dc0c0c07398f\"}",
+            "true",
+            "false",
+            "\"00000000-0000-0000-0000-000000000000\"",
+            "\"00000000-0000-4000-8000-000000000000\"",
+            "\"00000000-0000-7000-8000-000000000000\"",
+        ]
+    );
+}
+
+#[test]
+fn bytes_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "bytes_running",
+        r#"
+type ascii_only { { b: byte, name: text } };
+
+operator number{from: text}: integer [
+    parse_integer{from: from}
+];
+
+operator main{} [
+    var n := number{from: "200"};
+    var b := byte{value: n};
+    call debug_value{v: b};
+    call debug_value{v: b.value};
+    call debug_value{v: b and x'f0'};
+    call debug_value{v: b or x'0f'};
+    call debug_value{v: b xor x'ff'};
+    call debug_value{v: not b};
+    call debug_value{v: and{b, x'f0', x'c0'}};
+    call debug_value{v: or{b, x'01', x'02'}};
+    call debug_value{v: xor{b, b, x'01'}};
+    call debug_value{v: to_text{from: b}};
+    call debug_value{v: b < x'ff'};
+    call debug_value{v: b = x'c8'};
+    var bytes := array [b, byte{value: n - 1}, x'00'];
+    call debug_value{v: bytes};
+    call debug_value{v: to_text{from: bytes}};
+    call debug_value{v: length{a: bytes}};
+    call debug_value{v: bytes[2]};
+    call debug_value{v: bytes || x"ff"};
+    call debug_value{v: bytes < x"c9"};
+    call debug_value{v: bytes = x"c8c700"};
+    bytes[3] := x'7f';
+    call debug_value{v: bytes};
+    var none: array byte;
+    call debug_value{v: none};
+    call debug_value{v: to_text{from: none}};
+    call debug_value{v: none || none};
+    var held := ascii_only{b, name: "x"};
+    call debug_value{v: held};
+    call debug_value{v: held.b};
+    var rows := relation { { b, n: 1 }, { b: x'01', n: 2 } } key { b };
+    call debug_value{v: rows};
+    call debug_table{r: rows};
+    call debug_value{v: max{r: rows, of: b}};
+    var sorted: array byte;
+    load sorted value from rows{b} order [asc b];
+    call debug_value{v: sorted};
+    call debug_value{v: byte{value: n + 56}};
+];
+"#,
+    );
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    assert_eq!(code, 1, "{stderr}");
+    let printed = r#"x'c8'
+200
+x'c0'
+x'cf'
+x'37'
+x'37'
+x'c0'
+x'cb'
+x'01'
+"x'c8'"
+true
+true
+x"c8c700"
+"x\"c8c700\""
+3
+x'c7'
+x"c8c700ff"
+true
+true
+x"c8c77f"
+x""
+"x\"\""
+x""
+ascii_only{b: x'c8', name: "x"}
+x'c8'
+relation { b: byte, n: integer } { { b: x'01', n: 2 }, { b: x'c8', n: 1 } }
+┌───────┬───┐
+│ b     │ n │
+├───────┼───┤
+│ x'01' │ 2 │
+│ x'c8' │ 1 │
+└───────┴───┘
+x'c8'
+x"01c8"
+"#;
+    assert!(
+        stderr.starts_with(&format!(
+            "{printed}error[{broken}]: byte{{value: 256}} isn't a value of `byte`: it breaks the constraint `value >= 0 and value <= 0xFF`"
+        )),
+        "{stderr}"
+    );
+}
+
+/// A program's own subtype of `byte` puts it in a hierarchy, which changes how its
+/// values are stored but not what they are, and leaves another unit's `uuid` as it is.
+#[test]
+fn bytes_of_a_subtype_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "bytes_in_a_hierarchy",
+        r#"
+uses { trendy.uuid };
+
+type ascii is byte { constraint value < 128 };
+
+operator number{from: text}: integer [
+    parse_integer{from: from}
+];
+
+operator main{} [
+    var n := number{from: "97"};
+    var b := byte{value: n};
+    call debug_value{v: b};
+    call debug_value{v: b is ascii};
+    call debug_value{v: not b};
+    call debug_value{v: (not b) is ascii};
+    call debug_value{v: (b and x'0f') is ascii};
+    var bytes := array [b, byte{value: n + 100}];
+    call debug_value{v: bytes};
+    call debug_value{v: to_text{from: bytes}};
+    call debug_value{v: bytes < array [byte{value: n + 1}]};
+    call debug_value{v: relation { { a: x'ff' }, { a: b } }};
+    var id := uuid{bytes: x"00112233_4455_6677_8899_aabbccddeeff"};
+    call debug_value{v: id.text};
+    call debug_value{v: id < uuid{text: "ff112233-4455-6677-8899-aabbccddeeff"}};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "x'61'",
+            "true",
+            "x'9e'",
+            "false",
+            "true",
+            "array [x'61', x'c5']",
+            "\"array [x'61', x'c5']\"",
+            "true",
+            "relation { a: byte } { { a: x'61' }, { a: x'ff' } }",
+            "\"00112233-4455-6677-8899-aabbccddeeff\"",
+            "true",
+        ]
+    );
+}
+
+#[test]
+fn uuids_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "uuids_running",
+        r#"
+uses { trendy.uuid };
+
+operator main{} [
+    var written := "6ba7b810-9dad-41d1-80b4-00c04fd430c8";
+    var id := uuid{text: written};
+    call debug_value{v: id};
+    call debug_value{v: id.text = written};
+    call debug_value{v: id is uuid_v4};
+    call debug_value{v: id is uuid_v7};
+    var v4 := treat id as uuid_v4;
+    call debug_value{v: v4.text};
+    call generate{out v4: v4};
+    call debug_value{v: v4.bytes[7]};
+    call debug_value{v: v4.bytes[9]};
+    var seven := uuid{bytes: x"017f22e2_79b0_7cc3_98c4_dc0c0c07398f"};
+    call debug_value{v: seven is uuid_v7};
+    call debug_value{v: is_uuid_text{text: written || "0"}};
+    call debug_value{v: is_uuid_text{text: "6BA7B810-9DAD-41D1-80B4-00C04FD430C8"}};
+    call debug_value{v: is_uuid_text{text: "6ba7b810x9dad-41d1-80b4-00c04fd430c8"}};
+    call debug_value{v: is_uuid_text{text: "6ba7b810-9dad-41d1-80b4-00c04fd430cg"}};
+    call debug_value{v: relation { { id: id }, { id: seven } }};
+    var text := "not a UUID";
+    call debug_value{v: uuid{text: text}};
+];
+"#,
+    );
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    assert_eq!(code, 1, "{stderr}");
+    let printed = r#"uuid{bytes: x"6ba7b8109dad41d180b400c04fd430c8"}
+true
+true
+false
+"6ba7b810-9dad-41d1-80b4-00c04fd430c8"
+x'40'
+x'80'
+true
+false
+false
+false
+false
+relation { id: uuid } { { id: uuid{bytes: x"017f22e279b07cc398c4dc0c0c07398f"} }, { id: uuid{bytes: x"6ba7b8109dad41d180b400c04fd430c8"} } }
+"#;
+    assert!(
+        stderr.starts_with(&format!("{printed}error[{broken}]: ")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("is_uuid_text{text}"), "{stderr}");
+}
+
+/// A value block in a conversion that nothing folds has local variables of its own.
+#[test]
+fn a_value_block_in_a_conversion_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "conversion_block",
+        r#"
+type t {
+    { n: integer },
+    { s: text }
+        to { n := [ var p := to_code_points{from: s}; length{a: p} ] }
+        from { s := [ var written := to_text{from: n}; written || "!" ] },
+};
+
+operator main{} [
+    var word := "abc";
+    var v := t{s: word || "d"};
+    call debug_value{v: v};
+    call debug_value{v: v.s};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr, "t{n: 4}\n\"4!\"\n");
+}
+
+/// A program's own `byte` isn't the prelude's, which is still written as bytes.
+#[test]
+fn a_programs_own_byte_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "own_byte",
+        r#"
+type byte { { value: integer } };
+
+operator main{} [
+    var n := 7;
+    var mine := byte{value: n};
+    call debug_value{v: mine};
+    call debug_value{v: array [mine]};
+    call debug_value{v: x'07'};
+    call debug_value{v: x"0708"};
+    call debug_value{v: to_text{from: mine}};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "own_byte::byte{value: 7}",
+            "array [own_byte::byte{value: 7}]",
+            "x'07'",
+            "x\"0708\"",
+            "\"own_byte::byte{value: 7}\"",
+        ]
+    );
 }

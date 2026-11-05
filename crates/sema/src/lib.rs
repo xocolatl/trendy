@@ -792,7 +792,7 @@ impl Namespaces {
                 .kinds
                 .get(&kind.name)
                 .is_some_and(|(_, members)| members.contains(scalar)),
-            (hir::Any::Kind(kind), hir::Type::Defined(_)) => {
+            (hir::Any::Kind(kind), hir::Type::Defined(_) | hir::Type::Array(_)) => {
                 kind.requires.iter().all(|&requirement| ty.has(requirement))
             }
             (_, hir::Type::Parameter(p)) => p.any == *any,
@@ -3728,15 +3728,302 @@ operator main{{}} [ var lines: array text; {main} ];"
             &prelude[end..part],
             &prelude[part_end..]
         );
+        // `trendy.uuid` calls its other representation's selector, which is gone.
         let errors = checked_prelude(&parse(&source));
+        let errors: Vec<&Diagnostic> = errors.iter().filter(|e| e.code == Code::Internal).collect();
         assert_eq!(errors.len(), 1, "{errors:#?}");
-        assert_eq!(errors[0].code, Code::Internal);
         assert!(
             errors[0]
                 .message
                 .contains("`type code_point { { value: integer }, … };`"),
             "{errors:#?}"
         );
+    }
+
+    #[test]
+    fn bytes_are_values_of_the_preludes_byte() {
+        let vars = variables(
+            "var a := x'7F';\nvar b := x\"de_AD\";\nvar c := x\"\";\nvar d := a.value;\nvar e := b[2];\nvar f := byte{value: 127} = a;\nvar g := to_text{from: a};\nvar h := to_text{from: b};\nvar i := array [a] = x\"7f\";",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(
+            values,
+            [
+                "x'7f'",
+                "x\"dead\"",
+                "x\"\"",
+                "127",
+                "x'ad'",
+                "true",
+                r#""x'7f'""#,
+                r#""x\"dead\"""#,
+                "true",
+            ]
+        );
+        assert_eq!(vars[0].ty.to_string(), "byte");
+        assert_eq!(vars[1].ty.to_string(), "array byte");
+        // Out of its range, it isn't one.
+        assert_eq!(
+            codes(&format!("var a := byte{{value: 256}};{MAIN}")),
+            [Code::BrokenConstraint]
+        );
+        assert_eq!(
+            codes(&format!("var a := byte{{value: -1}};{MAIN}")),
+            [Code::BrokenConstraint]
+        );
+    }
+
+    #[test]
+    fn a_literal_is_of_the_most_specific_type_a_byte_is_of() {
+        let vars = variables(
+            "type ascii is byte { constraint value < 128 };\nvar a := x'61' is ascii;\nvar b := x'ff' is ascii;\nvar c := x\"61ff\"[1] is ascii;\nvar d := x\"61ff\"[2] is ascii;\nvar e := (not x'ff') is ascii;\nvar f := (x'ff' and x'7f') is ascii;",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(values, ["true", "false", "true", "false", "true", "true"]);
+        // An array of them is still ordered, by their numbers, whichever each is
+        // of, as a unit that compares arrays of bytes needn't know of a subtype.
+        let vars = variables(
+            "type ascii is byte { constraint value < 128 };\nvar a := x\"61\" < x\"ff\";\nvar b := x\"ff\" < x\"61\";\nvar c := x\"61\" < x\"62\";\nvar d := relation { { b: x'ff' }, { b: x'61' } };",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(
+            values,
+            [
+                "true",
+                "false",
+                "true",
+                "relation { b: byte } { { b: x'61' }, { b: x'ff' } }"
+            ]
+        );
+        // In their numbers' order, whichever each is of, whatever it is called.
+        let vars = variables(
+            "type tiny is byte { constraint value < 16 };\nvar a := relation { { b: x'ff' }, { b: x'01' } };\nvar b := x\"01\" < x\"ff\";",
+        );
+        assert_eq!(
+            vars[0].init.to_string(),
+            "relation { b: byte } { { b: x'01' }, { b: x'ff' } }"
+        );
+        assert_eq!(vars[1].init.to_string(), "true");
+        // Written as a byte, but an array of a subtype's is not bytes.
+        let vars = variables(
+            "type ascii is byte { constraint value < 128 };\nvar a := to_text{from: x'61'};\nvar b := to_text{from: x\"61\"};",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(values, [r#""x'61'""#, r#""array [x'61']""#]);
+    }
+
+    #[test]
+    fn a_programs_own_byte_is_not_the_preludes() {
+        let vars = variables(
+            "type byte { { value: integer } };\nvar mine := byte{value: 7};\nvar theirs := x'07';\nvar n := mine.value;\nvar written := to_text{from: mine};",
+        );
+        assert_eq!(vars[0].ty.to_string(), "program::byte");
+        assert_eq!(vars[1].ty.to_string(), "trendy.prelude::byte");
+        assert_eq!(vars[1].init.to_string(), "x'07'");
+        assert_eq!(vars[2].init.to_string(), "7");
+        assert_eq!(vars[3].init.to_string(), r#""program::byte{value: 7}""#,);
+        // Its operators are its own, as it has none.
+        let errors = errors(
+            "type byte { { value: integer } };\nvar mine := byte{value: 7};\nvar a := mine and mine;\n\noperator main{} [];",
+        );
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::TypeMismatch, Code::TypeMismatch],
+            "{errors:#?}"
+        );
+    }
+
+    #[test]
+    fn bit_operators_of_bytes_give_bytes() {
+        let vars = variables(
+            "var a := x'f0' and x'3c';\nvar b := x'f0' or x'0f';\nvar c := x'ff' xor x'0f';\nvar d := not x'0f';\nvar e := not x'00';\nvar f := not x'ff';\nvar g := and{x'ff', x'3c', x'0f'};\nvar h := or{x'01', x'02', x'04'};\nvar i := xor{x'01', x'01', x'04'};\nvar j: byte := and{};\nvar k: byte := or{};\nvar l: byte := xor{};\nvar m := (x'ff' and x'f0') = x'f0';",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(
+            values,
+            [
+                "x'30'", "x'ff'", "x'f0'", "x'f0'", "x'ff'", "x'00'", "x'0c'", "x'07'", "x'04'",
+                "x'ff'", "x'00'", "x'00'", "true",
+            ]
+        );
+        assert!(vars.iter().take(12).all(|v| v.ty.to_string() == "byte"));
+    }
+
+    #[test]
+    fn bytes_have_no_arithmetic() {
+        for (source, operator) in [
+            ("x'ff' + x'01'", "+"),
+            ("x'ff' + 1", "+"),
+            ("-x'ff'", "-"),
+            ("x'ff' * x'02'", "*"),
+            ("x'ff' shl 1", "shl"),
+            ("x'ff' shr 1", "shr"),
+        ] {
+            let errors = errors(&format!("var a := {source};{MAIN}"));
+            assert_eq!(
+                errors[0].code,
+                Code::WrongOperandType,
+                "{source}: {errors:#?}"
+            );
+            assert!(
+                errors[0].message.contains(&format!("`{operator}`")),
+                "{errors:#?}"
+            );
+            assert!(
+                errors[0]
+                    .notes
+                    .iter()
+                    .any(|n| n.contains("`b.value` is its number")),
+                "{source}: {errors:#?}"
+            );
+        }
+        // Nor have a type's values bits, but a byte's.
+        let of_a_type =
+            |value: &str| format!("type t {{ {{ n: integer }} }};\nvar a := {value};{MAIN}");
+        assert_eq!(codes(&of_a_type("not t{n: 1}")), [Code::WrongOperandType]);
+        assert_eq!(
+            codes(&of_a_type("t{n: 1} and t{n: 2}")),
+            [Code::TypeMismatch, Code::TypeMismatch]
+        );
+        // An array of bytes has no bits of its own.
+        assert_eq!(
+            codes(&format!("var a := x\"ab\" and x\"cd\";{MAIN}")),
+            [Code::TypeMismatch, Code::TypeMismatch]
+        );
+    }
+
+    #[test]
+    fn other_languages_ways_with_bytes_are_fixed() {
+        for (written, fixed) in [
+            ("var a: byte := 0x7f;", "var a: byte := x'7f';"),
+            ("var a: byte := 127;", "var a: byte := x'7f';"),
+            ("var a: byte := 0;", "var a: byte := x'00';"),
+            ("var a: byte := 'a';", "var a: byte := x'61';"),
+            ("var a: byte := x\"7f\";", "var a: byte := x'7f';"),
+            (
+                "var a: array byte := x'7f';",
+                "var a: array byte := x\"7f\";",
+            ),
+            ("var a := x'f0' and 0x0f;", "var a := x'f0' and x'0f';"),
+            ("var a := 15 and x'f0';", "var a := x'0f' and x'f0';"),
+            ("var a := x'61' = 'a';", "var a := x'61' = x'61';"),
+            ("var a: u8 := x'01';", "var a: byte := x'01';"),
+            ("var a: uint8 := x'01';", "var a: byte := x'01';"),
+            ("var a: octet := x'01';", "var a: byte := x'01';"),
+            ("var a: BLOB := x\"01\";", "var a: array byte := x\"01\";"),
+            ("var a: bytea := x\"01\";", "var a: array byte := x\"01\";"),
+            (
+                "var a: VARBINARY := x\"01\";",
+                "var a: array byte := x\"01\";",
+            ),
+            ("var a: binary := x\"01\";", "var a: array byte := x\"01\";"),
+            ("var a: bytes := x\"01\";", "var a: array byte := x\"01\";"),
+        ] {
+            let source = format!("{written}{MAIN}");
+            assert_eq!(fix(&source), format!("{fixed}{MAIN}"), "{written}");
+        }
+        // No literal of a byte says what these do: the type is what changes.
+        for written in [
+            "var a: byte := 300;",
+            "var a: byte := -1;",
+            "var a: byte := x\"7f7f\";",
+        ] {
+            let source = format!("{written}{MAIN}");
+            let errors = errors(&source);
+            assert_eq!(errors[0].code, Code::TypeMismatch, "{written}: {errors:#?}");
+            assert!(!fix(&source).contains("x'"), "{written}");
+        }
+        // Grouped as its comparison, as of integers.
+        assert_eq!(
+            fix(&format!("var a := x'f0' and x'f0' = x'f0';{MAIN}")),
+            format!("var a := (x'f0' and x'f0') = x'f0';{MAIN}")
+        );
+        let errors = errors(&format!("var a := x'f0' and x'f0' = x'f0';{MAIN}"));
+        assert_eq!(errors[0].code, Code::BitGrouping);
+        assert!(errors[0].message.contains("`and` of a byte and a boolean"));
+        let errors = self::errors(&format!("var a := not x'f0' = x'0f';{MAIN}"));
+        assert_eq!(errors[0].code, Code::BitGrouping);
+        assert!(errors[0].message.contains("the complement of a byte"));
+    }
+
+    #[test]
+    fn a_uuids_bits_say_its_version() {
+        let test = |bytes: &str, ty: &str| {
+            let vars = variables(&format!(
+                "uses {{ trendy.uuid }};\nvar a := uuid{{bytes: x\"{bytes}\"}} is {ty};"
+            ));
+            vars[0].init.to_string()
+        };
+        for (bytes, ty, expected) in [
+            ("00000000_0000_4000_8000_000000000000", "uuid_v4", "true"),
+            ("00000000_0000_4fff_bfff_000000000000", "uuid_v4", "true"),
+            ("00000000_0000_7000_8000_000000000000", "uuid_v7", "true"),
+            ("00000000_0000_7fff_bfff_000000000000", "uuid_v7", "true"),
+            // Another version.
+            ("00000000_0000_1000_8000_000000000000", "uuid_v4", "false"),
+            ("00000000_0000_7000_8000_000000000000", "uuid_v4", "false"),
+            ("00000000_0000_4000_8000_000000000000", "uuid_v7", "false"),
+            // Another variant.
+            ("00000000_0000_4000_0000_000000000000", "uuid_v4", "false"),
+            ("00000000_0000_4000_c000_000000000000", "uuid_v4", "false"),
+            ("00000000_0000_7000_4000_000000000000", "uuid_v7", "false"),
+            ("00000000_0000_7000_c000_000000000000", "uuid_v7", "false"),
+        ] {
+            assert_eq!(test(bytes, ty), expected, "{bytes} is {ty}");
+        }
+    }
+
+    #[test]
+    fn a_uuids_text_has_what_belongs_at_each_place() {
+        let right = "00112233-4455-6677-8899-aabbccddeeff";
+        let is_text = |text: &str| {
+            let vars = variables(&format!(
+                "uses {{ trendy.uuid }};\nvar a := is_uuid_text{{text: \"{text}\"}};"
+            ));
+            vars[0].init.to_string()
+        };
+        assert_eq!(is_text(right), "true");
+        assert_eq!(is_text(&format!("{right}0")), "false");
+        assert_eq!(is_text(&right[1..]), "false");
+        assert_eq!(is_text(""), "false");
+        for i in 0..right.len() {
+            // A digit where a dash goes, and where a digit goes something else.
+            let mut wrong = right.to_string();
+            let replacement = if &right[i..=i] == "-" { "0" } else { "g" };
+            wrong.replace_range(i..=i, replacement);
+            assert_eq!(is_text(&wrong), "false", "{wrong}");
+        }
+        // Each digit each place can have.
+        for digit in "0123456789abcdef".chars() {
+            let every = right.replace(|c: char| c != '-', &digit.to_string());
+            assert_eq!(is_text(&every), "true", "{every}");
+        }
+        assert_eq!(is_text(&right.to_uppercase()), "false");
+    }
+
+    #[test]
+    fn a_value_block_in_a_conversion_has_its_locals() {
+        // Only known when the program runs, so not folded away.
+        let program = "type t {\n    { n: integer },\n    {\n        s: text,\n    }\n        to { n := [ var p := to_code_points{from: s}; length{a: p} ] }\n        from { s := [ var written := to_text{from: n}; written ] },\n};\n\noperator main{} [\n    var word := \"abc\";\n    call debug_value{v: t{s: word || \"d\"}.s};\n];";
+        let program = analyze_str(program).unwrap();
+        let locals = program
+            .operators
+            .iter()
+            .filter_map(|operator| match &operator.kind {
+                hir::OperatorKind::ReadOnly { locals, .. } if operator.name.starts_with("t ") => {
+                    Some(locals.len())
+                }
+                _ => None,
+            });
+        assert_eq!(locals.collect::<Vec<_>>(), [1, 1]);
+    }
+
+    #[test]
+    fn a_subtype_has_its_supertypes_representations() {
+        let vars = variables(
+            "type p {\n    { a: integer },\n    { b: integer } to { a := b + 1 } from { b := a - 1 },\n};\ntype c is p { constraint a > 10 };\nvar v := treat p{a: 20} as c;\nvar n := v.b;",
+        );
+        assert_eq!(vars[1].init.to_string(), "19");
     }
 
     #[test]
@@ -3876,7 +4163,7 @@ operator main{{}} [ var lines: array text; {main} ];"
         // order; the implementation declares it again, with each
         // representation's components and the conversions.
         let interface = "interface\n\ntype duration {\n    { seconds: integer },\n    { hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 },\n    constraint seconds >= 0,\n};\n\nimplementation\n\n";
-        let part = "type duration {\n    { seconds: integer },\n    { hours: integer, minutes: integer }\n        to { seconds := hours * 3600 + minutes * 60 }\n        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },\n};\n\n";
+        let part = "type duration {\n    { hours: integer, minutes: integer }\n        to { seconds := hours * 3600 + minutes * 60 }\n        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },\n};\n\n";
         let program = |rest: &str| format!("{interface}{part}{rest}operator main{{}} [];");
         let values: Vec<String> = analyze_str(&program(
             "var a := duration{hours: 1, minutes: 30}.seconds;\nvar b := duration{seconds: 5400}.minutes;\n",
@@ -3900,6 +4187,12 @@ operator main{{}} [ var lines: array text; {main} ];"
         // is stored, nor how the others convert.
         let alone = format!("{interface}operator main{{}} [];");
         assert_eq!(codes(&alone), [Code::Conversions]);
+        assert!(
+            errors(&alone)[0]
+                .message
+                .starts_with("the interface declares `duration` with several"),
+            "{alone}"
+        );
         // Conversions in the interface are moved to the implementation, to a
         // declaration of the type there, or to a new one.
         let converted = interface.replace(
@@ -3937,22 +4230,91 @@ operator main{{}} [ var lines: array text; {main} ];"
         let source = format!("{interface}{retyped}operator main{{}} [];");
         assert_eq!(codes(&source), [Code::DefinitionMismatch]);
         assert_eq!(fix(&source), program(""));
+        // One it doesn't declare, which leaves two without conversions.
         let other = part.replace("{ hours: integer, minutes: integer }", "{ days: integer }");
         let errors = errors(&format!("{interface}{other}operator main{{}} [];"));
-        let codes_of: Vec<Code> = errors.iter().map(|e| e.code).collect();
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
         assert_eq!(
-            codes_of,
-            [Code::DefinitionMismatch, Code::DefinitionMismatch],
+            messages,
+            [
+                "`duration` has more than one possible representation without conversions",
+                "the interface declares no representation of `duration` with these components, `duration{days: …}`",
+            ],
             "{errors:#?}"
         );
-        assert_eq!(
-            errors[0].message,
-            "the implementation's declaration of `duration` doesn't repeat `duration{hours: …, minutes: …}`"
+        assert!(
+            errors[0].help.iter().any(|h| h.contains(
+                "give the other `to` and `from`, in the implementation's declaration of `duration`"
+            )),
+            "{errors:#?}"
         );
+    }
+
+    #[test]
+    fn an_implementation_repeats_only_the_representations_it_extends() {
+        let interface = "interface\n\ntype t {\n    { a: integer },\n    { b: integer },\n    { c: integer },\n};\n\nimplementation\n\n";
+        let b = "{ b: integer } to { a := b } from { b := a }";
+        let c = "{ c: integer } to { a := c } from { c := a }";
+        let of = |reps: &str| format!("{interface}type t {{ {reps} }};\noperator main{{}} [];");
+        // The one left out is the one its values are stored as.
+        let vars = variables(&format!(
+            "{interface}type t {{ {b}, {c} }};\nvar one := t{{b: 1}};\nvar a := one.a;\nvar same := t{{c: 1}} = t{{a: 1}};"
+        ));
+        assert_eq!(vars[0].init.to_string(), "t{a: 1}");
+        assert_eq!(vars[1].init.to_string(), "1");
+        assert_eq!(vars[2].init.to_string(), "true");
+        // Repeating it is allowed, and it is still checked against the interface.
+        let repeated = of(&format!("{{ a: integer }}, {b}, {c}"));
+        assert!(analyze_str(&repeated).is_ok());
+        let retyped = of(&format!("{{ a: text }}, {b}, {c}"));
+        assert_eq!(codes(&retyped), [Code::DefinitionMismatch]);
+        assert_eq!(fix(&retyped), repeated);
+        // Two left out, or none, can't say which it is.
+        assert_eq!(codes(&of(b)), [Code::Conversions]);
         assert_eq!(
-            errors[1].message,
-            "the interface declares no representation of `duration` with these components, `duration{days: …}`"
+            codes(&of(&format!(
+                "{{ a: integer }} to {{ b := a }} from {{ a := b }}, {b}, {c}"
+            ))),
+            [Code::Conversions]
         );
+        // Conversions in the interface go after what its declaration has.
+        let source = "interface\n\ntype t {\n    { a: integer },\n    { b: integer } to { a := b } from { b := a },\n    { c: integer },\n};\n\nimplementation\n\ntype t {\n    { c: integer } to { a := c } from { c := a },\n};\n\noperator main{} [];";
+        assert_eq!(codes(source), [Code::InterfaceDeclaration]);
+        let fixed = fix(source);
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        assert!(fixed.contains("    { b: integer },\n"), "{fixed}");
+        assert!(
+            fixed.contains("{ c: integer } to { a := c } from { c := a },\n    { b: integer } to { a := b } from { b := a },"),
+            "{fixed}"
+        );
+        // Conversions on both sides are for the author to choose between.
+        let source = "interface\n\ntype t {\n    { a: integer },\n    { b: integer } to { a := b } from { b := a },\n};\n\nimplementation\n\ntype t {\n    { b: integer } to { a := b + 1 } from { b := a - 1 },\n};\n\noperator main{} [];";
+        let found = errors(source);
+        assert_eq!(found[0].code, Code::InterfaceDeclaration, "{found:#?}");
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+        // With a declaration of none, it gets one, of those they convert.
+        let source = "interface\n\ntype t {\n    { a: integer },\n    { b: integer } to { a := b } from { b := a },\n};\n\nimplementation\n\noperator main{} [];";
+        let fixed = fix(source);
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        assert!(
+            fixed.contains("type t {\n    { b: integer } to { a := b } from { b := a },\n};"),
+            "{fixed}"
+        );
+    }
+
+    #[test]
+    fn a_subtypes_implementation_repeats_only_what_it_extends() {
+        // Neither its own constraint, nor even that it is a subtype.
+        let program = |part: &str| {
+            format!(
+                "interface\n\ntype e {{ {{ a: approximate, b: approximate }} }};\n\ntype circle is e {{\n    constraint a = b,\n    {{ r: approximate }},\n}};\n\nimplementation\n\n{part} {{\n    {{ r: approximate }} to {{ a := r, b := r }} from {{ r := a }},\n}};\n\nvar c := e{{a: 2e0, b: 2e0}} is circle;\nvar r := circle{{r: 3e0}}.r;\n"
+            )
+        };
+        for part in ["type circle", "type circle is e"] {
+            let vars = variables(&program(part));
+            assert_eq!(vars[0].init.to_string(), "true", "{part}");
+            assert_eq!(vars[1].init.to_string(), "3e0", "{part}");
+        }
     }
 
     #[test]
@@ -4071,6 +4433,61 @@ operator main{{}} [ var lines: array text; {main} ];"
                 "{found:#?}"
             );
         }
+    }
+
+    #[test]
+    fn arrays_concatenate_and_are_ordered_by_their_elements() {
+        let value = |written: &str| {
+            let source = format!("var v := {written};{MAIN}");
+            let program = analyze_str(&source).unwrap_or_else(|e| panic!("{written}: {e:#?}"));
+            program.variables[0].init.to_string()
+        };
+        for (written, known) in [
+            ("array [1] || array [2, 3]", "array [1, 2, 3]"),
+            ("array integer [] || array [1]", "array [1]"),
+            ("array [1] || array integer []", "array [1]"),
+            ("array [1, 2] < array [1, 3]", "true"),
+            ("array [1, 3] < array [1, 2]", "false"),
+            ("array [1] < array [1, 0]", "true"),
+            ("array integer [] < array [0]", "true"),
+            ("array [1] <= array [1]", "true"),
+            ("array [2] > array [1, 9]", "true"),
+            ("array [\"a\"] < array [\"b\"]", "true"),
+            ("array [array [1]] < array [array [2]]", "true"),
+            (
+                "max{r: relation { { a: array [1] }, { a: array [2] } }, of: a}",
+                "array [2]",
+            ),
+        ] {
+            assert_eq!(value(written), known, "{written}");
+        }
+        // Of a type whose order is its stored components, ascending.
+        let source = format!(
+            "type n {{ {{ v: integer }}, order [asc v] }};\nvar a := array [n{{v: 1}}] < array [n{{v: 2}}];{MAIN}"
+        );
+        assert_eq!(
+            analyze_str(&source).unwrap().variables[0].init.to_string(),
+            "true"
+        );
+        // Not of tuples, which have no order, nor one the other way.
+        for (types, a, b) in [
+            ("", "array [tuple { x: 1 }]", "array [tuple { x: 2 }]"),
+            (
+                "type d { { v: integer }, order [desc v] };\n",
+                "array [d{v: 1}]",
+                "array [d{v: 2}]",
+            ),
+        ] {
+            let source = format!("{types}var v := {a} < {b};{MAIN}");
+            assert_eq!(codes(&source), [Code::WrongOperandType], "{a}");
+            let source = format!("{types}var v := {a} = {b};{MAIN}");
+            assert!(analyze_str(&source).is_ok(), "{a}");
+        }
+        // Of one type.
+        let source = format!("var v := array [1] || array [\"a\"];{MAIN}");
+        assert_eq!(codes(&source), [Code::TypeMismatch]);
+        let source = format!("var v := array [1] || 2;{MAIN}");
+        assert_eq!(codes(&source), [Code::TypeMismatch]);
     }
 
     #[test]
@@ -5006,14 +5423,14 @@ operator main{{}} [ var lines: array text; {main} ];"
         );
         assert_eq!(
             errors[0].primary.message,
-            "`not` takes booleans, or integers, bit by bit"
+            "`not` takes booleans, or integers or bytes, bit by bit"
         );
         // Operands of no type `and` takes are booleans.
         let origin = &errors[3].secondary[0];
         assert_eq!(&source[origin.span.start..origin.span.end], "and");
         assert_eq!(
             origin.message,
-            "`and` takes booleans, or integers, bit by bit"
+            "`and` takes booleans, or integers or bytes, bit by bit"
         );
         let fixed = fix(&source);
         assert!(
@@ -6777,10 +7194,13 @@ operator main{{}} [ var lines: array text; {main} ];"
         // A tuple, a relation or an array is told what it has instead.
         for (operation, rule) in [
             ("tuple { x: 1 } < tuple { x: 2 }", "tuples have no order"),
-            ("array [1] < array [2]", "arrays can only be compared"),
             (
-                "array [1] || array [2]",
-                "`||` applies to scalar values, such as an array's elements, `a[i]`",
+                "array [tuple { x: 1 }] < array [tuple { x: 2 }]",
+                "an array is ordered only if its elements are",
+            ),
+            (
+                "array [1] + array [2]",
+                "`+` applies to scalar values, such as an array's elements, `a[i]`",
             ),
             ("-array [1]", "`-` applies to scalar values"),
             (
@@ -8834,6 +9254,10 @@ operator main{{}} [ var lines: array text; {main} ];"
         let program = units("type code_point { { n: integer } };\nvar mine := code_point{n: 1};\nvar theirs := to_code_points{from: \"a\"}[1].value;\n\noperator main{} [];").unwrap();
         assert_eq!(program.variables[0].ty.to_string(), "program::code_point");
         assert_eq!(program.variables[1].init.to_string(), "97");
+        // Its other representation's selector is still the prelude's, under
+        // its name for it.
+        let program = units("type code_point { { n: integer } };\nvar theirs := trendy.prelude::code_point{character: 'a'}.value;\n\noperator main{} [];").unwrap();
+        assert_eq!(program.variables[0].init.to_string(), "97");
         // The prelude's union type `error` and its heading
         // `transaction_collection`, which the language's failures and
         // transactions are of, whatever a unit declares of their names.
@@ -12214,11 +12638,6 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
         assert_eq!(
             codes(&format!("var x := array [1][\"1\"];{MAIN}")),
             [Code::TypeMismatch]
-        );
-        // Arrays have no order.
-        assert_eq!(
-            codes(&format!("var x := array [1] < array [2];{MAIN}")),
-            [Code::WrongOperandType]
         );
         assert_eq!(
             codes(&format!("var x := value from array [1];{MAIN}")),

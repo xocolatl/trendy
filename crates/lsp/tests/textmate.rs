@@ -442,6 +442,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#operator-word" },
             { "include": "#boolean" },
             { "include": "#number" },
+            { "include": "#bytes" },
             { "include": "#text" },
             { "include": "#punctuation" },
         ],
@@ -474,6 +475,10 @@ fn generate(probed: &Probed) -> Value {
             "number": {
                 "match": format!("\\b{}", probed.number),
                 "name": "constant.numeric.trendy",
+            },
+            "bytes": {
+                "match": "\\bx(?:'[^'\\n]*'|\"[^\"\\n]*\")",
+                "name": "string.quoted.other.trendy",
             },
             "text": text_rule(),
             "punctuation": { "patterns": punctuation_patterns },

@@ -205,6 +205,52 @@ fn separated(
     }
 }
 
+/// What is wrong with the body of a byte or bytes literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HexProblem {
+    /// Not a hexadecimal digit, at its offset in the body.
+    Digit { digit: char, at: usize },
+    /// An underscore not between two digits: the body without it.
+    Underscores { fixed: String },
+    /// An odd number of digits, this many, which no number of bytes takes.
+    Odd { digits: usize },
+}
+
+/// The bytes the body of a byte or bytes literal holds, between its quotes:
+/// each two hexadecimal digits, of either case, each underscore between two
+/// digits.
+///
+/// # Errors
+///
+/// Why it holds none, if it doesn't.
+pub fn hex_bytes(body: &str) -> Result<Vec<u8>, HexProblem> {
+    if body.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fixed = match separated(body, 0, (16, "hexadecimal")) {
+        Ok(fixed) => fixed,
+        Err(IntProblem::Digit { digit, at, .. }) => return Err(HexProblem::Digit { digit, at }),
+        // Only underscores.
+        Err(_) => String::new(),
+    };
+    if fixed != body {
+        return Err(HexProblem::Underscores { fixed });
+    }
+    let digits: Vec<u8> = body
+        .chars()
+        .filter_map(|c| u8::try_from(c.to_digit(16)?).ok())
+        .collect();
+    if digits.len() % 2 == 1 {
+        return Err(HexProblem::Odd {
+            digits: digits.len(),
+        });
+    }
+    Ok(digits
+        .chunks(2)
+        .map(|pair| pair[0] * 16 + pair[1])
+        .collect())
+}
+
 /// Check an integer literal token's text: decimal digits, or a radix
 /// prefix, `0x`, `0o` or `0b`, and hexadecimal, octal or binary ones, each
 /// underscore between two digits. A decimal number has no leading zero,
@@ -656,5 +702,44 @@ mod tests {
     #[test]
     fn escape_list_names_every_escape() {
         assert_eq!(escape_list(), r#"\" \\ \n \r \t \0 \u{…}"#);
+    }
+
+    #[test]
+    fn literals_of_bytes_hold_pairs_of_digits() {
+        assert_eq!(hex_bytes(""), Ok(vec![]));
+        assert_eq!(hex_bytes("7f"), Ok(vec![0x7f]));
+        assert_eq!(hex_bytes("7F"), Ok(vec![0x7f]));
+        assert_eq!(hex_bytes("dead_BEEF"), Ok(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(hex_bytes("d_e"), Ok(vec![0xde]));
+        assert_eq!(hex_bytes("7"), Err(HexProblem::Odd { digits: 1 }));
+        assert_eq!(hex_bytes("abc"), Err(HexProblem::Odd { digits: 3 }));
+        assert_eq!(
+            hex_bytes("ag"),
+            Err(HexProblem::Digit { digit: 'g', at: 1 })
+        );
+        assert_eq!(
+            hex_bytes("_ab"),
+            Err(HexProblem::Underscores {
+                fixed: "ab".to_string()
+            })
+        );
+        assert_eq!(
+            hex_bytes("ab_"),
+            Err(HexProblem::Underscores {
+                fixed: "ab".to_string()
+            })
+        );
+        assert_eq!(
+            hex_bytes("a__b"),
+            Err(HexProblem::Underscores {
+                fixed: "a_b".to_string()
+            })
+        );
+        assert_eq!(
+            hex_bytes("_"),
+            Err(HexProblem::Underscores {
+                fixed: String::new()
+            })
+        );
     }
 }

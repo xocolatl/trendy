@@ -1,0 +1,154 @@
+/* UUIDs, RFC 9562's universally unique identifiers, and the versions of them
+   whose fields a program can tell: 16 bytes, written as text in 36 characters.
+   A unit that has them uses this one, `uses { trendy.uuid };`. */
+interface
+
+/* A UUID: its 16 bytes, or its text, as RFC 9562 writes it, lowercase, each byte
+   two hexadecimal digits, with dashes after the 4th, 6th, 8th and 10th, as
+   `"00112233-4455-6677-8899-aabbccddeeff"`. Ordered by its bytes. */
+type uuid {
+    { bytes: array byte, constraint length{a: bytes} = 16 },
+    { text: text, constraint is_uuid_text{text} },
+    order [asc bytes],
+};
+
+/* Whether `text` is a UUID's text, which `uuid{text}` can select. */
+operator is_uuid_text{text: text}: boolean;
+
+/* A version 4 UUID: its 7th byte's high bits say version 4, and its 9th's say
+   RFC 9562's variant. Every UUID whose bytes do is one. */
+type uuid_v4 is uuid { constraint (bytes[7] and x'f0') = x'40' and (bytes[9] and x'c0') = x'80' };
+
+/* A version 7 UUID: its 7th byte's high bits say version 7, and its 9th's say
+   RFC 9562's variant. Every UUID whose bytes do is one. */
+type uuid_v7 is uuid { constraint (bytes[7] and x'f0') = x'70' and (bytes[9] and x'c0') = x'80' };
+
+/* Give `uuid` a UUID. Nothing generates a random one until trendy has a source
+   of random numbers, so for now it is always the nil UUID, all zeros. */
+operator generate{out uuid: uuid};
+
+/* Give `v4` a version 4 UUID. Nothing generates a random one until trendy has a
+   source of random numbers, so for now only its version and variant bits are
+   set. */
+operator generate{out v4: uuid_v4};
+
+/* Give `v7` a version 7 UUID. Nothing generates one from the time and random
+   numbers until trendy has a source of them, so for now only its version and
+   variant bits are set. */
+operator generate{out v7: uuid_v7};
+
+implementation
+
+const hex_digits := to_characters{from: "0123456789abcdef"};
+
+operator hex{of: byte}: text [
+    from_character{from: hex_digits[of.value div 16 + 1]}
+        || from_character{from: hex_digits[of.value mod 16 + 1]}
+];
+
+/* The number of the lowercase hexadecimal digit `at`, which `is_uuid_text` has
+   checked it is. */
+operator digit{at: code_point}: integer [
+    if at.value <= 0x39 then at.value - 0x30 else at.value - 0x57
+];
+
+/* The byte of the two digits at `i` and after it in `points`. */
+operator byte_at{points: array code_point, i: integer}: byte [
+    byte{value: digit{at: points[i]} * 16 + digit{at: points[i + 1]}}
+];
+
+/* Whether the two at `i` and after it in `points` are lowercase hexadecimal
+   digits. */
+operator digits_at{points: array code_point, i: integer}: boolean [
+    is_digit{at: points[i]} and is_digit{at: points[i + 1]}
+];
+
+operator is_digit{at: code_point}: boolean [
+    at.value >= 0x30 and at.value <= 0x39 or at.value >= 0x61 and at.value <= 0x66
+];
+
+operator is_uuid_text{text: text}: boolean [
+    var p := to_code_points{from: text};
+    var dash := code_point{character: '-'};
+    if length{a: p} <> 36
+        then false
+        else p[9] = dash
+            and p[14] = dash
+            and p[19] = dash
+            and p[24] = dash
+            and digits_at{points: p, i: 1}
+            and digits_at{points: p, i: 3}
+            and digits_at{points: p, i: 5}
+            and digits_at{points: p, i: 7}
+            and digits_at{points: p, i: 10}
+            and digits_at{points: p, i: 12}
+            and digits_at{points: p, i: 15}
+            and digits_at{points: p, i: 17}
+            and digits_at{points: p, i: 20}
+            and digits_at{points: p, i: 22}
+            and digits_at{points: p, i: 25}
+            and digits_at{points: p, i: 27}
+            and digits_at{points: p, i: 29}
+            and digits_at{points: p, i: 31}
+            and digits_at{points: p, i: 33}
+            and digits_at{points: p, i: 35}
+];
+
+type uuid {
+    { text: text }
+        to { bytes := [
+            var p := to_code_points{from: text};
+            array [
+                byte_at{points: p, i: 1},
+                byte_at{points: p, i: 3},
+                byte_at{points: p, i: 5},
+                byte_at{points: p, i: 7},
+                byte_at{points: p, i: 10},
+                byte_at{points: p, i: 12},
+                byte_at{points: p, i: 15},
+                byte_at{points: p, i: 17},
+                byte_at{points: p, i: 20},
+                byte_at{points: p, i: 22},
+                byte_at{points: p, i: 25},
+                byte_at{points: p, i: 27},
+                byte_at{points: p, i: 29},
+                byte_at{points: p, i: 31},
+                byte_at{points: p, i: 33},
+                byte_at{points: p, i: 35},
+            ]
+        ] }
+        from {
+            text := hex{of: bytes[1]}
+                || hex{of: bytes[2]}
+                || hex{of: bytes[3]}
+                || hex{of: bytes[4]}
+                || "-"
+                || hex{of: bytes[5]}
+                || hex{of: bytes[6]}
+                || "-"
+                || hex{of: bytes[7]}
+                || hex{of: bytes[8]}
+                || "-"
+                || hex{of: bytes[9]}
+                || hex{of: bytes[10]}
+                || "-"
+                || hex{of: bytes[11]}
+                || hex{of: bytes[12]}
+                || hex{of: bytes[13]}
+                || hex{of: bytes[14]}
+                || hex{of: bytes[15]}
+                || hex{of: bytes[16]},
+        },
+};
+
+operator generate{out uuid: uuid} [
+    uuid := uuid{bytes: x"00000000_0000_0000_0000_000000000000"};
+];
+
+operator generate{out v4: uuid_v4} [
+    v4 := treat uuid{bytes: x"00000000_0000_4000_8000_000000000000"} as uuid_v4;
+];
+
+operator generate{out v7: uuid_v7} [
+    v7 := treat uuid{bytes: x"00000000_0000_7000_8000_000000000000"} as uuid_v7;
+];

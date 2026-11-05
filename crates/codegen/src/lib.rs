@@ -286,6 +286,46 @@ impl Functions {
         Ok(())
     }
 
+    /// The integer at `dst` of the unsigned number of `width` at `src`.
+    fn widen(
+        &mut self,
+        dst: &lir::Place,
+        src: &lir::Place,
+        width: lir::Width,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        let src = self.address(src, frame, b)?;
+        let flags = MemFlagsData::trusted();
+        let value = match width {
+            lir::Width::U8 => b.ins().uload8(types::I64, flags, src, 0),
+            lir::Width::U16 => b.ins().uload16(types::I64, flags, src, 0),
+            lir::Width::U32 => b.ins().uload32(flags, src, 0),
+        };
+        self.store(dst, value, frame, b)
+    }
+
+    /// The unsigned number of `width` at `dst` of the integer at `src`, which
+    /// its type's constraints have kept in its range.
+    fn narrow(
+        &mut self,
+        dst: &lir::Place,
+        src: &lir::Place,
+        width: lir::Width,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        let value = self.load(types::I64, src, frame, b)?;
+        let dst = self.address(dst, frame, b)?;
+        let flags = MemFlagsData::trusted();
+        match width {
+            lir::Width::U8 => b.ins().istore8(flags, value, dst, 0),
+            lir::Width::U16 => b.ins().istore16(flags, value, dst, 0),
+            lir::Width::U32 => b.ins().istore32(flags, value, dst, 0),
+        };
+        Ok(())
+    }
+
     fn inst(
         &mut self,
         inst: &lir::Inst,
@@ -357,6 +397,8 @@ impl Functions {
                 let address = b.ins().iadd(elements, offset);
                 self.store(dst, address, frame, b)?;
             }
+            lir::Inst::Widen { dst, src, width } => self.widen(dst, src, *width, frame, b)?,
+            lir::Inst::Narrow { dst, src, width } => self.narrow(dst, src, *width, frame, b)?,
             lir::Inst::Increment { place } => {
                 let pointer = self.config.pointer_type();
                 let value = self.load(pointer, place, frame, b)?;
@@ -986,6 +1028,8 @@ struct LaidOut {
 fn field_layout(field: &lir::Field) -> lir::Layout {
     match field {
         lir::Field::U8(_) => lir::Layout::U8,
+        lir::Field::U16(_) => lir::Layout::U16,
+        lir::Field::U32(_) => lir::Layout::U32,
         lir::Field::I64(_) => lir::Layout::I64,
         lir::Field::F64Bits(_) => lir::Layout::F64Bits,
         lir::Field::Usize(_) | lir::Field::Size(_) | lir::Field::Offset(..) => lir::Layout::Usize,
@@ -1008,6 +1052,8 @@ impl Target {
     fn align(&self, layout: &lir::Layout) -> usize {
         match layout {
             lir::Layout::U8 | lir::Layout::Bytes(_) => 1,
+            lir::Layout::U16 => 2,
+            lir::Layout::U32 => 4,
             lir::Layout::I64 | lir::Layout::F64Bits => 8,
             lir::Layout::Usize | lir::Layout::Address => self.pointer_bytes,
             lir::Layout::Struct(fields) | lir::Layout::Union(fields) => {
@@ -1019,6 +1065,8 @@ impl Target {
     fn size(&self, layout: &lir::Layout) -> usize {
         match layout {
             lir::Layout::U8 => 1,
+            lir::Layout::U16 => 2,
+            lir::Layout::U32 => 4,
             lir::Layout::I64 | lir::Layout::F64Bits => 8,
             lir::Layout::Usize | lir::Layout::Address => self.pointer_bytes,
             lir::Layout::Bytes(n) => *n,
@@ -1113,6 +1161,12 @@ impl Target {
         out.bytes.resize(out.bytes.len().next_multiple_of(align), 0);
         match field {
             lir::Field::U8(n) => out.bytes.push(*n),
+            lir::Field::U16(n) => out
+                .bytes
+                .extend(self.in_target_order(u64::from(*n).to_le_bytes(), 2)),
+            lir::Field::U32(n) => out
+                .bytes
+                .extend(self.in_target_order(u64::from(*n).to_le_bytes(), 4)),
             lir::Field::I64(n) => out.bytes.extend(self.in_target_order(n.to_le_bytes(), 8)),
             lir::Field::F64Bits(bits) => {
                 out.bytes

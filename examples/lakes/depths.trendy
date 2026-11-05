@@ -38,7 +38,6 @@ operator recorded{out lakes: relation lake};
 implementation
 
 type metres {
-    { m: integer },
     { cm: integer }
         to { m := cm div 100 }
         from { cm := m * 100 },

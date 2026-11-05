@@ -654,6 +654,8 @@ operator's column.
 Everything else goes on one line, except that a relation value with more than
 one tuple is broken across lines: each tuple on its own line, indented four
 spaces per level of nesting, with the closing brace on a line of its own.
+A type's braces with more than one thing in them, or a representation with
+conversions, are broken the same way.
 A tuple value, relation value or call's arguments with several items, one of
 them broken, puts each item on its own line too, and so does one with a
 broken chain in it outside any block. Lines are at most 100
@@ -2492,6 +2494,27 @@ is already a value of its supertypes, inside a relation or an array too,
 and nothing is copied to make it one. Its descriptor is `KIND_UNION`,
 whose one attribute says where the components are; the runtime compares,
 orders, writes and releases such a value by its own type's descriptor.
+
+A byte, the prelude's `byte`, is a type of the program's own as far as lowering goes:
+sema selects one for a literal (`Checker::byte_literal`, `bytes_literal`), and
+writes `and`, `or`, `xor` and `not` of bytes as those of their numbers
+(`Checker::bytes_bits`, `not_byte`), so that nothing here knows of them. The
+runtime and `hir::Value` write one as its literal, knowing it by its name
+(`hir::Library::is_byte`).
+
+A value's components are stored in as few bytes as its type allows
+(`Families::stored`): an integer component that the type's constraints
+keep in a range no lower than 0 and no higher than 2^32 - 1 takes 1, 2 or
+4 bytes, as the smallest of those the range fits, unsigned (`Layout::U8`,
+`U16`, `U32`, `hir::Scalar::Narrow`, which only lowering makes), so that
+`byte` takes one and an `array byte` is that many bytes after its header. The
+language can't tell (RM Prescription 4): lowering converts where a value
+is selected and where its components are read (`narrowed`, `widened`), and
+a constraint's own operator, and everything else, sees integers. A
+constraint says a range only as an `and` of comparisons of the component with a
+constant (`bounded_by`). A hierarchy's values aren't narrowed, as they are
+all laid out as its root's. The runtime reads and writes such a number by its
+descriptor's kind, `KIND_U8`, `KIND_U16` or `KIND_U32`.
 
 Approximate arithmetic makes IEEE 754's `-0.0` into `0.0` by adding `0.0` to
 each result (`one_zero`), which leaves every other number as it is, so that

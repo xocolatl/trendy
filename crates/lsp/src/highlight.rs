@@ -70,7 +70,10 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         kind if kind.is_operator() => (Class::ExprOperator, false),
         kind if kind.is_keyword() => (Class::Keyword, false),
         SyntaxKind::IntLiteral | SyntaxKind::ApproximateLiteral => (Class::Number, false),
-        SyntaxKind::TextLiteral | SyntaxKind::CharacterLiteral => (Class::Text, false),
+        SyntaxKind::TextLiteral
+        | SyntaxKind::CharacterLiteral
+        | SyntaxKind::ByteLiteral
+        | SyntaxKind::BytesLiteral => (Class::Text, false),
         SyntaxKind::Ident => word(token)?,
         _ => return None,
     };
@@ -560,6 +563,21 @@ mod tests {
                 ("var", Class::Keyword, false),
                 ("r", Class::Variable, true),
                 ("1e5", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn literals_of_bytes_are_text() {
+        assert_eq!(
+            highlight("var a := x'7f' and x\"ab\"[1];"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("x'7f'", Class::Text, false),
+                ("and", Class::ExprOperator, false),
+                ("x\"ab\"", Class::Text, false),
+                ("1", Class::Number, false),
             ]
         );
     }

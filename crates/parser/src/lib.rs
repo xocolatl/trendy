@@ -150,6 +150,8 @@ fn starts_condition(kind: SyntaxKind) -> bool {
             | SyntaxKind::ApproximateLiteral
             | SyntaxKind::TextLiteral
             | SyntaxKind::CharacterLiteral
+            | SyntaxKind::ByteLiteral
+            | SyntaxKind::BytesLiteral
             | SyntaxKind::TrueKw
             | SyntaxKind::FalseKw
             | SyntaxKind::LParen

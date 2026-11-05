@@ -67,6 +67,46 @@ pub const KIND_DEFINED: u8 = 7;
 pub const KIND_UNION: u8 = 8;
 /// One character, laid out as a text of it is.
 pub const KIND_CHARACTER: u8 = 9;
+/// An integer stored in one byte, as a component of a type of the program's own whose
+/// constraints keep it in that range.
+pub const KIND_U8: u8 = 10;
+/// As [`KIND_U8`], in two bytes.
+pub const KIND_U16: u8 = 11;
+/// As [`KIND_U8`], in four bytes.
+pub const KIND_U32: u8 = 12;
+
+/// The integer stored at `value` in the width of the kind `kind`.
+///
+/// # Safety
+///
+/// `value` must point to an integer of that kind.
+unsafe fn narrow(value: *const u8, kind: u8) -> u32 {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        match kind {
+            KIND_U8 => u32::from(*value),
+            KIND_U16 => u32::from(value.cast::<u16>().read_unaligned()),
+            _ => value.cast::<u32>().read_unaligned(),
+        }
+    }
+}
+
+/// Store at `dst` the code point `point`, as the integer of the kind `kind` it is
+/// stored as: [`KIND_INTEGER`] or a narrower one.
+///
+/// # Safety
+///
+/// `dst` must point to memory for one.
+#[cfg(not(test))]
+unsafe fn write_number(dst: *mut u8, kind: u8, point: u32) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        match kind {
+            KIND_U32 => dst.cast::<u32>().write_unaligned(point),
+            _ => dst.cast::<i64>().write_unaligned(i64::from(point)),
+        }
+    }
+}
 
 /// [`trendy_rt_integer_failed`]'s and [`trendy_rt_approximate_failed`]'s
 /// operators: `+`.
@@ -173,6 +213,7 @@ pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
             KIND_INTEGER | KIND_APPROXIMATE => {
                 lhs.cast::<u64>().read_unaligned() == rhs.cast::<u64>().read_unaligned()
             }
+            KIND_U8 | KIND_U16 | KIND_U32 => narrow(lhs, desc.kind) == narrow(rhs, desc.kind),
             KIND_TEXT | KIND_CHARACTER => {
                 let (a, b) = (read_slice(lhs), read_slice(rhs));
                 a.1 == b.1
@@ -188,11 +229,18 @@ pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
             KIND_RELATION | KIND_ARRAY => {
                 let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
                 let element = desc.element();
-                count == other
-                    && (0..count).all(|i| {
-                        let offset = i * element.size;
-                        equal(a.add(offset), b.add(offset), element)
-                    })
+                if count != other {
+                    return false;
+                }
+                // What is one byte each is compared at once.
+                if element.size == 1 && !element.points {
+                    return core::slice::from_raw_parts(a, count)
+                        == core::slice::from_raw_parts(b, count);
+                }
+                (0..count).all(|i| {
+                    let offset = i * element.size;
+                    equal(a.add(offset), b.add(offset), element)
+                })
             }
             _ => false,
         }
@@ -213,6 +261,65 @@ unsafe fn tuples_equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool 
         attributes(desc)
             .iter()
             .all(|attr| equal(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc))
+    }
+}
+
+/// Store at `dst` the array of the elements of `lhs` then those of `rhs`, of the type
+/// `desc` describes, in memory the statement's scope holds. Fails if the memory can't
+/// be allocated.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid arrays of that type, `desc` to its descriptor,
+/// and `dst` to memory for an array. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_concat_arrays(
+    dst: *mut Text,
+    lhs: *const Text,
+    rhs: *const Text,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller; the new buffer has room for both.
+    status(|| unsafe {
+        let (lhs, rhs) = (lhs.read_unaligned(), rhs.read_unaligned());
+        let desc = &*desc;
+        let element = desc.element();
+        let sizes = lhs
+            .len
+            .checked_add(rhs.len)
+            .and_then(|len| Some((len, len.checked_mul(element.size)?)));
+        let Some((len, size)) = sizes else {
+            return Err(out_of_memory());
+        };
+        let bytes = allocate_buffer(size, desc)?;
+        let first = lhs.len * element.size;
+        core::ptr::copy_nonoverlapping(lhs.bytes, bytes, first);
+        core::ptr::copy_nonoverlapping(rhs.bytes, bytes.add(first), rhs.len * element.size);
+        adopt(bytes, len, element);
+        dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
+/// Store at `dst` -1, 0 or 1, as `lhs` is before, equal to or after `rhs`, of the type
+/// `desc` describes, in the order sorting does.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid values of that type, `desc` to its descriptor,
+/// and `dst` to an `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_compare(
+    dst: *mut i64,
+    lhs: *const u8,
+    rhs: *const u8,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let ordering = order(lhs, rhs, &*desc);
+        dst.write_unaligned(ordering as i64);
     }
 }
 
@@ -3648,19 +3755,25 @@ unsafe fn order_otherwise(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> co
                 let (a, b) = (read_slice(lhs), read_slice(rhs));
                 core::slice::from_raw_parts(a.0, a.1).cmp(core::slice::from_raw_parts(b.0, b.1))
             }
+            KIND_U8 | KIND_U16 | KIND_U32 => narrow(lhs, desc.kind).cmp(&narrow(rhs, desc.kind)),
             KIND_TUPLE | KIND_DEFINED => compare_tuples(lhs, rhs, desc),
-            // By their types' names, then their components.
+            // By the names they are written with, then their components, as
+            // `hir::DefinedValue` orders them: of a type and the subtypes a
+            // constraint defines, written the same, in their components' order.
             KIND_UNION => {
                 let ((a, at), (b, bt)) = (own_type(lhs, desc), own_type(rhs, desc));
-                if same_type(a, b) {
-                    order(at, bt, a)
-                } else {
-                    type_name(a).cmp(type_name(b))
-                }
+                written_name(a)
+                    .cmp(written_name(b))
+                    .then_with(|| order(at, bt, a))
             }
             KIND_RELATION | KIND_ARRAY => {
                 let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
                 let element = desc.element();
+                // What is one byte each is compared at once, each as unsigned.
+                if element.size == 1 && !element.points {
+                    return core::slice::from_raw_parts(a, count)
+                        .cmp(core::slice::from_raw_parts(b, other));
+                }
                 for i in 0..count.min(other) {
                     let offset = i * element.size;
                     let ordering = order(a.add(offset), b.add(offset), element);
@@ -5397,7 +5510,7 @@ pub unsafe extern "C" fn trendy_rt_to_code_points(
         let points = allocate_buffer(size, desc)?;
         for (i, c) in text.chars().enumerate() {
             let at = points.add(i * element.size + number.offset);
-            at.cast::<i64>().write_unaligned(i64::from(u32::from(c)));
+            write_number(at, (*number.desc).kind, u32::from(c));
         }
         dst.write_unaligned(Text {
             bytes: points,
@@ -5509,10 +5622,11 @@ pub unsafe extern "C" fn trendy_rt_from_code_points(
         };
         let point = |i: usize| {
             let at = array.bytes.add(i * element.size + number.offset);
-            let n = at.cast::<i64>().read_unaligned();
-            u32::try_from(n)
-                .ok()
-                .and_then(char::from_u32)
+            let n = match (*number.desc).kind {
+                KIND_U32 => Some(narrow(at, KIND_U32)),
+                _ => u32::try_from(at.cast::<i64>().read_unaligned()).ok(),
+            };
+            n.and_then(char::from_u32)
                 .unwrap_or_else(|| internal_error("a code point is no Unicode scalar value"))
         };
         let mut len = 0usize;
@@ -7504,6 +7618,7 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
         match desc.kind {
             KIND_BOOLEAN => out.write_str(if *value == 0 { "false" } else { "true" }),
             KIND_INTEGER => write!(out, "{}", value.cast::<i64>().read_unaligned()),
+            KIND_U8 | KIND_U16 | KIND_U32 => write!(out, "{}", narrow(value, desc.kind)),
             // The shortest exponent form that reads back as the same value,
             // as `hir::Approximate::literal` writes it.
             KIND_APPROXIMATE => write!(out, "{:e}", value.cast::<f64>().read_unaligned()),
@@ -7528,15 +7643,12 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
                 write_value(out, components, own)
             }
             // Its selector's invocation, as a call is written.
-            KIND_DEFINED => write_call(
-                out,
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                    desc.written,
-                    desc.written_len,
-                )),
-                value,
-                desc,
-            ),
+            KIND_DEFINED if is_byte(written_name(desc)) => match byte_number(value, desc) {
+                Some(byte) => write!(out, "x'{byte:02x}'"),
+                // What failed to be one, as an error says.
+                None => write_call(out, written_name(desc), value, desc),
+            },
+            KIND_DEFINED => write_call(out, written_name(desc), value, desc),
             KIND_RELATION => {
                 out.write_str("relation ")?;
                 write_heading(out, desc)?;
@@ -7557,6 +7669,16 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
             KIND_ARRAY => {
                 let (elements, count) = read_slice(value);
                 let element = desc.element();
+                // Bytes, of an `array byte` out of a hierarchy, as a literal
+                // writes them.
+                if element.kind == KIND_DEFINED && is_byte(type_name(element)) {
+                    out.write_str("x\"")?;
+                    for i in 0..count {
+                        let byte = byte_number(elements.add(i * element.size), element);
+                        write!(out, "{:02x}", byte.ok_or(fmt::Error)?)?;
+                    }
+                    return out.write_char('"');
+                }
                 if count == 0 {
                     out.write_str("array ")?;
                     write_type(out, element)?;
@@ -7760,7 +7882,7 @@ impl Write for Measured {
 unsafe fn write_type(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
     match desc.kind {
         KIND_BOOLEAN => out.write_str("boolean"),
-        KIND_INTEGER => out.write_str("integer"),
+        KIND_INTEGER | KIND_U8 | KIND_U16 | KIND_U32 => out.write_str("integer"),
         KIND_APPROXIMATE => out.write_str("approximate"),
         KIND_TEXT => out.write_str("text"),
         KIND_CHARACTER => out.write_str("character"),
@@ -7822,6 +7944,34 @@ unsafe fn write_call(
         }
     }
     out.write_char('}')
+}
+
+/// Whether the name a type is called or written by is what the program calls
+/// the prelude's `byte`: its name, unless another unit declares one (see
+/// `hir::Library::is_byte`).
+fn is_byte(name: &str) -> bool {
+    name == "byte" || name == "trendy.prelude::byte"
+}
+
+/// The number of the byte at `value`, a value of the type `desc`, stored in one
+/// byte, or as an integer in a hierarchy, or as what a value selected of the type's
+/// components was before they were checked, if it is out of its range.
+///
+/// # Safety
+///
+/// As for [`write_value`], with `desc` describing a `byte`.
+unsafe fn byte_number(value: *const u8, desc: &TypeDesc) -> Option<u8> {
+    // SAFETY: guaranteed by the caller; its one attribute's offset and
+    // descriptor are its layout.
+    unsafe {
+        let number = &attributes(desc)[0];
+        let at = value.add(number.offset);
+        if (*number.desc).kind == KIND_U8 {
+            Some(*at)
+        } else {
+            u8::try_from(at.cast::<i64>().read_unaligned()).ok()
+        }
+    }
 }
 
 /// `{ name: value, … }` or `{}`, for the tuple at `value`.
@@ -7930,6 +8080,19 @@ unsafe fn own_type<'d>(value: *const u8, desc: &TypeDesc) -> (&'d TypeDesc, *con
 unsafe fn same_type(a: &TypeDesc, b: &TypeDesc) -> bool {
     // SAFETY: guaranteed by the caller.
     core::ptr::eq(a, b) || unsafe { type_name(a) == type_name(b) }
+}
+
+/// The name a value of the type of the program's own that `desc` describes is
+/// written with.
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor of such a type.
+unsafe fn written_name(desc: &TypeDesc) -> &str {
+    // SAFETY: the compiler emits names as valid UTF-8.
+    unsafe {
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(desc.written, desc.written_len))
+    }
 }
 
 /// The name of the type of the program's own that `desc` describes.

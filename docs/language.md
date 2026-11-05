@@ -151,10 +151,9 @@ operator main{} [];
   unit's own (see below).
 
 A type with several possible representations the interface declares is
-declared again in the implementation, which repeats each
-representation's components and gives every one but the stored one its
-`to` and `from`, so that no other unit can tell which of them the values
-are stored as:
+declared again in the implementation, which gives every one but the
+stored one its `to` and `from`, so that no other unit can tell which of
+them the values are stored as:
 
 ```trendy
 interface
@@ -168,7 +167,6 @@ type duration {
 implementation
 
 type duration {
-    { seconds: integer },
     { hours: integer, minutes: integer }
         to { seconds := hours * 3600 + minutes * 60 }
         from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },
@@ -186,12 +184,16 @@ operator main{} [
   implementation's declaration is moved there (A0067). Conversions in the
   interface are moved to the implementation's, which the fix writes if
   it is missing (A0067).
-- **It repeats each representation's components** as the interface
-  writes them, with their types, as an operator's body repeats its
-  heading, so that each conversion reads beside what it converts. One the
-  interface doesn't declare, or one it doesn't repeat, is an error, with
-  components that differ in their types fixed to the interface's
-  (A0068).
+- **It repeats only what it extends:** the components of each
+  representation it gives conversions, as the interface writes them, with
+  their types, as an operator's body repeats its heading, so that each
+  conversion reads beside what it converts. One the interface doesn't
+  declare is an error, and components that differ in their types are fixed
+  to the interface's (A0068). The stored one, which it has nothing to add
+  to, it can leave out, as here, or repeat, with no conversions.
+- **Exactly one is left without conversions,** so leaving out two is an
+  error, and so is leaving out none (A0059), as a type's values are stored
+  as one of its representations.
 - **A type with one possible representation needs no second
   declaration,** as it has nothing to convert, and one with several
   declared in an interface without one is an error (A0059).
@@ -1432,6 +1434,16 @@ type code_point {
     order [asc value],
 };
 
+/* A byte: a number from 0 to 255, written `x'7f'`, and ordered by its number,
+   which is `b.value`. An array of them, `array byte`, is what binary data is,
+   written `x"dead_beef"`. `and`, `or`, `xor` and `not` of bytes work on their
+   bits. A byte isn't a character, or a number to do arithmetic on. */
+type byte {
+    { value: integer },
+    constraint value >= 0 and value <= 0xFF,
+    order [asc value],
+};
+
 /* The code points of `from`, in order: what its text is made of, one for
    each Unicode scalar value, not each character a reader sees, as `é` can
    be written as `e` and a combining accent, two code points. */
@@ -2336,6 +2348,85 @@ operator main{} [
     };
 ];
 ```
+
+### UUIDs
+
+`trendy.uuid`, a unit that comes with the compiler, which a unit uses with
+`uses { trendy.uuid };`, has RFC 9562's universally unique identifiers. It is
+trendy, so nothing in it is built in: a type with two possible representations,
+16 bytes and the text RFC 9562 writes, and a subtype of it for each version a
+program can tell by its bits. Its interface, what a unit that uses it sees:
+
+```
+/* UUIDs, RFC 9562's universally unique identifiers, and the versions of them
+   whose fields a program can tell: 16 bytes, written as text in 36 characters.
+   A unit that has them uses this one, `uses { trendy.uuid };`. */
+interface
+
+/* A UUID: its 16 bytes, or its text, as RFC 9562 writes it, lowercase, each byte
+   two hexadecimal digits, with dashes after the 4th, 6th, 8th and 10th, as
+   `"00112233-4455-6677-8899-aabbccddeeff"`. Ordered by its bytes. */
+type uuid {
+    { bytes: array byte, constraint length{a: bytes} = 16 },
+    { text: text, constraint is_uuid_text{text} },
+    order [asc bytes],
+};
+
+/* Whether `text` is a UUID's text, which `uuid{text}` can select. */
+operator is_uuid_text{text: text}: boolean;
+
+/* A version 4 UUID: its 7th byte's high bits say version 4, and its 9th's say
+   RFC 9562's variant. Every UUID whose bytes do is one. */
+type uuid_v4 is uuid { constraint (bytes[7] and x'f0') = x'40' and (bytes[9] and x'c0') = x'80' };
+
+/* A version 7 UUID: its 7th byte's high bits say version 7, and its 9th's say
+   RFC 9562's variant. Every UUID whose bytes do is one. */
+type uuid_v7 is uuid { constraint (bytes[7] and x'f0') = x'70' and (bytes[9] and x'c0') = x'80' };
+
+/* Give `uuid` a UUID. Nothing generates a random one until trendy has a source
+   of random numbers, so for now it is always the nil UUID, all zeros. */
+operator generate{out uuid: uuid};
+
+/* Give `v4` a version 4 UUID. Nothing generates a random one until trendy has a
+   source of random numbers, so for now only its version and variant bits are
+   set. */
+operator generate{out v4: uuid_v4};
+
+/* Give `v7` a version 7 UUID. Nothing generates one from the time and random
+   numbers until trendy has a source of them, so for now only its version and
+   variant bits are set. */
+operator generate{out v7: uuid_v7};
+```
+
+```trendy
+uses { trendy.uuid };
+
+const id := uuid{text: "6ba7b810-9dad-41d1-80b4-00c04fd430c8"};
+
+operator main{} [
+    call debug_value{v: id};
+    call debug_value{v: id.text};
+    call debug_value{v: id.bytes[7]};
+    call debug_value{v: id is uuid_v4};
+    call debug_value{v: is_uuid_text{text: "6BA7B810"}};
+    var made := treat uuid{bytes: x"00000000_0000_7000_8000_000000000000"} as uuid_v7;
+    call generate{out v7: made};
+    call debug_value{v: made.text};
+];
+```
+
+- **A value of a version's type is a UUID whose bits say so.** Each subtype is
+  defined by a constraint, so `uuid{bytes: …}` of a version 4 UUID's bytes is a
+  `uuid_v4`, and `id is uuid_v4` is true of it (see [Subtypes defined by
+  constraints](#subtypes-defined-by-constraints)).
+- **Its text is lowercase,** as RFC 9562 writes it, so that each UUID has one text,
+  as a possible representation must: `uuid{text: …}` of uppercase digits, or
+  anything else `is_uuid_text` says isn't one, fails (R0017).
+- **`generate` makes no random UUIDs yet,** as trendy has no source of random numbers:
+  `generate{out uuid}` gives the nil UUID, and `generate{out v4}` and `generate{out
+  v7}` a UUID of zeros but for its version and variant bits. They are update operators,
+  as anything that reads a source of random numbers or the time must be, so that a
+  program that calls them won't change when they do.
 
 ## Variables
 
@@ -4044,6 +4135,8 @@ operator main{} [
 ];
 ```
 
+- **`a || b` is the elements of `a`, then those of `b`,** of one array type, as `||` is
+  of text.
 - **Positions count from 1.** `a[i]` is the element of `a` at the
   position `i`, an integer from 1 up to `length{a: a}`, as in SQL and
   Tutorial D. Any other position is an error (R0011): when compiling, if
@@ -4749,8 +4842,8 @@ operator main{} [];
 
 ### Bits
 
-`not`, `and`, `or` and `xor` of integers take their bits, as two's
-complement writes them, the sign's bit going on to the left forever, so
+`not`, `and`, `or` and `xor` of integers, and of bytes (see [Bytes](#bytes)), take
+their bits, as two's complement writes an integer's, the sign's bit going on to the left forever, so
 that a result doesn't depend on how wide an integer is: `not a` is
 `-a - 1`. `shl` and `shr` move the bits, as they multiply and divide by
 a power of 2.
@@ -4951,6 +5044,58 @@ operator main{} [
   is empty: `var c: character;` is an error (A0006), but a relation or an array of them
   starts empty, as any does.
 
+### Bytes
+
+A `byte`, a type of the prelude, is a number from 0 to 255, written `x'7f'`, two
+hexadecimal digits between `x'` and `'`. An array of them, `array byte`, is what binary
+data is, written `x"dead_beef"`, pairs of them between `x"` and `"`, as many as there
+are, an underscore between any two digits. Single quotes hold one, as they hold one
+character, and double quotes any number, as they do of text.
+
+```trendy
+const magic := x"89_50_4e_47";
+
+operator flipped{b: byte}: byte [
+    b xor x'ff'
+];
+
+operator main{} [
+    call debug_value{v: magic[1]};
+    call debug_value{v: magic[1].value};
+    call debug_value{v: length{a: magic}};
+    call debug_value{v: magic || x"0d0a"};
+    call debug_value{v: magic < x"8a"};
+    call debug_value{v: x'f0' and x'3c'};
+    call debug_value{v: not x'0f'};
+    call debug_value{v: flipped{b: byte{value: 15}}};
+    call debug_value{v: to_text{from: x'7F'}};
+];
+```
+
+- **It is a type like any other,** declared in the prelude as `{ value: integer }` of
+  a constraint, and ordered by its number, so `b.value` is its number, and
+  `byte{value: n}` the byte of a number, which fails outside its range (R0017).
+  Its one component takes a byte of memory, and an `array byte` one for each, as an
+  integer a type's constraints keep in a range takes only what that range needs,
+  whichever type it is of. Nothing in the language can tell.
+- **`and`, `or`, `xor` and `not` of bytes take their bits,** and give a byte, as they
+  do of integers, in their operators' forms too, `xor{a, b, c}`, and with the same
+  grouping, so `b and x'f0' = x'40'` is an error, with a fix to `(b and x'f0') = x'40'`
+  (A0076). A byte has no arithmetic and no shifts, which could leave its range: those
+  are of its number, `byte{value: b.value * 2 mod 256}`. An integer isn't a byte
+  either, so `b and 0x0f` is an error, with a fix to `b and x'0f'`, as is `127` where a
+  byte is expected, to `x'7f'` (A0004).
+- **A byte isn't a character,** and `array byte` isn't text: `x'61' = 'a'` is an error
+  (A0004), whose fix writes a character of ASCII as its byte, and `||` of bytes and text
+  is too. Which bytes a text is depends on an encoding, which nothing here chooses.
+- **Literals say which at once.** `x'dead'` is an error, with a fix to `x"dead"`, as
+  `x''` is to `x""`, an empty array, and `x'7'` has no fix, since the digit it lacks
+  could be any (P0061). `x'7f'` where an array is expected, and `x"7f"` where a byte is,
+  are fixed to each other (A0004).
+- **Written in lowercase,** whichever case a literal's digits are in, so a value is
+  written as `x'7f'` and an array of them `x"deadbeef"`, as `to_text` writes them too.
+  The empty one is `x""`.
+
 ### Comparisons
 
 `a = b`, `a <> b`, `a < b`, `a <= b`, `a > b` and `a >= b` compare two
@@ -4969,9 +5114,14 @@ Two values are equal exactly when they are the same value, as *The Third
 Manifesto* requires (RM Prescription 8). Two tuples are equal when every
 attribute's values are equal, and two relations when they have the same
 tuples, in any order; the values inside are compared the same way. Two
-arrays are equal when they have equal elements at each position. Tuples and
-arrays have no order, so `<`, `<=`, `>` and `>=` don't apply to them
-(A0022).
+arrays are equal when they have equal elements at each position. Tuples have no
+order, so `<`, `<=`, `>` and `>=` don't apply to them (A0022).
+
+An array is ordered if its elements are, element by element, the first that differs
+deciding, and one that runs out first coming first: `array [1, 2] < array [1, 3]`, and
+`array [1] < array [1, 0]`, as text is ordered. That is so of scalars and arrays of
+them, and of a type of the program's own whose order is its stored components, all of
+them, ascending; an array of any other type has no order (A0022).
 
 Relations are ordered as sets, by inclusion, as in Tutorial D: `r <= s`
 is true when every tuple of `r` is in `s` (subset), `r < s` when, too,
@@ -6473,6 +6623,17 @@ var path: text := "C:\data";
 operator main{} [];
 ```
 
+**Byte literals** are two hexadecimal digits between `x'` and `'`, and **bytes
+literals**, of an `array byte`, are pairs of them between `x"` and `"`, an underscore
+between any two digits (see [Bytes](#bytes)).
+
+```trendy
+var low := x'7f';
+var signature := x"dead_beef";
+
+operator main{} [];
+```
+
 ## Comments
 
 A comment is written `/* … */`, and can go anywhere whitespace can. There
@@ -6678,6 +6839,11 @@ line after a comment on its own line, such as a file's header, is kept.
 | `let x = x + 1;`, declaring a variable again | `x := x + 1;`, assigning it |
 | `x = 0` | `x := 0` |
 | `x += 1`, `x++`, `++x` | `x := x + 1;` |
+| `BLOB`, `bytea`, `VARBINARY`, `bytes`, `byte[]` | `array byte` |
+| `u8`, `uint8`, `octet` | `byte` |
+| `X'DEADBEEF'`, `'\xdeadbeef'::bytea` | `x"deadbeef"` |
+| `b"ab"`, `b'ab'` | `x"6162"` |
+| `b'a'`, `0x61u8`, a C `'a'` as a number | `x'61'` |
 | `INSERT R …`, `INSERT INTO r …` | `insert r …;` |
 | `DELETE R WHERE P`, `DELETE FROM r WHERE p` | `delete r where p;` |
 | `DELETE R`, `DELETE FROM r`, `… WHERE 1 = 1` | `r := relation {};` |

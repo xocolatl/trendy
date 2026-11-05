@@ -363,44 +363,13 @@ pub(crate) fn kinds(
 }
 
 /// Give `namespaces` the types of the units that come with the compiler
-/// that built-ins' signatures name, from `files`, as they declare them,
-/// once the types are resolved: the prelude's `code_point`, whose values
-/// the compiler makes with the components [`hir::Library::code_point_components`],
-/// as a type of its own, no subtype. One that isn't is an internal error,
-/// at the prelude's end, and so is one missing, which a type of just those
-/// components stands for, so that the built-ins are checked against what
-/// they name, and nothing else is reported for it.
+/// that built-ins' signatures name or literals make, from `files`, as they
+/// declare them, once the types are resolved: the prelude's `code_point` and
+/// `byte`, whose values the compiler makes with the components
+/// [`hir::Library::number_components`]. See [`made_by_the_compiler`].
 pub(crate) fn library(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagnostic>) {
-    let name = hir::Library::CODE_POINT;
-    let identity = namespaces.prelude_identity(name);
-    let components = hir::Library::code_point_components();
-    let declared = namespaces.defined_named(&identity).cloned();
-    let as_made = declared.as_ref().is_some_and(|defined| {
-        defined.components == components
-            && defined.supertypes.is_empty()
-            && defined.specialization.is_none()
-    });
-    if !as_made {
-        errors.push(Diagnostic::error(
-            Code::Internal,
-            format!(
-                "the prelude doesn't declare `type {name} {{ {{ value: integer }}, … }};`, of a code point, which `to_code_points` makes values of"
-            ),
-            Span::empty(files.prelude().span().end),
-            "missing",
-        ));
-    }
-    let code_point = declared.unwrap_or_else(|| hir::Defined {
-        name: identity,
-        components,
-        representations: Vec::new(),
-        constraints: Vec::new(),
-        keys: BTreeMap::new(),
-        order: None,
-        supertypes: Vec::new(),
-        specialized: false,
-        specialization: None,
-    });
+    let code_point = made_by_the_compiler(hir::Library::CODE_POINT, files, namespaces, errors);
+    let byte = made_by_the_compiler(hir::Library::BYTE, files, namespaces, errors);
     // A missing `error` is reported with what a failure needs
     // (`failures`), and one of its name stands for it.
     let error = namespaces.prelude_identity(hir::Library::ERROR);
@@ -413,8 +382,52 @@ pub(crate) fn library(files: &Files, namespaces: &mut Namespaces, errors: &mut V
         });
     namespaces.library = Some(hir::Library {
         code_point: Box::new(code_point),
+        byte: Box::new(byte),
         error: Box::new(error),
     });
+}
+
+/// The prelude's type `name`, whose values the compiler makes with the
+/// components [`hir::Library::number_components`], as a type of its own, no
+/// subtype. One that isn't is an internal error, at the prelude's end, and so
+/// is one missing, which a type of just those components stands for, so that the
+/// built-ins are checked against what they name, and nothing else is reported for
+/// it.
+fn made_by_the_compiler(
+    name: &str,
+    files: &Files,
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> hir::Defined {
+    let identity = namespaces.prelude_identity(name);
+    let components = hir::Library::number_components();
+    let declared = namespaces.defined_named(&identity).cloned();
+    let as_made = declared.as_ref().is_some_and(|defined| {
+        defined.components == components
+            && defined.supertypes.is_empty()
+            && defined.specialization.is_none()
+    });
+    if !as_made {
+        errors.push(Diagnostic::error(
+            Code::Internal,
+            format!(
+                "the prelude doesn't declare `type {name} {{ {{ value: integer }}, … }};`, of no supertype, as the compiler makes its values"
+            ),
+            Span::empty(files.prelude().span().end),
+            "missing",
+        ));
+    }
+    declared.unwrap_or_else(|| hir::Defined {
+        name: identity,
+        components,
+        representations: Vec::new(),
+        constraints: Vec::new(),
+        keys: BTreeMap::new(),
+        order: None,
+        supertypes: Vec::new(),
+        specialized: false,
+        specialization: None,
+    })
 }
 
 /// Add to `list` the signature of each built-in operator the units that

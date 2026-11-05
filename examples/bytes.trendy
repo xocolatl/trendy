@@ -1,0 +1,51 @@
+/* Bytes: `byte` is a number from 0 to 255, written in hexadecimal, and binary data is
+   an array of them. Each file format's first bytes say what it is, as these do. */
+var formats := relation {
+    { format: "PNG", magic: x"89_50_4e_47" },
+    { format: "gzip", magic: x"1f_8b" },
+    { format: "PDF", magic: x"25_50_44_46" },
+    { format: "ELF", magic: x"7f_45_4c_46" },
+}
+key { format };
+
+/* A byte with its high bit flipped, and its low bits alone. */
+operator flipped{b: byte}: byte [
+    b xor x'80'
+];
+
+operator low_bits{b: byte}: byte [
+    b and x'0f'
+];
+
+/* The hexadecimal digit of a byte's low bits, which reads the byte's number. */
+operator low_digit{b: byte}: character [
+    to_characters{from: "0123456789abcdef"}[low_bits{b}.value + 1]
+];
+
+/* Which of `formats` an array of bytes starts with: each one's first bytes are its
+   own, however long the file is. */
+operator starts_with{data: array byte, start: array byte}: boolean [
+    var same := length{a: data} >= length{a: start};
+    var i := 1;
+    while same and i <= length{a: start} loop [
+        same := data[i] = start[i];
+        i := i + 1;
+    ];
+    same
+];
+
+operator main{} [
+    call debug_table{r: formats};
+    var header := x"89504e47" || x"0d0a1a0a";
+    call debug_value{v: header};
+    call debug_value{v: length{a: header}};
+    call debug_value{v: header[1]};
+    call debug_value{v: header[1].value};
+    call debug_value{v: flipped{b: header[1]}};
+    call debug_value{v: low_digit{b: header[1]}};
+    call debug_value{v: not header[1]};
+    call debug_value{v: or{x'01', x'02', x'04'}};
+    call debug_value{v: header < x"8a"};
+    call debug_table{r: formats where starts_with{data: header, start: magic}};
+    call debug_value{v: to_text{from: x"7F45"}};
+];

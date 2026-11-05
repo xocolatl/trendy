@@ -189,6 +189,10 @@ pub enum SyntaxKind {
     TextLiteral,
     /// `'👍'`: one character, what a reader sees as one.
     CharacterLiteral,
+    /// `x'7f'`: one byte; a malformed one keeps this kind too.
+    ByteLiteral,
+    /// `x"dead_beef"`: an array of bytes; a malformed one keeps this kind too.
+    BytesLiteral,
     /// A character the lexer does not recognize.
     ErrorToken,
 
@@ -480,7 +484,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 186] = [
+    pub const ALL: [SyntaxKind; 188] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -567,6 +571,8 @@ impl SyntaxKind {
         SyntaxKind::ApproximateLiteral,
         SyntaxKind::TextLiteral,
         SyntaxKind::CharacterLiteral,
+        SyntaxKind::ByteLiteral,
+        SyntaxKind::BytesLiteral,
         SyntaxKind::ErrorToken,
         SyntaxKind::Program,
         SyntaxKind::SourceFile,
@@ -883,6 +889,8 @@ impl SyntaxKind {
                 | SyntaxKind::ApproximateLiteral
                 | SyntaxKind::TextLiteral
                 | SyntaxKind::CharacterLiteral
+                | SyntaxKind::ByteLiteral
+                | SyntaxKind::BytesLiteral
                 | SyntaxKind::TrueKw
                 | SyntaxKind::FalseKw
         )
@@ -1089,6 +1097,8 @@ impl SyntaxKind {
             SyntaxKind::ApproximateLiteral => "approximate literal",
             SyntaxKind::TextLiteral => "text literal",
             SyntaxKind::CharacterLiteral => "character literal",
+            SyntaxKind::ByteLiteral => "byte literal",
+            SyntaxKind::BytesLiteral => "bytes literal",
             SyntaxKind::ErrorToken => "unrecognized character",
             _ => return None,
         })

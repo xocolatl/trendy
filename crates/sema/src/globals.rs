@@ -863,21 +863,20 @@ impl<'a> Globals<'a> {
             .find(|c| c.direction() == Some(direction))?;
         // Each assigns components, whose types are written where they are
         // declared.
-        let value = match direction {
+        match direction {
             ast::Direction::To => {
                 let stored = self.stored_heading(defined);
                 let written = stored.as_ref();
-                self.conversion(signature, &conversion, &defined.components, written, errors)?
+                self.conversion(signature, &conversion, &defined.components, written, errors)
             }
             ast::Direction::From => {
                 let own = representation.components();
                 let Some(hir::Type::Tuple(components)) = &signature.result else {
                     unreachable!("a conversion from the stored representation is of a tuple");
                 };
-                self.conversion(signature, &conversion, components, own.as_ref(), errors)?
+                self.conversion(signature, &conversion, components, own.as_ref(), errors)
             }
-        };
-        Some((Vec::new(), value))
+        }
     }
 
     /// Where the stored components of `defined` are declared: in the stored
@@ -937,7 +936,8 @@ impl<'a> Globals<'a> {
     /// The tuple of `components`, written in `written`, that `conversion`
     /// computes, in `signature`, whose parameters are the components it
     /// computes them from: each once, of its type, computed as a read-only
-    /// operator's value is. `None` after reporting why not.
+    /// operator's value is, and the local variables of the value blocks that
+    /// do. `None` after reporting why not.
     fn conversion(
         &mut self,
         signature: &Signature,
@@ -945,7 +945,7 @@ impl<'a> Globals<'a> {
         components: &hir::Heading,
         written: Option<&ast::Heading>,
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<hir::Expr> {
+    ) -> Option<(Vec<hir::Local>, hir::Expr)> {
         let list = conversion.assignments()?;
         let keyword = conversion
             .keyword()
@@ -1026,7 +1026,7 @@ impl<'a> Globals<'a> {
             ));
             ok = false;
         }
-        ok.then(|| ops::tuple(values))
+        ok.then(|| (locals.finish(), ops::tuple(values)))
     }
 
     /// The value of `signature`, an operator that computes `constraint`, of

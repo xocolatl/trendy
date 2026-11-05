@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use trendy_syntax::ast::{
     Arguments, ArrayLiteral, AssignBlock, AssignList, AstNode, BinaryExpr, Body, Clause,
     GatherList, Heading, IfExpr, Load, NameList, NaryExpr, OrderList, RelationLiteral, RenameList,
-    SourceFile, TupleLiteral,
+    Representation, SourceFile, TupleLiteral,
 };
 use trendy_syntax::{Precedence, SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -700,10 +700,17 @@ fn key_start(token: &SyntaxToken) -> Option<SyntaxNode> {
 
 /// Whether `node` is laid out one item per line whatever its width: a
 /// relation value with more than one tuple, or a type's braces with more
-/// than one thing in them, possible representations or constraints.
+/// than one thing in them, possible representations or constraints, or a
+/// representation with conversions, which take lines of their own.
 fn always_vertical(node: &SyntaxNode) -> bool {
     match node.kind() {
-        SyntaxKind::TypeBody => items(node) > 1,
+        SyntaxKind::TypeBody => {
+            items(node) > 1
+                || node
+                    .children()
+                    .filter_map(Representation::cast)
+                    .any(|r| r.conversions().next().is_some())
+        }
         _ => RelationLiteral::cast(node.clone()).is_some_and(|r| r.elements().nth(1).is_some()),
     }
 }
@@ -1446,6 +1453,27 @@ mod tests {
                 "var a := lakes . depths :: limit * 2 ;var b := lakes :: table {n,m} where n=lakes::one;"
             ),
             "var a := lakes.depths::limit * 2;\nvar b := lakes::table{n, m} where n = lakes::one;\n"
+        );
+    }
+
+    #[test]
+    fn a_lone_representation_with_conversions_takes_lines_of_its_own() {
+        assert_eq!(
+            fmt("type metres { { cm: integer } to { m := cm div 100 } from { cm := m * 100 } };"),
+            "type metres {\n    { cm: integer }\n        to { m := cm div 100 }\n        from { cm := m * 100 },\n};\n"
+        );
+        // One without them stays on its line.
+        assert_eq!(
+            fmt("type metres {\n    { m: integer },\n};"),
+            "type metres { { m: integer } };\n"
+        );
+    }
+
+    #[test]
+    fn literals_of_bytes_are_as_written() {
+        assert_eq!(
+            fmt(r#"var a:=x'7F' ;var b :=x"dead_BEEF";var c:=x"";"#),
+            "var a := x'7F';\nvar b := x\"dead_BEEF\";\nvar c := x\"\";\n"
         );
     }
 

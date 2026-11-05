@@ -1,0 +1,38 @@
+uses { trendy.uuid };
+
+/* UUIDs: 16 bytes, or their text, with a subtype for each version its bits say. These
+   are an RFC's own, of a version 1 UUID, which has no subtype here, and of a version
+   4 and a version 7. */
+const namespace := uuid{text: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"};
+const random := uuid{text: "919108f7-52d1-4320-9bac-f847db4148a8"};
+const timed := uuid{bytes: x"017f22e2_79b0_7cc3_98c4_dc0c0c07398f"};
+
+/* What its bits say it is. */
+operator version{id: uuid}: text [
+    if id is uuid_v4 then "version 4" else if id is uuid_v7 then "version 7" else "another"
+];
+
+var known := relation {
+    { name: "namespace", id: namespace },
+    { name: "random", id: random },
+    { name: "timed", id: timed },
+}
+key { name };
+
+operator main{} [
+    call debug_table{
+        r: (known extend { as_text := id.text, version := version{id} }){name, as_text, version},
+    };
+    call debug_value{v: timed};
+    call debug_value{v: namespace < random};
+    call debug_value{v: is_uuid_text{text: "not a UUID"}};
+    var nil := namespace;
+    call generate{out uuid: nil};
+    call debug_value{v: nil.text};
+    var four := treat random as uuid_v4;
+    call generate{out v4: four};
+    call debug_value{v: four.text};
+    var seven := treat timed as uuid_v7;
+    call generate{out v7: seven};
+    call debug_value{v: seven.text};
+];

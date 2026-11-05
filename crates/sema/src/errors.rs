@@ -18,28 +18,37 @@ use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Origin, TypeParameters};
 use crate::{Kind, Namespace, Namespaces, scope, sections};
 
-/// Type names from other languages, and the built-in type each one means.
-const TYPE_ALIASES: &[(&str, hir::Scalar)] = &[
-    ("bigint", hir::Scalar::Integer),
-    ("bit", hir::Scalar::Boolean),
-    ("bool", hir::Scalar::Boolean),
-    ("char", hir::Scalar::Character),
-    ("decimal", hir::Scalar::Approximate),
-    ("double", hir::Scalar::Approximate),
-    ("f32", hir::Scalar::Approximate),
-    ("f64", hir::Scalar::Approximate),
-    ("float", hir::Scalar::Approximate),
-    ("float64", hir::Scalar::Approximate),
-    ("i64", hir::Scalar::Integer),
-    ("int", hir::Scalar::Integer),
-    ("int64", hir::Scalar::Integer),
-    ("long", hir::Scalar::Integer),
-    ("number", hir::Scalar::Approximate),
-    ("numeric", hir::Scalar::Approximate),
-    ("real", hir::Scalar::Approximate),
-    ("str", hir::Scalar::Text),
-    ("string", hir::Scalar::Text),
-    ("varchar", hir::Scalar::Text),
+/// Type names from other languages, in lowercase, and the type each one means,
+/// as it is written.
+const TYPE_ALIASES: &[(&str, &str)] = &[
+    ("bigint", "integer"),
+    ("binary", "array byte"),
+    ("bit", "boolean"),
+    ("blob", "array byte"),
+    ("bool", "boolean"),
+    ("bytea", "array byte"),
+    ("bytes", "array byte"),
+    ("char", "character"),
+    ("decimal", "approximate"),
+    ("double", "approximate"),
+    ("f32", "approximate"),
+    ("f64", "approximate"),
+    ("float", "approximate"),
+    ("float64", "approximate"),
+    ("i64", "integer"),
+    ("int", "integer"),
+    ("int64", "integer"),
+    ("long", "integer"),
+    ("number", "approximate"),
+    ("numeric", "approximate"),
+    ("octet", "byte"),
+    ("real", "approximate"),
+    ("str", "text"),
+    ("string", "text"),
+    ("u8", "byte"),
+    ("uint8", "byte"),
+    ("varbinary", "array byte"),
+    ("varchar", "text"),
 ];
 
 /// `name` is defined at `this` but was already defined at `first`, in the
@@ -416,14 +425,16 @@ pub(crate) fn unknown_type(
             TYPE_ALIASES
                 .iter()
                 .find(|(alias, _)| *alias == lowercase)
-                .map(|&(_, ty)| written(ty.name()))
+                .map(|&(_, meant)| written(meant))
         })
         .or_else(|| {
-            let types: Vec<&str> = hir::Scalar::ALL
+            // What this declaration declares first, as the first of equally
+            // close names is meant.
+            let types: Vec<&str> = declared
                 .iter()
-                .map(|t| t.name())
+                .copied()
+                .chain(hir::Scalar::ALL.iter().map(|t| t.name()))
                 .chain(namespaces.defined_types(span))
-                .chain(declared.iter().copied())
                 .collect();
             closest(name, types).map(written)
         });
@@ -1003,6 +1014,7 @@ pub(crate) fn type_mismatch(
         (hir::Type::Scalar(scalar), Some(written), Some(value)) => {
             rewrite_literal(*scalar, value, &written)
         }
+        (declared, Some(_), Some(value)) => rewrite_as_bytes(declared, value),
         _ => None,
     };
     if let Some(replacement) = rewritten {
@@ -1371,6 +1383,7 @@ pub(crate) fn complement_compared(
     token: &SyntaxToken,
     operand: &Expr,
     comparison: &ast::BinaryExpr,
+    of: &hir::Type,
 ) -> Diagnostic {
     let whole = comparison.syntax().text().to_string();
     let offset = |at: usize| at - comparison.span().start;
@@ -1382,14 +1395,22 @@ pub(crate) fn complement_compared(
     let not = trendy_syntax::span(token.text_range());
     Diagnostic::error(
         Code::BitGrouping,
-        format!("`{whole}` compares the complement of an integer"),
+        format!("`{whole}` compares the complement of {}", bits_of(of)),
         Span::new(not.start, comparison.span().end),
         format!("this is `({lhs}){rest}`"),
     )
-    .with_note("`not` binds tightest, as every prefix operator does, and of an integer it is the complement, bit by bit, so a `not` of an integer that begins a comparison is written in parentheses, whichever is meant: SQL and Python read `not n = 0` as `not (n = 0)`")
+    .with_note(format!("`not` binds tightest, as every prefix operator does, and of {of} it is the complement, bit by bit, so a `not` of {of} that begins a comparison is written in parentheses, whichever is meant: SQL and Python read `not n = 0` as `not (n = 0)`", of = bits_of(of)))
     .with_help(format!(
         "write `not ({compared})` to negate the comparison, or `({lhs}){rest}` to compare the complement"
     ))
+}
+
+/// A value of `ty`, which has bits, as a message says it.
+fn bits_of(ty: &hir::Type) -> &'static str {
+    match ty {
+        hir::Type::Scalar(_) => "an integer",
+        _ => "a byte",
+    }
 }
 
 /// A connective of an integer and a comparison, `binary`, as in `x and 1
@@ -1401,6 +1422,7 @@ pub(crate) fn misgrouped_bits(
     binary: &ast::BinaryExpr,
     comparison: &ast::BinaryExpr,
     inner: &Expr,
+    of: &hir::Type,
 ) -> Diagnostic {
     let span = binary.span();
     let whole = binary.syntax().text().to_string();
@@ -1427,12 +1449,12 @@ pub(crate) fn misgrouped_bits(
         .map_or_else(String::new, |t| t.text().to_string());
     Diagnostic::error(
         Code::BitGrouping,
-        format!("`{whole}` is `{read}`, `{op}` of an integer and a boolean"),
+        format!("`{whole}` is `{read}`, `{op}` of {} and a boolean", bits_of(of)),
         grouped,
         format!("these are `{op}`'s operands only in parentheses"),
     )
     .with_note(format!(
-        "a comparison binds tighter than `and`, `or` and `xor`, which are of booleans, or of integers, bit by bit, so `{cmp}` takes the operand next to it, as `==` does in C"
+        "a comparison binds tighter than `and`, `or` and `xor`, which are of booleans, or of integers or bytes, bit by bit, so `{cmp}` takes the operand next to it, as `==` does in C"
     ))
     .with_suggestion(
         format!("compare the bits: `{fixed}`"),
@@ -1447,6 +1469,33 @@ pub(crate) fn misgrouped_bits(
             },
         ],
     )
+}
+
+/// A literal of bytes of type `declared` for the same value as the literal of
+/// `value`: of a byte, a number in its range, `0x7f` or `127`, a C `char` of one
+/// ASCII character, or the bytes of an array of one, and of an array of them, one
+/// byte.
+fn rewrite_as_bytes(declared: &hir::Type, value: &hir::Value) -> Option<String> {
+    let is_byte =
+        |ty: &hir::Type| matches!(ty, hir::Type::Defined(d) if hir::Library::is_byte(&d.name));
+    if is_byte(declared) {
+        let byte = match value {
+            hir::Value::Integer(n) => u8::try_from(*n).ok(),
+            hir::Value::Character(c) if c.len() == 1 && c.is_ascii() => Some(c.as_bytes()[0]),
+            hir::Value::Array(array) => match array.bytes()?.as_slice() {
+                [byte] => Some(*byte),
+                _ => None,
+            },
+            _ => None,
+        }?;
+        return Some(format!("x'{byte:02x}'"));
+    }
+    match (declared, value) {
+        (hir::Type::Array(element), hir::Value::Defined(value)) if is_byte(element) => {
+            Some(format!("x\"{:02x}\"", value.byte()?))
+        }
+        _ => None,
+    }
 }
 
 /// A literal of type `ty` for the same value as `value`, written `written`,
@@ -6577,29 +6626,39 @@ pub(crate) fn unimplemented_type(name: &str, decl: &trendy_syntax::ast::TypeDecl
     )
     .with_note(IMPLEMENTED_TYPE)
     .with_help(format!(
-        "declare `{name}` again in the implementation, with each of its representations' components, and `to` and `from` after each but the one its values are stored as"
+        "declare `{name}` again in the implementation, with the components of each of its representations but the one its values are stored as, and `to` and `from` after them"
     ))
 }
 
 /// How a type an interface declares is completed, for notes.
-const IMPLEMENTED_TYPE: &str = "a type the interface declares shows its users its possible representations, its constraints and its order, but not which representation its values are stored as, nor how the others convert to it: its implementation declares it again, with each representation's components, and `to { … }` and `from { … }` after each but the stored one";
+const IMPLEMENTED_TYPE: &str = "a type the interface declares shows its users its possible representations, its constraints and its order, but not which representation its values are stored as, nor how the others convert to it: its implementation declares it again, with the components of each representation but the stored one, and `to { … }` and `from { … }` after them";
 
 /// `representation`, a second possible representation of the type `name`
-/// without conversions, after `stored`, the one its values are stored as.
+/// without conversions, after `other`, which `decl` declares: its conversions go
+/// after its braces, or, in its unit's interface, in the implementation's
+/// declaration.
 pub(crate) fn second_stored(
     name: &str,
+    decl: &trendy_syntax::ast::TypeDecl,
     representation: &trendy_syntax::ast::Representation,
-    stored: &trendy_syntax::ast::Representation,
+    other: &trendy_syntax::ast::Representation,
 ) -> Diagnostic {
+    let goes = if ast::section_of(decl.syntax()) == ast::Section::Interface {
+        format!("in the implementation's declaration of `{name}`")
+    } else {
+        "after its braces".to_string()
+    };
     Diagnostic::error(
         Code::Conversions,
         format!("`{name}` has more than one possible representation without conversions"),
         representation.span(),
         "no `to` or `from`",
     )
-    .with_secondary(stored.span(), "its values are stored as this one")
+    .with_secondary(other.span(), "this one has none either")
     .with_note(REPRESENTATIONS)
-    .with_help("convert it to the stored one and from it, after its braces")
+    .with_help(format!(
+        "its values are stored as one of them, so give the other `to` and `from`, {goes}"
+    ))
 }
 
 /// `representation`, other than the stored one, without a conversion
@@ -7294,7 +7353,7 @@ fn kind_help(
 fn plural(ty: &hir::Type) -> String {
     match ty {
         hir::Type::Scalar(hir::Scalar::Boolean) => "booleans".to_string(),
-        hir::Type::Scalar(hir::Scalar::Integer) => "integers".to_string(),
+        hir::Type::Scalar(hir::Scalar::Integer | hir::Scalar::Narrow(_)) => "integers".to_string(),
         hir::Type::Scalar(hir::Scalar::Approximate) => "approximate numbers".to_string(),
         hir::Type::Scalar(hir::Scalar::Text) => "text".to_string(),
         hir::Type::Scalar(hir::Scalar::Character) => "characters".to_string(),
@@ -7313,8 +7372,11 @@ fn plural(ty: &hir::Type) -> String {
 fn operand_rule(op: crate::ops::Operator, token: &str, ty: &hir::Type) -> String {
     use crate::ops::Operator;
     match (op, ty) {
+        (_, hir::Type::Defined(defined)) if hir::Library::is_byte(&defined.name) => {
+            "a byte isn't a number, but `b.value` is its number, and `byte{value: n}` the byte of a number".to_string()
+        }
         (Operator::Compare(_), hir::Type::Array(_)) => {
-            "arrays can only be compared with `=` and `<>`: they are equal if they have equal elements at each position".to_string()
+            "an array is ordered only if its elements are, and these aren't, so it can only be compared with `=` and `<>`: they are equal if they have equal elements at each position".to_string()
         }
         (Operator::Compare(_), hir::Type::Dummy(dummy)) => format!(
             "`{}` is a union type, which has no order: its values, of its subtypes' types, can only be compared with `=` and `<>`",
@@ -9849,7 +9911,7 @@ pub(crate) fn undeclared_representation(
     )
     .with_note(IMPLEMENTED_TYPE)
     .with_help(format!(
-        "repeat the interface's representations, {}, or declare this one there too",
+        "give conversions to one of the interface's representations, {}, or declare this one there too",
         trendy_diag::conjoin(&declared)
     ))
 }
@@ -9886,36 +9948,6 @@ pub(crate) fn representation_mismatch(
         Some(edit) => d.with_suggestion("write the interface's components", vec![edit]),
         None => d,
     }
-}
-
-/// `part`, the declaration in the implementation of the type `name` its
-/// unit's interface declares, which doesn't repeat `missing`, of the
-/// interface's representations.
-pub(crate) fn unrepeated_representations(
-    name: &str,
-    part: &ast::TypeDecl,
-    missing: &[&ast::Representation],
-) -> Diagnostic {
-    let span = part
-        .name()
-        .and_then(|n| n.ident())
-        .map_or_else(|| part.span(), |i| trendy_syntax::span(i.text_range()));
-    let listed: Vec<String> = missing.iter().map(|r| written_selector(name, r)).collect();
-    let mut d = Diagnostic::error(
-        Code::DefinitionMismatch,
-        format!(
-            "the implementation's declaration of `{name}` doesn't repeat {}",
-            trendy_diag::conjoin(&listed)
-        ),
-        span,
-        "not every representation",
-    );
-    for representation in missing {
-        d = d.with_secondary(representation.span(), "the interface's");
-    }
-    d.with_note(IMPLEMENTED_TYPE).with_help(
-        "repeat each representation's components, with `to` and `from` after each but the one its values are stored as",
-    )
 }
 
 /// The constraint `decl`, declared in its unit's interface, though the

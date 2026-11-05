@@ -10,7 +10,7 @@ use trendy_lir as lir;
 /// Translate HIR to LIR. Infallible: sema has already rejected bad programs.
 #[must_use]
 pub fn lower(program: &hir::Program) -> lir::Program {
-    let mut cx = Lowering::new(&program.files, &program.subtypes);
+    let mut cx = Lowering::new(&program.files, &program.subtypes, integer_bounds(program));
     cx.recursion = program.recursion();
 
     let mut variable_data = Vec::new();
@@ -785,9 +785,13 @@ struct Lowering {
 impl Lowering {
     /// For the program whose files' paths are `files`, with the types'
     /// immediate subtypes `subtypes`.
-    fn new(files: &[String], subtypes: &BTreeMap<String, Vec<hir::Type>>) -> Self {
+    fn new(
+        files: &[String],
+        subtypes: &BTreeMap<String, Vec<hir::Type>>,
+        bounds: HashMap<hir::OperatorId, IntegerBounds>,
+    ) -> Self {
         Lowering {
-            families: Families::new(subtypes),
+            families: Families::new(subtypes, bounds),
             data: Vec::new(),
             descriptors: HashMap::new(),
             empty: None,
@@ -1001,6 +1005,20 @@ impl Lowering {
                     lir::Field::Variant(fields[1].clone(), Box::new(components)),
                 ])
             }
+            // Its integers its constraints let it store narrower, so.
+            hir::Value::Defined(value) if let Some(stored) = self.families.stored(&value.ty) => {
+                let fields = stored
+                    .attributes()
+                    .zip(value.components.attributes())
+                    .map(|((_, ty), (_, component))| match (ty, component) {
+                        (hir::Type::Scalar(hir::Scalar::Narrow(width)), hir::Value::Integer(n)) => {
+                            narrow_field(*width, *n)
+                        }
+                        _ => self.value_field(component),
+                    })
+                    .collect();
+                lir::Field::Struct(fields)
+            }
             // Attributes come in name order, the heading's order, and a
             // value of any other type of the program's own is laid out as
             // its components.
@@ -1041,9 +1059,22 @@ impl Lowering {
         if ty.root().is_some() {
             return self.hierarchy_descriptor(ty);
         }
+        let stored;
         let (kind, heading, element) = match ty {
             hir::Type::Scalar(hir::Scalar::Boolean) => (KIND_BOOLEAN, None, None),
-            hir::Type::Defined(defined) => (KIND_DEFINED, Some(&defined.components), None),
+            hir::Type::Scalar(hir::Scalar::Narrow(width)) => {
+                let kind = match width {
+                    hir::Width::U8 => KIND_U8,
+                    hir::Width::U16 => KIND_U16,
+                    hir::Width::U32 => KIND_U32,
+                };
+                (kind, None, None)
+            }
+            hir::Type::Defined(defined) => {
+                stored = self.families.stored(defined);
+                let heading = stored.as_ref().unwrap_or(&defined.components);
+                (KIND_DEFINED, Some(heading), None)
+            }
             hir::Type::Scalar(hir::Scalar::Integer) => (KIND_INTEGER, None, None),
             hir::Type::Scalar(hir::Scalar::Approximate) => (KIND_APPROXIMATE, None, None),
             hir::Type::Scalar(hir::Scalar::Text) => (KIND_TEXT, None, None),
@@ -1075,8 +1106,10 @@ impl Lowering {
         let (name, written) = (self.name(name), self.name(written));
         let points = self.points(ty);
         let integers = match ty {
-            hir::Type::Relation(heading) => integers(&hir::Type::Tuple(heading.clone())),
-            _ => integers(ty),
+            hir::Type::Relation(heading) => {
+                integers(&hir::Type::Tuple(heading.clone()), &self.families)
+            }
+            _ => integers(ty, &self.families),
         };
         let id = self.constant(vec![
             lir::Field::U8(kind),
@@ -1148,9 +1181,11 @@ impl Lowering {
     /// type outside a hierarchy, which is laid out as its components. In a
     /// hierarchy, a value starts with this one's address, as its own type.
     fn components_descriptor(&mut self, defined: &hir::Defined) -> lir::DataId {
+        // With no constraints to store them narrower by, as they are given.
         let alone = hir::Defined {
             supertypes: Vec::new(),
             specialized: false,
+            constraints: Vec::new(),
             ..defined.clone()
         };
         self.descriptor(&hir::Type::Defined(Box::new(alone)))
@@ -1223,6 +1258,9 @@ const KIND_ARRAY: u8 = 6;
 const KIND_DEFINED: u8 = 7;
 const KIND_UNION: u8 = 8;
 const KIND_CHARACTER: u8 = 9;
+const KIND_U8: u8 = 10;
+const KIND_U16: u8 = 11;
+const KIND_U32: u8 = 12;
 
 /// The part of lowering for one function.
 struct FunctionBuilder<'a> {
@@ -1412,12 +1450,16 @@ struct Lookup {
 /// order they compare, if it is nothing else, and otherwise 0: an integer
 /// is one, and a tuple or a value of a type outside a hierarchy is its
 /// attributes', in name order, as they are laid out and compared.
-fn integers(ty: &hir::Type) -> usize {
+fn integers(ty: &hir::Type, families: &Families) -> usize {
     match ty {
         hir::Type::Scalar(hir::Scalar::Integer) => 1,
+        hir::Type::Defined(defined) if families.stored(defined).is_some() => 0,
         hir::Type::Tuple(_) | hir::Type::Defined(_) if ty.root().is_none() => {
             let fields = ty.fields().expect("tuples and types' values have fields");
-            let each: Vec<usize> = fields.attributes().map(|(_, ty)| integers(ty)).collect();
+            let each: Vec<usize> = fields
+                .attributes()
+                .map(|(_, ty)| integers(ty, families))
+                .collect();
             if each.contains(&0) {
                 0
             } else {
@@ -3263,8 +3305,8 @@ impl<'a> FunctionBuilder<'a> {
 
     /// The array of type `ty` of the records of `records`, an array of type
     /// `read` that `load_csv` read from `file`: each value of a type of the
-    /// program's own in them read in another possible representation than
-    /// the stored one converted to it (see [`hir::read_as`]), and each
+    /// program's own in them selected from its components, read in one of
+    /// its possible representations (see [`hir::read_as`]), and each
     /// checked against its type's constraints, as selecting it would, inner
     /// values first. The program stops at the first broken, writing the
     /// line, unless the call gives `errors`, the runtime's `Errors`: then a
@@ -3283,19 +3325,13 @@ impl<'a> FunctionBuilder<'a> {
         let (hir::Type::Array(read_record), hir::Type::Array(record)) = (read, ty) else {
             unreachable!("`load_csv` loads an array");
         };
-        let converts = read != ty;
-        let errors = errors.filter(|_| skippable(record, &cx.families));
-        if !converts && errors.is_none() && !constrained(record) {
+        if read == ty {
             return records.clone();
         }
-        let copies = converts || errors.is_some();
-        let rows = if copies {
-            let mut count = records.clone();
-            count.path.push(1);
-            self.allocated(ty, count, cx)
-        } else {
-            records.clone()
-        };
+        let errors = errors.filter(|_| skippable(record, &cx.families));
+        let mut count = records.clone();
+        count.path.push(1);
+        let rows = self.allocated(ty, count, cx);
         // With errors, where the next record kept goes, after those kept.
         let kept = errors.map(|_| {
             let kept = self.slot(lir::Layout::Usize);
@@ -3312,11 +3348,7 @@ impl<'a> FunctionBuilder<'a> {
             cx.layout(read_record),
             cx,
             |this, read, index, cx| {
-                let row = if copies {
-                    this.element(&rows, kept.as_ref().unwrap_or(index), cx.layout(record))
-                } else {
-                    read.clone()
-                };
+                let row = this.element(&rows, kept.as_ref().unwrap_or(index), cx.layout(record));
                 // A record skipped goes on after the record.
                 let after = this.new_block();
                 let at = Record {
@@ -3351,17 +3383,15 @@ impl<'a> FunctionBuilder<'a> {
                 layout: lir::Layout::Usize,
             });
         }
-        if copies {
-            self.adopt(&rows, ty, cx);
-        }
+        self.adopt(&rows, ty, cx);
         rows
     }
 
     /// The value of type `ty` that `value` says where to write, which
-    /// `load_csv` read as `read`: written there, unless that is where it
-    /// was read, converted if `read` is another type, and checked, with each
-    /// value of a type of the program's own in it, inner first (see
-    /// [`FunctionBuilder::records_checked`]). A value of a type of the
+    /// `load_csv` read as `read`: written there, converted if `read` is
+    /// another type, and checked, with each value of a type of the program's
+    /// own in it, inner first (see [`FunctionBuilder::records_checked`]). A
+    /// value of a type of the
     /// program's own is read as a tuple of the components of the
     /// representation the columns named, each read in turn, and, of another
     /// than the stored one, converted by its conversion to it.
@@ -3373,14 +3403,11 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) {
         if ty == read {
-            if value.dst != value.src {
-                self.insts.push(lir::Inst::Copy {
-                    dst: value.dst.clone(),
-                    src: value.src.clone(),
-                    layout: cx.layout(ty),
-                });
-            }
-            self.value_checked(&value.dst, ty, &value.name, value.at, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: value.dst.clone(),
+                src: value.src.clone(),
+                layout: cx.layout(ty),
+            });
             return;
         }
         let hir::Type::Tuple(fields) = read else {
@@ -3397,7 +3424,8 @@ impl<'a> FunctionBuilder<'a> {
         // Where its stored components go: where it goes, or, in a
         // hierarchy, a place of their own, which it is then made of.
         let in_hierarchy = ty.root().is_some();
-        let target = if in_hierarchy {
+        let narrowed = cx.families.stored(defined);
+        let target = if in_hierarchy || narrowed.is_some() {
             let stored = hir::Type::Tuple(defined.components.clone());
             Reading {
                 dst: self.slot(cx.layout(&stored)),
@@ -3438,6 +3466,9 @@ impl<'a> FunctionBuilder<'a> {
             if in_hierarchy {
                 self.made_in_hierarchy(defined, &target.dst, &value.dst, &checking, cx);
             }
+        }
+        if let Some(stored) = &narrowed {
+            self.stored_copied(stored, &target.dst, &value.dst, false, cx);
         }
     }
 
@@ -3675,33 +3706,6 @@ impl<'a> FunctionBuilder<'a> {
             inner.dst.path.push(i);
             inner.src.path.push(i);
             self.record_value(&inner, ty, read, cx);
-        }
-    }
-
-    /// Each value of a type of the program's own in the value of type `ty`,
-    /// named `name`, at `value` in a record of `at`, checked against its
-    /// type's constraints, inner values first, then the value itself.
-    fn value_checked(
-        &mut self,
-        value: &lir::Place,
-        ty: &hir::Type,
-        name: &str,
-        at: &Record,
-        cx: &mut Lowering,
-    ) {
-        let Some(heading) = ty.fields() else {
-            return;
-        };
-        for (i, (attribute, ty)) in heading.attributes().enumerate() {
-            let mut inner = value.clone();
-            inner.path.push(i);
-            self.value_checked(&inner, ty, &dotted(name, attribute), at, cx);
-        }
-        if let hir::Type::Defined(defined) = ty
-            && defined.is_constrained()
-        {
-            let checking = self.read_checking(name, at, cx);
-            self.constrained(defined, value, &checking, cx);
         }
     }
 
@@ -4073,7 +4077,13 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("`to_code_points` gives code points");
         };
         let components = hir::Type::Tuple(code_point.components.clone());
-        let stored = hir::Type::Array(Box::new(components.clone()));
+        // Out of a hierarchy, each is what the runtime makes of its components, as they
+        // are stored, narrower or not.
+        let stored = if element.root().is_none() {
+            ty.clone()
+        } else {
+            hir::Type::Array(Box::new(components.clone()))
+        };
         let text = self.place(&call.args["from"], cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&stored)));
         let points = self.slot(cx.layout(&stored));
@@ -4116,7 +4126,11 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("`from_code_points` takes code points");
         };
         let components = hir::Type::Tuple(code_point.components.clone());
-        let stored = hir::Type::Array(Box::new(components.clone()));
+        let stored = if element.root().is_none() {
+            ty.clone()
+        } else {
+            hir::Type::Array(Box::new(components.clone()))
+        };
         let array = self.place(from, cx);
         let points = if element.root().is_none() {
             array
@@ -5957,8 +5971,79 @@ impl<'a> FunctionBuilder<'a> {
             components
                 .path
                 .extend(cx.families.components_path(&defined));
+            return self.widened(&defined, components, cx);
         }
         components
+    }
+
+    /// The components of a value of `defined`, at `value`, laid out as the tuple of
+    /// them: where they are, unless its constraints let some be stored narrower (see
+    /// [`Families::stored`]), when a new tuple of them.
+    fn widened(
+        &mut self,
+        defined: &hir::Defined,
+        value: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let Some(stored) = cx.families.stored(defined) else {
+            return value;
+        };
+        let wide = self.slot(cx.layout(&hir::Type::Tuple(defined.components.clone())));
+        self.stored_copied(&stored, &value, &wide, true, cx);
+        wide
+    }
+
+    /// The value of `defined` whose components, laid out as the tuple of them, are at
+    /// `components`: where they are, unless its constraints let some be stored narrower,
+    /// when in a new place, as they are known to be in range once those are checked.
+    fn narrowed(
+        &mut self,
+        defined: &hir::Defined,
+        components: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let Some(stored) = cx.families.stored(defined) else {
+            return components;
+        };
+        let value = self.slot(cx.layout(&hir::Type::Tuple(stored.clone())));
+        self.stored_copied(&stored, &components, &value, false, cx);
+        value
+    }
+
+    /// Copy each component of `stored` from `from` to `to`, one laid out as `stored`
+    /// and the other as the tuple of them, as `widening` says which, each narrower one
+    /// converted.
+    fn stored_copied(
+        &mut self,
+        stored: &hir::Heading,
+        from: &lir::Place,
+        to: &lir::Place,
+        widening: bool,
+        cx: &mut Lowering,
+    ) {
+        for (i, (_, ty)) in stored.attributes().enumerate() {
+            let (mut src, mut dst) = (from.clone(), to.clone());
+            src.path.push(i);
+            dst.path.push(i);
+            let inst = match ty {
+                hir::Type::Scalar(hir::Scalar::Narrow(width)) if widening => lir::Inst::Widen {
+                    dst,
+                    src,
+                    width: lir_width(*width),
+                },
+                hir::Type::Scalar(hir::Scalar::Narrow(width)) => lir::Inst::Narrow {
+                    dst,
+                    src,
+                    width: lir_width(*width),
+                },
+                ty => lir::Inst::Copy {
+                    dst,
+                    src,
+                    layout: cx.layout(ty),
+                },
+            };
+            self.insts.push(inst);
+        }
     }
 
     /// The value `selection`, a `Select` or a `SelectIn`, selects.
@@ -6018,7 +6103,7 @@ impl<'a> FunctionBuilder<'a> {
         let ty = hir::Type::Defined(Box::new(defined.clone()));
         self.constrained(defined, &value, &Checking::Selected, cx);
         if ty.root().is_none() {
-            return value;
+            return self.narrowed(defined, value, cx);
         }
         let selected = self.slot(cx.layout(&ty));
         self.made_in_hierarchy(defined, &value, &selected, &Checking::Selected, cx);
@@ -6463,7 +6548,7 @@ impl<'a> FunctionBuilder<'a> {
             relation,
             heading,
             leaves,
-        } = sorted(relation, &written, &loading.order);
+        } = sorted(relation, &written, &loading.order, &cx.families);
         let relation_ty = hir::Type::Relation(heading.clone());
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         // Where an attribute is in the tuple, by name order.
@@ -7091,6 +7176,60 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
+    /// Whether the relations `lhs` and `rhs`, of type `operand_ty`, are
+    /// ordered as `comparison` says, as sets: `>=` and `>` are `<=` and `<`
+    /// the other way around.
+    fn subset(
+        &mut self,
+        comparison: hir::Comparison,
+        operand_ty: &hir::Type,
+        lhs: lir::Place,
+        rhs: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let (lhs, rhs) = match comparison {
+            hir::Comparison::Less | hir::Comparison::LessOrEqual => (lhs, rhs),
+            _ => (rhs, lhs),
+        };
+        let proper = matches!(comparison, hir::Comparison::Less | hir::Comparison::Greater);
+        let dst = self.slot(lir::Layout::U8);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));
+        let proper = usize_constant(u64::from(proper), cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Subset,
+            args: vec![dst.clone(), lhs, rhs, descriptor, proper],
+        });
+        dst
+    }
+
+    /// Whether `lhs` and `rhs`, of type `operand_ty`, are equal or, if
+    /// `comparison` isn't `=`, not.
+    fn equality(
+        &mut self,
+        comparison: hir::Comparison,
+        operand_ty: &hir::Type,
+        lhs: lir::Place,
+        rhs: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let equal = self.slot(lir::Layout::U8);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Equal,
+            args: vec![equal.clone(), lhs, rhs, descriptor],
+        });
+        if comparison == hir::Comparison::Equal {
+            return equal;
+        }
+        let dst = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Unary {
+            dst: dst.clone(),
+            op: lir::UnaryOp::Not(lir::Bits::Boolean),
+            src: equal,
+        });
+        dst
+    }
+
     /// `lhs op rhs`, of operands of type `operand_ty`, computed into a new
     /// stack slot.
     fn binary(
@@ -7110,21 +7249,7 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Comparison::Greater
                 | hir::Comparison::GreaterOrEqual),
                 hir::Compared::Relation,
-            ) => {
-                let (lhs, rhs) = match comparison {
-                    hir::Comparison::Less | hir::Comparison::LessOrEqual => (lhs, rhs),
-                    _ => (rhs, lhs),
-                };
-                let proper = matches!(comparison, hir::Comparison::Less | hir::Comparison::Greater);
-                let dst = self.slot(lir::Layout::U8);
-                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));
-                let proper = usize_constant(u64::from(proper), cx);
-                self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::Subset,
-                    args: vec![dst.clone(), lhs, rhs, descriptor, proper],
-                });
-                return dst;
-            }
+            ) => return self.subset(comparison, operand_ty, lhs, rhs, cx),
             // Values of a type of the program's own by its order, which is
             // then compared with 0.
             hir::BinaryOp::Compare(
@@ -7132,7 +7257,7 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Comparison::LessOrEqual
                 | hir::Comparison::Greater
                 | hir::Comparison::GreaterOrEqual),
-                hir::Compared::Defined,
+                hir::Compared::Defined | hir::Compared::Array,
             ) => {
                 let ordering = self.ordering(operand_ty, lhs, rhs, cx);
                 let zero = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
@@ -7148,22 +7273,15 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Compared::Tuple
                 | hir::Compared::Relation
                 | hir::Compared::Array,
-            ) => {
-                let equal = self.slot(lir::Layout::U8);
+            ) => return self.equality(comparison, operand_ty, lhs, rhs, cx),
+            hir::BinaryOp::ConcatenateArrays => {
+                let dst = self.slot(cx.layout(operand_ty));
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));
                 self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::Equal,
-                    args: vec![equal.clone(), lhs, rhs, descriptor],
+                    function: lir::RuntimeFn::ConcatArrays,
+                    args: vec![dst.clone(), lhs, rhs, descriptor],
                 });
-                if comparison == hir::Comparison::Equal {
-                    return equal;
-                }
-                let dst = self.slot(lir::Layout::U8);
-                self.insts.push(lir::Inst::Unary {
-                    dst: dst.clone(),
-                    op: lir::UnaryOp::Not(lir::Bits::Boolean),
-                    src: equal,
-                });
+                self.scoped = true;
                 return dst;
             }
             hir::BinaryOp::Concatenate => {
@@ -7230,6 +7348,15 @@ impl<'a> FunctionBuilder<'a> {
                     args: vec![result.clone(), lhs, rhs],
                 });
             }
+            // In the runtime's order, which is its elements' (see
+            // `hir::Type::orders_as_stored`).
+            hir::Type::Array(_) => {
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Compare,
+                    args: vec![result.clone(), lhs, rhs, descriptor],
+                });
+            }
             hir::Type::Scalar(scalar) => {
                 let compared = hir::Compared::Scalar(*scalar);
                 let less = hir::BinaryOp::Compare(hir::Comparison::Less, compared);
@@ -7289,6 +7416,10 @@ impl<'a> FunctionBuilder<'a> {
         let path = cx.families.components_path(defined);
         lhs.path.extend(path.iter().copied());
         rhs.path.extend(path);
+        let (lhs, rhs) = (
+            self.widened(defined, lhs, cx),
+            self.widened(defined, rhs, cx),
+        );
         // In another representation than the stored one, the components its
         // conversion computes.
         let (lhs, rhs) = match order.from {
@@ -7384,17 +7515,23 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
                 hir::Compared::Scalar(hir::Scalar::Approximate) => {
                     lir::Operand::Numeric(lir::Numeric::Approximate)
                 }
-                hir::Compared::Scalar(hir::Scalar::Text | hir::Scalar::Character)
+                hir::Compared::Scalar(
+                    hir::Scalar::Text | hir::Scalar::Character | hir::Scalar::Narrow(_),
+                )
                 | hir::Compared::Defined
                 | hir::Compared::Tuple
                 | hir::Compared::Relation
-                | hir::Compared::Array => unreachable!("compared by a runtime call"),
+                | hir::Compared::Array => {
+                    unreachable!("compared by a runtime call, or never: no expression is narrow")
+                }
                 hir::Compared::Parameter(_) => {
                     unreachable!("functions are of instantiated operators")
                 }
             },
         ),
-        hir::BinaryOp::Concatenate => unreachable!("text is concatenated by a runtime call"),
+        hir::BinaryOp::Concatenate | hir::BinaryOp::ConcatenateArrays => {
+            unreachable!("text and arrays are concatenated by a runtime call")
+        }
     }
 }
 
@@ -7490,6 +7627,8 @@ fn zero_constant(layout: &lir::Layout, cx: &mut Lowering) -> lir::Place {
 fn zero_field(layout: &lir::Layout) -> lir::Field {
     match layout {
         lir::Layout::U8 => lir::Field::U8(0),
+        lir::Layout::U16 => lir::Field::U16(0),
+        lir::Layout::U32 => lir::Field::U32(0),
         lir::Layout::I64 => lir::Field::I64(0),
         lir::Layout::F64Bits => lir::Field::F64Bits(0),
         lir::Layout::Usize | lir::Layout::Address => lir::Field::Usize(0),
@@ -7549,12 +7688,117 @@ fn lower_numeric(numeric: hir::Numeric) -> lir::Numeric {
 
 fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
     match scalar {
-        hir::Scalar::Boolean => lir::Layout::U8,
+        hir::Scalar::Boolean | hir::Scalar::Narrow(hir::Width::U8) => lir::Layout::U8,
         hir::Scalar::Integer => lir::Layout::I64,
         hir::Scalar::Approximate => lir::Layout::F64Bits,
         hir::Scalar::Text | hir::Scalar::Character => {
             lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
         }
+        hir::Scalar::Narrow(hir::Width::U16) => lir::Layout::U16,
+        hir::Scalar::Narrow(hir::Width::U32) => lir::Layout::U32,
+    }
+}
+
+/// The field of the integer `n`, in the range of `width`, stored in it.
+fn narrow_field(width: hir::Width, n: i64) -> lir::Field {
+    let in_range = "a value satisfies its type's constraints";
+    match width {
+        hir::Width::U8 => lir::Field::U8(u8::try_from(n).expect(in_range)),
+        hir::Width::U16 => lir::Field::U16(u16::try_from(n).expect(in_range)),
+        hir::Width::U32 => lir::Field::U32(u32::try_from(n).expect(in_range)),
+    }
+}
+
+/// LIR's name for `width`.
+fn lir_width(width: hir::Width) -> lir::Width {
+    match width {
+        hir::Width::U8 => lir::Width::U8,
+        hir::Width::U16 => lir::Width::U16,
+        hir::Width::U32 => lir::Width::U32,
+    }
+}
+
+/// The bounds a read-only operator's value says each integer parameter is within when
+/// it is true: the lowest and the highest, if it says one.
+type IntegerBounds = BTreeMap<String, (Option<i64>, Option<i64>)>;
+
+/// [`IntegerBounds`] of each read-only operator of `program`, of those that are a type's
+/// constraints what it can store its components by (see [`Families::stored`]).
+fn integer_bounds(program: &hir::Program) -> HashMap<hir::OperatorId, IntegerBounds> {
+    program
+        .operators
+        .iter()
+        .enumerate()
+        .filter_map(|(i, operator)| {
+            let hir::OperatorKind::ReadOnly { value, .. } = &operator.kind else {
+                return None;
+            };
+            let mut bounds = IntegerBounds::new();
+            bounded_by(value, &mut bounds);
+            (!bounds.is_empty()).then_some((hir::OperatorId(i), bounds))
+        })
+        .collect()
+}
+
+/// Add to `bounds` what `condition`, true, says of its integer parameters: each operand
+/// of an `and` does, and each comparison of a parameter with a constant.
+fn bounded_by(condition: &hir::Expr, bounds: &mut IntegerBounds) {
+    use hir::Comparison as C;
+    fn at(expr: &hir::Expr) -> &hir::Expr {
+        match expr {
+            hir::Expr::At(_, inner) => at(inner),
+            expr => expr,
+        }
+    }
+    match at(condition) {
+        hir::Expr::Connective(hir::Connective::And, operands) => {
+            for operand in operands {
+                bounded_by(operand, bounds);
+            }
+        }
+        hir::Expr::Binary(
+            hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Integer)),
+            lhs,
+            rhs,
+        ) => {
+            let (name, n, comparison) = match (at(lhs), at(rhs)) {
+                (hir::Expr::Parameter(name), hir::Expr::Constant(hir::Value::Integer(n))) => {
+                    (name, *n, *comparison)
+                }
+                (hir::Expr::Constant(hir::Value::Integer(n)), hir::Expr::Parameter(name)) => {
+                    let flipped = match comparison {
+                        C::Less => C::Greater,
+                        C::LessOrEqual => C::GreaterOrEqual,
+                        C::Greater => C::Less,
+                        C::GreaterOrEqual => C::LessOrEqual,
+                        same => *same,
+                    };
+                    (name, *n, flipped)
+                }
+                _ => return,
+            };
+            let (low, high) = bounds.entry(name.clone()).or_default();
+            let raised = |low: &mut Option<i64>, to: Option<i64>| {
+                *low = (*low).max(to);
+            };
+            let lowered = |high: &mut Option<i64>, to: Option<i64>| {
+                if let Some(to) = to {
+                    *high = Some(high.map_or(to, |high| high.min(to)));
+                }
+            };
+            match comparison {
+                C::Less => lowered(high, n.checked_sub(1)),
+                C::LessOrEqual => lowered(high, Some(n)),
+                C::Greater => raised(low, n.checked_add(1)),
+                C::GreaterOrEqual => raised(low, Some(n)),
+                C::Equal => {
+                    raised(low, Some(n));
+                    lowered(high, Some(n));
+                }
+                C::NotEqual => {}
+            }
+        }
+        _ => {}
     }
 }
 
@@ -7567,7 +7811,12 @@ fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
 /// components it computes are an attribute of each tuple, which no source
 /// can name, computed by an `Extend` of the relation, one more for each
 /// conversion of another's components, and the runtime orders by those.
-fn sorted(relation: &hir::Expr, heading: &hir::Heading, order: &[hir::OrderItem]) -> Sorted {
+fn sorted(
+    relation: &hir::Expr,
+    heading: &hir::Heading,
+    order: &[hir::OrderItem],
+    families: &Families,
+) -> Sorted {
     let mut keys = Keys::default();
     for item in order {
         let ty = heading
@@ -7615,7 +7864,15 @@ fn sorted(relation: &hir::Expr, heading: &hir::Heading, order: &[hir::OrderItem]
                     .expect("a key is an attribute of the tuples"),
             ];
             let mut ty = heading.get(&key.attribute).expect("a key is an attribute");
+            // As it is stored, if a type's constraints let it be narrower.
+            let mut stored = None;
             for step in &key.path {
+                stored = match ty {
+                    hir::Type::Defined(defined) => families
+                        .stored(defined)
+                        .and_then(|stored| stored.get(step).cloned()),
+                    _ => None,
+                };
                 let fields = ty.fields().expect("a key's path is through components");
                 path.push(
                     fields
@@ -7627,7 +7884,7 @@ fn sorted(relation: &hir::Expr, heading: &hir::Heading, order: &[hir::OrderItem]
             }
             Leaf {
                 path,
-                ty: key.ty,
+                ty: stored.unwrap_or(key.ty),
                 descending: key.descending,
             }
         })
@@ -7897,8 +8154,8 @@ struct Record<'f> {
 }
 
 /// A value in a record `at`, as `load_csv` reads it: where it goes, in the
-/// array the statement fills, where `load_csv` read it, which is the same
-/// if it needs no conversion, and its name, as `t.c` reads it.
+/// array the statement fills, where `load_csv` read it, and its name, as
+/// `t.c` reads it.
 #[derive(Clone)]
 struct Reading<'r> {
     dst: lir::Place,
@@ -7929,12 +8186,17 @@ struct Families {
     /// Each root's room for its values' components: a
     /// [`lir::Layout::Union`] of its variants' components, in that order.
     unions: HashMap<String, lir::Layout>,
+    /// What each read-only operator's value says of its integer parameters.
+    bounds: HashMap<hir::OperatorId, IntegerBounds>,
 }
 
 impl Families {
     /// The hierarchies of the types `subtypes`, each with its immediate
     /// subtypes.
-    fn new(subtypes: &BTreeMap<String, Vec<hir::Type>>) -> Self {
+    fn new(
+        subtypes: &BTreeMap<String, Vec<hir::Type>>,
+        bounds: HashMap<hir::OperatorId, IntegerBounds>,
+    ) -> Self {
         fn collect(
             name: &str,
             subtypes: &BTreeMap<String, Vec<hir::Type>>,
@@ -7998,6 +8260,7 @@ impl Families {
             variants,
             constrained,
             unions: HashMap::new(),
+            bounds,
         };
         let roots: Vec<String> = families.variants.keys().cloned().collect();
         for root in roots {
@@ -8038,6 +8301,45 @@ impl Families {
             .insert(root.to_string(), lir::Layout::Union(layouts));
     }
 
+    /// The components of `defined` as its values store them, if that isn't as they
+    /// are: an integer its constraints keep in a range that fits fewer bytes takes those
+    /// (RM Prescription 4 keeps physical representations out of the language). Not in
+    /// a hierarchy, whose values are all laid out as its root's.
+    fn stored(&self, defined: &hir::Defined) -> Option<hir::Heading> {
+        if defined.constraints.is_empty() || defined.specialized || !defined.supertypes.is_empty() {
+            return None;
+        }
+        let mut narrowed = false;
+        let stored = defined.components.attributes().map(|(name, ty)| {
+            let mut ty = ty.clone();
+            if ty == hir::Type::Scalar(hir::Scalar::Integer) {
+                let (mut low, mut high) = (None::<i64>, None::<i64>);
+                for constraint in &defined.constraints {
+                    if let Some((from, to)) = self
+                        .bounds
+                        .get(&constraint.operator)
+                        .and_then(|bounds| bounds.get(name))
+                    {
+                        low = low.max(*from);
+                        high = match (high, *to) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (a, b) => a.or(b),
+                        };
+                    }
+                }
+                if let (Some(low), Some(high)) = (low, high)
+                    && let Some(width) = hir::Width::of_range(low, high)
+                {
+                    narrowed = true;
+                    ty = hir::Type::Scalar(hir::Scalar::Narrow(width));
+                }
+            }
+            (name.to_string(), ty)
+        });
+        let stored = hir::Heading::new(stored.collect());
+        narrowed.then_some(stored)
+    }
+
     /// The layout of a value of type `ty`.
     fn layout(&self, ty: &hir::Type) -> lir::Layout {
         if let Some(root) = ty.root() {
@@ -8049,6 +8351,9 @@ impl Families {
         }
         match ty {
             hir::Type::Scalar(scalar) => scalar_layout(*scalar),
+            hir::Type::Defined(defined) if let Some(stored) = self.stored(defined) => {
+                self.layout(&hir::Type::Tuple(stored))
+            }
             hir::Type::Relation(_) | hir::Type::Array(_) => {
                 lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
             }
@@ -8378,17 +8683,23 @@ mod tests {
                 name: hir::Library::ERROR.to_string(),
                 supertypes: Vec::new(),
             }),
-            code_point: Box::new(hir::Defined {
-                name: hir::Library::CODE_POINT.to_string(),
-                components: hir::Library::code_point_components(),
-                representations: Vec::new(),
-                constraints: Vec::new(),
-                keys: BTreeMap::new(),
-                order: None,
-                supertypes: Vec::new(),
-                specialized: false,
-                specialization: None,
-            }),
+            code_point: Box::new(number_type(hir::Library::CODE_POINT)),
+            byte: Box::new(number_type(hir::Library::BYTE)),
+        }
+    }
+
+    /// The type `name` of the library, of a number alone.
+    fn number_type(name: &str) -> hir::Defined {
+        hir::Defined {
+            name: name.to_string(),
+            components: hir::Library::number_components(),
+            representations: Vec::new(),
+            constraints: Vec::new(),
+            keys: BTreeMap::new(),
+            order: None,
+            supertypes: Vec::new(),
+            specialized: false,
+            specialization: None,
         }
     }
 
@@ -10652,7 +10963,11 @@ mod tests {
             ]
             .into(),
         );
-        let mut cx = Lowering::new(&["test.trendy".to_string()], &BTreeMap::new());
+        let mut cx = Lowering::new(
+            &["test.trendy".to_string()],
+            &BTreeMap::new(),
+            HashMap::new(),
+        );
         let id = cx.descriptor(&hir::Type::Tuple(heading));
         let lir::Field::Address(attributes) = cx.data[id.0].fields[4] else {
             panic!("attributes are an address");
@@ -10666,7 +10981,11 @@ mod tests {
 
     #[test]
     fn descriptors_point_to_their_elements_type() {
-        let mut cx = Lowering::new(&["test.trendy".to_string()], &BTreeMap::new());
+        let mut cx = Lowering::new(
+            &["test.trendy".to_string()],
+            &BTreeMap::new(),
+            HashMap::new(),
+        );
         let element = |cx: &Lowering, id: lir::DataId| {
             let lir::Field::Address(element) = cx.data[id.0].fields[6] else {
                 panic!("the element's descriptor is an address");
@@ -10687,7 +11006,11 @@ mod tests {
 
     #[test]
     fn descriptors_say_when_walking_them_can_be_skipped() {
-        let mut cx = Lowering::new(&["test.trendy".to_string()], &BTreeMap::new());
+        let mut cx = Lowering::new(
+            &["test.trendy".to_string()],
+            &BTreeMap::new(),
+            HashMap::new(),
+        );
         let text = || hir::Type::Scalar(hir::Scalar::Text);
         let boolean = || hir::Type::Scalar(hir::Scalar::Boolean);
         let heading = |attributes: Vec<(&str, hir::Type)>| {
@@ -11072,5 +11395,92 @@ mod tests {
             ]
         );
         assert_eq!(runtime(otherwise), [lir::RuntimeFn::DebugValue]);
+    }
+
+    /// A parameter's comparison with a number.
+    fn compared(comparison: hir::Comparison, n: i64) -> hir::Expr {
+        hir::Expr::Binary(
+            hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Integer)),
+            Box::new(hir::Expr::Parameter("v".to_string())),
+            Box::new(hir::Expr::Constant(hir::Value::Integer(n))),
+        )
+    }
+
+    /// What a type of one integer `v`, of a constraint of `condition`,
+    /// stores it as, if not an integer, as `in_hierarchy` says.
+    fn stored_as(condition: &hir::Expr, in_hierarchy: bool) -> Option<hir::Width> {
+        let operator = hir::OperatorId(0);
+        let mut bounds = IntegerBounds::new();
+        bounded_by(condition, &mut bounds);
+        let defined = hir::Defined {
+            name: "t".to_string(),
+            components: hir::Heading::new(BTreeMap::from([(
+                "v".to_string(),
+                hir::Type::Scalar(hir::Scalar::Integer),
+            )])),
+            representations: Vec::new(),
+            constraints: vec![hir::Constraint {
+                operator,
+                text: String::new(),
+            }],
+            keys: BTreeMap::new(),
+            order: None,
+            supertypes: Vec::new(),
+            specialized: in_hierarchy,
+            specialization: None,
+        };
+        let stored = Families::new(&BTreeMap::new(), HashMap::from([(operator, bounds)]))
+            .stored(&defined)?;
+        match stored.get("v") {
+            Some(hir::Type::Scalar(hir::Scalar::Narrow(width))) => Some(*width),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn constraints_store_an_integer_in_as_few_bytes_as_its_range_takes() {
+        use hir::Comparison as C;
+        use hir::Width as W;
+        let both = |low: hir::Expr, high: hir::Expr| {
+            hir::Expr::Connective(hir::Connective::And, vec![low, high])
+        };
+        for (low, high, width) in [
+            ((C::GreaterOrEqual, 0), (C::LessOrEqual, 255), Some(W::U8)),
+            ((C::GreaterOrEqual, 0), (C::Less, 256), Some(W::U8)),
+            ((C::Greater, -1), (C::Less, 256), Some(W::U8)),
+            ((C::Equal, 7), (C::Equal, 7), Some(W::U8)),
+            ((C::GreaterOrEqual, 0), (C::LessOrEqual, 256), Some(W::U16)),
+            (
+                (C::GreaterOrEqual, 0),
+                (C::LessOrEqual, 65_535),
+                Some(W::U16),
+            ),
+            (
+                (C::GreaterOrEqual, 0),
+                (C::LessOrEqual, 65_536),
+                Some(W::U32),
+            ),
+            ((C::GreaterOrEqual, 0), (C::Less, 1 << 32), Some(W::U32)),
+            // Larger than any narrower one, or possibly negative, it stays.
+            ((C::GreaterOrEqual, 0), (C::LessOrEqual, 1 << 32), None),
+            ((C::GreaterOrEqual, -1), (C::LessOrEqual, 1), None),
+            // A side no constraint limits is no range.
+            ((C::GreaterOrEqual, 0), (C::NotEqual, 9), None),
+        ] {
+            let condition = both(compared(low.0, low.1), compared(high.0, high.1));
+            assert_eq!(stored_as(&condition, false), width, "{low:?} and {high:?}");
+        }
+        // Only an `and`'s operands each hold.
+        let either = hir::Expr::Connective(
+            hir::Connective::Or,
+            vec![compared(C::Equal, 1), compared(C::Equal, 2)],
+        );
+        assert_eq!(stored_as(&either, false), None);
+        // A hierarchy's values are all laid out as its root's.
+        let byte = both(
+            compared(C::GreaterOrEqual, 0),
+            compared(C::LessOrEqual, 255),
+        );
+        assert_eq!(stored_as(&byte, true), None);
     }
 }

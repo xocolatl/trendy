@@ -978,8 +978,11 @@ impl LanguageError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Library {
     /// The prelude's `code_point`, a Unicode scalar value, stored as
-    /// [`Library::code_point_components`] says.
+    /// [`Library::number_components`] says.
     pub code_point: Box<Defined>,
+    /// The prelude's `byte`, which a literal makes, stored as
+    /// [`Library::number_components`] says.
+    pub byte: Box<Defined>,
     /// The prelude's union type `error`, a root, whose subtypes are what a
     /// program fails or warns with, the errors the language makes among
     /// them ([`LanguageError`]).
@@ -1011,11 +1014,25 @@ impl Library {
     /// The name of the prelude's type of code points.
     pub const CODE_POINT: &'static str = "code_point";
 
-    /// The components of the representation `code_point`'s values are
-    /// stored as, which the compiler makes them with: `{ value: integer }`,
-    /// the scalar value's number.
+    /// The name of the prelude's type of bytes.
+    pub const BYTE: &'static str = "byte";
+
+    /// Whether `identity` is what the program calls the prelude's `byte`:
+    /// its name, if no other unit declares a type of that name, in which case
+    /// it is qualified, as that one's is.
     #[must_use]
-    pub fn code_point_components() -> Heading {
+    pub fn is_byte(identity: &str) -> bool {
+        match identity.rsplit_once("::") {
+            Some((unit, name)) => unit == "trendy.prelude" && name == Library::BYTE,
+            None => identity == Library::BYTE,
+        }
+    }
+
+    /// The components of the representation `code_point`'s and `byte`'s values
+    /// are stored as, which the compiler makes them with: `{ value: integer }`,
+    /// the number each is.
+    #[must_use]
+    pub fn number_components() -> Heading {
         Heading::new([("value".to_string(), Type::Scalar(Scalar::Integer))].into())
     }
 
@@ -3254,7 +3271,7 @@ impl Numeric {
         match scalar {
             Scalar::Integer => Some(Numeric::Integer),
             Scalar::Approximate => Some(Numeric::Approximate),
-            Scalar::Boolean | Scalar::Text | Scalar::Character => None,
+            Scalar::Boolean | Scalar::Text | Scalar::Character | Scalar::Narrow(_) => None,
         }
     }
 }
@@ -3479,6 +3496,8 @@ pub enum BinaryOp {
     Mod,
     /// `||`, of texts.
     Concatenate,
+    /// Two arrays of one type, one's elements then the other's.
+    ConcatenateArrays,
     /// A comparison of two values of the same type, whose result is a
     /// boolean.
     Compare(Comparison, Compared),
@@ -3539,7 +3558,8 @@ pub enum Compared {
     /// and one less than or equal to another when it is a subset of it.
     Relation,
     /// Arrays of one array type, equal when they have the same elements in
-    /// the same order: only `=` and `<>`.
+    /// the same order, and, if they are ordered ([`Type::has`]), ordered element
+    /// by element.
     Array,
     /// Values of the type parameter with this index, compared as values of
     /// the type a call gives it: only `=` and `<>`, but for `any relation`,
@@ -3666,6 +3686,14 @@ pub fn compare(lhs: &Value, rhs: &Value, converted: &Converted) -> std::cmp::Ord
         (Value::Text(a), Value::Text(b)) | (Value::Character(a), Value::Character(b)) => {
             a.as_bytes().cmp(b.as_bytes())
         }
+        // Element by element, and one that runs out first comes first.
+        (Value::Array(a), Value::Array(b)) => a
+            .elements
+            .iter()
+            .zip(&b.elements)
+            .map(|(a, b)| compare(a, b, converted))
+            .find(|ordering| ordering.is_ne())
+            .unwrap_or_else(|| a.elements.len().cmp(&b.elements.len())),
         (Value::Defined(a), Value::Defined(b)) => {
             let order =
                 a.ty.order
@@ -3713,7 +3741,8 @@ impl BinaryOp {
             | BinaryOp::ShiftRight => Some(Scalar::Integer),
             BinaryOp::Concatenate => Some(Scalar::Text),
             BinaryOp::Compare(_, Compared::Scalar(scalar)) => Some(scalar),
-            BinaryOp::Compare(
+            BinaryOp::ConcatenateArrays
+            | BinaryOp::Compare(
                 _,
                 Compared::Defined
                 | Compared::Tuple
@@ -3774,8 +3803,8 @@ impl BinaryOp {
             BinaryOp::Compare(comparison, Compared::Relation) => {
                 return Ok(Value::Boolean(contains(comparison, lhs, rhs)));
             }
-            // By the type's order.
-            BinaryOp::Compare(comparison, Compared::Defined) => {
+            // By the type's order, or element by element.
+            BinaryOp::Compare(comparison, Compared::Defined | Compared::Array) => {
                 return Ok(Value::Boolean(comparison.holds(ordered())));
             }
             // Values of a type parameter's type, as the values are: of
@@ -3815,6 +3844,12 @@ impl BinaryOp {
             }
             (Value::Text(a), Value::Text(b)) if self == BinaryOp::Concatenate => {
                 Ok(Value::Text(format!("{a}{b}")))
+            }
+            (Value::Array(a), Value::Array(b)) if self == BinaryOp::ConcatenateArrays => {
+                Ok(Value::Array(ArrayValue {
+                    element: a.element.clone(),
+                    elements: a.elements.iter().chain(&b.elements).cloned().collect(),
+                }))
             }
             (Value::Approximate(a), Value::Approximate(b)) => {
                 let (a, b) = (a.get(), b.get());
@@ -4363,10 +4398,7 @@ impl Defined {
 /// whose columns `columns`, the type of its part of the call's `columns`,
 /// gives: of a tuple, each attribute's; of a value of a type of the
 /// program's own, read in the possible representation whose components the
-/// columns name, the tuple of those, which is converted to the stored ones,
-/// or the type itself if it is read as stored, and so is each value inside
-/// it, but in a hierarchy, where it is laid out after its type, the tuple
-/// of its components; and otherwise `ty` itself.
+/// columns name, the tuple of those; and otherwise `ty` itself.
 #[must_use]
 pub fn read_as(ty: &Type, columns: &Type) -> Type {
     let Type::Tuple(given) = columns else {
@@ -4389,16 +4421,10 @@ pub fn read_as(ty: &Type, columns: &Type) -> Type {
         Type::Tuple(heading) => Type::Tuple(read(heading)),
         Type::Defined(defined) => {
             let names: Vec<&str> = given.named().map(|(c, _)| c).collect();
-            let representation = defined.representation_with(&names);
-            if let Some((components, Some(_))) = representation {
-                return Type::Tuple(read(components));
-            }
-            let stored = read(&defined.components);
-            if stored == defined.components && ty.root().is_none() {
-                ty.clone()
-            } else {
-                Type::Tuple(stored)
-            }
+            let components = defined
+                .representation_with(&names)
+                .map_or(&defined.components, |(components, _)| components);
+            Type::Tuple(read(components))
         }
         _ => ty.clone(),
     }
@@ -4487,6 +4513,32 @@ pub enum Scalar {
     /// [`trendy_text::characters`]). It has no representation a program can see, and
     /// is stored as a text of it is.
     Character,
+    /// An integer as a component of a type of the program's own is stored, when its
+    /// constraints keep it in this width's range. No expression has this type: it is
+    /// how lowering lays out and describes such a component, which is an integer
+    /// wherever it is read.
+    Narrow(Width),
+}
+
+/// How an integer known to be in a range is stored: unsigned, in this many bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Width {
+    U8,
+    U16,
+    U32,
+}
+
+impl Width {
+    /// The narrowest width that holds every integer from `low` to `high`, if one does.
+    #[must_use]
+    pub fn of_range(low: i64, high: i64) -> Option<Width> {
+        match (low, high) {
+            (0.., ..=0xFF) => Some(Width::U8),
+            (0.., ..=0xFFFF) => Some(Width::U16),
+            (0.., ..=0xFFFF_FFFF) => Some(Width::U32),
+            _ => None,
+        }
+    }
 }
 
 impl Scalar {
@@ -4515,7 +4567,7 @@ impl Scalar {
     pub fn name(self) -> &'static str {
         match self {
             Scalar::Boolean => "boolean",
-            Scalar::Integer => "integer",
+            Scalar::Integer | Scalar::Narrow(_) => "integer",
             Scalar::Approximate => "approximate",
             Scalar::Text => "text",
             Scalar::Character => "character",
@@ -4537,7 +4589,7 @@ impl Scalar {
             Scalar::Integer => Value::Integer(0),
             Scalar::Approximate => Value::Approximate(Approximate::new(0.0)),
             Scalar::Text => Value::Text(String::new()),
-            Scalar::Character => return None,
+            Scalar::Character | Scalar::Narrow(_) => return None,
         })
     }
 }
@@ -4810,6 +4862,9 @@ impl std::fmt::Display for Value {
                 f.write_char('\'')
             }
             Value::Tuple(tuple) => write!(f, "tuple {tuple}"),
+            Value::Defined(value) if let Some(byte) = value.byte() => {
+                write!(f, "x'{byte:02x}'")
+            }
             // Its selector's invocation, as a call is written.
             Value::Defined(value) => {
                 f.write_str(&selection_text(value.ty.written(), &value.components))
@@ -4821,6 +4876,11 @@ impl std::fmt::Display for Value {
                 }
                 let tuples: Vec<String> = relation.tuples.iter().map(ToString::to_string).collect();
                 write!(f, "{{ {} }}", tuples.join(", "))
+            }
+            Value::Array(array) if let Some(bytes) = array.bytes() => {
+                f.write_str("x\"")?;
+                bytes.iter().try_for_each(|byte| write!(f, "{byte:02x}"))?;
+                f.write_char('"')
             }
             // An empty one with its elements' type, which there is no
             // element to give.
@@ -4854,10 +4914,44 @@ pub fn selection_text(ty: &str, components: &TupleValue) -> String {
 /// TTM has every scalar value carry its type (RM Prescription 2): its components,
 /// in its possible representation. Two of a type are equal when their
 /// components are (RM Prescription 8).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DefinedValue {
     pub ty: Box<Defined>,
     pub components: TupleValue,
+}
+
+impl PartialOrd for DefinedValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// By the names they are written with, then their components, so that the
+/// values of a type and of the subtypes a constraint defines, written the same, are in
+/// their components' order, as the runtime orders them.
+impl Ord for DefinedValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ty
+            .written()
+            .cmp(other.ty.written())
+            .then_with(|| self.components.cmp(&other.components))
+            .then_with(|| self.ty.cmp(&other.ty))
+    }
+}
+
+impl DefinedValue {
+    /// The byte it is, if it is written as the prelude's `byte`, as a value
+    /// of a subtype defined by a constraint is too.
+    #[must_use]
+    pub fn byte(&self) -> Option<u8> {
+        if !Library::is_byte(self.ty.written()) {
+            return None;
+        }
+        match self.components.get("value") {
+            Some(Value::Integer(n)) => u8::try_from(*n).ok(),
+            _ => None,
+        }
+    }
 }
 
 /// A tuple value: a value for each attribute of its heading. Two tuples are
@@ -4908,6 +5002,24 @@ pub struct ArrayValue {
 }
 
 impl ArrayValue {
+    /// Its bytes, if it is an `array byte` out of a hierarchy, which is written
+    /// as bytes, as the runtime writes one.
+    #[must_use]
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        let is_bytes = self.element.root().is_none()
+            && matches!(&self.element, Type::Defined(element) if Library::is_byte(&element.name));
+        if !is_bytes {
+            return None;
+        }
+        self.elements
+            .iter()
+            .map(|element| match element {
+                Value::Defined(value) => value.byte(),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The relation a `load` makes of the array, as `unloading` says: each
     /// element a tuple, and those that turn out equal one.
     #[must_use]
@@ -5406,13 +5518,40 @@ impl Type {
 
     /// Whether the type has what `requirement` names: a scalar type as
     /// [`Scalar::has`] says, and a type parameter if its kind requires it.
-    /// Tuples, relations and arrays have no total order, and no arithmetic.
+    /// An array has an order if its elements' is as they are stored
+    /// ([`Type::orders_as_stored`]). Tuples and relations have no total order,
+    /// and no arithmetic.
     #[must_use]
     pub fn has(&self, requirement: Requirement) -> bool {
         match self {
             Type::Scalar(scalar) => scalar.has(requirement),
             Type::Parameter(parameter) => parameter.any.requires(requirement),
+            Type::Array(_) => requirement == Requirement::Order && self.orders_as_stored(),
             Type::Defined(defined) => requirement == Requirement::Order && defined.order.is_some(),
+            _ => false,
+        }
+    }
+
+    /// Whether its values are in the order the runtime sorts them by: scalars,
+    /// arrays of such values, and values of a type whose order is its stored
+    /// components', all of them, in turn, ascending, each such a value. Those of a
+    /// subtype a constraint defines are stored and written as its supertype's, so
+    /// they are in that order too.
+    #[must_use]
+    pub fn orders_as_stored(&self) -> bool {
+        match self {
+            Type::Scalar(_) => true,
+            Type::Array(element) => element.orders_as_stored(),
+            Type::Defined(defined) => defined.ordered_by().is_some_and(|(order, components)| {
+                order.from.is_none()
+                    && order.items.iter().all(|item| !item.descending)
+                    && order
+                        .items
+                        .iter()
+                        .map(|item| item.attribute.as_str())
+                        .eq(components.attributes().map(|(name, _)| name))
+                    && components.attributes().all(|(_, ty)| ty.orders_as_stored())
+            }),
             _ => false,
         }
     }

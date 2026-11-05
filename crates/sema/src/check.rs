@@ -324,8 +324,8 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         match expr {
             Expr::Literal(literal) => {
-                let value = types::literal_value(literal, errors)?;
-                self.matched(expected, hir::Expr::Constant(value), expr, errors)
+                let value = types::literal_value(literal, expr, self, errors)?;
+                self.matched(expected, value, expr, errors)
             }
             Expr::Name(name_ref) => self.named(name_ref, expr, expected, errors),
             Expr::Qualified(written) => self.qualified(written, expr, expected, errors),
@@ -418,20 +418,24 @@ impl<'a> Checker<'a> {
             self.operands(&token, vec![unary.operand()], expected, errors)?;
         types::result_type(expected, &result, expr, errors)?;
         let [operand] = <[hir::Expr; 1]>::try_from(operands).ok()?;
-        if resolved == Resolved::Unary(hir::UnaryOp::Complement)
-            && let Some(comparison) = errors::begun_comparison(&token)
+        if matches!(
+            resolved,
+            Resolved::Unary(hir::UnaryOp::Complement) | Resolved::NotByte
+        ) && let Some(comparison) = errors::begun_comparison(&token)
         {
             errors.push(errors::complement_compared(
                 &token,
                 &unary.operand()?,
                 &comparison,
+                &result,
             ));
             return None;
         }
         match resolved {
             Resolved::Identity => Some(operand),
             Resolved::Unary(op) => types::evaluated(ops::unary(op, operand), expr, None, errors),
-            Resolved::Binary(_) | Resolved::Connective { .. } => None,
+            Resolved::NotByte => self.not_byte(operand, expr, errors),
+            Resolved::Binary(_) | Resolved::Bytes(_) | Resolved::Connective { .. } => None,
         }
     }
 
@@ -1830,7 +1834,7 @@ impl<'a> Checker<'a> {
         let operand_expr = extract.operand()?;
         let operand = self.expr(&operand_expr, None, errors)?;
         let ty = self.ty(&operand);
-        let others = self.other_components(&ty);
+        let others = Self::other_components(&ty);
         let others: Vec<&hir::Heading> = others.iter().collect();
         if let Some(error) = self.method_call(extract, &operand_expr, &ty, &others) {
             errors.push(error);
@@ -1879,15 +1883,14 @@ impl<'a> Checker<'a> {
     }
 
     /// The components of the possible representations of `ty`, if it is a
-    /// type of the program's own, but the stored one.
-    fn other_components(&self, ty: &hir::Type) -> Vec<hir::Heading> {
+    /// type of the program's own, but the stored one: of a subtype, its
+    /// supertype's too, as its values are its supertype's.
+    fn other_components(ty: &hir::Type) -> Vec<hir::Heading> {
         match ty {
-            hir::Type::Defined(defined) => self
-                .names
-                .namespaces()
-                .converted(&defined.name)
+            hir::Type::Defined(defined) => defined
+                .representations
                 .iter()
-                .map(|c| c.components.clone())
+                .map(|r| r.components.clone())
                 .collect(),
             _ => Vec::new(),
         }
@@ -2481,7 +2484,7 @@ impl<'a> Checker<'a> {
                 connective,
                 not_left,
             } => connected_booleans(connective, not_left, checked, expr, expected, errors),
-            Resolved::Binary(hir::BinaryOp::Bitwise(bitwise)) => {
+            resolved @ (Resolved::Binary(hir::BinaryOp::Bitwise(_)) | Resolved::Bytes(_)) => {
                 let mut operands = Vec::new();
                 for (out, own) in checked {
                     errors.extend(own);
@@ -2489,26 +2492,127 @@ impl<'a> Checker<'a> {
                 }
                 let operands: Vec<hir::Expr> = operands.into_iter().collect::<Option<_>>()?;
                 types::result_type(expected, &expectation.ty, expr, errors)?;
-                let identity = hir::Expr::Constant(hir::Value::Integer(bitwise.identity()));
-                operands
-                    .into_iter()
-                    .map(Ok)
-                    .reduce(|lhs, rhs| {
-                        ops::binary(hir::BinaryOp::Bitwise(bitwise), lhs?, rhs?, self.bindings())
-                    })
-                    .unwrap_or(Ok(identity))
-                    .map_err(|failed| {
-                        errors.push(match failed {
-                            ops::Failed::Scalar(failure) => errors::failure(failure, expr, None),
-                            failed => errors::failed(&failed, expr),
-                        });
-                    })
-                    .ok()
+                let mut operands = operands.into_iter();
+                let Some(first) = operands.next() else {
+                    return self.bits_of_none(resolved, expr, errors);
+                };
+                operands.try_fold(first, |lhs, rhs| match resolved {
+                    Resolved::Bytes(bitwise) => self.bytes_bits(bitwise, lhs, rhs, expr, errors),
+                    Resolved::Binary(op) => {
+                        let bits = ops::binary(op, lhs, rhs, self.bindings());
+                        reported(bits, expr, errors)
+                    }
+                    _ => unreachable!("bits are of integers or of bytes"),
+                })
             }
-            Resolved::Identity | Resolved::Unary(_) | Resolved::Binary(_) => {
-                unreachable!("a connective is of booleans or of integers")
+            Resolved::Identity | Resolved::NotByte | Resolved::Unary(_) | Resolved::Binary(_) => {
+                unreachable!("a connective is of booleans, of integers or of bytes")
             }
         }
+    }
+
+    /// The connective `resolved`, written `expr`, of integers or bytes bit by
+    /// bit, of no operands: all its bits set, or none.
+    fn bits_of_none(
+        &mut self,
+        resolved: Resolved,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        match resolved {
+            Resolved::Bytes(bitwise) => {
+                let number = hir::Expr::Constant(hir::Value::Integer(bitwise.identity() & 0xFF));
+                self.byte_of_number(number, expr, errors)
+            }
+            Resolved::Binary(hir::BinaryOp::Bitwise(bitwise)) => {
+                Some(hir::Expr::Constant(hir::Value::Integer(bitwise.identity())))
+            }
+            _ => unreachable!("bits are of integers or of bytes"),
+        }
+    }
+
+    /// The byte of the number `number`, of a byte's range, written `expr`.
+    fn byte_of_number(
+        &mut self,
+        number: hir::Expr,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let byte = self.namespaces().library().byte.clone();
+        let components = ops::tuple([("value".to_string(), number)].into());
+        self.selected(&byte, components, expr, errors)
+    }
+
+    /// The value of the literal `byte`, written `expr`.
+    pub(crate) fn byte_literal(
+        &mut self,
+        byte: u8,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let number = hir::Expr::Constant(hir::Value::Integer(i64::from(byte)));
+        self.byte_of_number(number, expr, errors)
+    }
+
+    /// The value of the literal of `bytes`, written `expr`: each selected
+    /// once, however many times it is written.
+    pub(crate) fn bytes_literal(
+        &mut self,
+        bytes: &[u8],
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let mut selected: BTreeMap<u8, hir::Expr> = BTreeMap::new();
+        let mut elements = Vec::with_capacity(bytes.len());
+        for byte in bytes {
+            if !selected.contains_key(byte) {
+                let element = self.byte_literal(*byte, expr, errors)?;
+                selected.insert(*byte, element);
+            }
+            elements.push(selected[byte].clone());
+        }
+        let byte = self.namespaces().library().byte.clone();
+        Some(ops::array(hir::Type::Defined(byte), elements))
+    }
+
+    /// `lhs op rhs` of bytes, written `expr`: of their numbers, whose eight bits
+    /// are all the two have, so that the result is a byte too.
+    fn bytes_bits(
+        &mut self,
+        op: hir::Bitwise,
+        lhs: hir::Expr,
+        rhs: hir::Expr,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let number = ops::binary(
+            hir::BinaryOp::Bitwise(op),
+            ops::number_of_byte(lhs),
+            ops::number_of_byte(rhs),
+            self.bindings(),
+        );
+        let number = reported(number, expr, errors)?;
+        self.byte_of_number(number, expr, errors)
+    }
+
+    /// `not` of the byte `operand`, written `expr`: the complement of its
+    /// number, of its eight bits.
+    fn not_byte(
+        &mut self,
+        operand: hir::Expr,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let complement = ops::unary(hir::UnaryOp::Complement, ops::number_of_byte(operand));
+        let complement = types::evaluated(complement, expr, None, errors)?;
+        let number = ops::binary(
+            hir::BinaryOp::Bitwise(hir::Bitwise::And),
+            complement,
+            hir::Expr::Constant(hir::Value::Integer(0xFF)),
+            self.bindings(),
+        );
+        let number = reported(number, expr, errors)?;
+        self.byte_of_number(number, expr, errors)
     }
 
     /// Checks an operand of a connective, the one at an index, narrowed by
@@ -2549,25 +2653,29 @@ impl<'a> Checker<'a> {
         if op == Operator::Implies {
             return None;
         }
-        let integer = hir::Type::Scalar(hir::Scalar::Integer);
         let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
         let ty = |i: usize| match &own.checked[i] {
             Some(types::Alone::Valid((_, ty))) => Some(ty),
             _ => None,
         };
+        let bits = |i: usize| ty(i).filter(|ty| ops::has_bits(ty));
         let comparison = |operand: Option<Expr>| match operand? {
             Expr::Binary(b) if b.operator()?.kind().is_comparison() => Some(b),
             _ => None,
         };
         // The comparison's operand next to the other, which is an integer.
-        let (i, comparison, inner) = if ty(0) == Some(&integer) && ty(1) == Some(&boolean) {
+        let (i, comparison, inner, of) = if ty(1) == Some(&boolean)
+            && let Some(of) = bits(0)
+        {
             let comparison = comparison(binary.rhs())?;
             let lhs = comparison.lhs()?;
-            (1, comparison, lhs)
-        } else if ty(0) == Some(&boolean) && ty(1) == Some(&integer) {
+            (1, comparison, lhs, of)
+        } else if ty(0) == Some(&boolean)
+            && let Some(of) = bits(1)
+        {
             let comparison = comparison(binary.lhs())?;
             let rhs = comparison.rhs()?;
-            (0, comparison, rhs)
+            (0, comparison, rhs, of)
         } else {
             return None;
         };
@@ -2575,8 +2683,8 @@ impl<'a> Checker<'a> {
         let inner_ty = self
             .narrowed(&inner, &facts[i], None, &mut scratch)
             .map(|checked| self.ty(&checked));
-        (inner_ty == Some(integer) && scratch.is_empty())
-            .then(|| errors::misgrouped_bits(binary, &comparison, &inner))
+        (inner_ty.as_ref() == Some(of) && scratch.is_empty())
+            .then(|| errors::misgrouped_bits(binary, &comparison, &inner, of))
     }
 
     /// `test`, `x is t`, written `expr`: whether the value of `x` is of the
@@ -3013,6 +3121,23 @@ impl<'a> Checker<'a> {
             errors,
         )
     }
+}
+
+/// `result`, of what is written `expr`, after reporting why not, if computing it
+/// fails.
+fn reported(
+    result: Result<hir::Expr, ops::Failed>,
+    expr: &Expr,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    result
+        .map_err(|failed| {
+            errors.push(match failed {
+                ops::Failed::Scalar(failure) => errors::failure(failure, expr, None),
+                failed => errors::failed(&failed, expr),
+            });
+        })
+        .ok()
 }
 
 /// The connective `connective` of booleans, written `expr`, of the

@@ -1737,7 +1737,7 @@ fn from_type(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> V
         );
         signatures.push(selector);
     }
-    for converted in namespaces.converted(name) {
+    for converted in namespaces.converted(&defined.name) {
         let own = component_parameters(&converted.components);
         if selects {
             let selector = made(

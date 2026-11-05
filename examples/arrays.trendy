@@ -32,6 +32,11 @@ var compared := tuple {
     reordered: rainfall = array [950, 1200, 220],
 };
 
+/* One after the other, and ordered as a relation's tuples are, of elements
+   that are ordered. */
+var joined := rainfall || array [300];
+var before := tuple { earlier_element: array [1, 9] < array [2], prefix: array [1] < array [1, 0] };
+
 operator first{a: array E}: E
     types { E: any type }
 [
@@ -163,6 +168,13 @@ operator computed{wet: integer, mid: integer, low: integer, two: integer, city: 
     call debug_value{
         v: tuple { copied: r = array [wet, mid, low], reordered: r = array [mid, wet, low] },
     };
+    call debug_value{v: r || array [300]};
+    call debug_value{
+        v: tuple {
+            earlier_element: array [1, 9] < array [two],
+            prefix: array [1] < array [1, two - 2],
+        },
+    };
     call debug_value{v: first{a: r}};
     call debug_value{v: first{a: array ["Amara", city]}};
     var yearly := relation {
@@ -205,6 +217,8 @@ operator main{} [
     call debug_value{v: corner};
     call debug_value{v: months};
     call debug_value{v: compared};
+    call debug_value{v: joined};
+    call debug_value{v: before};
     call debug_value{v: wettest};
     call debug_value{v: named};
     call debug_value{v: ranked};

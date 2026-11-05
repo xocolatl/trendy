@@ -53,6 +53,14 @@ pub const FILES: Unit = Unit {
     source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/files.trendy"),
 };
 
+/// `trendy.uuid`, RFC 9562's universally unique identifiers.
+pub const UUID: Unit = Unit {
+    name: "trendy.uuid",
+    path: "<uuid>",
+    source: include_str!("uuid.trendy"),
+    source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/uuid.trendy"),
+};
+
 /// Every unit that comes with the compiler, in the order their texts
 /// follow a program's units' in its spans: the prelude last.
-pub const UNITS: [Unit; 3] = [FILES, CATALOG, PRELUDE];
+pub const UNITS: [Unit; 4] = [UUID, FILES, CATALOG, PRELUDE];

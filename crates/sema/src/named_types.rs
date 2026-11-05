@@ -206,22 +206,17 @@ fn convertible(
     let possreps = namespaces.possreps(decl);
     // Declared in its unit's interface with several, which say nothing of
     // how they convert, it is declared again in the implementation, which
-    // does; a representation the implementation doesn't repeat is reported
-    // as the implementation is checked (`unrepeated`).
-    let implemented = namespaces.implementation(decl).is_some();
-    let unrepeated = |p: &ast::Possrep| implemented && p.converted() == p.written();
+    // does, of each but the one it is stored as.
     if inherited.is_none()
         && possreps.len() > 1
-        && !implemented
+        && namespaces.implementation(decl).is_none()
         && ast::section_of(decl.syntax()) == ast::Section::Interface
         && possreps.iter().all(ast::Possrep::is_stored)
     {
         errors.push(errors::unimplemented_type(name, decl));
         return vec![false; possreps.len()];
     }
-    let stored = possreps
-        .iter()
-        .position(|p| p.is_stored() && !unrepeated(p));
+    let stored = possreps.iter().position(ast::Possrep::is_stored);
     let (stored_names, mut seen) = match (inherited, stored) {
         (Some(inherited), _) => (inherited.stored.clone(), inherited.taken.clone()),
         (None, Some(stored)) => {
@@ -242,9 +237,6 @@ fn convertible(
             if inherited.is_none() && Some(i) == stored {
                 return false;
             }
-            if unrepeated(possrep) {
-                return false;
-            }
             let representation = possrep.written();
             let conversions: Vec<ast::Conversion> = possrep.conversions().collect();
             let mut ok = true;
@@ -260,6 +252,7 @@ fn convertible(
                 (None, Some(stored)) if conversions.is_empty() => {
                     errors.push(errors::second_stored(
                         name,
+                        decl,
                         representation,
                         possreps[stored].written(),
                     ));

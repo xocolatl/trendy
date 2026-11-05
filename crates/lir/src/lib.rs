@@ -134,6 +134,8 @@ pub struct SlotId(pub usize);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Layout {
     U8,
+    U16,
+    U32,
     I64,
     F64Bits,
     /// An unsigned integer the size of a pointer.
@@ -712,6 +714,15 @@ pub enum RuntimeFn {
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
     CompareText,
+    /// `trendy_rt_compare(dst, lhs, rhs, descriptor)`: store -1, 0 or 1 at `dst`, an
+    /// [`Layout::I64`], as `lhs` is before, equal to or after `rhs`, values of the type
+    /// the descriptor describes, in the order the runtime sorts them by.
+    Compare,
+    /// `trendy_rt_concat_arrays(dst, lhs, rhs, descriptor)`: store at `dst` the array
+    /// of the elements of `lhs` then those of `rhs`, of the type the descriptor
+    /// describes, in memory the statement owns. It fails if the memory can't be
+    /// allocated.
+    ConcatArrays,
     /// `trendy_rt_equal(dst, lhs, rhs, descriptor)`: store at `dst`, a
     /// [`Layout::U8`], whether two values of the type the descriptor
     /// describes are equal. For tuples, relations and arrays.
@@ -728,7 +739,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 90] = [
+    pub const ALL: [RuntimeFn; 92] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -817,6 +828,8 @@ impl RuntimeFn {
         RuntimeFn::Load,
         RuntimeFn::Unload,
         RuntimeFn::CompareText,
+        RuntimeFn::Compare,
+        RuntimeFn::ConcatArrays,
         RuntimeFn::Equal,
         RuntimeFn::Assign,
     ];
@@ -859,6 +872,7 @@ impl RuntimeFn {
             | RuntimeFn::RemoveRun
             | RuntimeFn::RemoveMarked
             | RuntimeFn::Concat
+            | RuntimeFn::ConcatArrays
             | RuntimeFn::Keep
             | RuntimeFn::HandOut
             | RuntimeFn::Reshape
@@ -918,6 +932,7 @@ impl RuntimeFn {
             | RuntimeFn::Subset
             | RuntimeFn::EqualRun
             | RuntimeFn::CompareText
+            | RuntimeFn::Compare
             | RuntimeFn::Run
             | RuntimeFn::DropOperand
             | RuntimeFn::Equal => false,
@@ -983,6 +998,8 @@ impl RuntimeFn {
             RuntimeFn::ComponentKeyViolated => "trendy_rt_component_key_violated",
             RuntimeFn::ComponentKeyViolatedInFile => "trendy_rt_component_key_violated_in_file",
             RuntimeFn::Concat => "trendy_rt_concat",
+            RuntimeFn::ConcatArrays => "trendy_rt_concat_arrays",
+            RuntimeFn::Compare => "trendy_rt_compare",
             RuntimeFn::Release => "trendy_rt_release",
             RuntimeFn::Begin => "trendy_rt_begin",
             RuntimeFn::End => "trendy_rt_end",
@@ -1081,6 +1098,19 @@ pub enum Inst {
     /// Add 1 to the [`Layout::Usize`] at `place`, which counts a loop's
     /// iterations, and so never overflows.
     Increment { place: Place },
+    /// Store at `dst`, a [`Layout::I64`], the integer at `src`, stored in `width`.
+    Widen {
+        dst: Place,
+        src: Place,
+        width: Width,
+    },
+    /// Store at `dst`, in `width`, the integer at `src`, a [`Layout::I64`], which is in
+    /// its range.
+    Narrow {
+        dst: Place,
+        src: Place,
+        width: Width,
+    },
     /// Store at `dst`, a [`Layout::Address`], the address of `src`: a
     /// variable passed to a `var` or `out` parameter.
     Address { dst: Place, src: Place },
@@ -1665,9 +1695,19 @@ pub enum DataKind {
     Constant,
 }
 
+/// How an integer is stored in less than a [`Layout::I64`]: unsigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Width {
+    U8,
+    U16,
+    U32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field {
     U8(u8),
+    U16(u16),
+    U32(u32),
     I64(i64),
     /// A 64-bit IEEE 754 float, as its exact bit pattern, so that no value
     /// is ever compared or changed by float arithmetic on the way.
