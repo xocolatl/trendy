@@ -1450,6 +1450,14 @@ mod tests {
     }
 
     #[test]
+    fn character_literals_are_as_written() {
+        assert_eq!(
+            fmt(r"var a:='é' ;var b :=array['\'',  '\n','🇸🇪'];"),
+            "var a := 'é';\nvar b := array ['\\'', '\\n', '🇸🇪'];\n"
+        );
+    }
+
+    #[test]
     fn warnings() {
         // As a `fail` statement is, a space before parentheses too.
         assert_eq!(

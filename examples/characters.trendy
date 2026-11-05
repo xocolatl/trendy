@@ -1,0 +1,59 @@
+/* Characters: what a reader sees as one, however many code points it is made of. A
+   flag is one character of two code points, and a family of four people one of seven.
+   Each country's name is in its own language too. */
+var flags := relation {
+    { country: "Sweden", native: "Sverige", flag: '🇸🇪' },
+    { country: "Nepal", native: "नेपाल", flag: '🇳🇵' },
+    { country: "Kenya", native: "Kenya", flag: '🇰🇪' },
+    { country: "Japan", native: "日本", flag: '🇯🇵' },
+}
+key { country };
+
+/* A text backwards, a character at a time, which keeps each flag whole, as reversing
+   its code points would make another flag of it. */
+operator reversed{t: text}: text [
+    var result := "";
+    for c in to_characters{from: t} loop [
+        result := from_character{from: c} || result;
+    ];
+    result
+];
+
+/* How many characters a name is, against how many code points. */
+operator lengths{
+    r: relation { country: text, native: text, flag: character },
+}: relation { country: text, characters: integer, code_points: integer } [
+    (r extend {
+        characters := length{a: to_characters{from: native}},
+        code_points := length{a: to_code_points{from: native}},
+    }){
+        country,
+        characters,
+        code_points,
+    }
+];
+
+operator main{} [
+    call debug_table{r: flags{country, flag}};
+    call debug_table{r: lengths{r: flags}};
+    call debug_value{v: reversed{t: "🇸🇪🇫🇮"}};
+
+    /* A literal of any of them, and its escapes. */
+    call debug_value{v: '👨‍👩‍👧‍👦'};
+    call debug_value{v: array ['\n', '\'', '"', '\u{1F44D}']};
+
+    /* Two are equal if they are the same code points, which is how they are ordered too:
+       nothing normalizes them, as `é` can be written two ways. */
+    call debug_value{v: 'é' = 'e\u{301}'};
+    call debug_value{v: min{r: flags, of: flag}};
+
+    /* A character shows no representation: operators convert it. */
+    call debug_value{v: from_character{from: 'a'} || "b"};
+    call debug_value{v: to_text{from: 'a'}};
+    call debug_value{v: parse_character{from: "🇸🇪"}};
+    call debug_value{v: from_characters{from: array ['🇸', '🇪']}};
+
+    /* A code point is a character of one code point. */
+    call debug_value{v: code_point{character: '('}.value};
+    call debug_value{v: code_point{value: 225}.character};
+];

@@ -15,14 +15,14 @@ operator greet{name: text, punctuation: text} [
 /* A text is made of code points, values of `code_point`, which
    `to_code_points` gives in order: one for each Unicode scalar value, so
    the `á` of `Paraná` is one, and the same letter written as `a` and a
-   combining accent is two. A code point is its number, or the text of it
-   alone, `code_point{character: "á"}`. `from_code_points` is the text of
+   combining accent is two. A code point is its number, or the character of it
+   alone, `code_point{character: 'á'}`. `from_code_points` is the text of
    an array of them, which makes the word again. */
 operator spell{word: text} [
     var points := to_code_points{from: word};
     call debug_value{v: length{a: points}};
     call debug_value{v: points[length{a: points}]};
-    call debug_value{v: points[length{a: points}] = code_point{character: "á"}};
+    call debug_value{v: points[length{a: points}] = code_point{character: 'á'}};
     call debug_value{v: from_code_points{from: points} = word};
 ];
 

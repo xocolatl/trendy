@@ -2008,7 +2008,7 @@ fn positions(read: &hir::Type) -> hir::Type {
 
 /// Whether `load_csv` loads an array, written `rows`, of `tuples`, which it
 /// reads as `read`, whose attributes it can read from fields: each of a
-/// type known here, text, an integer, an approximate number or a boolean,
+/// type known here, text, a character, an integer, an approximate number or a boolean,
 /// or a type of the program's own whose components it can read, in the
 /// representation it reads them in. If not, it is reported.
 fn csv_readable(

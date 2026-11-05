@@ -3773,10 +3773,10 @@ operator main{{}} [ var lines: array text; {main} ];"
         // A character's number, and the character of a number, as Python's
         // `ord` and `chr` give them, which are a code point's, however the
         // argument is written.
-        let one = |written: &str| format!("var letter := \"ü\";\nvar p := {written};{MAIN}");
+        let one = |written: &str| format!("var letter := 'ü';\nvar p := {written};{MAIN}");
         for (written, fixed) in [
             ("ord{letter}", "code_point{character: letter}.value"),
-            ("ord{c: \"(\"}", "code_point{character: \"(\"}.value"),
+            ("ord{c: '('}", "code_point{character: '('}.value"),
             ("chr{233}", "code_point{value: 233}.character"),
             ("fromCharCode{233}", "code_point{value: 233}.character"),
         ] {
@@ -3993,19 +3993,190 @@ operator main{{}} [ var lines: array text; {main} ];"
 
     #[test]
     fn a_code_point_is_a_number_or_its_character() {
-        // A selection of literals is a literal, and its character the text
-        // of it alone.
+        // A selection of literals is a literal, and its character that of the
+        // code point alone.
         let values: Vec<String> = variables(
-            "var open := code_point{character: \"(\"};\nvar closed := code_point{value: 41}.character;\nvar same := code_point{character: \"é\"} = to_code_points{from: \"é\"}[1];",
+            "var open := code_point{character: '('};\nvar closed := code_point{value: 41}.character;\nvar same := code_point{character: '('} = code_point{value: 40};",
         )
         .iter()
         .map(|v| v.init.to_string())
         .collect();
-        assert_eq!(values, ["code_point{value: 40}", "\")\"", "true"]);
-        // Of one code point's text alone.
-        for written in ["\"ab\"", "\"\""] {
+        assert_eq!(values, ["code_point{value: 40}", "')'", "true"]);
+        // Of a character of one code point alone.
+        for written in ["'🇸🇪'", "'e\\u{301}'"] {
             let source = format!("var c := code_point{{character: {written}}};{MAIN}");
             assert_eq!(codes(&source), [Code::BrokenConstraint], "{written}");
+        }
+        // As text, the fix writes it as one.
+        let source = format!("var c := code_point{{character: \"(\"}};{MAIN}");
+        assert_eq!(codes(&source), [Code::TypeMismatch]);
+        assert_eq!(
+            fix(&source),
+            format!("var c := code_point{{character: '('}};{MAIN}")
+        );
+    }
+
+    #[test]
+    fn a_character_is_a_value_of_its_own() {
+        let value = |written: &str| {
+            let source = format!("var v := {written};{MAIN}");
+            let program = analyze_str(&source).unwrap_or_else(|e| panic!("{written}: {e:#?}"));
+            program.variables[0].init.to_string()
+        };
+        for (written, known) in [
+            ("'a'", "'a'"),
+            ("'🇸🇪'", "'🇸🇪'"),
+            ("'\\''", "'\\''"),
+            ("'\"'", "'\"'"),
+            ("'\\r\\n'", "'\\r\\n'"),
+            ("'\\u{41}'", "'A'"),
+            // Equal only if the same code points, and ordered by them.
+            ("'a' = 'a'", "true"),
+            ("'é' = 'e\\u{301}'", "false"),
+            ("'a' < 'b'", "true"),
+            ("'Z' < 'a'", "true"),
+            ("min{r: relation { { c: 'b' }, { c: 'a' } }, of: c}", "'a'"),
+            // Its conversions.
+            ("from_character{from: '🇸🇪'}", "\"🇸🇪\""),
+            ("to_text{from: 'a'}", "\"'a'\""),
+            ("to_text{from: '\\''}", "\"'\\\\''\""),
+            ("parse_character{from: \"🇸🇪\"}", "'🇸🇪'"),
+            ("to_characters{from: \"🇸🇪a\"}", "array ['🇸🇪', 'a']"),
+            ("to_characters{from: \"\"}", "array character []"),
+            ("from_characters{from: array ['🇸🇪', 'a']}", "\"🇸🇪a\""),
+            // A flag's halves are one, written together.
+            ("from_characters{from: array ['🇸', '🇪']}", "\"🇸🇪\""),
+            (
+                "length{a: to_characters{from: from_characters{from: array ['🇸', '🇪']}}}",
+                "1",
+            ),
+        ] {
+            assert_eq!(value(written), known, "{written}");
+        }
+        // Of a type of the program's own too, which an order can be of.
+        let source = format!(
+            "type grade {{ {{ letter: character }}, constraint letter >= 'A' and letter <= 'F', order [asc letter] }};\nvar a := grade{{letter: 'B'}} < grade{{letter: 'C'}};{MAIN}"
+        );
+        assert_eq!(
+            analyze_str(&source).unwrap().variables[0].init.to_string(),
+            "true"
+        );
+        // Text that isn't one fails, as other text to read does, known when compiling.
+        for written in ["ab", ""] {
+            let source = format!("var c := parse_character{{from: \"{written}\"}};{MAIN}");
+            let found = errors(&source);
+            assert_eq!(found[0].code, Code::Unparsable, "{found:#?}");
+            assert!(
+                found[0].message.contains("isn't one character"),
+                "{found:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_known_failure_has_the_code_of_its_kind() {
+        let failing = |error: &str, declared: &str| {
+            let source = format!(
+                "{declared}operator f{{}}: integer [ fail {error} ];\nvar v := f{{}};\n{MAIN}"
+            );
+            errors(&source)[0].code
+        };
+        // The language's, written as a program can write them.
+        assert_eq!(
+            failing("division_by_zero{operation: \"1 div 0\"}", ""),
+            Code::DivisionByZero
+        );
+        assert_eq!(failing("failure{message: \"no\"}", ""), Code::Failed);
+        // A program's own of the same name is its own, the language's named by its unit.
+        let own = "type unparsable is error { { reason: text } };\noperator message{error: unparsable}: text [ error.reason ];\n";
+        assert_eq!(failing("unparsable{reason: \"no\"}", own), Code::Failed);
+        assert_eq!(
+            failing(
+                "trendy.prelude::unparsable{text: \"a\", type: \"integer\", out_of_range: false}",
+                own
+            ),
+            Code::Unparsable
+        );
+    }
+
+    #[test]
+    fn a_character_is_no_text() {
+        let var = |declared: &str| format!("var v{declared};{MAIN}");
+        // What is written in the other quotes is written in its type's.
+        for (written, fixed) in [
+            (": text := 'a'", ": text := \"a\""),
+            (": text := '\"'", ": text := \"\\\"\""),
+            (": character := \"a\"", ": character := 'a'"),
+            (": character := \"'\"", ": character := '\\''"),
+            (": character := \"🇸🇪\"", ": character := '🇸🇪'"),
+        ] {
+            assert_eq!(codes(&var(written)), [Code::TypeMismatch], "{written}");
+            assert_eq!(fix(&var(written)), var(fixed), "{written}");
+            assert!(analyze_str(&var(fixed)).is_ok(), "{fixed}");
+        }
+        assert_eq!(fix(&var(" := 'a' = \"a\"")), var(" := 'a' = 'a'"),);
+        // Not one character, nothing can make it one: the type's the fix.
+        let found = errors(&var(": character := \"ab\""));
+        assert_eq!(found[0].suggestions.len(), 1, "{found:#?}");
+        assert_eq!(found[0].suggestions[0].edits[0].replacement, "text");
+        // Converted by an operator when it isn't known.
+        let body = |statement: &str| {
+            format!("operator f{{c: character, t: text}} [ {statement} ];\n{MAIN}")
+        };
+        assert_eq!(
+            fix(&body("var u: text := c;")),
+            body("var u: text := from_character{from: c};")
+        );
+        assert_eq!(
+            fix(&body("var u: character := t;")),
+            body("var u: character := parse_character{from: t};")
+        );
+        assert_eq!(
+            fix(&body("var u := c || t;")),
+            body("var u := from_character{from: c} || t;")
+        );
+        assert_eq!(
+            fix(&body("var u := t || c;")),
+            body("var u := t || from_character{from: c};")
+        );
+        // It shows no representation: no components, and no selector.
+        assert_eq!(codes(&body("var u := c.text;")), [Code::WrongOperandType]);
+        for written in ["character{from: t}", "Character{from: t}", "char{from: t}"] {
+            let source = body(&format!("var u := {written};"));
+            assert_eq!(
+                fix(&source),
+                body("var u := parse_character{from: t};"),
+                "{written}"
+            );
+        }
+        // It has no default, as no character is any more a start than another.
+        for declared in [": character", ": tuple { c: character }"] {
+            assert_eq!(codes(&var(declared)), [Code::UntypedVariable], "{declared}");
+        }
+        for declared in [": array character", ": relation { c: character }"] {
+            assert!(analyze_str(&var(declared)).is_ok(), "{declared}");
+        }
+        let source = "operator main{} [ var c: character; ];";
+        assert_eq!(codes(source), [Code::UntypedVariable]);
+    }
+
+    #[test]
+    fn other_languages_names_for_a_character() {
+        // Most languages' `char` is one, and SQL's and Tutorial D's a string.
+        for (written, fixed) in [
+            ("char", "character"),
+            ("Char", "character"),
+            ("Character", "character"),
+            ("CHAR", "text"),
+            ("CHARACTER", "text"),
+        ] {
+            let source = format!("var v: {written} := 'a';\n{MAIN}");
+            assert_eq!(codes(&source)[0], Code::UnknownType, "{written}");
+            assert_eq!(
+                fix(&source),
+                format!("var v: {fixed} := 'a';\n{MAIN}"),
+                "{written}"
+            );
         }
     }
 

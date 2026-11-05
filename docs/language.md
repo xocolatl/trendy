@@ -1139,7 +1139,7 @@ operator main{} [
 - **A type declares the kinds it is of,** as the prelude's do:
   `builtin type integer: { ordered, numeric };`. It must have what each
   requires, which the compiler checks of the prelude. `boolean`, `integer`,
-  `approximate` and `text` are ordered; relations aren't, as their `<` is
+  `approximate`, `text` and `character` are ordered; relations aren't, as their `<` is
   subset, which isn't a total order. `integer` and `approximate` are
   numeric. A type of the program's own is ordered when its braces give
   it an order (see [A program's own types](#a-programs-own-types)), and
@@ -1298,7 +1298,7 @@ operator or a type of the name of one of the prelude's, built in or
 written in trendy, hides the prelude's in its unit, which every other
 unit still sees, as a unit's own name does a used unit's (see
 [Units](#units)). Only the built-in types' names, `boolean`, `integer`,
-`approximate` and `text`, are no unit's to declare (A0001).
+`approximate`, `text` and `character`, are no unit's to declare (A0001).
 
 The prelude keeps built-ins as few as possible: what can be written in
 trendy is, so that it means exactly what its definition says, and when the
@@ -1327,6 +1327,7 @@ builtin type boolean: { ordered };
 builtin type integer: { ordered, numeric };
 builtin type approximate: { ordered, numeric };
 builtin type text: { ordered };
+builtin type character: { ordered };
 
 builtin operator debug_value{v: any type};
 
@@ -1417,14 +1418,17 @@ builtin operator parse_boolean{from: text}: boolean;
 
 /* A Unicode code point that a text can hold: from 0 to 10FFFF hex, but
    not the surrogates, D800 to DFFF, which UTF-8 can't encode, so each is a
-   Unicode scalar value. It is a number, `value`, or the text of it alone,
-   `character`, so that `code_point{character: "("}` is the code point of
-   `(`, and `p.character` the text of `p`. Code points are ordered by their
+   Unicode scalar value. It is a number, `value`, or the character of it alone,
+   `character`, so that `code_point{character: '('}` is the code point of
+   `(`, and `p.character` the character of `p`. Code points are ordered by their
    numbers. */
 type code_point {
     { value: integer },
-    { character: text, constraint length{a: to_code_points{from: character}} = 1 },
-    constraint value >= 0 and value <= 1114111 and (value < 55296 or value > 57343),
+    {
+        character: character,
+        constraint length{a: to_code_points{from: from_character{from: character}}} = 1,
+    },
+    constraint value >= 0 and value <= 0x10FFFF and (value < 0xD800 or value > 0xDFFF),
     order [asc value],
 };
 
@@ -1436,6 +1440,20 @@ builtin operator to_code_points{from: text}: array code_point;
 /* The text of the code points `from`, in order, which every array of them
    writes, so that it is `to_code_points`'s inverse. */
 builtin operator from_code_points{from: array code_point}: text;
+
+/* The characters of `from`, in order: what a reader sees as one each, by the rules of
+   Unicode's UAX #29, as a flag is one of two code points. */
+builtin operator to_characters{from: text}: array character;
+
+/* The text of the characters `from`, in order, so that it is `to_characters`'s inverse
+   of a text; but not of an array, as two characters can join, as a flag's halves do. */
+builtin operator from_characters{from: array character}: text;
+
+/* The text of the character `from`, alone. */
+operator from_character{from: character}: text;
+
+/* The character the text `from` is, which fails unless it is exactly one. */
+operator parse_character{from: text}: character;
 
 /* π, the ratio of a circle's circumference to its diameter: the
    approximate number nearest it. */
@@ -1846,16 +1864,19 @@ operator main{} [
 **`to_text{from: any type}: text`**,
 **`to_approximate{from: integer}: approximate`**,
 **`parse_integer{from: text}: integer`**,
-**`parse_approximate{from: text}: approximate`** and
-**`parse_boolean{from: text}: boolean`** convert values, which
+**`parse_approximate{from: text}: approximate`**,
+**`parse_boolean{from: text}: boolean`**,
+**`parse_character{from: text}: character`** and
+**`from_character{from: character}: text`** convert values, which
 never convert implicitly: *The Third Manifesto* allows no coercion, only
 explicit conversions such as Tutorial D's `CAST_AS_CHAR` (chapter 3).
 
 - **`to_text` writes any value as trendy source,** the text `debug_value`
   writes, so a value of every type has one, and it reads back as the same
   value: `42`, `5e-1` for an approximate number, which is always written
-  with an exponent, and `"Lima"` for a text, with its quotes, which a
-  text never needs, being text already.
+  with an exponent, `"Lima"` for a text, with its quotes, which a
+  text never needs, being text already, and `'a'` for a character, with
+  its, whose text alone is `from_character{from: c}`.
 - **`to_approximate` is the approximate number nearest an integer,** the
   integer itself up to 2^53 in magnitude, beyond which not every integer
   is one, so `9007199254740993` becomes `9.007199254740992e15`. There is
@@ -1981,9 +2002,9 @@ builtin operator load_text_file{
    file's columns have an order and no names, so the call names them.
    Columns it doesn't name are skipped. With `header`, the file's first
    record is a header, which is skipped too. Each attribute is text, an
-   integer, an approximate number or a boolean, read from its field as
-   `parse_integer`, `parse_approximate` and `parse_boolean` read them,
-   and text as it is, or a value of a type of the program's own whose
+   integer, an approximate number, a boolean or a character, read from its field as
+   `parse_integer`, `parse_approximate`, `parse_boolean` and `parse_character` read
+   them, and text as it is, or a value of a type of the program's own whose
    components are, in one of its possible representations, which
    `columns` gives a tuple of their columns, as
    `tuple { name: 1, at: tuple { latitude: 2, longitude: 3 } }` does, and
@@ -2228,9 +2249,9 @@ operator main{} [
 - **The array's type says what to read.** Each field is read as its
   attribute's type, as Tutorial D's `LOAD` takes its shape from its
   target (chapter 5): text as it is, and an integer, an approximate
-  number or a boolean as `parse_integer`, `parse_approximate` and
-  `parse_boolean` read them, so `2672.3` is an approximate number, and
-  `yes` and `N` are booleans. A field that isn't one stops the program
+  number, a boolean or a character as `parse_integer`, `parse_approximate`,
+  `parse_boolean` and `parse_character` read them, so `2672.3` is an approximate
+  number, and `yes` and `N` are booleans. A field that isn't one stops the program
   (R0014), writing it, its column, its line, and its attribute, an
   `unreadable_field`. An attribute of another
   type, which no field writes, is an error when compiling (A0055), as is
@@ -4832,7 +4853,7 @@ operator main{} [
     call debug_value{v: points[6]};
     call debug_value{v: points[6].character};
     call debug_value{v: length{a: points}};
-    call debug_value{v: points[1] = code_point{character: "P"}};
+    call debug_value{v: points[1] = code_point{character: 'P'}};
     call debug_value{v: from_code_points{from: points} = word};
 ];
 ```
@@ -4843,15 +4864,16 @@ operator main{} [
   is a type of its own, not an integer, as *The Third Manifesto*'s `QTY`
   is (chapter 6): its number is `p.value`, and code points are ordered by
   it. So every array of them has a text, which `from_code_points` gives.
-- **It is the text of it alone too,** another possible representation,
-  `p.character`: `code_point{character: "á"}` is `code_point{value:
+- **It is the character of it alone too,** another possible representation,
+  `p.character`: `code_point{character: 'á'}` is `code_point{value:
   225}`, and, of literals, a literal itself, as every selection of them
-  is. Its own constraint says the text is one code point's (see [A
+  is. Its own constraint says the character is one code point's (see [A
   program's own types](#a-programs-own-types)), so
-  `code_point{character: "ab"}` fails (R0017).
-- **It is no character a reader sees.** `é` can be written as one code
+  `code_point{character: '🇸🇪'}` fails (R0017).
+- **It is less than a character a reader sees,** which may be several (see
+  [Characters](#characters)). `é` can be written as one code
   point, `\u{E9}`, or as two, `e` and a combining accent, `\u{301}`, which
-  are different texts. trendy has no type of one character.
+  are different texts.
 - **Each is made as selecting it would make it,** so of a subtype a
   constraint defines, as `type ascii is code_point { constraint value <
   128 };` does, if it is true of it (see [Subtypes defined by
@@ -4873,6 +4895,62 @@ var letters := length{a: word};
 operator main{} [];
 ```
 
+### Characters
+
+A `character` is one character, what a reader sees as one, however many code points
+it is made of: `'a'`, `'é'`, the flag `'🇸🇪'`, of two, or the family `'👨‍👩‍👧‍👦'`, of seven. It is
+written between single quotes, as text is between double ones, with the same escapes,
+and `\'` for its own quote: `'\n'`, `'\u{1F44D}'`, `'\''`.
+
+```trendy
+const greeting := "नमस्ते 🇳🇵";
+
+operator reversed{t: text}: text [
+    var result := "";
+    for c in to_characters{from: t} loop [
+        result := from_character{from: c} || result;
+    ];
+    result
+];
+
+operator main{} [
+    call debug_value{v: to_characters{from: greeting}};
+    call debug_value{v: length{a: to_characters{from: greeting}}};
+    call debug_value{v: length{a: to_code_points{from: greeting}}};
+    call debug_value{v: reversed{t: "🇸🇪🇫🇮"}};
+    call debug_value{v: 'é' = 'e\u{301}'};
+    call debug_value{v: min{r: relation { { c: 'b' }, { c: 'a' } }, of: c}};
+];
+```
+
+- **One character is an extended grapheme cluster** of Unicode's UAX #29, by its
+  default rules, at Unicode 18.0.0, whatever the locale, so that it depends on its code
+  points alone: Slovak's `ch` is two. Those rules change between versions of Unicode,
+  and a type is a set of values (*The Third Manifesto*, chapter 3), so the version is
+  part of the language, and changes only with it.
+- **Literals say which at once.** `'abc'` is an error, with a fix to `"abc"`, as is
+  `''` to `""`, `'''` to `'\''`, and `'🇸🇪🇫🇮'`, two flags (P0060). `'a'` where a
+  text is expected, as SQL, Python and JavaScript write text, and `"a"` where a
+  character is, are fixed to each other (A0004).
+- **It shows no representation.** It has no components and no selector, only literals,
+  as *The Third Manifesto* allows a built-in type (chapter 6), and it converts only
+  through operators. `from_character{from: c}` is its text alone; `to_text{from: c}`
+  writes it as source, `'a'`, as `to_text` writes any value. `parse_character{from: t}`
+  is the character `t` is, and fails unless it is exactly one (R0014). `||` and
+  `length` take text and arrays, and `c = "a"` is an error, as a character isn't a text.
+- **`to_characters{from: t}` is the array of `t`'s characters, in order, and
+  `from_characters{from: a}` the text of the array `a`'s.** The text of a text's
+  characters is that text. The characters of an array's text needn't be that array, as
+  two can join: `'🇸'` and `'🇪'` are one flag, written together.
+- **Two are equal only if they are the same code points,** as equal values are the same
+  value, which no operator can tell apart (RM Prescription 8), and
+  `to_code_points` can tell these. So `'é'` written as one code point isn't `'e\u{301}'`,
+  as `"é"` isn't `"e\u{301}"`: nothing normalizes. Characters are ordered by
+  their code points, as text is. There is no collation, as there is none of text.
+- **It has no default,** as no character is any more a start than another, and none
+  is empty: `var c: character;` is an error (A0006), but a relation or an array of them
+  starts empty, as any does.
+
 ### Comparisons
 
 `a = b`, `a <> b`, `a < b`, `a <= b`, `a > b` and `a >= b` compare two
@@ -4884,6 +4962,7 @@ The built-in types are also ordered:
 | `boolean` | `false` before `true` |
 | `integer` | numerical |
 | `approximate` | numerical |
+| `character` | by its code points, as a text of it is |
 | `text` | by code point, which is also the order of the UTF-8 bytes. There is no collation: `"Z" < "a"`, and `"é" > "z"` |
 
 Two values are equal exactly when they are the same value, as *The Third
@@ -6625,7 +6704,12 @@ line after a comment on its own line, such as a file's header, is kept.
 | `int`, `long`, `i64` | `integer` |
 | `float`, `double`, `real`, `f64` | `approximate` |
 | `0.5`, `.5`, `5.` | `0.5e0`, `5e0` |
-| `string`, `str`, `varchar` | `text` |
+| `string`, `str`, `varchar`, `CHAR`, `CHARACTER` | `text` |
+| `char`, `Character` | `character` |
+| `'abc'`, `''`, `'''` | `"abc"`, `""`, `'\''` |
+| `'a'`, where text is expected | `"a"` |
+| `"a"`, where a character is expected | `'a'` |
+| `graphemes{t}` | `to_characters{from: t}` |
 | `str(x)`, `x.to_string()`, `CAST(x AS VARCHAR)`, `CAST_AS_CHAR (X)` | `to_text{from: x}` |
 | `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
 | `int(s)`, `parseInt(s)`, `atoi(s)`, `CAST(s AS INTEGER)`, `CAST_AS_INTEGER (S)` | `parse_integer{from: s}` |

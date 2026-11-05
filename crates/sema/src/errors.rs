@@ -23,7 +23,7 @@ const TYPE_ALIASES: &[(&str, hir::Scalar)] = &[
     ("bigint", hir::Scalar::Integer),
     ("bit", hir::Scalar::Boolean),
     ("bool", hir::Scalar::Boolean),
-    ("char", hir::Scalar::Text),
+    ("char", hir::Scalar::Character),
     ("decimal", hir::Scalar::Approximate),
     ("double", hir::Scalar::Approximate),
     ("f32", hir::Scalar::Approximate),
@@ -255,12 +255,12 @@ pub(crate) fn local_out_of_scope(
 
 /// A variable `name`, of type `ty`, written `type_expr`, which has no
 /// default, without an initial value: a type with a type parameter in it,
-/// or with a type of the program's own.
+/// or with a type of the program's own, or `character`.
 pub(crate) fn no_default_value(name: &str, ty: &hir::Type, type_expr: &TypeExpr) -> Diagnostic {
     let why = if ty.parameters().next().is_some() {
         "each call gives a type parameter its type, so a type with one in it has no default"
     } else {
-        "no value of a type of the program's own is any more a start than another, so it has no default, nor has a tuple with one"
+        "no value of a type of the program's own, nor any character, is any more a start than another, so it has no default, nor has a tuple with one"
     };
     Diagnostic::error(
         Code::UntypedVariable,
@@ -409,10 +409,15 @@ pub(crate) fn unknown_type(
         };
     }
     let written = |n: &str| (n.to_string(), n.to_string());
-    let meant = TYPE_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == lowercase)
-        .map(|&(_, ty)| written(ty.name()))
+    // SQL's and Tutorial D's, uppercase, is of text, as the other languages' `char` isn't.
+    let strings = matches!(name, "CHAR" | "CHARACTER").then(|| written(hir::Scalar::Text.name()));
+    let meant = strings
+        .or_else(|| {
+            TYPE_ALIASES
+                .iter()
+                .find(|(alias, _)| *alias == lowercase)
+                .map(|&(_, ty)| written(ty.name()))
+        })
         .or_else(|| {
             let types: Vec<&str> = hir::Scalar::ALL
                 .iter()
@@ -423,7 +428,9 @@ pub(crate) fn unknown_type(
             closest(name, types).map(written)
         });
     if let Some((meant, replacement)) = meant {
-        if TYPE_ALIASES.iter().any(|(alias, _)| *alias == lowercase) {
+        if lowercase == "character" && name != "Character"
+            || TYPE_ALIASES.iter().any(|(alias, _)| *alias == lowercase)
+        {
             d = d.with_note(format!("trendy's name for this type is `{meant}`"));
         }
         d = d.with_suggestion(format!("use `{meant}`"), vec![Edit { span, replacement }]);
@@ -1006,17 +1013,23 @@ pub(crate) fn type_mismatch(
                 replacement,
             }],
         );
-    } else if let Some(builtin) = conversion(found, declared)
-        && (value.is_none() || !parses(builtin))
+    } else if let Some(conversion) = conversion(found, declared)
+        && (value.is_none() || !conversion.parses)
     {
         // A text known when compiling is one parsing reads, rewritten
         // above as the value's literal, or one it would fail for.
-        d = with_conversion(d, "it", builtin, expr);
+        d = with_conversion(d, "it", conversion, expr);
     }
     // `n * x`, of an integer and an approximate number: the first operand
     // set the type, and as an approximate number it takes the rest.
     if let Origin::Value(first) = origin
-        && conversion(declared, found) == Some(hir::ReadOnlyBuiltin::ToApproximate)
+        && matches!(
+            (declared, found),
+            (
+                hir::Type::Scalar(hir::Scalar::Integer),
+                hir::Type::Scalar(hir::Scalar::Approximate)
+            )
+        )
     {
         let subject = format!("`{}`", first.syntax().text());
         d = match written_literal(first) {
@@ -1027,7 +1040,7 @@ pub(crate) fn type_mismatch(
                     replacement: format!("{written}e0"),
                 }],
             ),
-            None => with_conversion(d, &subject, hir::ReadOnlyBuiltin::ToApproximate, first),
+            None => with_conversion(d, &subject, Conversion::TO_APPROXIMATE, first),
         };
     }
     // Only a written type can be changed to fit the value, and only the
@@ -1112,37 +1125,54 @@ fn written_literal(expr: &Expr) -> Option<String> {
 /// `to_approximate` takes integers, and `parse_integer`,
 /// `parse_approximate` and `parse_boolean` read values from text, failing
 /// for other text.
-fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::ReadOnlyBuiltin> {
+fn conversion(from: &hir::Type, to: &hir::Type) -> Option<Conversion> {
     use hir::{Scalar, Type};
+    let parsing = |name| Conversion { name, parses: true };
+    let converting = |name| Conversion {
+        name,
+        parses: false,
+    };
     match (from, to) {
         (Type::Scalar(Scalar::Integer), Type::Scalar(Scalar::Approximate)) => {
-            Some(hir::ReadOnlyBuiltin::ToApproximate)
+            Some(Conversion::TO_APPROXIMATE)
         }
         (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Integer)) => {
-            Some(hir::ReadOnlyBuiltin::ParseInteger)
+            Some(parsing("parse_integer"))
         }
         (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Approximate)) => {
-            Some(hir::ReadOnlyBuiltin::ParseApproximate)
+            Some(parsing("parse_approximate"))
         }
         (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Boolean)) => {
-            Some(hir::ReadOnlyBuiltin::ParseBoolean)
+            Some(parsing("parse_boolean"))
+        }
+        (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Character)) => {
+            Some(parsing("parse_character"))
+        }
+        // The text of it, as `to_text` would write it in quotes.
+        (Type::Scalar(Scalar::Character), Type::Scalar(Scalar::Text)) => {
+            Some(converting("from_character"))
         }
         (Type::Scalar(_) | Type::Parameter(_), Type::Scalar(Scalar::Text)) => {
-            Some(hir::ReadOnlyBuiltin::ToText)
+            Some(converting("to_text"))
         }
         _ => None,
     }
 }
 
-/// Whether the conversion `builtin` reads a value from text, which fails
-/// for other text.
-fn parses(builtin: hir::ReadOnlyBuiltin) -> bool {
-    matches!(
-        builtin,
-        hir::ReadOnlyBuiltin::ParseInteger
-            | hir::ReadOnlyBuiltin::ParseApproximate
-            | hir::ReadOnlyBuiltin::ParseBoolean
-    )
+/// The prelude's operator that converts a value of one type to another's.
+#[derive(Clone, Copy)]
+struct Conversion {
+    name: &'static str,
+    /// Whether it reads the value from text, so that it can fail, which one known
+    /// when compiling tells then.
+    parses: bool,
+}
+
+impl Conversion {
+    const TO_APPROXIMATE: Conversion = Conversion {
+        name: "to_approximate",
+        parses: false,
+    };
 }
 
 /// `d`, with the fix converting `expr`, which the message calls `subject`,
@@ -1150,12 +1180,16 @@ fn parses(builtin: hir::ReadOnlyBuiltin) -> bool {
 fn with_conversion(
     d: Diagnostic,
     subject: &str,
-    builtin: hir::ReadOnlyBuiltin,
+    conversion: Conversion,
     expr: &Expr,
 ) -> Diagnostic {
-    let name = builtin.name();
+    let name = conversion.name;
     let span = expr.span();
-    let verb = if parses(builtin) { "parse" } else { "convert" };
+    let verb = if conversion.parses {
+        "parse"
+    } else {
+        "convert"
+    };
     d.with_suggestion(
         format!(
             "{verb} {subject} with `{name}`: `{name}{{from: {}}}`",
@@ -1425,6 +1459,12 @@ fn rewrite_literal(ty: hir::Scalar, value: &hir::Value, written: &str) -> Option
             hir::Scalar::Text,
             hir::Value::Boolean(_) | hir::Value::Integer(_) | hir::Value::Approximate(_),
         ) => Some(format!("\"{written}\"")),
+        // Another language's string in single quotes, and its character in double.
+        (hir::Scalar::Text, hir::Value::Character(character)) => {
+            Some(hir::Value::Text(character.clone()).to_string())
+        }
+        (hir::Scalar::Character, hir::Value::Text(text)) => trendy_text::is_one_character(text)
+            .then(|| hir::Value::Character(text.clone()).to_string()),
         // `0` and `1` are the usual spellings of false and true elsewhere.
         (hir::Scalar::Boolean, hir::Value::Integer(n @ (0 | 1))) => Some((*n == 1).to_string()),
         // `"yes"` or `"0"`, as `parse_boolean` reads them.
@@ -2360,7 +2400,7 @@ const ABSENT: &[(&[&str], &str, &str)] = &[
     (
         &["ord"],
         CHARACTERS,
-        "the number of `c`, the text of one code point, is `code_point{character: c}.value`",
+        "the number of `c`, a character of one code point, is `code_point{character: c}.value`",
     ),
     (
         &["codepointat", "charcodeat"],
@@ -2370,7 +2410,7 @@ const ABSENT: &[(&[&str], &str, &str)] = &[
     (
         &["chr", "unichr", "fromcharcode"],
         CHARACTERS,
-        "the text of the code point numbered `n` is `code_point{value: n}.character`",
+        "the character of the code point numbered `n` is `code_point{value: n}.character`",
     ),
 ];
 
@@ -2432,7 +2472,7 @@ pub(crate) fn absent(name: &str) -> Option<(&'static str, &'static str)> {
 const MATHEMATICAL: &str = "the prelude's mathematical operators are `+`, `-`, `*`, `/`, `div`, `mod`, `sqrt`, `sin`, `cos`, `atan2` and `pi`, and it has no others yet";
 
 /// What a text is made of, in the prelude's terms.
-const CHARACTERS: &str = "a text is made of code points, values of the prelude's `code_point`, each a number, `value`, or the text of it, `character`, which `to_code_points` gives an array of, and `from_code_points` a text of";
+const CHARACTERS: &str = "a text is made of code points, values of the prelude's `code_point`, each a number, `value`, or the character of it, `character`, which `to_code_points` gives an array of, and `from_code_points` a text of; `to_characters` gives what a reader sees as one each";
 
 /// The edit naming the one argument of a call, written `written`, `param`,
 /// the one parameter of the operator meant, if it has another name or
@@ -2528,6 +2568,10 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("parseboolean", "parse_boolean", None),
     ("parsebool", "parse_boolean", None),
     ("chars", "to_code_points", None),
+    ("graphemes", "to_characters", None),
+    ("grapheme_clusters", "to_characters", None),
+    ("character", "parse_character", None),
+    ("char", "parse_character", None),
     ("codepoints", "to_code_points", None),
     ("fromcodepoint", "from_code_points", None),
     ("sine", "sin", None),
@@ -5380,12 +5424,12 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
                 None,
             )
         }
-        crate::ops::Failed::Own(message) => {
+        crate::ops::Failed::Own(message, code) => {
             // As the program would write it.
             let mut written = String::new();
             trendy_text::escape_message(message, &mut written)
                 .expect("writing to a `String` cannot fail");
-            Diagnostic::error(Code::Failed, written, expr.span(), "fails").with_note(FAIL_RULE)
+            Diagnostic::error(*code, written, expr.span(), "fails").with_note(FAIL_RULE)
         }
         crate::ops::Failed::NotOfType(treated) => {
             let (value, ty) = &**treated;
@@ -7253,6 +7297,7 @@ fn plural(ty: &hir::Type) -> String {
         hir::Type::Scalar(hir::Scalar::Integer) => "integers".to_string(),
         hir::Type::Scalar(hir::Scalar::Approximate) => "approximate numbers".to_string(),
         hir::Type::Scalar(hir::Scalar::Text) => "text".to_string(),
+        hir::Type::Scalar(hir::Scalar::Character) => "characters".to_string(),
         hir::Type::Defined(defined) => format!("values of `{}`", defined.name),
         hir::Type::Dummy(dummy) => format!("values of `{}`", dummy.name),
         hir::Type::Tuple(_) => "tuples".to_string(),
@@ -7313,11 +7358,11 @@ pub(crate) fn wrong_operand_type(
     .with_note(operand_rule(op, token.text(), ty));
     // `n || " people"`: the text was meant, not `||` of numbers or `T`s.
     let to_text = conversion(ty, &hir::Type::Scalar(hir::Scalar::Text));
-    if let (Operator::Concatenate, Some(builtin), Some(first)) = (op, to_text, first)
+    if let (Operator::Concatenate, Some(conversion), Some(first)) = (op, to_text, first)
         && *ty != hir::Type::Scalar(hir::Scalar::Boolean)
     {
         let subject = format!("`{}`", first.syntax().text());
-        return with_conversion(d, &subject, builtin, first);
+        return with_conversion(d, &subject, conversion, first);
     }
     // `not name = "Lagos"`: `not` binds tightest, so this is `not` of
     // `name`; the comparison was meant.
@@ -7368,7 +7413,7 @@ pub(crate) fn wrong_operand_type(
             match first {
                 Some(first) => {
                     let subject = format!("`{}`", first.syntax().text());
-                    with_conversion(d, &subject, hir::ReadOnlyBuiltin::ToApproximate, first)
+                    with_conversion(d, &subject, Conversion::TO_APPROXIMATE, first)
                 }
                 None => d,
             }
@@ -8939,7 +8984,7 @@ pub(crate) fn unassigned_out(name: &str, operator: &str, ident: &SyntaxToken) ->
 }
 
 /// The rule for what `load_csv` reads.
-const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column `columns` gives it: text as it is, and an integer, an approximate number or a boolean as `parse_integer`, `parse_approximate` and `parse_boolean` read them; a value of a type of the program's own is selected from its components, in one of its possible representations, each read from a column of its own";
+const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column `columns` gives it: text as it is, and an integer, an approximate number, a boolean or a character as `parse_integer`, `parse_approximate`, `parse_boolean` and `parse_character` read them; a value of a type of the program's own is selected from its components, in one of its possible representations, each read from a column of its own";
 
 /// The rule for `load_csv`'s columns.
 const CSV_COLUMNS: &str = "`columns` gives each attribute of the tuples the position of the column it is read from, counting from 1, and each a column of its own";
@@ -8962,7 +9007,7 @@ pub(crate) fn unreadable_attributes(
         "loaded with `load_csv`",
     )
     .with_note(CSV_FIELDS)
-    .with_help("load the fields of the columns as text, integers, approximate numbers or booleans, and compute the other attributes from them")
+    .with_help("load the fields of the columns as text, integers, approximate numbers, booleans or characters, and compute the other attributes from them")
 }
 
 /// The array written `rows`, which `load_csv` loads, whose tuples' type is

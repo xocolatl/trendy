@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use trendy_diag::{Diagnostic, Span, closest};
+use trendy_diag::{Code, Diagnostic, Span, closest};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Expr, Literal, LiteralError};
 use trendy_syntax::{SyntaxKind, SyntaxToken, literal};
@@ -1341,8 +1341,8 @@ pub(crate) enum Failed {
     CallConstraint(Box<BrokenCallConstraint>),
     /// A value treated as one of a type it isn't of.
     NotOfType(Box<(hir::Value, hir::Type)>),
-    /// A `fail`, of the error that writes this message.
-    Own(String),
+    /// A `fail`, of the error that writes this message, with the code of its kind.
+    Own(String, Code),
 }
 
 /// The tuples of `operand` for which `condition`, computed from the tuple at
@@ -2480,9 +2480,14 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
 /// The failure of a `fail` of the error `error`: its message, as the
 /// prelude's `message` writes it, or that operator's own failure.
 fn own_failure(error: hir::Value, bindings: Bindings) -> Failed {
+    let language = match &error {
+        hir::Value::Defined(value) => hir::LanguageError::of_type(&value.ty.name),
+        _ => None,
+    };
+    let code = language.map_or(Code::Failed, hir::LanguageError::code);
     let Some(message) = bindings.operators.message() else {
         // The prelude doesn't declare it, which is reported.
-        return Failed::Own(error.to_string());
+        return Failed::Own(error.to_string(), code);
     };
     let call = hir::Call {
         operator: message.id,
@@ -2491,7 +2496,7 @@ fn own_failure(error: hir::Value, bindings: Bindings) -> Failed {
         updated: BTreeMap::new(),
     };
     match self::call(call, bindings) {
-        Ok(hir::Expr::Constant(hir::Value::Text(text))) => Failed::Own(text),
+        Ok(hir::Expr::Constant(hir::Value::Text(text))) => Failed::Own(text, code),
         Ok(other) => unreachable!("an error's message is known with the error: {other:?}"),
         Err(failed) => failed,
     }

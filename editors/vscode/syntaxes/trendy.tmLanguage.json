@@ -238,17 +238,36 @@
       ]
     },
     "text": {
-      "begin": "\"",
-      "end": "\"|$",
-      "name": "string.quoted.double.trendy",
       "patterns": [
         {
-          "match": "\\\\(?:[\\\"\\\\nrt0]|u\\{[0-9A-Fa-f]{1,6}\\})",
-          "name": "constant.character.escape.trendy"
+          "begin": "\"",
+          "end": "\"|$",
+          "name": "string.quoted.double.trendy",
+          "patterns": [
+            {
+              "match": "\\\\(?:[\\\"\\\\nrt0]|u\\{[0-9A-Fa-f]{1,6}\\})",
+              "name": "constant.character.escape.trendy"
+            },
+            {
+              "match": "\\\\.",
+              "name": "invalid.illegal.escape.trendy"
+            }
+          ]
         },
         {
-          "match": "\\\\.",
-          "name": "invalid.illegal.escape.trendy"
+          "begin": "'",
+          "end": "'|$",
+          "name": "string.quoted.single.trendy",
+          "patterns": [
+            {
+              "match": "\\\\(?:[\\\"\\\\nrt0']|u\\{[0-9A-Fa-f]{1,6}\\})",
+              "name": "constant.character.escape.trendy"
+            },
+            {
+              "match": "\\\\.",
+              "name": "invalid.illegal.escape.trendy"
+            }
+          ]
         }
       ]
     },

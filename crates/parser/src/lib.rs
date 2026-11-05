@@ -149,6 +149,7 @@ fn starts_condition(kind: SyntaxKind) -> bool {
             | SyntaxKind::IntLiteral
             | SyntaxKind::ApproximateLiteral
             | SyntaxKind::TextLiteral
+            | SyntaxKind::CharacterLiteral
             | SyntaxKind::TrueKw
             | SyntaxKind::FalseKw
             | SyntaxKind::LParen

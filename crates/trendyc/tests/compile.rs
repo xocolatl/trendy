@@ -8234,6 +8234,197 @@ fn a_closure_of_one_value_gives_up_its_operand() {
 }
 
 #[test]
+fn characters() {
+    let (code, stderr) = run_example("characters");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "┌─────────┬──────┐",
+            "│ country │ flag │",
+            "├─────────┼──────┤",
+            "│ Japan   │ 🇯🇵   │",
+            "│ Kenya   │ 🇰🇪   │",
+            "│ Nepal   │ 🇳🇵   │",
+            "│ Sweden  │ 🇸🇪   │",
+            "└─────────┴──────┘",
+            "┌────────────┬─────────────┬─────────┐",
+            "│ characters │ code_points │ country │",
+            "├────────────┼─────────────┼─────────┤",
+            "│          2 │           2 │ Japan   │",
+            "│          3 │           5 │ Nepal   │",
+            "│          5 │           5 │ Kenya   │",
+            "│          7 │           7 │ Sweden  │",
+            "└────────────┴─────────────┴─────────┘",
+            "\"🇫🇮🇸🇪\"",
+            "'👨\u{200D}👩\u{200D}👧\u{200D}👦'",
+            "array ['\\n', '\\'', '\"', '👍']",
+            "false",
+            "'🇯🇵'",
+            "\"ab\"",
+            "\"'a'\"",
+            "'🇸🇪'",
+            "\"🇸🇪\"",
+            "40",
+            "'á'",
+        ]
+    );
+}
+
+/// Characters the program computes: in arrays, relations and tuples, compared and
+/// sorted as text is, by their code points, and held by what outlives the statement
+/// that made them.
+#[test]
+fn characters_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "characters_running",
+        r#"
+type grade {
+    { letter: character },
+    constraint letter >= 'A' and letter <= 'F',
+    order [asc letter],
+};
+
+const vowels := (series{from: 1, to: 2} extend { c := if value = 1 then 'a' else 'é' }){c};
+
+var seen: array character;
+
+operator first_of{t: text}: character [
+    to_characters{from: t}[1]
+];
+
+operator remember{t: text} [
+    seen := to_characters{from: t};
+];
+
+operator give{out c: character} [
+    c := first_of{t: "🇸🇪!"};
+];
+
+operator main{} [
+    var word := "e" || "\u{301}b";
+    var letters := to_characters{from: word};
+    call debug_value{v: letters};
+    call debug_value{v: length{a: letters}};
+    call debug_value{v: letters[1] = 'e\u{301}'};
+    call debug_value{v: letters[1] = 'é'};
+    call debug_value{v: letters[2] > letters[1]};
+    call debug_value{v: from_characters{from: letters} = word};
+    call debug_value{v: letters = array ['e\u{301}', 'b']};
+    call debug_value{v: letters = array ['e\u{301}', 'c']};
+    call debug_value{v: tuple { c: letters[2] } = tuple { c: 'b' }};
+    call debug_value{v: first_of{t: word}};
+
+    /* What a statement made, held by a variable after it. */
+    call remember{t: "🇳🇵" || "x"};
+    call debug_value{v: seen};
+
+    var given: character := 'a';
+    call give{out c: given};
+    call debug_value{v: given};
+    call debug_value{v: from_character{from: given} || "!"};
+    call debug_value{v: parse_character{from: word || ""} = 'x'};
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines[..13],
+        [
+            "array ['e\u{301}', 'b']",
+            "2",
+            "true",
+            "false",
+            "false",
+            "true",
+            "true",
+            "false",
+            "true",
+            "'e\u{301}'",
+            "array ['🇳🇵', 'x']",
+            "'🇸🇪'",
+            "\"🇸🇪!\"",
+        ],
+        "{stderr}"
+    );
+    // Of what isn't one character, it says so.
+    assert!(
+        lines[13].starts_with("error[R0014]: ") && lines[13].ends_with("isn't one character"),
+        "{stderr}"
+    );
+}
+
+/// Characters in relations and arrays, sorted and compared as text is, by their code
+/// points, and in keys.
+#[test]
+fn characters_in_relations() {
+    let (code, stderr) = run_source(
+        "characters_in_relations",
+        r#"
+const vowels := (series{from: 1, to: 2} extend { c := if value = 1 then 'é' else 'a' }){c};
+
+operator main{} [
+    call debug_table{r: vowels};
+    call debug_value{v: vowels where c = 'a'};
+    call debug_value{v: min{r: vowels, of: c}};
+    call debug_value{v: max{r: vowels, of: c}};
+    var ordered: array character;
+    load ordered value from vowels order [desc c] keep {c};
+    call debug_value{v: ordered};
+    var points: relation { c: character, n: integer };
+    load points from to_characters{from: "aéa"} as c numbered n;
+    call debug_value{v: count{r: points join vowels}};
+    call debug_value{v: tuple { c: 'x' }};
+    var keyed := relation { { c: 'x', n: 1 } } key { c };
+    insert keyed relation { { c: 'y', n: 1 } };
+    call debug_value{v: keyed};
+    insert keyed relation { { c: 'x', n: 2 } };
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines[..13],
+        [
+            "┌───┐",
+            "│ c │",
+            "├───┤",
+            "│ a │",
+            "│ é │",
+            "└───┘",
+            "relation { c: character } { { c: 'a' } }",
+            "'a'",
+            "'é'",
+            "array ['é', 'a']",
+            "3",
+            "tuple { c: 'x' }",
+            "relation { c: character, n: integer } { { c: 'x', n: 1 }, { c: 'y', n: 1 } }",
+        ],
+        "{stderr}"
+    );
+    assert!(lines[13].starts_with("error[R0008]"), "{stderr}");
+}
+
+/// A field of one character is read as one, and any other isn't.
+#[test]
+fn load_csv_reads_characters() {
+    let good = "country,flag\nSweden,🇸🇪\nNepal,🇳🇵\n";
+    let columns = "tuple { country: 1, flag: 2 }";
+    let heading = "{ country: text, flag: character }";
+    let (code, stderr) = loaded_rows("characters", "", heading, good, columns);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("flag: '🇸🇪'"), "{stderr}");
+    assert!(stderr.contains("flag: '🇳🇵'"), "{stderr}");
+    let bad = "country,flag\nSweden,SE\n";
+    let (code, stderr) = loaded_rows("not_characters", "", heading, bad, columns);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.starts_with("error[R0014]"), "{stderr}");
+    assert!(stderr.contains("isn't one character"), "{stderr}");
+}
+
+#[test]
 fn constants() {
     let (code, stderr) = run_example("constants");
     assert_eq!(code, 0, "{stderr}");

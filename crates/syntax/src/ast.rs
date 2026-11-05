@@ -2901,6 +2901,7 @@ pub enum LiteralValue {
     Integer(i64),
     Approximate(f64),
     Text(String),
+    Character(String),
 }
 
 /// Why a literal has no value.
@@ -2945,6 +2946,19 @@ impl Literal {
                     .ok_or(LiteralError::ApproximateTooLarge);
             }
             _ => {}
+        }
+        if token.kind() == SyntaxKind::CharacterLiteral {
+            let (value, problems) = text
+                .strip_prefix('\'')
+                .and_then(|t| t.strip_suffix('\''))
+                .filter(|_| text.len() >= 2)
+                .map(literal::decode_character)
+                .ok_or(LiteralError::Malformed)?;
+            return if problems.is_empty() && trendy_text::is_one_character(&value) {
+                Ok(LiteralValue::Character(value))
+            } else {
+                Err(LiteralError::Malformed)
+            };
         }
         let body = text
             .strip_prefix('"')

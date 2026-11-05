@@ -1089,6 +1089,7 @@ pub(crate) fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> 
             Some(hir::Value::Approximate(hir::Approximate::new(value)))
         }
         Ok(LiteralValue::Text(value)) => Some(hir::Value::Text(value)),
+        Ok(LiteralValue::Character(value)) => Some(hir::Value::Character(value)),
         Err(LiteralError::IntegerTooLarge) => {
             errors.push(errors::integer_out_of_range(literal.span()));
             None

@@ -249,6 +249,14 @@ pub enum RuntimeFn {
     /// components, in memory the statement owns. It fails if the memory
     /// can't be allocated.
     FromCodePoints,
+    /// `trendy_rt_to_characters(dst, text, descriptor)`: store at `dst` the array of
+    /// the characters of the text, in order, of the type the descriptor describes, in
+    /// memory the statement owns. It fails if the memory can't be allocated.
+    ToCharacters,
+    /// `trendy_rt_from_characters(dst, array)`: store at `dst` the text of the
+    /// characters of the array, in order, in memory the statement owns. It fails if
+    /// the memory can't be allocated.
+    FromCharacters,
     /// `trendy_rt_sqrt(dst, x)`: store at `dst` the square root of the
     /// approximate number `x`, as `sqrt` computes it. It fails if `x` is
     /// negative, which has none.
@@ -720,7 +728,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 88] = [
+    pub const ALL: [RuntimeFn; 90] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -729,6 +737,8 @@ impl RuntimeFn {
         RuntimeFn::ParseBoolean,
         RuntimeFn::ToCodePoints,
         RuntimeFn::FromCodePoints,
+        RuntimeFn::ToCharacters,
+        RuntimeFn::FromCharacters,
         RuntimeFn::Sqrt,
         RuntimeFn::Sin,
         RuntimeFn::Cos,
@@ -828,6 +838,8 @@ impl RuntimeFn {
             | RuntimeFn::ParseBoolean
             | RuntimeFn::ToCodePoints
             | RuntimeFn::FromCodePoints
+            | RuntimeFn::ToCharacters
+            | RuntimeFn::FromCharacters
             | RuntimeFn::Sqrt
             | RuntimeFn::LoadTextFile
             | RuntimeFn::LoadTextFileWithErrors
@@ -924,6 +936,8 @@ impl RuntimeFn {
             RuntimeFn::ParseBoolean => "trendy_rt_parse_boolean",
             RuntimeFn::ToCodePoints => "trendy_rt_to_code_points",
             RuntimeFn::FromCodePoints => "trendy_rt_from_code_points",
+            RuntimeFn::ToCharacters => "trendy_rt_to_characters",
+            RuntimeFn::FromCharacters => "trendy_rt_from_characters",
             RuntimeFn::Sqrt => "trendy_rt_sqrt",
             RuntimeFn::Sin => "trendy_rt_sin",
             RuntimeFn::Cos => "trendy_rt_cos",

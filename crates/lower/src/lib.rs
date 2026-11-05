@@ -982,7 +982,7 @@ impl Lowering {
             hir::Value::Boolean(b) => lir::Field::U8(u8::from(*b)),
             hir::Value::Integer(n) => lir::Field::I64(*n),
             hir::Value::Approximate(r) => lir::Field::F64Bits(r.to_bits()),
-            hir::Value::Text(text) => {
+            hir::Value::Text(text) | hir::Value::Character(text) => {
                 let bytes = self.buffer(lir::Field::Bytes(text.as_bytes().to_vec()));
                 lir::Field::Struct(vec![bytes, lir::Field::Usize(len(text.len()))])
             }
@@ -1047,6 +1047,7 @@ impl Lowering {
             hir::Type::Scalar(hir::Scalar::Integer) => (KIND_INTEGER, None, None),
             hir::Type::Scalar(hir::Scalar::Approximate) => (KIND_APPROXIMATE, None, None),
             hir::Type::Scalar(hir::Scalar::Text) => (KIND_TEXT, None, None),
+            hir::Type::Scalar(hir::Scalar::Character) => (KIND_CHARACTER, None, None),
             hir::Type::Tuple(heading) => (KIND_TUPLE, Some(heading), None),
             hir::Type::Relation(heading) => (
                 KIND_RELATION,
@@ -1221,6 +1222,7 @@ const KIND_RELATION: u8 = 5;
 const KIND_ARRAY: u8 = 6;
 const KIND_DEFINED: u8 = 7;
 const KIND_UNION: u8 = 8;
+const KIND_CHARACTER: u8 = 9;
 
 /// The part of lowering for one function.
 struct FunctionBuilder<'a> {
@@ -4043,6 +4045,8 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::ReadOnlyBuiltin::ToCodePoints => self.code_points(call, cx),
             hir::ReadOnlyBuiltin::FromCodePoints => self.text_of_code_points(call, cx),
+            hir::ReadOnlyBuiltin::ToCharacters => self.characters(call, cx),
+            hir::ReadOnlyBuiltin::FromCharacters => self.text_of_characters(call, cx),
             hir::ReadOnlyBuiltin::Sqrt => {
                 self.mathematical(lir::RuntimeFn::Sqrt, call, &["of"], cx)
             }
@@ -4135,6 +4139,34 @@ impl<'a> FunctionBuilder<'a> {
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::FromCodePoints,
             args: vec![dst.clone(), points, descriptor],
+        });
+        self.scoped = true;
+        dst
+    }
+
+    /// The value of `call`, of `to_characters`: the array of its text's characters,
+    /// as `hir::ReadOnlyBuiltin::evaluate` gives it.
+    fn characters(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
+        let ty = self.program.result(call);
+        let text = self.place(&call.args["from"], cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let characters = self.slot(cx.layout(&ty));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::ToCharacters,
+            args: vec![characters.clone(), text, descriptor],
+        });
+        self.scoped = true;
+        characters
+    }
+
+    /// The value of `call`, of `from_characters`: the text of its array's characters,
+    /// as `hir::ReadOnlyBuiltin::evaluate` gives it.
+    fn text_of_characters(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
+        let array = self.place(&call.args["from"], cx);
+        let dst = self.slot(scalar_layout(hir::Scalar::Text));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::FromCharacters,
+            args: vec![dst.clone(), array],
         });
         self.scoped = true;
         dst
@@ -7143,7 +7175,10 @@ impl<'a> FunctionBuilder<'a> {
                 self.scoped = true;
                 return dst;
             }
-            hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Text)) => {
+            hir::BinaryOp::Compare(
+                comparison,
+                hir::Compared::Scalar(hir::Scalar::Text | hir::Scalar::Character),
+            ) => {
                 // The runtime orders the texts as -1, 0 or 1, which is then
                 // compared with 0.
                 let ordering = self.slot(lir::Layout::I64);
@@ -7189,7 +7224,7 @@ impl<'a> FunctionBuilder<'a> {
     ) -> lir::Place {
         let result = self.slot(lir::Layout::I64);
         match ty {
-            hir::Type::Scalar(hir::Scalar::Text) => {
+            hir::Type::Scalar(hir::Scalar::Text | hir::Scalar::Character) => {
                 self.insts.push(lir::Inst::CallRuntime {
                     function: lir::RuntimeFn::CompareText,
                     args: vec![result.clone(), lhs, rhs],
@@ -7349,7 +7384,7 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
                 hir::Compared::Scalar(hir::Scalar::Approximate) => {
                     lir::Operand::Numeric(lir::Numeric::Approximate)
                 }
-                hir::Compared::Scalar(hir::Scalar::Text)
+                hir::Compared::Scalar(hir::Scalar::Text | hir::Scalar::Character)
                 | hir::Compared::Defined
                 | hir::Compared::Tuple
                 | hir::Compared::Relation
@@ -7517,7 +7552,9 @@ fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
         hir::Scalar::Boolean => lir::Layout::U8,
         hir::Scalar::Integer => lir::Layout::I64,
         hir::Scalar::Approximate => lir::Layout::F64Bits,
-        hir::Scalar::Text => lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize]),
+        hir::Scalar::Text | hir::Scalar::Character => {
+            lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
+        }
     }
 }
 
@@ -8036,7 +8073,9 @@ impl Families {
             });
         }
         match ty {
-            hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
+            hir::Type::Scalar(scalar) => {
+                matches!(scalar, hir::Scalar::Text | hir::Scalar::Character)
+            }
             hir::Type::Relation(_) | hir::Type::Array(_) => true,
             hir::Type::Tuple(_) | hir::Type::Defined(_) => ty
                 .fields()

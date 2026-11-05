@@ -18,6 +18,7 @@ builtin type boolean: { ordered };
 builtin type integer: { ordered, numeric };
 builtin type approximate: { ordered, numeric };
 builtin type text: { ordered };
+builtin type character: { ordered };
 
 builtin operator debug_value{v: any type};
 
@@ -108,14 +109,17 @@ builtin operator parse_boolean{from: text}: boolean;
 
 /* A Unicode code point that a text can hold: from 0 to 10FFFF hex, but
    not the surrogates, D800 to DFFF, which UTF-8 can't encode, so each is a
-   Unicode scalar value. It is a number, `value`, or the text of it alone,
-   `character`, so that `code_point{character: "("}` is the code point of
-   `(`, and `p.character` the text of `p`. Code points are ordered by their
+   Unicode scalar value. It is a number, `value`, or the character of it alone,
+   `character`, so that `code_point{character: '('}` is the code point of
+   `(`, and `p.character` the character of `p`. Code points are ordered by their
    numbers. */
 type code_point {
     { value: integer },
-    { character: text, constraint length{a: to_code_points{from: character}} = 1 },
-    constraint value >= 0 and value <= 1114111 and (value < 55296 or value > 57343),
+    {
+        character: character,
+        constraint length{a: to_code_points{from: from_character{from: character}}} = 1,
+    },
+    constraint value >= 0 and value <= 0x10FFFF and (value < 0xD800 or value > 0xDFFF),
     order [asc value],
 };
 
@@ -127,6 +131,20 @@ builtin operator to_code_points{from: text}: array code_point;
 /* The text of the code points `from`, in order, which every array of them
    writes, so that it is `to_code_points`'s inverse. */
 builtin operator from_code_points{from: array code_point}: text;
+
+/* The characters of `from`, in order: what a reader sees as one each, by the rules of
+   Unicode's UAX #29, as a flag is one of two code points. */
+builtin operator to_characters{from: text}: array character;
+
+/* The text of the characters `from`, in order, so that it is `to_characters`'s inverse
+   of a text; but not of an array, as two characters can join, as a flag's halves do. */
+builtin operator from_characters{from: array character}: text;
+
+/* The text of the character `from`, alone. */
+operator from_character{from: character}: text;
+
+/* The character the text `from` is, which fails unless it is exactly one. */
+operator parse_character{from: text}: character;
 
 /* π, the ratio of a circle's circumference to its diameter: the
    approximate number nearest it. */
@@ -319,10 +337,25 @@ operator series{from: integer, to: integer}: relation { value: integer } [
 
 type code_point {
     { value: integer },
-    { character: text }
-        to { value := to_code_points{from: character}[1].value }
-        from { character := from_code_points{from: array [code_point{value: value}]} },
+    { character: character }
+        to { value := to_code_points{from: from_character{from: character}}[1].value }
+        from {
+            character := to_characters{
+                from: from_code_points{from: array [code_point{value: value}]},
+            }[1],
+        },
 };
+
+operator from_character{from: character}: text [
+    from_characters{from: array [from]}
+];
+
+operator parse_character{from: text}: character [
+    var characters := to_characters{from: from};
+    if length{a: characters} = 1
+        then characters[1]
+        else fail unparsable{text: from, type: "character", out_of_range: false}
+];
 
 const pi := 3.141592653589793e0;
 
@@ -418,6 +451,8 @@ operator message{error: unparsable}: text [
         then "an integer"
         else if error.type = "approximate"
         then "an approximate number"
+        else if error.type = "character"
+        then "one character"
         else "a boolean";
     to_text{from: error.text}
         || (if error.out_of_range then " is out of " || a || "'s range" else " isn't " || a)

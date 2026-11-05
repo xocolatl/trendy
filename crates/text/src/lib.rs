@@ -10,6 +10,13 @@
 
 use core::fmt;
 
+mod character_tables;
+mod characters;
+
+pub use characters::{
+    Characters, UNICODE_VERSION, characters, first_character_len, is_one_character,
+};
+
 /// Escapes written as a backslash and one character, and what they stand for.
 pub const SIMPLE_ESCAPES: &[(char, char)] = &[
     ('"', '"'),
@@ -42,6 +49,22 @@ pub const BIDI_CONTROLS: [char; 9] = [
 /// Returns an error if `out` does.
 pub fn escape(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
     escape_but(text, out, &[])
+}
+
+/// Write the body of a character literal for the character `text`: as [`escape`]
+/// writes a text literal's, but with its own quote escaped rather than the other.
+///
+/// # Errors
+///
+/// Returns an error if `out` does.
+pub fn escape_character(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
+    for (i, part) in text.split('\'').enumerate() {
+        if i > 0 {
+            out.write_str("\\'")?;
+        }
+        escape_bare(part, out)?;
+    }
+    Ok(())
 }
 
 /// Write `text` with nothing around it, as a table's cell shows it: as
@@ -151,6 +174,21 @@ fn escape_but(text: &str, out: &mut impl fmt::Write, kept: &[char]) -> fmt::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_character_escapes_its_own_quote() {
+        let escaped = |text: &str| {
+            let mut out = String::new();
+            escape_character(text, &mut out).unwrap();
+            out
+        };
+        assert_eq!(escaped("a"), "a");
+        assert_eq!(escaped("'"), "\\'");
+        assert_eq!(escaped("\""), "\"");
+        assert_eq!(escaped("\\"), "\\\\");
+        assert_eq!(escaped("\r\n"), "\\r\\n");
+        assert_eq!(escaped("🇸🇪"), "🇸🇪");
+    }
 
     #[test]
     fn what_could_change_a_terminal_or_reorder_text_is_escaped() {

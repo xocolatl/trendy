@@ -373,17 +373,25 @@ fn text_rule() -> Value {
         .iter()
         .map(|(c, _)| regex_escape(&c.to_string()))
         .collect();
+    let quoted = |quote: &str, name: &str, simple: &str| {
+        json!({
+            "begin": quote,
+            "end": format!("{quote}|$"),
+            "name": name,
+            "patterns": [
+                {
+                    // The `\u{…}` form is defined in trendy_syntax::literal.
+                    "match": format!("\\\\(?:[{simple}]|u\\{{[0-9A-Fa-f]{{1,6}}\\}})"),
+                    "name": "constant.character.escape.trendy",
+                },
+                { "match": "\\\\.", "name": "invalid.illegal.escape.trendy" },
+            ],
+        })
+    };
     json!({
-        "begin": "\"",
-        "end": "\"|$",
-        "name": "string.quoted.double.trendy",
         "patterns": [
-            {
-                // The `\u{…}` form is defined in trendy_syntax::literal.
-                "match": format!("\\\\(?:[{simple_escapes}]|u\\{{[0-9A-Fa-f]{{1,6}}\\}})"),
-                "name": "constant.character.escape.trendy",
-            },
-            { "match": "\\\\.", "name": "invalid.illegal.escape.trendy" },
+            quoted("\"", "string.quoted.double.trendy", &simple_escapes),
+            quoted("'", "string.quoted.single.trendy", &format!("{simple_escapes}'")),
         ],
     })
 }

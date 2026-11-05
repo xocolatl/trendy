@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-pub use trendy_text::SIMPLE_ESCAPES;
+pub use trendy_text::{SIMPLE_ESCAPES, characters, is_one_character};
 
 /// The written forms of every escape, for messages: `\" \\ \n \r \t \0 \u{…}`.
 #[must_use]
@@ -14,6 +14,32 @@ pub fn escape_list() -> String {
         .chain(std::iter::once("\\u{…}".to_string()))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The text literal for the same text as the character literal's body `body`, or
+/// a string another language wrote in single quotes: its `"` escaped, and its `'`
+/// not, in a text literal's quotes.
+#[must_use]
+pub fn text_literal_of_character_body(body: &str) -> String {
+    let mut written = String::with_capacity(body.len() + 2);
+    written.push('"');
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('\'') => written.push('\''),
+                Some(escaped) => {
+                    written.push('\\');
+                    written.push(escaped);
+                }
+                None => written.push_str("\\\\"),
+            },
+            '"' => written.push_str("\\\""),
+            c => written.push(c),
+        }
+    }
+    written.push('"');
+    written
 }
 
 /// A problem inside a text literal. Ranges are byte offsets into the body,
@@ -33,6 +59,18 @@ pub enum TextProblem {
 /// the returned text is only meaningful when there are none.
 #[must_use]
 pub fn decode_text(body: &str) -> (String, Vec<TextProblem>) {
+    decode(body, &[])
+}
+
+/// Decode the body of a character literal, as [`decode_text`] does one of a text
+/// literal: with the same escapes, and `\'` for the quote that ends it.
+#[must_use]
+pub fn decode_character(body: &str) -> (String, Vec<TextProblem>) {
+    decode(body, &[('\'', '\'')])
+}
+
+/// Decode a literal's body, with these escapes besides [`SIMPLE_ESCAPES`].
+fn decode(body: &str, others: &[(char, char)]) -> (String, Vec<TextProblem>) {
     let mut text = String::with_capacity(body.len());
     let mut problems = Vec::new();
     let mut chars = body.char_indices().peekable();
@@ -47,7 +85,8 @@ pub fn decode_text(body: &str) -> (String, Vec<TextProblem>) {
             // the lexer reports as an unterminated literal.
             break;
         };
-        if let Some(&(_, value)) = SIMPLE_ESCAPES.iter().find(|(name, _)| *name == e) {
+        let mut escapes = SIMPLE_ESCAPES.iter().chain(others);
+        if let Some(&(_, value)) = escapes.find(|(name, _)| *name == e) {
             text.push(value);
         } else if e == 'u' {
             match unicode_escape(body, start, &mut chars) {
@@ -586,6 +625,32 @@ mod tests {
         assert_eq!(approximate_value("1.5e-3"), Some(0.0015));
         assert_eq!(approximate_value("1e400"), None);
         assert_eq!(approximate_value("1_000.5e0"), Some(1000.5));
+    }
+
+    #[test]
+    fn a_character_literal_has_its_own_quote_as_an_escape() {
+        assert_eq!(decode_character(r"\'").0, "'");
+        assert_eq!(decode_character(r"\u{1F44D}").0, "👍");
+        assert_eq!(decode_character(r#"\""#).0, "\"");
+        assert_eq!(decode_character("a").1, []);
+        // Not in a text literal, whose quote is the other.
+        assert_eq!(decode_text(r"\'").1.len(), 1);
+        assert_eq!(decode_character(r"\q").1.len(), 1);
+    }
+
+    #[test]
+    fn single_quotes_become_a_text_literal() {
+        for (body, text) in [
+            ("abc", r#""abc""#),
+            ("", r#""""#),
+            (r"it\'s", r#""it's""#),
+            (r#"say "hi""#, r#""say \"hi\"""#),
+            (r"a\nb", r#""a\nb""#),
+            (r"\\", r#""\\""#),
+            (r"\u{1F44D}", r#""\u{1F44D}""#),
+        ] {
+            assert_eq!(text_literal_of_character_body(body), text, "{body}");
+        }
     }
 
     #[test]

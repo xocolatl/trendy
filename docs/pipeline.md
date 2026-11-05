@@ -204,7 +204,14 @@ them, can't disagree, writing every control character and every
 bidirectional control (`BIDI_CONTROLS`) as an escape, so that nothing
 written can change a terminal or show text other than in its order, and so
 the words `parse_boolean` reads
-(`parse_boolean`), and why a text is no value of a type (`Unparsable`).
+(`parse_boolean`), and why a text is no value of a type (`Unparsable`). It
+also says what a character is, an extended grapheme cluster (`characters`), by
+the rules of UAX #29 at the version of Unicode the language pins
+(`UNICODE_VERSION`), from tables generated from Unicode's data files
+(`character_tables.rs`, by `tests/character_tables.rs`) and tested against Unicode's own tests
+(`unicode/GraphemeBreakTest.txt`). `hir::Scalar::Character` is stored as a text
+of it is, with a descriptor of its own (`KIND_CHARACTER`), which writes it in its
+own quotes; nothing else tells them apart when the program runs.
 **`trendy_numeric`**, `no_std` too, and depending only on `trendy_text`
 and `libm`, holds the exact sums
 and products that `sum` and `product` fold and run with, each rounded once

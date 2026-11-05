@@ -103,6 +103,7 @@ codes! {
     UsesForm => "P0057",
     QualifiedForm => "P0058",
     Assertion => "P0059",
+    CharacterLiteral => "P0060",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",

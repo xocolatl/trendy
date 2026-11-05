@@ -66,6 +66,11 @@ pub fn lex(source: &str) -> Lexed {
                 SyntaxKind::TextLiteral,
                 text_literal(source, start, &mut errors),
             )
+        } else if c == '\'' {
+            (
+                SyntaxKind::CharacterLiteral,
+                character_literal(source, start, &mut errors),
+            )
         } else if source[start..].starts_with(":=") {
             (SyntaxKind::ColonEq, start + 2)
         } else if let Some((kind, len)) = two_character_token(&source[start..]) {
@@ -262,6 +267,121 @@ fn text_literal(source: &str, start: usize, errors: &mut Vec<Diagnostic>) -> usi
     end
 }
 
+/// The end of the character literal starting at `start`. A `'''` is a quote without
+/// its backslash, and a literal that doesn't end on its line runs to the line's end,
+/// or to just before a `;` there, as a text literal does. What isn't one character
+/// is reported, keeping the kind, so that nothing else cascades.
+fn character_literal(source: &str, start: usize, errors: &mut Vec<Diagnostic>) -> usize {
+    if source[start..].starts_with("'''") {
+        errors.push(quote_without_backslash(Span::new(start, start + 3)));
+        return start + 3;
+    }
+    let line_end = scan_while(source, start + 1, &|c| c != '\n' && c != '\r');
+    let mut escaped = false;
+    let mut closing = None;
+    for (i, c) in source[start + 1..line_end].char_indices() {
+        if c == '\'' && !escaped {
+            closing = Some(start + 1 + i);
+            break;
+        }
+        escaped = !escaped && c == '\\';
+    }
+    let end = closing.unwrap_or_else(|| {
+        let line = source[start + 1..line_end].trim_end();
+        let before = line.strip_suffix(';').map_or(line, str::trim_end);
+        start + 1 + before.len()
+    });
+    let body = &source[start + 1..end];
+    let (value, problems) = literal::decode_character(body);
+    for problem in &problems {
+        errors.push(invalid_escape(problem, body, start + 1));
+    }
+    let one = literal::is_one_character(&value);
+    let literal_end = end + usize::from(closing.is_some());
+    let span = Span::new(start, literal_end);
+    if closing.is_none() {
+        errors.push(unterminated_character(span, body, one));
+    } else if !one && problems.is_empty() {
+        errors.push(not_one_character(span, body, &value));
+    }
+    literal_end
+}
+
+/// `'''` at `span`.
+fn quote_without_backslash(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::CharacterLiteral,
+        "a single quote in a character literal needs a backslash",
+        span,
+        "these quotes hold nothing, and start another",
+    )
+    .with_note(CHARACTER_LITERAL)
+    .with_suggestion(
+        r"write `'\''`",
+        vec![Edit {
+            span,
+            replacement: r"'\''".to_string(),
+        }],
+    )
+}
+
+/// The character literal at `span`, with the body `body`, which holds `value`: not
+/// one character, so most likely a text another language writes in single quotes.
+fn not_one_character(span: Span, body: &str, value: &str) -> Diagnostic {
+    let label = match literal::characters(value).count() {
+        0 => "no character is empty".to_string(),
+        n => format!("{n} characters"),
+    };
+    let text = literal::text_literal_of_character_body(body);
+    Diagnostic::error(
+        Code::CharacterLiteral,
+        "a character literal is one character",
+        span,
+        label,
+    )
+    .with_note(CHARACTER_LITERAL)
+    .with_suggestion(
+        format!("for text, write `{text}`"),
+        vec![Edit {
+            span,
+            replacement: text,
+        }],
+    )
+}
+
+/// The character literal at `span`, with the body `body`, which has no closing `'`:
+/// fixed by adding it, if it holds one character, and otherwise to a text literal.
+fn unterminated_character(span: Span, body: &str, one: bool) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::CharacterLiteral,
+        "unterminated character literal",
+        span,
+        "this character literal has no closing `'`",
+    )
+    .with_note("a character literal must end on the line it starts")
+    .with_note(CHARACTER_LITERAL);
+    if one {
+        return d.with_suggestion(
+            "insert `'`",
+            vec![Edit {
+                span: Span::empty(span.end),
+                replacement: "'".to_string(),
+            }],
+        );
+    }
+    let text = literal::text_literal_of_character_body(body);
+    d.with_suggestion(
+        format!("for text, write `{text}`"),
+        vec![Edit {
+            span,
+            replacement: text,
+        }],
+    )
+}
+
+/// What a character literal is.
+const CHARACTER_LITERAL: &str = r"a character literal is one character between single quotes, what a reader sees as one, as `'a'` or `'🇸🇪'`; text is written between double quotes, and a single quote in a character literal is `\'`";
+
 fn unexpected_character(c: char, span: Span) -> Diagnostic {
     // Invisible characters are unreadable between backticks, so non-ASCII
     // characters also get their code point, and control characters an escape.
@@ -286,7 +406,7 @@ fn unexpected_character(c: char, span: Span) -> Diagnostic {
         "not valid anywhere in trendy source",
     )
     .with_note(format!(
-        "identifiers use ASCII letters, digits and `_`; text is written in `\"`; punctuation is `{}`",
+        "identifiers use ASCII letters, digits and `_`; text is written in `\"`, and a character in `'`; punctuation is `{}`",
         punctuation.join(" ")
     ))
     .with_suggestion(
@@ -521,6 +641,90 @@ mod tests {
                 Semicolon
             ]
         );
+    }
+
+    /// `source` with the first fix of its first error made.
+    fn fixed(source: &str) -> String {
+        let lexed = lex(source);
+        let mut fixed = source.to_string();
+        let edits = &lexed.errors[0].suggestions[0].edits;
+        for edit in edits.iter().rev() {
+            fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+        }
+        fixed
+    }
+
+    #[test]
+    fn a_character_literal_is_one_character() {
+        for one in [
+            "'a'",
+            "'é'",
+            "'e\u{301}'",
+            "'🇸🇪'",
+            "'👨\u{200D}👩\u{200D}👧\u{200D}👦'",
+            r"'\''",
+            r"'\\'",
+            "'\"'",
+            r"'\n'",
+            r"'\r\n'",
+            r"'\u{1F44D}'",
+            r"'\u{1F1F8}\u{1F1EA}'",
+        ] {
+            let lexed = lex(one);
+            assert_eq!(lexed.errors.len(), 0, "{one}: {:#?}", lexed.errors);
+            assert_eq!(kinds(one), [CharacterLiteral], "{one}");
+        }
+        // It ends where it says, whatever follows.
+        assert_eq!(
+            kinds("'a' 'b'"),
+            [CharacterLiteral, Whitespace, CharacterLiteral]
+        );
+        assert_eq!(kinds("'a';"), [CharacterLiteral, Semicolon]);
+    }
+
+    #[test]
+    fn what_isnt_one_character_is_fixed_to_what_it_is() {
+        // Text, as other languages write it, and the quote without its backslash.
+        for (written, meant, label) in [
+            ("'abc'", r#""abc""#, "3 characters"),
+            ("''", r#""""#, "no character is empty"),
+            ("'🇸🇪🇫🇮'", r#""🇸🇪🇫🇮""#, "2 characters"),
+            (r"'it\'s'", r#""it's""#, "4 characters"),
+            (r#"'a"b'"#, r#""a\"b""#, "3 characters"),
+            (r"'a\nb'", r#""a\nb""#, "3 characters"),
+            (
+                "'''",
+                r"'\''",
+                "these quotes hold nothing, and start another",
+            ),
+        ] {
+            let lexed = lex(written);
+            assert_eq!(lexed.errors.len(), 1, "{written}: {:#?}", lexed.errors);
+            assert_eq!(lexed.errors[0].code, Code::CharacterLiteral, "{written}");
+            assert_eq!(lexed.errors[0].primary.message, label, "{written}");
+            assert_eq!(fixed(written), meant, "{written}");
+            assert_eq!(kinds(written), [CharacterLiteral], "{written}");
+            assert!(lex(&fixed(written)).errors.is_empty(), "{written}");
+        }
+        // Without its end, which goes before a `;`, as text's does.
+        for (written, meant) in [
+            ("var a := 'x;\n", "var a := 'x';\n"),
+            ("var a := 'x\n", "var a := 'x'\n"),
+            ("'", "\"\""),
+            ("var a := 'abc;\n", "var a := \"abc\";\n"),
+        ] {
+            let lexed = lex(written);
+            assert_eq!(lexed.errors.len(), 1, "{written}: {:#?}", lexed.errors);
+            assert_eq!(lexed.errors[0].code, Code::CharacterLiteral, "{written}");
+            assert_eq!(fixed(written), meant, "{written}");
+        }
+        // A bad escape is that, and only that.
+        let lexed = lex(r"'\q'");
+        assert_eq!(lexed.errors.len(), 1, "{:#?}", lexed.errors);
+        assert_eq!(lexed.errors[0].code, Code::InvalidEscape);
+        // A text's own quote needs no backslash, as a character's does.
+        assert_eq!(lex(r#""\'""#).errors[0].code, Code::InvalidEscape);
+        assert!(lex(r#""'""#).errors.is_empty());
     }
 
     #[test]

@@ -567,6 +567,10 @@ pub enum ReadOnlyBuiltin {
     ToCodePoints,
     /// The text of code points, in order.
     FromCodePoints,
+    /// The characters of a text, in order: what a reader sees as one each.
+    ToCharacters,
+    /// The text of characters, in order.
+    FromCharacters,
     /// The square root of an approximate number, correctly rounded, which
     /// a negative one hasn't.
     Sqrt,
@@ -849,6 +853,18 @@ impl LanguageError {
         }
     }
 
+    /// The error whose type the program calls `identity`, if it is one the language
+    /// makes: its name, or, if a unit of the program's declares one of that name too,
+    /// its name qualified by the unit that comes with the compiler.
+    #[must_use]
+    pub fn of_type(identity: &str) -> Option<LanguageError> {
+        let name = match identity.rsplit_once("::") {
+            Some((unit, name)) => unit.starts_with("trendy.").then_some(name)?,
+            None => identity,
+        };
+        LanguageError::ALL.into_iter().find(|e| e.name() == name)
+    }
+
     /// Its type's components.
     #[must_use]
     pub fn components(self) -> Heading {
@@ -1086,7 +1102,7 @@ impl Library {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 23] = [
+    pub const ALL: [Builtin; 25] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -1102,6 +1118,8 @@ impl Builtin {
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseBoolean),
         Builtin::ReadOnly(ReadOnlyBuiltin::ToCodePoints),
         Builtin::ReadOnly(ReadOnlyBuiltin::FromCodePoints),
+        Builtin::ReadOnly(ReadOnlyBuiltin::ToCharacters),
+        Builtin::ReadOnly(ReadOnlyBuiltin::FromCharacters),
         Builtin::ReadOnly(ReadOnlyBuiltin::Sqrt),
         Builtin::ReadOnly(ReadOnlyBuiltin::Sin),
         Builtin::ReadOnly(ReadOnlyBuiltin::Cos),
@@ -1178,6 +1196,8 @@ impl Builtin {
                 | ReadOnlyBuiltin::ParseBoolean
                 | ReadOnlyBuiltin::ToCodePoints
                 | ReadOnlyBuiltin::FromCodePoints
+                | ReadOnlyBuiltin::ToCharacters
+                | ReadOnlyBuiltin::FromCharacters
                 | ReadOnlyBuiltin::Sqrt
                 | ReadOnlyBuiltin::Sin
                 | ReadOnlyBuiltin::Cos
@@ -1227,9 +1247,14 @@ impl Builtin {
                 | ReadOnlyBuiltin::ParseApproximate
                 | ReadOnlyBuiltin::ParseBoolean,
             ) => [constant("from", Type::Scalar(Scalar::Text))].into(),
-            Builtin::ReadOnly(ReadOnlyBuiltin::ToCodePoints) => {
+            Builtin::ReadOnly(ReadOnlyBuiltin::ToCodePoints | ReadOnlyBuiltin::ToCharacters) => {
                 [constant("from", Type::Scalar(Scalar::Text))].into()
             }
+            Builtin::ReadOnly(ReadOnlyBuiltin::FromCharacters) => [constant(
+                "from",
+                Type::Array(Box::new(Type::Scalar(Scalar::Character))),
+            )]
+            .into(),
             Builtin::ReadOnly(ReadOnlyBuiltin::FromCodePoints) => {
                 [constant("from", library.code_points())].into()
             }
@@ -1334,6 +1359,8 @@ impl ReadOnlyBuiltin {
             ReadOnlyBuiltin::ParseBoolean => "parse_boolean",
             ReadOnlyBuiltin::ToCodePoints => "to_code_points",
             ReadOnlyBuiltin::FromCodePoints => "from_code_points",
+            ReadOnlyBuiltin::ToCharacters => "to_characters",
+            ReadOnlyBuiltin::FromCharacters => "from_characters",
             ReadOnlyBuiltin::Sqrt => "sqrt",
             ReadOnlyBuiltin::Sin => "sin",
             ReadOnlyBuiltin::Cos => "cos",
@@ -1355,8 +1382,11 @@ impl ReadOnlyBuiltin {
             | ReadOnlyBuiltin::Product => {
                 Type::Parameter(Builtin::ReadOnly(self).types()[0].clone())
             }
-            ReadOnlyBuiltin::ToText | ReadOnlyBuiltin::FromCodePoints => Type::Scalar(Scalar::Text),
+            ReadOnlyBuiltin::ToText
+            | ReadOnlyBuiltin::FromCodePoints
+            | ReadOnlyBuiltin::FromCharacters => Type::Scalar(Scalar::Text),
             ReadOnlyBuiltin::ToCodePoints => library.code_points(),
+            ReadOnlyBuiltin::ToCharacters => Type::Array(Box::new(Type::Scalar(Scalar::Character))),
             ReadOnlyBuiltin::ToApproximate
             | ReadOnlyBuiltin::ParseApproximate
             | ReadOnlyBuiltin::Sqrt
@@ -1458,6 +1488,28 @@ impl ReadOnlyBuiltin {
                 other => panic!("`to_code_points` of {other:?}"),
             },
             ReadOnlyBuiltin::FromCodePoints => Ok(Value::Text(Library::text_of(&args["from"]))),
+            ReadOnlyBuiltin::ToCharacters => match &args["from"] {
+                Value::Text(text) => Ok(Value::Array(ArrayValue {
+                    element: Type::Scalar(Scalar::Character),
+                    elements: trendy_text::characters(text)
+                        .map(|character| Value::Character(character.to_string()))
+                        .collect(),
+                })),
+                other => panic!("`to_characters` of {other:?}"),
+            },
+            ReadOnlyBuiltin::FromCharacters => match &args["from"] {
+                Value::Array(array) => Ok(Value::Text(
+                    array
+                        .elements
+                        .iter()
+                        .map(|element| match element {
+                            Value::Character(character) => character.as_str(),
+                            other => panic!("`from_characters` of {other:?}"),
+                        })
+                        .collect(),
+                )),
+                other => panic!("`from_characters` of {other:?}"),
+            },
             ReadOnlyBuiltin::Sqrt => {
                 let x = approximate("of");
                 trendy_numeric::sqrt(x.get())
@@ -3202,7 +3254,7 @@ impl Numeric {
         match scalar {
             Scalar::Integer => Some(Numeric::Integer),
             Scalar::Approximate => Some(Numeric::Approximate),
-            Scalar::Boolean | Scalar::Text => None,
+            Scalar::Boolean | Scalar::Text | Scalar::Character => None,
         }
     }
 }
@@ -3611,7 +3663,9 @@ pub fn compare(lhs: &Value, rhs: &Value, converted: &Converted) -> std::cmp::Ord
         (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
         (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
         (Value::Approximate(a), Value::Approximate(b)) => a.cmp(b),
-        (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
+        (Value::Text(a), Value::Text(b)) | (Value::Character(a), Value::Character(b)) => {
+            a.as_bytes().cmp(b.as_bytes())
+        }
         (Value::Defined(a), Value::Defined(b)) => {
             let order =
                 a.ty.order
@@ -4062,7 +4116,7 @@ impl Type {
     #[must_use]
     pub fn default_value(&self) -> Option<Value> {
         Some(match self {
-            Type::Scalar(scalar) => scalar.default_value(),
+            Type::Scalar(scalar) => return scalar.default_value(),
             Type::Defined(_) | Type::Dummy(_) | Type::Parameter(_) => return None,
             Type::Tuple(heading) => Value::Tuple(TupleValue(
                 heading
@@ -4429,6 +4483,10 @@ pub enum Scalar {
     Approximate,
     /// A sequence of Unicode characters, stored as UTF-8.
     Text,
+    /// One character, what a reader sees as one, of one or more code points (see
+    /// [`trendy_text::characters`]). It has no representation a program can see, and
+    /// is stored as a text of it is.
+    Character,
 }
 
 impl Scalar {
@@ -4444,11 +4502,12 @@ impl Scalar {
     }
 
     /// In alphabetical order, as messages list them.
-    pub const ALL: [Scalar; 4] = [
+    pub const ALL: [Scalar; 5] = [
         Scalar::Boolean,
         Scalar::Integer,
         Scalar::Approximate,
         Scalar::Text,
+        Scalar::Character,
     ];
 
     /// The type's name in source code.
@@ -4459,6 +4518,7 @@ impl Scalar {
             Scalar::Integer => "integer",
             Scalar::Approximate => "approximate",
             Scalar::Text => "text",
+            Scalar::Character => "character",
         }
     }
 
@@ -4468,14 +4528,17 @@ impl Scalar {
         Scalar::ALL.into_iter().find(|t| t.name() == name)
     }
 
+    /// The value a variable of the type starts with, if nothing says what. No
+    /// character is any more a start than another, and none is empty.
     #[must_use]
-    pub fn default_value(self) -> Value {
-        match self {
+    pub fn default_value(self) -> Option<Value> {
+        Some(match self {
             Scalar::Boolean => Value::Boolean(false),
             Scalar::Integer => Value::Integer(0),
             Scalar::Approximate => Value::Approximate(Approximate::new(0.0)),
             Scalar::Text => Value::Text(String::new()),
-        }
+            Scalar::Character => return None,
+        })
     }
 }
 
@@ -4657,6 +4720,8 @@ pub enum Value {
     Integer(i64),
     Approximate(Approximate),
     Text(String),
+    /// One character (see [`Scalar::Character`]), as the text of it.
+    Character(String),
     Tuple(TupleValue),
     Relation(RelationValue),
     Array(ArrayValue),
@@ -4680,6 +4745,7 @@ impl Value {
             Value::Integer(_) => scalar(Scalar::Integer),
             Value::Approximate(_) => scalar(Scalar::Approximate),
             Value::Text(_) => scalar(Scalar::Text),
+            Value::Character(_) => scalar(Scalar::Character),
             Value::Tuple(tuple) => Type::Tuple(Heading(
                 tuple
                     .attributes()
@@ -4737,6 +4803,11 @@ impl std::fmt::Display for Value {
                 f.write_char('"')?;
                 trendy_text::escape(text, f)?;
                 f.write_char('"')
+            }
+            Value::Character(character) => {
+                f.write_char('\'')?;
+                trendy_text::escape_character(character, f)?;
+                f.write_char('\'')
             }
             Value::Tuple(tuple) => write!(f, "tuple {tuple}"),
             // Its selector's invocation, as a call is written.

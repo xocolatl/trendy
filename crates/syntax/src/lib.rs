@@ -187,6 +187,8 @@ pub enum SyntaxKind {
     ApproximateLiteral,
     /// `"…"`, including an unterminated one.
     TextLiteral,
+    /// `'👍'`: one character, what a reader sees as one.
+    CharacterLiteral,
     /// A character the lexer does not recognize.
     ErrorToken,
 
@@ -478,7 +480,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 185] = [
+    pub const ALL: [SyntaxKind; 186] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -564,6 +566,7 @@ impl SyntaxKind {
         SyntaxKind::IntLiteral,
         SyntaxKind::ApproximateLiteral,
         SyntaxKind::TextLiteral,
+        SyntaxKind::CharacterLiteral,
         SyntaxKind::ErrorToken,
         SyntaxKind::Program,
         SyntaxKind::SourceFile,
@@ -879,6 +882,7 @@ impl SyntaxKind {
             SyntaxKind::IntLiteral
                 | SyntaxKind::ApproximateLiteral
                 | SyntaxKind::TextLiteral
+                | SyntaxKind::CharacterLiteral
                 | SyntaxKind::TrueKw
                 | SyntaxKind::FalseKw
         )
@@ -1084,6 +1088,7 @@ impl SyntaxKind {
             SyntaxKind::IntLiteral => "integer literal",
             SyntaxKind::ApproximateLiteral => "approximate literal",
             SyntaxKind::TextLiteral => "text literal",
+            SyntaxKind::CharacterLiteral => "character literal",
             SyntaxKind::ErrorToken => "unrecognized character",
             _ => return None,
         })

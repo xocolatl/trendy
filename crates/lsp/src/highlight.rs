@@ -70,7 +70,7 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         kind if kind.is_operator() => (Class::ExprOperator, false),
         kind if kind.is_keyword() => (Class::Keyword, false),
         SyntaxKind::IntLiteral | SyntaxKind::ApproximateLiteral => (Class::Number, false),
-        SyntaxKind::TextLiteral => (Class::Text, false),
+        SyntaxKind::TextLiteral | SyntaxKind::CharacterLiteral => (Class::Text, false),
         SyntaxKind::Ident => word(token)?,
         _ => return None,
     };
@@ -560,6 +560,19 @@ mod tests {
                 ("var", Class::Keyword, false),
                 ("r", Class::Variable, true),
                 ("1e5", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn character_literals_are_text() {
+        assert_eq!(
+            highlight("var a: character := 'b';"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("character", Class::Type, false),
+                ("'b'", Class::Text, false),
             ]
         );
     }

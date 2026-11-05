@@ -65,6 +65,8 @@ pub const KIND_DEFINED: u8 = 7;
 /// components, at the offset of the descriptor's one attribute, which has
 /// no name or type.
 pub const KIND_UNION: u8 = 8;
+/// One character, laid out as a text of it is.
+pub const KIND_CHARACTER: u8 = 9;
 
 /// [`trendy_rt_integer_failed`]'s and [`trendy_rt_approximate_failed`]'s
 /// operators: `+`.
@@ -171,7 +173,7 @@ pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
             KIND_INTEGER | KIND_APPROXIMATE => {
                 lhs.cast::<u64>().read_unaligned() == rhs.cast::<u64>().read_unaligned()
             }
-            KIND_TEXT => {
+            KIND_TEXT | KIND_CHARACTER => {
                 let (a, b) = (read_slice(lhs), read_slice(rhs));
                 a.1 == b.1
                     && core::slice::from_raw_parts(a.0, a.1)
@@ -589,7 +591,7 @@ unsafe fn each_buffer(value: *const u8, desc: &TypeDesc, f: &mut impl FnMut(*mut
     // SAFETY: guaranteed by the caller.
     unsafe {
         match desc.kind {
-            KIND_TEXT | KIND_RELATION | KIND_ARRAY => {
+            KIND_TEXT | KIND_CHARACTER | KIND_RELATION | KIND_ARRAY => {
                 let (buffer, _) = read_slice(value);
                 if !buffer.is_null() {
                     f(buffer.cast_mut());
@@ -3642,7 +3644,7 @@ unsafe fn order_otherwise(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> co
                 .cast::<f64>()
                 .read_unaligned()
                 .total_cmp(&rhs.cast::<f64>().read_unaligned()),
-            KIND_TEXT => {
+            KIND_TEXT | KIND_CHARACTER => {
                 let (a, b) = (read_slice(lhs), read_slice(rhs));
                 core::slice::from_raw_parts(a.0, a.1).cmp(core::slice::from_raw_parts(b.0, b.1))
             }
@@ -5405,6 +5407,80 @@ pub unsafe extern "C" fn trendy_rt_to_code_points(
     })
 }
 
+/// Store at `dst` the array of the characters of the text `from`, in order, of the type
+/// `desc` describes, in memory the statement owns, as `to_characters` gives them, and
+/// the compiler with it. Fails if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `from` must point to a valid text value, `desc` to a valid descriptor of that array
+/// type, and `dst` to memory for an array. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_to_characters(
+    dst: *mut Text,
+    from: *const Text,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller; each element has room for a text value.
+    status(|| unsafe {
+        let text = read_text(from.cast());
+        let desc = &*desc;
+        let element = desc.element();
+        let count = trendy_text::characters(text).count();
+        let Some(size) = count.checked_mul(element.size) else {
+            return Err(out_of_memory());
+        };
+        let characters = allocate_buffer(size, desc)?;
+        for (i, character) in trendy_text::characters(text).enumerate() {
+            let value = scope_text(character)?;
+            copy_element(
+                characters,
+                characters.add(i * element.size),
+                (&raw const value).cast(),
+                element,
+            );
+        }
+        dst.write_unaligned(Text {
+            bytes: characters,
+            len: count,
+        });
+        Ok(())
+    })
+}
+
+/// Store at `dst` the text of the characters of the array `from`, in order, in memory
+/// the statement owns, as `from_characters` gives it, and the compiler with it. Fails
+/// if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `from` must point to a valid array of characters, and `dst` to memory for a text
+/// value. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_from_characters(dst: *mut Text, from: *const Text) -> bool {
+    // SAFETY: guaranteed by the caller; an array of characters is an array of what a
+    // text value is laid out as.
+    status(|| unsafe {
+        let array = from.read_unaligned();
+        let character = |i: usize| read_slice(array.bytes.add(i * size_of::<Text>()));
+        let mut len = 0usize;
+        for i in 0..array.len {
+            len = len.checked_add(character(i).1).ok_or_else(out_of_memory)?;
+        }
+        let bytes = allocate_buffer(len, core::ptr::null())?;
+        let mut at = 0;
+        for i in 0..array.len {
+            let (written, written_len) = character(i);
+            core::ptr::copy_nonoverlapping(written, bytes.add(at), written_len);
+            at += written_len;
+        }
+        dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
 /// Store at `dst` the text of the code points of the array `from`, in
 /// order, of the type `desc` describes, whose elements are a code point's
 /// stored components, as [`trendy_rt_to_code_points`] makes them, in memory
@@ -6397,9 +6473,9 @@ fn try_file_text(bytes: &[u8]) -> Result<&str, usize> {
 /// owns, and at `lines` the line each record starts on, an array of
 /// `usize`s, in memory the statement owns too. Each attribute of the
 /// tuples is the field in the column that `columns` gives it, counting
-/// from 1: text as it is, and an integer, an approximate number or a
-/// boolean as `parse_integer`, `parse_approximate` and `parse_boolean`
-/// read one. A value of a type of the program's own is read as its
+/// from 1: text as it is, and an integer, an approximate number, a boolean
+/// or a character as `parse_integer`, `parse_approximate`, `parse_boolean`
+/// and `parse_character` read one. A value of a type of the program's own is read as its
 /// components, and a tuple, of the components of another possible
 /// representation of one, as its attributes, whose columns `columns` gives
 /// as a tuple of them; the caller converts those, and checks the type's
@@ -6880,7 +6956,8 @@ unsafe fn field_error(
         KIND_INTEGER => "integer",
         KIND_APPROXIMATE => "approximate",
         KIND_BOOLEAN => "boolean",
-        kind => unreachable!("only a number or a boolean can't be read: {kind}"),
+        KIND_CHARACTER => "character",
+        kind => unreachable!("only a number, a boolean or a character can't be read: {kind}"),
     };
     let (path, attribute, ty, text) = (
         scope_text(place.path)?,
@@ -7242,8 +7319,8 @@ unsafe fn field_value(field: csv::Field<'_>) -> Fallible<&str> {
 }
 
 /// Read the CSV file's field `field` into `dst`, as a value of the type
-/// `desc` describes: text, an integer, an approximate number or a boolean;
-/// or why it isn't one. Fails if the memory for a text can't be allocated.
+/// `desc` describes: text, an integer, an approximate number, a boolean or a
+/// character; or why it isn't one. Fails if the memory for a text can't be allocated.
 ///
 /// # Safety
 ///
@@ -7269,6 +7346,11 @@ unsafe fn try_read_field(
             KIND_APPROXIMATE => trendy_numeric::parse_approximate(value)
                 .map(|x| dst.cast::<f64>().write_unaligned(x)),
             KIND_BOOLEAN => trendy_text::parse_boolean(value).map(|b| dst.write(u8::from(b))),
+            KIND_CHARACTER if trendy_text::is_one_character(value) => {
+                dst.cast::<Text>().write_unaligned(scope_text(value)?);
+                Ok(())
+            }
+            KIND_CHARACTER => Err(trendy_text::Unparsable::Malformed),
             kind => unreachable!("`load_csv` reads no values of kind {kind}"),
         })
     }
@@ -7430,6 +7512,11 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
                 out.write_char('"')?;
                 trendy_text::escape(text, out)?;
                 out.write_char('"')
+            }
+            KIND_CHARACTER => {
+                out.write_char('\'')?;
+                trendy_text::escape_character(read_text(value), out)?;
+                out.write_char('\'')
             }
             KIND_TUPLE => {
                 out.write_str("tuple ")?;
@@ -7645,7 +7732,7 @@ unsafe fn write_cell(out: &mut impl Write, tuple: *const u8, attr: Option<&Attr>
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (value, desc) = (tuple.add(attr.offset), &*attr.desc);
-        if desc.kind == KIND_TEXT {
+        if matches!(desc.kind, KIND_TEXT | KIND_CHARACTER) {
             trendy_text::escape_bare(read_text(value), out)
         } else {
             write_value(out, value, desc)
@@ -7676,6 +7763,7 @@ unsafe fn write_type(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
         KIND_INTEGER => out.write_str("integer"),
         KIND_APPROXIMATE => out.write_str("approximate"),
         KIND_TEXT => out.write_str("text"),
+        KIND_CHARACTER => out.write_str("character"),
         // SAFETY: guaranteed by the caller.
         KIND_DEFINED | KIND_UNION => out.write_str(unsafe { type_name(desc) }),
         KIND_TUPLE => {
@@ -8003,7 +8091,7 @@ mod tests {
     fn scalar(kind: u8, size: usize) -> TypeDesc {
         TypeDesc {
             kind,
-            points: kind == KIND_TEXT,
+            points: matches!(kind, KIND_TEXT | KIND_CHARACTER),
             integers: 0,
             size,
             attributes: core::ptr::null(),
@@ -8058,6 +8146,19 @@ mod tests {
     }
 
     /// A relation whose tuples are `tuple`s.
+    #[test]
+    fn a_character_is_written_in_its_own_quotes() {
+        let written = |character: &str| {
+            let value = [character.as_ptr() as usize, character.len()];
+            print(value.as_ptr().cast(), &scalar(KIND_CHARACTER, 16))
+        };
+        assert_eq!(written("a"), "'a'");
+        assert_eq!(written("🇸🇪"), "'🇸🇪'");
+        assert_eq!(written("'"), r"'\''");
+        assert_eq!(written("\""), "'\"'");
+        assert_eq!(written("\r\n"), r"'\r\n'");
+    }
+
     fn relation_of(tuple: &TypeDesc) -> TypeDesc {
         TypeDesc {
             kind: KIND_RELATION,
