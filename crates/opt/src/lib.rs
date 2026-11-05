@@ -2,7 +2,8 @@
 //! less to run.
 //!
 //! Sema computes, when compiling, whatever it can, and leaves the rest for
-//! the program to compute when it runs, which is what this rewrites. A
+//! the program to compute when it runs, operators and constants, which is
+//! what this rewrites. A
 //! rewrite never changes what a program means, which includes the failures
 //! it can have: every operand is still computed, and an operand that can
 //! fail only where it would be (see `language.md`'s "Evaluation").
@@ -20,9 +21,29 @@ pub fn optimized(program: hir::Program) -> hir::Program {
         .iter()
         .map(|operator| optimized_operator(&program, operator))
         .collect();
+    let constants = program
+        .constants
+        .iter()
+        .map(|constant| optimized_constant(&program, constant))
+        .collect();
     hir::Program {
         operators,
+        constants,
         ..program
+    }
+}
+
+/// `constant`, of `program`, optimized: a value with no parameters, which the
+/// program computes if the compiler can't.
+fn optimized_constant(program: &hir::Program, constant: &hir::Constant) -> hir::Constant {
+    let optimizer = Optimizer {
+        program,
+        params: &BTreeMap::new(),
+        locals: &constant.locals,
+    };
+    hir::Constant {
+        value: optimizer.expr(constant.value.clone()),
+        ..constant.clone()
     }
 }
 
@@ -314,12 +335,8 @@ fn at_hand(expr: hir::Expr, depth: usize, heading: &hir::Heading) -> hir::Expr {
 mod tests {
     use super::*;
 
-    /// The relation `call debug_table{r: …};`, the only statement of the
-    /// update operator `f` in `source`, writes, once optimized, in
-    /// shorthand: each restriction's condition in trendy, and the rest as
-    /// its ANDs, of parameters. Each restriction's tuple at hand must have
-    /// the heading of what it restricts.
-    fn planned(source: &str) -> String {
+    /// The valid program `source`, optimized.
+    fn program(source: &str) -> hir::Program {
         let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
         assert!(parse.errors.is_empty(), "{:?}", parse.errors);
         let unit = trendy_sema::File {
@@ -337,7 +354,16 @@ mod tests {
             })
             .collect();
         let program = trendy_sema::analyze(&[unit], &library).expect("the program is valid");
-        let program = optimized(program);
+        optimized(program)
+    }
+
+    /// The relation `call debug_table{r: …};`, the only statement of the
+    /// update operator `f` in `source`, writes, once optimized, in
+    /// shorthand: each restriction's condition in trendy, and the rest as
+    /// its ANDs, of parameters. Each restriction's tuple at hand must have
+    /// the heading of what it restricts.
+    fn planned(source: &str) -> String {
+        let program = program(source);
         let operator = program
             .operators
             .iter()
@@ -357,9 +383,28 @@ mod tests {
         shorthand(&optimizer, &call.args["r"])
     }
 
+    /// The value of the constant `name` in `source`, once optimized, as
+    /// [`planned`] writes it.
+    fn planned_constant(source: &str, name: &str) -> String {
+        let program = program(source);
+        let constant = program
+            .constants
+            .iter()
+            .find(|constant| constant.name == name)
+            .expect("the constant is declared");
+        let optimizer = Optimizer {
+            program: &program,
+            params: &BTreeMap::new(),
+            locals: &constant.locals,
+        };
+        shorthand(&optimizer, &constant.value)
+    }
+
     fn shorthand(optimizer: &Optimizer, expr: &hir::Expr) -> String {
         match expr {
             hir::Expr::Parameter(name) => name.clone(),
+            hir::Expr::ComputedConstant(id, _) => optimizer.program.constants[id.0].name.clone(),
+            hir::Expr::At(_, inner) => shorthand(optimizer, inner),
             hir::Expr::And(lhs, rhs) => format!(
                 "({} and {})",
                 shorthand(optimizer, lhs),
@@ -457,6 +502,18 @@ mod tests {
         assert_eq!(
             planned(&f("times{b, a, c} where p")),
             "(((b where p) and a) and c)"
+        );
+    }
+
+    #[test]
+    fn a_constants_value_is_planned_as_an_operators_is() {
+        let source = "const a := series{from: 1, to: 3} rename {value as x};\n\
+             const b := series{from: 1, to: 3} rename {value as y};\n\
+             const few := times{a, b} where x = 1 and y = 2;\n\
+             operator main{} [ call debug_table{r: few}; ];";
+        assert_eq!(
+            planned_constant(source, "few"),
+            "((a where x = 1) and (b where y = 2))"
         );
     }
 

@@ -9,9 +9,9 @@ var parsed := parse_approximate{from: "2.5"};
 /* π, the approximate number nearest it, and square roots and
    trigonometry, of angles in radians: computed the same way on every
    machine, so folded as they run. */
-var circumference := 2e0 * pi{} * 1.5e0;
+var circumference := 2e0 * pi * 1.5e0;
 var hypotenuse := sqrt{of: 3e0 * 3e0 + 4e0 * 4e0};
-var half_turn := cos{of: pi{}};
+var half_turn := cos{of: pi};
 var upward := atan2{y: 1e0, x: 0e0};
 
 operator arithmetic{a: approximate, b: approximate} [
@@ -64,6 +64,6 @@ operator main{} [
     call parse{t: "1.5E-3"};
     call parse{t: "-0e0"};
     call trigonometry{a: 3e0, b: 4e0};
-    call trigonometry{a: pi{} / 6e0, b: -1e0};
+    call trigonometry{a: pi / 6e0, b: -1e0};
     call trigonometry{a: -1e0, b: 0e0};
 ];

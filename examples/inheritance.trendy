@@ -20,7 +20,7 @@ type distance {
 };
 type angle {
     { rho: approximate },
-    constraint rho >= 0e0 and rho < 2e0 * pi{},
+    constraint rho >= 0e0 and rho < 2e0 * pi,
     order [asc rho],
 };
 
@@ -56,8 +56,8 @@ type point {
    is the full turn itself, which is the angle 0. */
 operator direction{y: approximate, x: approximate}: angle [
     var rho := atan2{y: y, x: x};
-    var turned := if rho < 0e0 then rho + 2e0 * pi{} else rho;
-    angle{rho: if turned < 2e0 * pi{} then turned else 0e0}
+    var turned := if rho < 0e0 then rho + 2e0 * pi else rho;
+    angle{rho: if turned < 2e0 * pi then turned else 0e0}
 ];
 
 /* The distance between two points (TTM's DIST). */
@@ -121,7 +121,7 @@ var reflected := reflect{p: pt};
    axis. */
 var polar := tuple { r: reflected.r, theta: reflected.theta };
 var apart := dist{p1: pt, p2: reflected};
-var north := point{r: distance{m: 3e0}, theta: angle{rho: pi{} / 2e0}};
+var north := point{r: distance{m: 3e0}, theta: angle{rho: pi / 2e0}};
 var origin := point{r: distance{m: 0e0}, theta: angle{rho: 1e0}};
 
 /* `THE_R ( P ) := …`: a component of the polar representation changed,
@@ -142,7 +142,7 @@ var turned := [
     var q := pt;
     assign {
         update q { r := distance{m: 2e0 * r.m} };
-        update q { theta := angle{rho: theta.rho + pi{} / 2e0} };
+        update q { theta := angle{rho: theta.rho + pi / 2e0} };
     };
     q
 ];
@@ -237,7 +237,7 @@ operator kind{figure: polygon}: text [
 operator area{figure: plane_figure}: approximate;
 
 operator area{figure: ellipse}: approximate [
-    pi{} * figure.a.m * figure.b.m
+    pi * figure.a.m * figure.b.m
 ];
 
 operator area{figure: polygon}: approximate [
@@ -280,7 +280,7 @@ operator geometry{p: point, shape: polygon} [
     call debug_value{v: opposite};
     call debug_value{v: tuple { r: opposite.r, theta: opposite.theta }};
     call debug_value{v: dist{p1: p, p2: opposite}};
-    call debug_value{v: point{r: distance{m: 3e0}, theta: angle{rho: pi{} / 2e0}}};
+    call debug_value{v: point{r: distance{m: 3e0}, theta: angle{rho: pi / 2e0}}};
     call debug_value{v: point{r: distance{m: 0e0}, theta: angle{rho: 1e0}}};
     var doubled := p;
     update doubled { r := distance{m: 2e0 * r.m} };
@@ -288,7 +288,7 @@ operator geometry{p: point, shape: polygon} [
     var round := p;
     assign {
         update round { r := distance{m: 2e0 * r.m} };
-        update round { theta := angle{rho: theta.rho + pi{} / 2e0} };
+        update round { theta := angle{rho: theta.rho + pi / 2e0} };
     };
     call debug_value{v: round};
     var q := p;

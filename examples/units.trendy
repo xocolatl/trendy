@@ -1,9 +1,9 @@
 /* A program of two units: this file, its main, and `lakes.depths`, the
    file `lakes/depths.trendy` beside it, named by its path from here. A
    `uses` brings what that unit's interface declares, its type, its
-   heading and its operators, each by its name; what its implementation
-   keeps, such as the variable the lakes are recorded in, no other unit
-   sees. */
+   constant, its heading and its operators, each by its name; what its
+   implementation keeps, such as the variable the lakes are recorded in,
+   no other unit sees. */
 uses { lakes.depths };
 
 /* This unit's own `lake`, which hides the one `lakes.depths` declares,
@@ -25,7 +25,7 @@ operator main{} [
     call recorded{out lakes: lakes};
     call debug_value{v: count{r: lakes}};
     call debug_value{v: deepest{lakes: lakes}};
-    var marked := lakes extend { shallow := depth < metres{cm: 50000} };
+    var marked := lakes extend { shallow := depth < lakes.depths::shallow_limit };
     var shallow: relation lake := marked{name, shallow};
     call debug_value{v: shallow where shallow};
 ];

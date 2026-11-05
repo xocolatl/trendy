@@ -472,11 +472,14 @@ fn mentioned(item: &Item) -> Vec<(String, Span)> {
             .into_iter()
             .chain(op.result().map(|r| r.syntax().clone()))
             .collect(),
-        Item::Relvar(decl) if ast::section_of(decl.syntax()) == Section::Interface => decl
-            .type_expr()
-            .map(|t| t.syntax().clone())
-            .into_iter()
-            .collect(),
+        Item::Relvar(decl) | Item::Constant(decl)
+            if ast::section_of(decl.syntax()) == Section::Interface =>
+        {
+            decl.type_expr()
+                .map(|t| t.syntax().clone())
+                .into_iter()
+                .collect()
+        }
         Item::Heading(decl) if ast::section_of(decl.syntax()) == Section::Interface => decl
             .heading()
             .map(|h| h.syntax().clone())

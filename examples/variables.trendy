@@ -160,4 +160,15 @@ operator main{} [
        so: `delete poets where true;` is an error. */
     poets := relation {};
     call debug_table{r: poets};
+
+    /* A constant is a name for a value that never changes, as Rust's `let`
+       is, and `var` its `let mut`. It is computed where it is declared, here
+       each time the loop comes round. */
+    const nights := 3;
+    var night := 0;
+    while night < nights loop [
+        const left := nights - night;
+        call debug_value{v: left};
+        night := night + 1;
+    ];
 ];

@@ -274,7 +274,9 @@ fn change(
 ) -> Option<(Assignee, Change)> {
     let written = clause.target()?;
     let Some((name, positions)) = target_path(&written) else {
-        if let Some(error) = attribute_assigned(clause, &written, names, errors) {
+        if let Some(qualified) = qualified_target(&written) {
+            errors.push(errors::assigned_qualified(&qualified));
+        } else if let Some(error) = attribute_assigned(clause, &written, names, errors) {
             errors.push(error);
         }
         return None;
@@ -340,6 +342,16 @@ pub(crate) fn target_path(written: &ast::Expr) -> Option<(ast::NameRef, Vec<ast:
             }
             _ => return None,
         }
+    }
+}
+
+/// The qualified name `written`, an assignment's target, or the array whose
+/// element it is, is, if it is one.
+fn qualified_target(written: &ast::Expr) -> Option<ast::QualifiedName> {
+    match written {
+        ast::Expr::Qualified(qualified) => Some(qualified.clone()),
+        ast::Expr::Index(index) => qualified_target(&index.operand()?),
+        _ => None,
     }
 }
 

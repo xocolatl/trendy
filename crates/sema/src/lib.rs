@@ -291,6 +291,10 @@ impl Files {
         self.each().flat_map(|(_, file)| file.variables())
     }
 
+    pub(crate) fn constants(&self) -> impl Iterator<Item = VarDecl> {
+        self.each().flat_map(|(_, file)| file.constants())
+    }
+
     pub(crate) fn constraints(&self) -> impl Iterator<Item = ast::ConstraintDecl> {
         self.each().flat_map(|(_, file)| file.constraints())
     }
@@ -384,6 +388,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
         values: &evaluated.values,
         recursive: &evaluated.recursive,
         variables: &evaluated.variables,
+        constants: &evaluated.constants,
         declared: &declared,
     };
     let constraints = constraints::check(files, &context, errors);
@@ -401,7 +406,9 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
             bodies.insert(signature.id, statements);
         }
     }
-    body::deferred_checks(&deferred, &bodies, &evaluated, &operators, errors);
+    body::deferred_checks(
+        &deferred, &bodies, &evaluated, &operators, &declared, errors,
+    );
     Checked {
         namespaces,
         operators,
@@ -464,10 +471,17 @@ impl Checked {
             .into_iter()
             .map(|v| v.expect("a program without errors has every variable"))
             .collect();
+        let constants = self
+            .evaluated
+            .constants
+            .into_iter()
+            .map(|c| c.expect("a program without errors has every constant"))
+            .collect();
         let library = self.namespaces.library().clone();
         hir::Program {
             operators,
             variables,
+            constants,
             files: files.paths.clone(),
             constraints: self.constraints,
             subtypes: self.namespaces.subtypes,
@@ -530,6 +544,8 @@ pub(crate) enum Kind {
     Operator,
     Builtin,
     Variable,
+    /// A constant, which shares the variables' namespace.
+    Constant,
     /// A database, which is a variable.
     Database,
     /// A database's relvar.
@@ -550,6 +566,7 @@ impl Kind {
             Kind::Operator => "an operator",
             Kind::Builtin => "a built-in operator",
             Kind::Variable => "a variable",
+            Kind::Constant => "a constant",
             Kind::Database => "a database",
             Kind::Relvar => "a database's relvar",
             Kind::Constraint => "a constraint",
@@ -583,6 +600,9 @@ pub(crate) struct Namespaces {
     operators: scope::Declared<OperatorName>,
     /// Where each variable is declared.
     variables: scope::Declared<Span>,
+    /// Where each constant is declared, first: it shares the variables'
+    /// namespace.
+    constants: scope::Declared<Span>,
     /// Where each constraint is declared: no name refers to one, so they
     /// have a namespace of their own.
     constraints: scope::Declared<Span>,
@@ -663,6 +683,7 @@ impl Namespaces {
             parts,
             operators: scope::Declared::default(),
             variables: scope::Declared::default(),
+            constants: scope::Declared::default(),
             constraints: scope::Declared::default(),
             databases: scope::Declared::default(),
             headings: scope::Declared::default(),
@@ -822,6 +843,7 @@ impl Namespaces {
         };
         match namespace {
             Namespace::Value => of(&self.variables, Kind::Variable)
+                .merged(of(&self.constants, Kind::Constant))
                 .merged(of(&self.databases, Kind::Database))
                 .resolved(),
             Namespace::Type => of(&self.types, Kind::Defined)
@@ -1058,13 +1080,40 @@ impl Namespaces {
             .map(|(_, span)| span)
     }
 
-    /// What a variable or a database named `name`, declared in `unit`, is
-    /// called in the program: they share a namespace.
+    /// Where the constant named `name` that what is written at `at` sees is
+    /// declared.
+    pub(crate) fn constant(&self, name: &str, at: Span) -> Option<Span> {
+        self.seen_as(name, at, Namespace::Value, Kind::Constant)
+            .map(|(_, span)| span)
+    }
+
+    /// Whether `unit` declares a constant named `name` that what is written
+    /// at `at` sees.
+    pub(crate) fn has_constant_in(&self, name: &str, unit: hir::FileId, at: Span) -> bool {
+        self.constants
+            .seen_in(name, unit, self.viewer(at), &self.units)
+            .is_some()
+    }
+
+    /// The names of the constants the unit `unit` declares that what is
+    /// written at `at` sees, qualifying them by that unit.
+    pub(crate) fn constant_names_in(&self, unit: hir::FileId, at: Span) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .constants
+            .names_in(unit, self.viewer(at), &self.units)
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// What a variable, a constant or a database named `name`, declared in
+    /// `unit`, is called in the program: they share a namespace.
     pub(crate) fn value_identity(&self, name: &str, unit: hir::FileId) -> String {
         let declaring = self
             .variables
             .declaring(name)
             .map(|(u, _)| u)
+            .chain(self.constants.declaring(name).map(|(u, _)| u))
             .chain(self.databases.declaring(name).map(|(u, _)| u));
         let ambiguous = scope::ambiguous(declaring);
         self.units.identity(name, unit, ambiguous)
@@ -1300,6 +1349,12 @@ impl Namespaces {
         self.is_first_in(&self.variables, ident)
     }
 
+    /// Whether `ident` is its constant name's first declaration in its unit,
+    /// not a duplicate, or the implementation's part of one.
+    pub(crate) fn is_first_constant(&self, ident: &SyntaxToken) -> bool {
+        self.is_first_in(&self.constants, ident)
+    }
+
     /// The first declaration in `unit` of `name` in the namespace a
     /// declaration of `kind`'s is in, or else the built-in type of that
     /// name, whose duplicate a declaration of `unit`'s of that name is:
@@ -1309,8 +1364,11 @@ impl Namespaces {
             table.each_in(name, unit).next().map(|&span| (kind, span))
         };
         match kind {
-            Kind::Variable | Kind::Database => here(&self.variables, Kind::Variable)
-                .or_else(|| here(&self.databases, Kind::Database)),
+            Kind::Variable | Kind::Constant | Kind::Database => {
+                here(&self.variables, Kind::Variable)
+                    .or_else(|| here(&self.constants, Kind::Constant))
+                    .or_else(|| here(&self.databases, Kind::Database))
+            }
             Kind::Constraint => here(&self.constraints, Kind::Constraint),
             _ => here(&self.headings, Kind::Heading)
                 .or_else(|| here(&self.types, Kind::Defined))
@@ -1357,6 +1415,7 @@ fn collect_names(
     errors: &mut Vec<Diagnostic>,
 ) -> Namespaces {
     let mut namespaces = Namespaces::with_kinds(files.names.clone(), files.parts.clone(), kinds);
+    let mut constants: HashMap<(hir::FileId, String), VarDecl> = HashMap::new();
     for (source, item) in files.items() {
         let prelude = source == Source::Prelude;
         let (kind, name, params) = match item {
@@ -1366,6 +1425,7 @@ fn collect_names(
             }
             Item::BuiltinType(ref decl) if prelude => (Kind::Type, decl.name(), None),
             Item::Variable(ref decl) => (Kind::Variable, decl.name(), None),
+            Item::Constant(ref decl) => (Kind::Constant, decl.name(), None),
             Item::Database(ref decl) => (Kind::Database, decl.name(), None),
             Item::Constraint(ref decl) if decl.part_of().is_none() => {
                 (Kind::Constraint, decl.name(), None)
@@ -1389,6 +1449,19 @@ fn collect_names(
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         let unit = namespaces.unit_at(span);
         let section = ast::section_of(item.syntax());
+        // The implementation's value of what its interface declares, which is
+        // its other part.
+        if let Item::Constant(decl) = &item {
+            let first = (unit, name.to_string());
+            if let Some(first) = constants.get(&first)
+                && completes_constant(first, decl)
+            {
+                continue;
+            }
+            constants
+                .entry((unit, name.to_string()))
+                .or_insert_with(|| decl.clone());
+        }
         if let Some(params) = params {
             let params = param_names(params.as_ref());
             let first = namespaces
@@ -1426,6 +1499,7 @@ fn collect_names(
         }
         match kind {
             Kind::Variable => namespaces.variables.insert(name, unit, section, span),
+            Kind::Constant => namespaces.constants.insert(name, unit, section, span),
             Kind::Database => namespaces.databases.insert(name, unit, section, span),
             Kind::Constraint => namespaces.constraints.insert(name, unit, section, span),
             Kind::Defined => namespaces.types.insert(name, unit, section, span),
@@ -1511,7 +1585,17 @@ fn variables(files: &Files, namespaces: &Namespaces) -> scope::Variables {
             .and_then(|n| n.ident())
             .is_some_and(|ident| namespaces.is_first_variable(&ident))
     });
-    scope::Variables::new(first, namespaces)
+    scope::Variables::new(first, files.constants(), namespaces)
+}
+
+/// Whether `decl` gives the value of the constant `first` declares without one,
+/// in its unit's interface: the rest of it, in the implementation, so that the
+/// interface doesn't say how it is computed.
+pub(crate) fn completes_constant(first: &VarDecl, decl: &VarDecl) -> bool {
+    first.initializer().is_none()
+        && ast::section_of(first.syntax()) == ast::Section::Interface
+        && decl.initializer().is_some()
+        && ast::section_of(decl.syntax()) == ast::Section::Implementation
 }
 
 #[cfg(test)]
@@ -1845,10 +1929,10 @@ mod tests {
     fn a_variable_is_passed_only_to_its_reader() {
         // A read-only operator reading a variable gets it as a parameter,
         // which only the calls choosing it give it.
-        let source = "var rate := 2;\noperator scaled{n: integer}: integer [ n * rate ];\noperator scaled{n: integer, by: integer}: integer [ n * by ];\noperator main{} [\n    call debug_value{v: scaled{n: 1}};\n    call debug_value{v: scaled{n: 1, by: 3}};\n];";
+        let source = "var rate := 2;\noperator set{} [ rate := 3; ];\noperator scaled{n: integer}: integer [ n * rate ];\noperator scaled{n: integer, by: integer}: integer [ n * by ];\noperator main{} [\n    call debug_value{v: scaled{n: 1}};\n    call debug_value{v: scaled{n: 1, by: 3}};\n];";
         assert_eq!(
             fix(source),
-            "var rate := 2;\noperator scaled{n: integer, rate: integer}: integer [ n * rate ];\noperator scaled{n: integer, by: integer}: integer [ n * by ];\noperator main{} [\n    call debug_value{v: scaled{n: 1, rate: rate}};\n    call debug_value{v: scaled{n: 1, by: 3}};\n];"
+            "var rate := 2;\noperator set{} [ rate := 3; ];\noperator scaled{n: integer, rate: integer}: integer [ n * rate ];\noperator scaled{n: integer, by: integer}: integer [ n * by ];\noperator main{} [\n    call debug_value{v: scaled{n: 1, rate: rate}};\n    call debug_value{v: scaled{n: 1, by: 3}};\n];"
         );
     }
 
@@ -2052,6 +2136,7 @@ mod tests {
              operator taxed{price: integer}: integer [ price + price * vat div 100 + vat ];\n\
              operator dearest{}: integer [ max{r: dishes, of: taxed{price: price}} ];\n\
              var folded := taxed{price: 100};\n\
+             operator bump{} [ vat := 17; dishes := relation {}; ];\n\
              operator main{} [ call debug_value{v: taxed{price: 100}}; ];";
         let found = errors(source);
         assert_eq!(
@@ -2068,6 +2153,7 @@ mod tests {
              operator taxed{price: integer, vat: integer}: integer [ price + price * vat div 100 + vat ];\n\
              operator dearest{dishes: relation { price: integer }}: integer [ max{r: dishes, of: taxed{price: price, vat: vat}} ];\n\
              var folded := taxed{price: 100, vat: vat};\n\
+             operator bump{} [ vat := 17; dishes := relation {}; ];\n\
              operator main{} [ call debug_value{v: taxed{price: 100, vat: vat}}; ];"
         );
         let twice = fix(&once);
@@ -5027,14 +5113,14 @@ operator main{{}} [ var lines: array text; {main} ];"
     #[test]
     fn square_roots_and_trigonometry_when_compiling() {
         let r = |x| hir::Value::Approximate(hir::Approximate::new(x));
-        assert_eq!(init("var a := pi{};", "a"), r(std::f64::consts::PI));
+        assert_eq!(init("var a := pi;", "a"), r(std::f64::consts::PI));
         assert_eq!(
             init("var a := sqrt{of: 3e0 * 3e0 + 4e0 * 4e0};", "a"),
             r(5.0)
         );
         assert_eq!(init("var a := sqrt{of: -0e0};", "a"), r(0.0));
-        assert_eq!(init("var a := cos{of: pi{}};", "a"), r(-1.0));
-        assert_eq!(init("var a := sin{of: pi{} / 2e0};", "a"), r(1.0));
+        assert_eq!(init("var a := cos{of: pi};", "a"), r(-1.0));
+        assert_eq!(init("var a := sin{of: pi / 2e0};", "a"), r(1.0));
         assert_eq!(
             init("var a := atan2{y: 1e0, x: -1e0};", "a"),
             r(3.0 * std::f64::consts::FRAC_PI_4)
@@ -5055,16 +5141,25 @@ operator main{{}} [ var lines: array text; {main} ];"
 
     #[test]
     fn constants_are_called() {
-        // As a value, with the braces of its call, and as other languages
-        // write it: in another case, as C does, and with its library.
-        for written in ["pi", "PI", "Pi", "M_PI", "math.pi", "Math.PI", "math.Pi"] {
+        // With the braces of a call, and as other languages write it: in
+        // another case, as C does, and with its library.
+        for written in [
+            "pi{}", "PI", "Pi", "M_PI", "math.pi", "Math.PI", "math.Pi", "math::pi", "Math::PI",
+        ] {
             let source = format!("var a := 2e0 * {written};{MAIN}");
             let errors = errors(&source);
             assert_eq!(errors.len(), 1, "{errors:#?}");
             let fixed = fix(&source);
-            assert_eq!(fixed, format!("var a := 2e0 * pi{{}};{MAIN}"), "{written}");
+            assert_eq!(fixed, format!("var a := 2e0 * pi;{MAIN}"), "{written}");
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         }
+        // With its unit's name, the same.
+        let source = format!("var a := 2e0 * trendy.prelude::pi{{}};{MAIN}");
+        assert_eq!(
+            fix(&source),
+            format!("var a := 2e0 * trendy.prelude::pi;{MAIN}")
+        );
+        assert!(analyze_str(&format!("var a := 2e0 * trendy.prelude::pi;{MAIN}")).is_ok());
         // Not an operator with parameters, whose arguments the fix can't
         // know, nor a library's other members.
         for written in ["sqrt", "SQRT", "math.sqrt", "math.e"] {
@@ -10611,7 +10706,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
     fn a_read_only_operators_statements_touch_nothing_else() {
         let in_loop = |statement: &str| {
             format!(
-                "var total := 0;\noperator f{{n: integer}}: integer [ var i := n; while i > 0 loop [ {statement} i := i - 1; ]; i ];{MAIN}"
+                "var total := 0;\noperator set{{}} [ total := 1; ];\noperator f{{n: integer}}: integer [ var i := n; while i > 0 loop [ {statement} i := i - 1; ]; i ];{MAIN}"
             )
         };
         // The program's variables, read, with the fix that passes it in.
@@ -10649,6 +10744,420 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             "operator f{{n: integer}}: integer [ var t := \"a\"; if n > 0 then [ t := \"b\"; ]; t ];{MAIN}"
         );
         assert_eq!(codes(&source), [Code::TypeMismatch]);
+    }
+
+    #[test]
+    fn a_constant_of_the_programs_is_known_when_it_can_be() {
+        // As if its value were written: a variable's initial value can read it,
+        // in any order, and so can a read-only operator's and a constraint.
+        let program = analyze_str(
+            "var a := b + 1;\nconst b := c * 2;\nconst c: integer := 3;\noperator f{}: integer [ b ];\nvar d := f{};\ntype t { { n: integer }, constraint n < b };\nvar e := t{n: 5};\noperator main{} [];",
+        )
+        .unwrap();
+        let init = |i: usize| program.variables[i].init.clone();
+        assert_eq!(init(0), hir::Value::Integer(7));
+        assert_eq!(init(1), hir::Value::Integer(6));
+        assert!(init(2).to_string().contains('5'), "{}", init(2));
+        // Broken as it is computed, which is when compiling.
+        assert_eq!(
+            codes("const a := 1 div 0;\noperator main{} [];"),
+            [Code::DivisionByZero]
+        );
+        assert_eq!(
+            codes(
+                "const r := relation { { a: 1, b: 1 }, { a: 1, b: 2 } } key { a };\noperator main{} [];"
+            ),
+            [Code::KeyViolated]
+        );
+        // Of the type it says, as a variable's value is.
+        assert_eq!(
+            codes("const a: text := 1;\noperator main{} [];"),
+            [Code::TypeMismatch]
+        );
+        // A name it shares with variables, and databases, but not operators.
+        assert_eq!(
+            codes("const a := 1;\nvar a := 2;\noperator main{} [];"),
+            [Code::DuplicateName]
+        );
+        assert_eq!(
+            codes("const a := 1;\nconst a := 2;\noperator main{} [];"),
+            [Code::DuplicateName]
+        );
+        analyze_str(
+            "const a := 1;\noperator a{}: integer [ 2 ];\nvar b := a + a{};\noperator main{} [];",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_constant_the_compiler_cant_compute_is_left_to_the_program() {
+        let looped = "const digits := series{from: 0, to: 9};\n";
+        // Anything can read it but a variable's initial value, which is known
+        // when compiling.
+        analyze_str(&format!(
+            "{looped}const biggest := max{{r: digits, of: value}};\noperator f{{}}: integer [ biggest ];\noperator main{{}} [ call debug_value{{v: f{{}}}}; ];"
+        ))
+        .unwrap();
+        assert_eq!(
+            codes(&format!("{looped}var a := digits;\noperator main{{}} [];")),
+            [Code::InitialValueWhenRunning]
+        );
+        // Through a recursion, a value block's statements and an operator.
+        for value in [
+            "const a := down{n: 2};",
+            "const a := [ var i := 0; while i < 2 loop [ i := i + 1; ]; i ];",
+            "const a := through{};",
+        ] {
+            let source = format!(
+                "operator down{{n: integer}}: integer [ if n = 0 then 0 else down{{n: n - 1}} ];\noperator through{{}}: integer [ down{{n: 1}} ];\n{value}\noperator main{{}} [ call debug_value{{v: a}}; ];"
+            );
+            analyze_str(&source).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_constant_reads_no_variable_and_nothing_assigns_it() {
+        let found = errors("var v := 1;\nconst c := v + 1;\noperator main{} [];");
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].code, Code::VariableInReadOnly);
+        assert_eq!(found[0].suggestions.len(), 1, "{found:#?}");
+        for body in [
+            "c := 2;",
+            "insert r relation { { n: 2 } };",
+            "delete r where n = 1;",
+            "call inc{var n: c};",
+        ] {
+            let source = format!(
+                "const c := 1;\nconst r := relation {{ {{ n: 1 }} }};\noperator inc{{var n: integer}} [ n := n + 1; ];\noperator main{{}} [ {body} ];"
+            );
+            let found = errors(&source);
+            assert_eq!(codes(&source), [Code::NotAssignable], "{body}: {found:#?}");
+            assert_eq!(found[0].suggestions.len(), 1, "{body}: {found:#?}");
+        }
+        // In a read-only operator, whose fix leaves it to read a variable.
+        assert_eq!(
+            codes("const c := 1;\noperator f{}: integer [ c := 2; c ];\noperator main{} [];"),
+            [Code::NotAssignable]
+        );
+        // What an interface declares can't be a variable, so nothing fixes it.
+        let found = errors("operator main{} [ pi := 3e0; ];");
+        assert_eq!(found[0].code, Code::NotAssignable, "{found:#?}");
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+    }
+
+    #[test]
+    fn a_constant_cycle_is_found_however_it_is_reached() {
+        let c = "const c := f{};\n";
+        let f = "operator f{}: integer [ c + 1 ];\n";
+        for source in [
+            format!("{c}{f}{MAIN}"),
+            format!("{f}{c}{MAIN}"),
+            format!("const c := d;\nconst d := c;\n{MAIN}"),
+            format!("const c := c;\n{MAIN}"),
+            // Done with `b` by the time the constant refers to it, from a variable
+            // first, and through a recursion.
+            format!(
+                "var v: integer := a{{n: 1}};\noperator a{{n: integer}}: integer [ b{{n: n}} + k ];\noperator b{{n: integer}}: integer [ if n = 0 then 0 else a{{n: n - 1}} ];\nconst k := b{{n: 0}};\n{MAIN}"
+            ),
+        ] {
+            let found = errors(&source);
+            assert!(
+                found.iter().any(|e| e.code == Code::CyclicInitialValues),
+                "{source}: {found:#?}"
+            );
+            assert_eq!(
+                found.len(),
+                found
+                    .iter()
+                    .filter(|e| e.code == Code::CyclicInitialValues)
+                    .count()
+                    + found
+                        .iter()
+                        .filter(|e| e.code == Code::InitialValueWhenRunning)
+                        .count(),
+                "{source}: {found:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_constant_is_not_called() {
+        for (source, code) in [
+            (
+                "const a := 1;\nvar b := a{};\noperator main{} [];",
+                Code::NotAnOperator,
+            ),
+            ("var b := pi{};\noperator main{} [];", Code::NotAnOperator),
+            (
+                "const a := 1;\nvar b := a{x: 1};\noperator main{} [];",
+                Code::NotAnOperator,
+            ),
+        ] {
+            assert_eq!(codes(source), [code], "{source}");
+        }
+        // Its braces go, if it has nothing in them.
+        let found = errors("var b := pi{};\noperator main{} [];");
+        assert_eq!(found[0].suggestions.len(), 1, "{found:#?}");
+        let found = errors("const a := 1;\nvar b := a{x: 1};\noperator main{} [];");
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+        // Other languages' ways of writing the prelude's.
+        for written in ["PI", "M_PI", "math.pi", "Math.PI"] {
+            let source = format!("var b := {written};\noperator main{{}} [];");
+            let found = errors(&source);
+            assert_eq!(
+                found[0].suggestions[0].edits[0].replacement, "pi",
+                "{found:#?}"
+            );
+        }
+        // A read-only operator without parameters is still called.
+        let found = errors("operator tau{}: integer [ 6 ];\nvar b := TAU;\noperator main{} [];");
+        assert_eq!(
+            found[0].suggestions[0].edits[0].replacement, "tau{}",
+            "{found:#?}"
+        );
+    }
+
+    #[test]
+    fn a_variable_nothing_assigns_can_be_a_constant() {
+        let reads = "operator f{}: integer [ v ];\noperator main{} [ call debug_value{v: f{}}; ];";
+        let found = errors(&format!("var v := 1;\n{reads}"));
+        assert_eq!(found[0].code, Code::VariableInReadOnly, "{found:#?}");
+        assert_eq!(
+            found[0].suggestions[0].edits[0].replacement, "const",
+            "{found:#?}"
+        );
+        // One that something assigns is passed, and one with no value has nothing
+        // to be a constant of.
+        for declared in [
+            "var v := 1;\noperator g{} [ v := 2; ];",
+            "var v := 1;\noperator g{var n: integer} [ n := 2; ];\noperator h{} [ call g{var n: v}; ];",
+            "var v: integer;",
+        ] {
+            let found = errors(&format!("{declared}\n{reads}"));
+            assert_eq!(found[0].code, Code::VariableInReadOnly, "{found:#?}");
+            assert!(
+                found[0]
+                    .suggestions
+                    .iter()
+                    .all(|s| s.edits[0].replacement != "const"),
+                "{declared}: {found:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_with_errors_may_assign_a_variable() {
+        // Nothing says what a body with errors assigns, and a word of the name in
+        // it may be its target. What an argument is for names nothing.
+        let reads = "operator f{}: integer [ v ];\noperator main{} [ call debug_value{v: f{}}; ];";
+        let is_offered = |declared: &str| {
+            errors(&format!("{declared}\n{reads}"))
+                .iter()
+                .find(|e| e.code == Code::VariableInReadOnly)
+                .expect("reported")
+                .suggestions
+                .iter()
+                .any(|s| s.edits[0].replacement == "const")
+        };
+        assert!(!is_offered("var v := 1;\noperator g{} [ v := nope; ];"));
+        assert!(is_offered("var v := 1;\noperator g{} [ var w := nope; ];"));
+    }
+
+    #[test]
+    fn a_units_constant_and_operator_can_share_a_name() {
+        let unit = "interface\n\nconst table := relation { { a: 1, b: 2 } };\nconst limit := 3;\n\
+             operator table{a: integer, b: integer}: integer;\noperator table{}: integer;\n\
+             operator limit{x: integer}: integer;\n\nimplementation\n\nconst hidden := 4;\n\
+             operator table{a: integer, b: integer}: integer [ a + b ];\n\
+             operator table{}: integer [ hidden ];\noperator limit{x: integer}: integer [ x ];\n";
+        let analyzed = |declared: &str| {
+            analyze_units(&[
+                (
+                    "program",
+                    &format!("uses {{ m }};\n{declared}\noperator main{{}} [];"),
+                ),
+                ("m", unit),
+            ])
+        };
+        let value = |written: &str| {
+            let program = analyzed(&format!("var a := 1;\nvar v := {written};")).unwrap();
+            program.variables[1].init.to_string()
+        };
+        // The constant, its projection, and before `{}` the operator.
+        assert_eq!(value("m::limit"), "3");
+        assert_eq!(value("m::table{b}"), "relation { b: integer } { { b: 2 } }");
+        assert_eq!(value("m::table{}"), "4");
+        assert_eq!(value("m::table{a: 1, b: 2}"), "3");
+        // With each name a value, it could be either (A0079), as it can be
+        // unqualified.
+        let found = analyzed("var a := 1;\nvar b := 2;\nvar v := m::table{a, b};").unwrap_err();
+        assert_eq!(found[0].code, Code::ProjectionOrCall, "{found:#?}");
+        assert_eq!(
+            found[0].help,
+            [
+                "to call the operator, write `m::table{a: a, b: b}`",
+                "to project the value, write `(m::table){a, b}`",
+            ]
+        );
+        // A value that can't be projected: the fix calls the operator.
+        let source = "var x := 1;\nvar v := m::limit{x};";
+        let found = analyzed(source).unwrap_err();
+        assert_eq!(found[0].code, Code::NotAnOperator, "{found:#?}");
+        assert_eq!(
+            found[0].suggestions[0].message,
+            "call the operator `m::limit`, which has these parameters"
+        );
+        assert_eq!(found[0].suggestions[0].edits[0].replacement, "x: ");
+        // Its own operator of that name is no operator of that unit's.
+        let source =
+            "operator limit{a: integer}: integer [ a ];\nvar a := 1;\nvar v := m::limit{a};";
+        let found = analyzed(source).unwrap_err();
+        assert_eq!(found[0].code, Code::NotAnOperator, "{found:#?}");
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+        // What its implementation keeps is no other unit's to read.
+        let found = analyzed("var v := m::hidden;").unwrap_err();
+        assert_eq!(found[0].code, Code::UnknownName, "{found:#?}");
+        assert_eq!(found[0].message, "unknown value `m::hidden`");
+    }
+
+    #[test]
+    fn a_qualified_name_is_a_constant_or_a_call() {
+        // A constant, read wherever a value is, known when compiling.
+        for source in [
+            "var a := 2e0 * trendy.prelude::pi;",
+            "const a := trendy.prelude::pi;",
+            "operator f{}: approximate [ trendy.prelude::pi ];",
+            "type t { { x: approximate }, constraint x < trendy.prelude::pi };",
+            "var r: relation { x: approximate };\nconstraint small := is_empty{r: r where x > trendy.prelude::pi};",
+            "database d;\nvar d.r: relation { x: approximate } key { x };\nconstraint d.small := is_empty{r: r where x > trendy.prelude::pi};",
+            "operator g{} [ call debug_value{v: trendy.prelude::pi}; ];",
+            "operator g{} [ var a := [ var b := trendy.prelude::pi; b ]; call debug_value{v: a}; ];",
+            "operator g{r: relation { x: approximate }} [ call debug_table{r: r extend { y := x * trendy.prelude::pi } where y > trendy.prelude::pi}; ];",
+            "operator g{a: approximate} [ if a > trendy.prelude::pi then [ call debug_value{v: trendy.prelude::pi}; ]; ];",
+        ] {
+            let source = format!("{source}\n{MAIN}");
+            assert!(
+                analyze_str(&source).is_ok(),
+                "{source}: {:#?}",
+                errors(&source)
+            );
+        }
+        // A misspelling, fixed from what the unit declares.
+        assert_eq!(
+            fix(&format!("var a := trendy.prelude::pie;{MAIN}")),
+            format!("var a := trendy.prelude::pi;{MAIN}")
+        );
+        // A library no one wrote, as `math.pi`.
+        assert_eq!(
+            fix(&format!("var a := nowhere::pi;{MAIN}")),
+            format!("var a := pi;{MAIN}")
+        );
+        // A unit no one wrote, of another name, as any qualifier.
+        assert_eq!(
+            codes(&format!("var a := nowhere::nothing;{MAIN}")),
+            [Code::UnknownName]
+        );
+        // An operator, called, whose name alone is reported, with the fix if it
+        // has no parameters.
+        let unit = "operator tau{}: integer [ 6 ];\n";
+        assert_eq!(
+            codes(&format!("var a := trendy.prelude::count;{MAIN}")),
+            [Code::OperatorAsValue]
+        );
+        assert_eq!(
+            errors(&format!("var a := trendy.prelude::count;{MAIN}"))[0].help,
+            ["call it with its arguments: the parameters are `count{r: any relation}`"]
+        );
+        assert_eq!(
+            errors(&format!(
+                "{unit}var a := trendy.prelude::debug_value;{MAIN}"
+            ))[0]
+                .help,
+            ["to invoke it, write a statement: `call trendy.prelude::debug_value{…};`"]
+        );
+        // Called, and with arguments, a constant is reported.
+        for (written, fixed) in [
+            ("trendy.prelude::pi{}", Some("trendy.prelude::pi")),
+            ("trendy.prelude::pi{a: 1}", None),
+            ("trendy.prelude::pi{a}", None),
+        ] {
+            let source = format!("var a := {written};{MAIN}");
+            assert_eq!(codes(&source), [Code::NotAnOperator], "{written}");
+            let found = errors(&source);
+            match fixed {
+                Some(fixed) => assert_eq!(fix(&source), format!("var a := {fixed};{MAIN}")),
+                None => assert!(found[0].suggestions.is_empty(), "{found:#?}"),
+            }
+        }
+        // Never assigned, in any form, nor passed to be.
+        let inc = "operator inc{var n: approximate} [ n := n + 1e0; ];\n";
+        for body in [
+            "trendy.prelude::pi := 3e0;",
+            "trendy.prelude::pi[1] := 3e0;",
+            "assign { trendy.prelude::pi := 3e0; };",
+            "insert trendy.prelude::pi relation { { n: 1 } };",
+            "delete trendy.prelude::pi where n = 1;",
+            "call inc{var n: trendy.prelude::pi};",
+        ] {
+            let source = format!("{inc}operator main{{}} [ {body} ];");
+            assert_eq!(codes(&source), [Code::NotAssignable], "{body}");
+        }
+    }
+
+    #[test]
+    fn a_local_constant_is_never_assigned() {
+        let update = "operator inc{var n: integer} [ n := n + 1; ];\n";
+        let fill = "operator fill{out n: integer} [ n := 1; ];\n";
+        for body in [
+            "const c := 1; c := 2;",
+            "const c := array [1]; c[1] := 2;",
+            "const c := relation { { n: 1 } }; insert c relation { { n: 2 } };",
+            "const c := relation { { n: 1 } }; delete c where n = 1;",
+            "const c := relation { { n: 1 } }; update c { n := 2 } where n = 1;",
+            "const c := 1; assign { c := 2; };",
+            "const c := 1; call inc{var n: c};",
+            "const c := 1; call fill{out n: c};",
+            "const c: array integer := array [1]; load c value from relation { { n: 1 } } order [asc n] keep {n};",
+            "var v := [ const c := 1; c := 2; c ];",
+            "const c := relation { { n: 1 } }; if count{r: c} > 0 then [ c := relation {}; ];",
+        ] {
+            let source = format!("{update}{fill}operator main{{}} [ {body} ];");
+            let found = errors(&source);
+            assert_eq!(codes(&source), [Code::NotAssignable], "{body}: {found:#?}");
+            assert_eq!(found[0].suggestions.len(), 1, "{body}: {found:#?}");
+        }
+        // In a read-only operator, a body's and one with statements.
+        for source in [
+            "operator f{}: integer [ const c := 1; c := 2; c ];\noperator main{} [];",
+            "operator f{}: integer [ const c := 1; var r := c; if r > 0 then [ c := 2; ]; r ];\noperator main{} [];",
+        ] {
+            assert_eq!(codes(source), [Code::NotAssignable], "{source}");
+        }
+        // It reads as any variable does, with a type, keys and a value that isn't
+        // known when compiling, in each kind of block.
+        analyze_str(
+            "operator f{n: integer}: integer [ const twice: integer := n * 2; twice + 1 ];\noperator g{r: relation { n: integer }} [ const k := r key { n }; if count{r: k} > 0 then [ const m := max{r: k, of: n}; call debug_value{v: m}; ]; ];\noperator main{} [ const v := [ const w := 1; w + 1 ]; call debug_value{v}; ];",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_local_constant_has_its_value_from_where_it_is_declared() {
+        for declaration in ["const c: integer;", "const c;"] {
+            let source = format!("operator main{{}} [ {declaration} ];");
+            let found = errors(&source);
+            assert_eq!(codes(&source), [Code::ConstantWithoutValue], "{found:#?}");
+            // Nothing can say what its value was to be.
+            assert!(found[0].suggestions.is_empty(), "{found:#?}");
+        }
+        // Declared again, which can't be fixed to an assignment of a constant.
+        let source = "operator main{} [ const c := 1; const c := 2; ];";
+        let found = errors(source);
+        assert_eq!(codes(source), [Code::DuplicateName]);
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+        let source = "operator main{} [ var c := 1; const c := 2; ];";
+        let found = errors(source);
+        assert_eq!(found[0].suggestions.len(), 1, "{found:#?}");
     }
 
     #[test]

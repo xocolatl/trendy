@@ -151,7 +151,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             (Class::Operator, false)
         }
         (Some(SyntaxKind::NameRef), _) if is_parameter(token) => (Class::Parameter, false),
-        (Some(SyntaxKind::NameRef), _) => (Class::Variable, false),
+        (Some(SyntaxKind::NameRef | SyntaxKind::QualifiedName), _) => (Class::Variable, false),
         (Some(SyntaxKind::Name), Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator)) => {
             (Class::Operator, true)
         }
@@ -701,6 +701,17 @@ mod tests {
                 ("count", Class::Operator, false),
                 ("r", Class::Attribute, false),
                 ("r", Class::Variable, false),
+            ]
+        );
+        // The unit's name's words, then the constant.
+        assert_eq!(
+            highlight("var a := trendy.prelude::pi;"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("trendy", Class::Unit, false),
+                ("prelude", Class::Unit, false),
+                ("pi", Class::Variable, false),
             ]
         );
     }

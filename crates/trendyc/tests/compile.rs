@@ -186,6 +186,10 @@ fn variables() {
             "│ born │ name │",
             "├──────┼──────┤",
             "└──────┴──────┘",
+            // A constant in a loop, computed each time round.
+            "3",
+            "2",
+            "1",
         ]
     );
 }
@@ -8227,4 +8231,153 @@ fn a_closure_of_one_value_gives_up_its_operand() {
 ];";
     let peak = peak_memory_of("closure_operand", source, 0);
     assert!(peak < 195 << 20, "{peak} bytes");
+}
+
+#[test]
+fn constants() {
+    let (code, stderr) = run_example("constants");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "┌───────────┬────┬────┐",
+            "│ direction │ dx │ dy │",
+            "├───────────┼────┼────┤",
+            "│ east      │  1 │  0 │",
+            "└───────────┴────┴────┘",
+            "tuple { x: 0, y: -8 }",
+            "8",
+            "5",
+            "stone_number{n: 3}",
+            "4",
+            "3",
+            "-1e0",
+        ]
+    );
+}
+
+/// A constant the compiler can't compute is computed once, before `main`, after
+/// those it reads, however it is reached: the failure of one stops the program,
+/// where it is declared, before anything `main` does, and one nothing reaches
+/// isn't computed.
+#[test]
+fn a_constant_is_computed_before_main_if_the_program_reaches_it() {
+    let (code, stderr) = run_source(
+        "computed_constants",
+        r#"
+const read_last := read_first + 1;
+const read_first := max{r: series{from: 1, to: 3}, of: value};
+const texts := (series{from: 1, to: 2} extend { t := "n" || to_text{from: value} }){t};
+const unreached := 1 div (max{r: series{from: 0, to: 0}, of: value});
+
+operator also{}: integer [
+    read_last * 2
+];
+
+operator with_it{}: relation { t: text } [
+    texts
+];
+
+operator fails{e: error}: integer [
+    fail e
+];
+
+operator main{} [
+    call debug_value{v: read_last};
+    call debug_value{v: also{}};
+    call debug_table{r: with_it{}};
+    /* It is read as it is, as many times, with nothing to free. */
+    var n := 0;
+    while n < 3 loop [
+        n := n + count{r: texts union with_it{}};
+    ];
+    call debug_value{v: n};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "4",
+            "8",
+            "┌────┐",
+            "│ t  │",
+            "├────┤",
+            "│ n1 │",
+            "│ n2 │",
+            "└────┘",
+            "4"
+        ]
+    );
+    let (code, stderr) = run_source(
+        "constant_fails",
+        r#"
+const broken := 1 div (max{r: series{from: 0, to: 0}, of: value});
+
+operator main{} [
+    call debug_value{v: "before anything"};
+    call debug_value{v: broken};
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with("error[R0002]: division by zero"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("constant_fails.trendy:2:"), "{stderr}");
+    assert!(!stderr.contains("before anything"), "{stderr}");
+    // Its keys, checked as it is computed.
+    let (code, stderr) = run_source(
+        "constant_keys",
+        r"
+const keyed := (series{from: 1, to: 2} extend { same := 1 }) key { same };
+
+operator main{} [
+    call debug_table{r: keyed};
+];
+",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.starts_with("error[R0008]"), "{stderr}");
+}
+
+/// An interface can leave a constant's value to its implementation, and other
+/// units read it as they would one with its value there.
+#[test]
+fn an_interface_can_leave_a_constants_value_to_its_implementation() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("constant_units");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sizes.trendy"),
+        "interface
+
+const small: integer;
+const shown := 2;
+const computed: integer;
+
+implementation
+
+const small := shown * 3;
+const computed := max{r: series{from: 1, to: small}, of: value};
+",
+    )
+    .unwrap();
+    let main = dir.join("constant_units.trendy");
+    std::fs::write(
+        &main,
+        "uses { sizes };
+
+operator main{} [
+    call debug_value{v: small};
+    call debug_value{v: sizes::shown};
+    call debug_value{v: computed};
+];
+",
+    )
+    .unwrap();
+    let (code, stderr) = build_and_run(&main, &dir.join("constant_units"), &workspace_root());
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), ["6", "2", "6"]);
 }

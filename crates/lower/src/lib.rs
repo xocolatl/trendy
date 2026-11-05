@@ -71,7 +71,9 @@ fn entry(
     let waiting = cx.waiting(program);
     let written = Written::new(&mut b, waiting, cx);
     let given = Given::new(&mut b, cx);
+    let mut first = None;
     b.catching(handle, |b| {
+        first = Some(b.position());
         b.insts.push(lir::Inst::Call {
             function: main,
             args: given.as_ref().map(|given| given.args.clone()),
@@ -110,6 +112,27 @@ fn entry(
     }
     let after = b.new_block();
     b.end_block(lir::Terminator::Failed, after);
+    // Each constant the program reaches, now that all of it is lowered, the
+    // messages too, leaving the program at no site for `main`.
+    let (block, at) = first.expect("`catching` lowers what it is given");
+    let entered = b.entered();
+    let computed = std::mem::take(&mut cx.computed_first);
+    for (i, function) in computed.into_iter().enumerate() {
+        b.insert(
+            (block, at + 2 * i),
+            lir::Inst::Call {
+                function,
+                args: None,
+                result: None,
+            },
+        );
+        b.insert(
+            (block, at + 2 * i + 1),
+            lir::Inst::RestoreSite {
+                src: entered.clone(),
+            },
+        );
+    }
     let lowered = b.finish(None, cx);
     cx.functions.insert(id.0, lowered);
     id
@@ -579,6 +602,56 @@ fn function(
     (function_id, makes)
 }
 
+/// The place of the value in the data object `data`, which is the struct of its
+/// fields, of which the value is the only one.
+fn in_data(data: lir::DataId) -> lir::Place {
+    lir::Place {
+        base: lir::Base::Data(data),
+        path: vec![0],
+    }
+}
+
+/// Where the constant `id`, read by lowered code, is kept: null until a function
+/// computes it, which is lowered here, so after those of the constants it reads,
+/// which the entry calls in that order, before `main`.
+fn computed_constant(
+    program: &hir::Program,
+    variable_data: &[lir::DataId],
+    id: hir::ConstantId,
+    cx: &mut Lowering,
+) -> lir::DataId {
+    if let Some(&data) = cx.constants.get(&id) {
+        return data;
+    }
+    let constant = &program.constants[id.0];
+    let layout = cx.layout(&constant.ty);
+    let data = cx.push(lir::Data {
+        kind: lir::DataKind::Variable {
+            name: constant.name.clone(),
+        },
+        writable: true,
+        fields: vec![zero_field(&layout)],
+    });
+    cx.constants.insert(id, data);
+    let function_id = cx.number();
+    let name = format!("the value of `{}`", constant.name);
+    let mut builder = FunctionBuilder::new(program, name, BTreeMap::new(), variable_data);
+    builder.bind(constant.locals.clone());
+    builder.scoped(|this| {
+        let src = this.place(&constant.value, cx);
+        this.named_keys_of(&constant.name, &constant.keys, &constant.ty, &src, None, cx);
+        let dst = lir::Place {
+            base: lir::Base::Data(data),
+            path: vec![0],
+        };
+        this.assign_place(dst, src, &constant.ty, cx);
+    });
+    let lowered = builder.finish(None, cx);
+    cx.functions.insert(function_id.0, lowered);
+    cx.computed_first.push(function_id);
+    data
+}
+
 /// A part of a constraint, which lowered code checks with a function of
 /// its own: the part's condition, a boolean, or, if `tuples`, the
 /// relation of the tuples that make it false, as `debug_value` writes it.
@@ -693,6 +766,11 @@ struct Lowering {
     paths: HashMap<hir::FileId, lir::Field>,
     /// Which operators call themselves, directly or through others.
     recursion: hir::Recursion,
+    /// Each constant lowered code reads, where it is kept.
+    constants: HashMap<hir::ConstantId, lir::DataId>,
+    /// The function that computes each of those, each after those it reads,
+    /// which the entry calls first.
+    computed_first: Vec<lir::FunctionId>,
     /// Where the arguments of a tail call of each function wait, as the
     /// frame they were made in goes, until the function copies them.
     tail_arguments: HashMap<lir::FunctionId, lir::DataId>,
@@ -722,6 +800,8 @@ impl Lowering {
             sites: HashMap::new(),
             paths: HashMap::new(),
             recursion: hir::Recursion::default(),
+            constants: HashMap::new(),
+            computed_first: Vec::new(),
             tail_arguments: HashMap::new(),
             numbered: 0,
             waiting: None,
@@ -1369,6 +1449,7 @@ fn is_read(expr: &hir::Expr) -> bool {
     match expr {
         hir::Expr::Constant(_)
         | hir::Expr::Variable(_)
+        | hir::Expr::ComputedConstant(..)
         | hir::Expr::Parameter(_)
         | hir::Expr::Local(_)
         | hir::Expr::Current(..) => true,
@@ -2011,6 +2092,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Local(_)
             | hir::Expr::Variable(_)
+            | hir::Expr::ComputedConstant(..)
             | hir::Expr::Parameter(_)
             | hir::Expr::Constant(_)
             | hir::Expr::Current(..) => {}
@@ -4430,18 +4512,34 @@ impl<'a> FunctionBuilder<'a> {
     ) {
         let (ty, keys) = self.assigned(target);
         let (ty, keys) = (ty.clone(), keys.to_vec());
+        let variable = self.target_name(target).to_string();
+        self.named_keys_of(&variable, &keys, &ty, value, added, cx);
+    }
+
+    /// Stop the program if the relation at `value`, of the type `ty`, what is
+    /// called `variable` has as it is assigned, breaks one of `keys`: as for
+    /// [`FunctionBuilder::check_keys_of`].
+    fn named_keys_of(
+        &mut self,
+        variable: &str,
+        keys: &[hir::Key],
+        ty: &hir::Type,
+        value: &lir::Place,
+        added: Option<&lir::Place>,
+        cx: &mut Lowering,
+    ) {
         if !matches!(ty, hir::Type::Relation(_)) {
             return;
         }
-        let variable = self.target_name(target).to_string();
-        for key in &keys {
+        let ty = ty.clone();
+        for key in keys {
             self.key_checked(value, added, &ty, key, cx, |this, failed, cx| {
                 Broken::Fail(Box::new(lir::Failure::Key(lir::KeyFailure::Variable {
                     value: failed.value,
                     descriptor: failed.descriptor,
                     key: failed.key,
                     pair: failed.pair,
-                    variable: this.text(&variable, cx),
+                    variable: this.text(variable, cx),
                 })))
             });
         }
@@ -4522,17 +4620,12 @@ impl<'a> FunctionBuilder<'a> {
         match expr {
             hir::Expr::Constant(value) => {
                 let field = cx.value_field(value);
-                // A data object is the struct of its fields; the value is its
-                // only field.
-                lir::Place {
-                    base: lir::Base::Data(cx.constant(vec![field])),
-                    path: vec![0],
-                }
+                in_data(cx.constant(vec![field]))
             }
-            hir::Expr::Variable(id) => lir::Place {
-                base: lir::Base::Data(self.variable_data[id.0]),
-                path: vec![0],
-            },
+            hir::Expr::Variable(id) => in_data(self.variable_data[id.0]),
+            hir::Expr::ComputedConstant(id, _) => {
+                in_data(computed_constant(self.program, self.variable_data, *id, cx))
+            }
             hir::Expr::Local(id) => self.local_places[id.0]
                 .as_ref()
                 .expect("a local variable is placed before it is used")
@@ -8202,6 +8295,7 @@ mod tests {
             message: hir::OperatorId(operators.len() - 1),
             operators,
             variables,
+            constants: Vec::new(),
             files: vec!["test.trendy".to_string()],
             constraints: Vec::new(),
             subtypes: [("error".to_string(), errors)].into(),

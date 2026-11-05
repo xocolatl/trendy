@@ -130,7 +130,7 @@ builtin operator from_code_points{from: array code_point}: text;
 
 /* π, the ratio of a circle's circumference to its diameter: the
    approximate number nearest it. */
-operator pi{}: approximate;
+const pi: approximate;
 
 /* The square root of `of`: the approximate number nearest it, correctly
    rounded, as IEEE 754 has it. A negative number has none, and the program
@@ -324,9 +324,7 @@ type code_point {
         from { character := from_code_points{from: array [code_point{value: value}]} },
 };
 
-operator pi{}: approximate [
-    3.141592653589793e0
-];
+const pi := 3.141592653589793e0;
 
 operator message{error: failure}: text [
     error.message

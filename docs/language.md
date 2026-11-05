@@ -129,8 +129,9 @@ operator main{} [];
 - **A unit's variables are its implementation's** (A0067). Other units
   reach them through its update operators, with an `out` parameter for
   what they read, as `recorded` gives `known`, so that what is true of
-  them is the unit's to keep. A constant is a read-only operator without
-  parameters, as the prelude's `pi{}` is.
+  them is the unit's to keep. A constant is its interface's to declare, as the
+  prelude's `pi` is, with its value or only its type (see
+  [Constants](#constants)).
 - **Versions go in the implementation** (A0067): a call names a
   specification, and dispatch finds the version for its arguments'
   types, whatever unit calls it, so there is nothing about a version to
@@ -284,9 +285,12 @@ operator main{} [
   operator `deepest`, `call tally::record{…};` of an update operator's,
   and `seas.depths::metres{m: 281}` of a selector, and
   `trendy.prelude::count{r: r}` the prelude's `count`, though the unit
-  writing it declares one of its own, which it hides there. Where a value
-  goes, a qualified name is a call, as no value is another unit's but one
-  an operator gives. The qualifier is
+  writing it declares one of its own, which it hides there, and
+  `lakes.depths::shallow_limit`, without braces, its constant. Where a
+  value goes, a qualified name is a constant or a call, as a unit's
+  variables are its own: its operator's name alone is an error, fixed to
+  the call if it has no parameters (A0016), and nothing another unit
+  declares is assigned (A0026). The qualifier is
   a unit the section uses, by the name its `uses` gives it after `as`, if
   it gives one, or else by its own, or the prelude, which every unit
   sees. A unit's own names are never qualified, as they hide every other
@@ -1435,7 +1439,7 @@ builtin operator from_code_points{from: array code_point}: text;
 
 /* π, the ratio of a circle's circumference to its diameter: the
    approximate number nearest it. */
-operator pi{}: approximate;
+const pi: approximate;
 
 /* The square root of `of`: the approximate number nearest it, correctly
    rounded, as IEEE 754 has it. A negative number has none, and the program
@@ -2380,7 +2384,9 @@ operator main{} [];
 An operator's body can declare variables of its own, written as the
 program's are, which its statements use and assign as they do the
 program's. They are purely local to the operator, as TTM allows even a
-read-only one (RM Prescription 3), and gone once it returns.
+read-only one (RM Prescription 3), and gone once it returns. One written
+`const` rather than `var` is a constant, which never changes: see
+[Constants](#constants).
 
 ```trendy
 var visits := relation { city: text, guests: integer } {};
@@ -2473,6 +2479,85 @@ operator scale{n: integer} [
 ];
 
 operator main{} [];
+```
+
+### Constants
+
+`const name[: type] := value;` is a name for a value that never changes, at the top
+level of a unit or anywhere a local variable can be declared: `var` and `const` are
+Rust's `let mut` and `let`. It is read as a variable is, by any operator, and by a
+type's constraint, where a variable can't be (A0050), as nothing about it can change.
+TTM asks for the same of relations, "relation constants or relcons" (chapter 6, under
+RM Prescription 14), as `TABLE_DEE` and `TABLE_DUM` are.
+
+```trendy
+const moves := relation {
+    { direction: "^", dx: 0, dy: 1 },
+    { direction: "v", dx: 0, dy: -1 },
+    { direction: ">", dx: 1, dy: 0 },
+    { direction: "<", dx: -1, dy: 0 },
+}
+key { direction };
+
+const digits := series{from: 0, to: 9} rename {value as d};
+const largest := max{r: digits, of: d};
+
+type digit { { n: integer }, constraint n >= 0 and n <= largest };
+
+operator dx{toward: text}: integer [
+    value from (moves where direction = toward){dx}
+];
+
+operator share{total: integer, people: integer}: integer [
+    const each := total div people;
+    const left := total - each * people;
+    each + left
+];
+
+operator main{} [
+    call debug_value{v: dx{toward: ">"}};
+    call debug_value{v: digit{n: largest}};
+    const guests := 3;
+    var served := 0;
+    while served < guests loop [
+        const portion := share{total: 10, people: guests};
+        call debug_value{v: portion};
+        served := served + 1;
+    ];
+];
+```
+
+- **A constant of the program's reads no variable** (A0050), but anything else a
+  value can: literals, other constants, in any order, and read-only operators. So
+  its value is the same whenever it is computed. One that reads itself, directly or
+  through the operators it calls, is an error (A0021).
+- **When it is computed is the compiler's to choose.** One the compiler can compute
+  is as if its value were written where it is read. Otherwise, as `digits`' is above,
+  with the loop in `series`, the program computes it once, before `main`, if it
+  reaches it, after the constants it reads, and a failure in that stops the program
+  as any other does. A variable's initial value, known when compiling, can't read
+  one of those (A0077).
+- **A local constant is computed where it is declared,** from the parameters and
+  variables then, each time that runs: in a loop, each time round. A `const`
+  parameter is the same thing, the value its caller gives.
+- **It has its value where it is declared** (A0080), as nothing could give it one
+  later: `const limit: integer;` is an error, and a variable is what starts at its
+  type's default. But an interface can leave it to the implementation, as an
+  operator's body is, with its type: `const pi: approximate;` there, and `const pi
+  := …;` here, so that other units see nothing of how it is computed.
+- **It is never assigned** (A0026): not by `:=`, `insert`, `delete`, `update` or
+  `load`, nor passed to a `var` or `out` parameter. The fix declares it `var`.
+- **Otherwise it is declared as a variable is,** with a type, or its value's, and
+  keys, checked as it is computed, in the namespace the program's variables and
+  databases share. It isn't called: `pi{}` is fixed to `pi`, and `moves{a}` is a
+  projection of `moves`, as it is of a variable. Another unit reads it by its name,
+  or by its name qualified by the unit's, `trendy.prelude::pi`.
+
+```trendy,error
+operator main{} [
+    const count := 0;
+    count := count + 1;
+];
 ```
 
 ### `if` statements
@@ -4600,8 +4685,8 @@ the smallest integer, `-9223372036854775808`, can be written.
 The prelude's `sqrt`, `sin` and `cos` give an approximate number's square
 root, and the sine and cosine of an angle in radians, and `atan2` the angle
 from the positive x axis to the point `(x, y)`, from -π, exclusive, to π.
-`pi{}` is the approximate number nearest π: a constant is a read-only
-operator without parameters, called as any other. `sqrt` is correctly
+`pi` is the approximate number nearest π, a constant (see
+[Constants](#constants)). `sqrt` is correctly
 rounded, as IEEE 754 requires; the others are computed the same way on
 every machine, so a result is the same whether the compiler computes it or
 the program does. A negative number has no square root (R0018), which is
@@ -4609,13 +4694,13 @@ a compile error when it is known while compiling, and otherwise stops the
 program as an overflow does.
 
 ```trendy
-var circumference := 2e0 * pi{} * 1.5e0;
+var circumference := 2e0 * pi * 1.5e0;
 var hypotenuse := sqrt{of: 3e0 * 3e0 + 4e0 * 4e0};
 
 operator polar{x: approximate, y: approximate} [
     call debug_value{v: sqrt{of: x * x + y * y}};
     call debug_value{v: atan2{y: y, x: x}};
-    call debug_value{v: cos{of: pi{} / 3e0}};
+    call debug_value{v: cos{of: pi / 3e0}};
 ];
 
 operator main{} [
@@ -6326,7 +6411,7 @@ operator main{} [];
 ## Names
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
-are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
+are case-sensitive. The keywords are `operator`, `var`, `const`, `call`, `builtin`,
 `tuple`, `relation`, `array`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `shl`, `shr`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `tclose`, `join`, `times`, `compose`, `matching`,
@@ -6494,7 +6579,10 @@ line after a comment on its own line, such as a file's header, is kept.
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
 | `x + 1;`, an expression as a statement | `x := x + 1;` to keep its value, `call debug_value{v: x + 1};` to see it |
 | `f(x)` in an expression | `f{x: x}`, every argument named |
-| `let`, `const`, `int x` | `var x`, at the top level or in an operator's body |
+| `let`, `int x` | `var x`, at the top level or in an operator's body |
+| `let mut x` | `var x`: what can change |
+| `val x`, Rust's `let x` where nothing assigns it | `const x`: what can't |
+| `const int x`, `var int x` | `const x: integer`: a type goes after its name |
 | `let x = x + 1;`, declaring a variable again | `x := x + 1;`, assigning it |
 | `x = 0` | `x := 0` |
 | `x += 1`, `x++`, `++x` | `x := x + 1;` |
@@ -6615,7 +6703,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a / b` for integers | `a div b` |
 | `a % b` | `a mod b` |
 | `1 / 2` meaning one half | `1e0 / 2e0` |
-| `PI`, `M_PI`, `math.pi`, `Math.PI` | `pi{}`, a call of an operator without parameters |
+| `PI`, `M_PI`, `math.pi`, `Math.PI`, `math::pi` | `pi`, a constant |
 | `sine(x)`, `cosine(x)`, `arctan2(y, x)` | `sin{of: x}`, `cos{of: x}`, `atan2{y: y, x: x}` |
 | `tan(x)`, `atan(x)`, `hypot(x, y)`, `abs(x)` | `sin{of: x} / cos{of: x}`, `atan2{y: x, x: 1e0}`, `sqrt{of: x * x + y * y}`, `if x < 0e0 then -x else x` |
 | `inf`, `NaN`, `1e0 / 0e0` | an error: approximate numbers are finite |

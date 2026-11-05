@@ -55,7 +55,6 @@ const FOREIGN_KEYWORDS: &[&str] = &[
     "auto",
     "bool",
     "char",
-    "const",
     "def",
     "double",
     "fn",
@@ -632,24 +631,51 @@ pub(crate) fn heading_as_type(found: Found, span: Span) -> Diagnostic {
 
 /// `found`, another language's keyword, starting a local variable's
 /// declaration: `var`.
-pub(crate) fn foreign_declaration(found: Found) -> Diagnostic {
+pub(crate) fn foreign_declaration(found: Found, mutable: Option<Span>) -> Diagnostic {
+    // Kotlin's and Scala's `val` is what never changes.
+    let (what, keyword) = if found.text == "val" {
+        ("constant", "const")
+    } else {
+        ("variable", "var")
+    };
+    let span = mutable.map_or(found.span, |word| Span::new(found.span.start, word.end));
+    let written = mutable.map_or(found.text.to_string(), |_| format!("{} mut", found.text));
+    Diagnostic::error(
+        Code::ExpectedDefinition,
+        format!("a local {what} is declared with `{keyword}`, not `{written}`"),
+        span,
+        "another language's keyword",
+    )
+    .with_note(format!(
+        "a local {what} is declared as a program's variable is: `{keyword} name: type := value;`; what can change is `var`, as Rust's `let mut`, and what can't is `const`, as Rust's `let`"
+    ))
+    .with_suggestion(
+        format!("replace `{written}` with `{keyword}`"),
+        vec![Edit {
+            span,
+            replacement: keyword.to_string(),
+        }],
+    )
+}
+
+/// `written`, a type another language's way, before the `name` a declaration
+/// declares, as C writes `const int x`.
+pub(crate) fn type_before_name(written: Found, name: Found) -> Diagnostic {
     Diagnostic::error(
         Code::ExpectedDefinition,
         format!(
-            "a local variable is declared with `var`, not `{}`",
-            found.text
+            "a type goes after the name it is of, not before: `{}: {}`",
+            name.text, written.text
         ),
-        found.span,
-        "another language's keyword",
+        written.span,
+        "a type before the name",
     )
-    .with_note(
-        "a local variable is declared as a program's variable is: `var name: type := value;`",
-    )
+    .with_note("a declaration has the form `var name: type := value;`, or `const` for `var`")
     .with_suggestion(
-        format!("replace `{}` with `var`", found.text),
+        format!("write `{}: {}`", name.text, written.text),
         vec![Edit {
-            span: found.span,
-            replacement: "var".to_string(),
+            span: Span::new(written.span.start, name.span.end),
+            replacement: format!("{}: {}", name.text, written.text),
         }],
     )
 }

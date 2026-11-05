@@ -532,7 +532,7 @@ impl Operators {
     /// The operators `name` names, as a call writes it: those its unit
     /// sees, or, qualified, those of the unit its qualifier names that it
     /// sees, which hide nothing, each in the order they are defined.
-    fn called(&self, name: crate::WrittenName) -> Vec<&Signature> {
+    pub(crate) fn called(&self, name: crate::WrittenName) -> Vec<&Signature> {
         let viewer = self.units.viewer(name.at);
         match name.unit {
             None => self.seen(name.name, viewer).collect(),
@@ -659,8 +659,12 @@ impl Operators {
 
     /// Whether an operator of `name`, that what is written at `at` sees, has
     /// exactly `parameters`.
-    pub(crate) fn takes_exactly(&self, name: &str, at: Span, parameters: &BTreeSet<&str>) -> bool {
-        self.overloads(name, at).any(|signature| {
+    pub(crate) fn takes_exactly(
+        &self,
+        name: crate::WrittenName,
+        parameters: &BTreeSet<&str>,
+    ) -> bool {
+        self.called(name).iter().any(|signature| {
             signature
                 .written
                 .keys()
@@ -893,6 +897,7 @@ pub(crate) fn signatures(
                 }
             }
             Item::Variable(_)
+            | Item::Constant(_)
             | Item::Relvar(_)
             | Item::Heading(_)
             | Item::Constraint(_)

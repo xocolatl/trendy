@@ -107,6 +107,16 @@ pub(crate) trait Names {
         self.resolve(name, span, errors)
     }
 
+    /// What reading the constant named `name` that `unit` declares is, written
+    /// at `span`: nothing, if what is written there doesn't see one.
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup;
+
     /// The names in scope at `at`, which a name written there that refers
     /// to nothing may be a misspelling of.
     fn candidates(&self, at: Span) -> Vec<String>;
@@ -318,6 +328,7 @@ impl<'a> Checker<'a> {
                 self.matched(expected, hir::Expr::Constant(value), expr, errors)
             }
             Expr::Name(name_ref) => self.named(name_ref, expr, expected, errors),
+            Expr::Qualified(written) => self.qualified(written, expr, expected, errors),
             Expr::Is(test) => self.type_test(test, expr, expected, errors),
             Expr::Treat(treat) => self.treated(treat, expr, expected, errors),
             Expr::Fail(fail) => self.failure(fail, expr, expected, errors),
@@ -360,6 +371,20 @@ impl<'a> Checker<'a> {
             Expr::MethodCall(call) => self.method_called(call, errors),
             Expr::Project(project) if let Some((ident, list)) = self.projected_call(project) => {
                 self.projection_call(&ident, &list, expr, expected, errors)
+            }
+            Expr::Project(project) if let Some((written, list)) = self.qualified_call(project) => {
+                let ident = written.ident()?;
+                let name =
+                    self.namespaces()
+                        .written_name(&ident, written.qualifier().as_ref(), errors)?;
+                self.call(
+                    &ident,
+                    name,
+                    Written::Nothing(&list),
+                    expr,
+                    expected,
+                    errors,
+                )
             }
             Expr::Project(project) => self.projection(project, expr, expected, errors),
             Expr::Postfix(_) => self.reshaped(expr, expected, errors),
@@ -587,8 +612,8 @@ impl<'a> Checker<'a> {
                     errors.push(errors::database_as_value(name, span));
                     return None;
                 }
-                if let Some((operator, written)) = self.constant_elsewhere(name_ref, name, span) {
-                    errors.push(errors::constant_as_value(name, written, &operator));
+                if let Some((meant, written)) = self.constant_elsewhere(name_ref, name, span) {
+                    errors.push(errors::constant_as_value(name, written, &meant));
                     return None;
                 }
                 let candidates = self.names.candidates(span);
@@ -605,10 +630,53 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The read-only operator without parameters that `name_ref`, which
-    /// names no value, is written for as another language writes a
-    /// constant, as `pi`'s value is written `PI`, in another case, C's
-    /// `M_PI`, or `math.pi` and `Math.PI`, with the library it is in, and
+    /// `written`, as `expr`: a constant the unit it names declares, the one
+    /// kind of value a unit's interface can give another.
+    fn qualified(
+        &mut self,
+        written: &ast::QualifiedName,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let ident = written.ident()?;
+        let qualifier = written.qualifier()?;
+        let span = trendy_syntax::span(ident.text_range());
+        // `math::pi`, as `math.pi`, of a library no one wrote.
+        if self
+            .namespaces()
+            .written_name_unreported(&ident, Some(&qualifier))
+            .is_none()
+            && let Some(meant) = self.constant_called_otherwise(ident.text(), span)
+        {
+            let whole = written.syntax().text().to_string();
+            errors.push(errors::constant_as_value(&whole, written.span(), &meant));
+            return None;
+        }
+        let name = self
+            .namespaces()
+            .written_name(&ident, Some(&qualifier), errors)?;
+        let unit = name.unit?;
+        match self.names.constant_of(ident.text(), unit, span, errors) {
+            Lookup::Found(value) => self.matched(expected, value, expr, errors),
+            Lookup::Reported => None,
+            Lookup::Unknown => {
+                errors.push(errors::unknown_qualified_value(
+                    written,
+                    &ident,
+                    unit,
+                    self.names.namespaces(),
+                    self.names.operators(),
+                ));
+                None
+            }
+        }
+    }
+
+    /// What `name_ref`, which names no value, is written for as another language
+    /// writes a constant, as `pi` is written `PI`, in another case, C's `M_PI`,
+    /// or `math.pi` and `Math.PI`, with the library it is in: the constant, or
+    /// the call of the read-only operator without parameters, of its name, and
     /// the span of what is written.
     fn constant_elsewhere(
         &self,
@@ -624,15 +692,25 @@ impl<'a> Checker<'a> {
             .and_then(|extract| Some((extract.attribute()?.ident()?, extract.span())));
         let (constant, written) = match &member {
             Some((attribute, whole)) => (attribute.text(), *whole),
-            None => (name.strip_prefix("M_").unwrap_or(name), span),
+            None => (name, span),
         };
-        let operator = constant.to_ascii_lowercase();
-        let constant = self
+        Some((self.constant_called_otherwise(constant, span)?, written))
+    }
+
+    /// What is written for `name`, which another language would call a
+    /// constant, seen from `span`: the constant, or the call of the read-only
+    /// operator without parameters, of its name in lowercase, without C's `M_`.
+    fn constant_called_otherwise(&self, name: &str, span: Span) -> Option<String> {
+        let lowered = name.strip_prefix("M_").unwrap_or(name).to_ascii_lowercase();
+        if self.names.namespaces().constant(&lowered, span).is_some() {
+            return Some(lowered);
+        }
+        let operator = self
             .names
             .operators()
-            .overloads(&operator, span)
+            .overloads(&lowered, span)
             .any(|signature| signature.read_only && signature.written.is_empty());
-        constant.then_some((operator, written))
+        operator.then(|| format!("{lowered}{{}}"))
     }
 
     /// `index`, `a[i]`, written `expr`: the element of the array `a` at the
@@ -777,6 +855,15 @@ impl<'a> Checker<'a> {
                 ops::rename(operand, renamings)
             }
             (Expr::Project(project), _) => {
+                // `pi{}`, a constant called as if it were an operator.
+                if !matches!(ty, hir::Type::Tuple(_) | hir::Type::Relation(_))
+                    && let Some(list) = project.names()
+                    && let Some((written, at)) = self.constant_written(&operand_expr)
+                {
+                    let list = Written::Nothing(&list);
+                    errors.push(errors::constant_called(&written, at, list));
+                    return None;
+                }
                 let projection = ops::Projection::Project(project);
                 let names = ops::removed(projection, &operand_expr, &ty, errors)?;
                 ops::remove(operand, names)
@@ -789,6 +876,56 @@ impl<'a> Checker<'a> {
             _ => unreachable!("matched above"),
         };
         self.matched(expected, result, expr, errors)
+    }
+
+    /// How `operand` names a constant, if it does, and where the constant's
+    /// name is.
+    fn constant_written(&self, operand: &Expr) -> Option<(String, Span)> {
+        let (ident, written) = match operand {
+            Expr::Name(name_ref) => {
+                let ident = name_ref.ident()?;
+                let at = trendy_syntax::span(ident.text_range());
+                let constant = !self.names.hides(ident.text())
+                    && self.namespaces().constant(ident.text(), at).is_some();
+                if !constant {
+                    return None;
+                }
+                let written = ident.text().to_string();
+                (ident, written)
+            }
+            // Only a constant has a value, written so.
+            Expr::Qualified(written) => (written.ident()?, written.syntax().text().to_string()),
+            _ => return None,
+        };
+        Some((written, trendy_syntax::span(ident.text_range())))
+    }
+
+    /// The operand and list of `project`, if it is a call of an operator of
+    /// another unit's written as a projection: if the operand is a qualified
+    /// name, which is a value only if that unit has a constant of that name,
+    /// and not before `{}` if it has an operator of that name too. One whose
+    /// qualifier names no unit is reported as a call would be.
+    fn qualified_call(
+        &self,
+        project: &ast::ProjectExpr,
+    ) -> Option<(ast::QualifiedName, ast::NameList)> {
+        let Expr::Qualified(written) = project.operand()? else {
+            return None;
+        };
+        let list = project.names()?;
+        let ident = written.ident()?;
+        let qualifier = written.qualifier();
+        let name = self
+            .namespaces()
+            .written_name_unreported(&ident, qualifier.as_ref());
+        let constant = name.is_some_and(|name| {
+            name.unit
+                .is_some_and(|unit| self.namespaces().has_constant_in(name.name, unit, name.at))
+        });
+        // As before `{}` a name that is an operator's is a call, a value of its
+        // name or not.
+        let operator = name.is_some_and(|name| !self.names.operators().called(name).is_empty());
+        (!constant || (operator && list.names().next().is_none())).then_some((written, list))
     }
 
     /// The operator's name and the list, if `project` is a call written as
@@ -875,40 +1012,43 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let Some((ident, list)) = self.could_be_a_call(project) else {
+        let Some((operand, list)) = self.could_be_a_call(project) else {
             return self.reshaped(expr, expected, errors);
         };
         let mut own = Vec::new();
         let projected = self.reshaped(expr, expected, &mut own);
         if own.is_empty() {
-            errors.push(errors::projection_or_call(&ident, &list, expr));
+            errors.push(errors::projection_or_call(&operand, &list, expr));
             return None;
         }
         let first = own.remove(0);
-        errors.push(errors::as_a_call(first, &ident, &list));
+        errors.push(errors::as_a_call(first, &operand, &list));
         errors.append(&mut own);
         projected
     }
 
-    /// The name of `project`'s operand, and its list, if they could be read
-    /// as a call: an operator of that name has exactly those parameters, and
-    /// each of them names a value.
-    fn could_be_a_call(&self, project: &ast::ProjectExpr) -> Option<(SyntaxToken, ast::NameList)> {
-        let Expr::Name(name_ref) = project.operand()? else {
-            return None;
+    /// `project`'s operand as it is written, a name, qualified or not, and its
+    /// list, if they could be read as a call: an operator of that name has
+    /// exactly those parameters, and each of them names a value.
+    fn could_be_a_call(&self, project: &ast::ProjectExpr) -> Option<(String, ast::NameList)> {
+        let operand = project.operand()?;
+        let (ident, qualifier) = match &operand {
+            Expr::Name(name_ref) => (name_ref.ident()?, None),
+            Expr::Qualified(written) => (written.ident()?, written.qualifier()),
+            _ => return None,
         };
-        let ident = name_ref.ident()?;
         let list = project.names()?;
-        let at = trendy_syntax::span(ident.text_range());
+        let called = self
+            .namespaces()
+            .written_name_unreported(&ident, qualifier.as_ref())?;
         let names: Vec<SyntaxToken> = list.names().filter_map(|n| n.ident()).collect();
         let parameters: BTreeSet<&str> = names.iter().map(SyntaxToken::text).collect();
         (!names.is_empty()
-            && self
-                .names
-                .operators()
-                .takes_exactly(ident.text(), at, &parameters)
-            && parameters.iter().all(|name| self.names.has_value(name, at)))
-        .then_some((ident, list))
+            && self.names.operators().takes_exactly(called, &parameters)
+            && parameters
+                .iter()
+                .all(|name| self.names.has_value(name, called.at)))
+        .then(|| (operand.syntax().text().to_string(), list))
     }
 
     /// Whether an argument of `written`, checked on its own, is an array,
@@ -969,16 +1109,22 @@ impl<'a> Checker<'a> {
                 return None;
             }
             None => {
-                match (called.unit, expr) {
-                    (Some(unit), Expr::Call(call)) => errors.extend(call.qualifier().map(|q| {
-                        errors::unknown_qualified_operator(
+                match (called.unit, qualifier_of(expr)) {
+                    (Some(unit), Some(_))
+                        if self.namespaces().has_constant_in(name, unit, span) =>
+                    {
+                        let whole = format!("{}{name}", qualifier_text(expr));
+                        errors.push(errors::constant_called(&whole, span, written));
+                    }
+                    (Some(unit), Some(qualifier)) => {
+                        errors.push(errors::unknown_qualified_operator(
                             ident,
-                            &q,
+                            &qualifier,
                             unit,
                             self.names.namespaces(),
                             self.names.operators(),
-                        )
-                    })),
+                        ));
+                    }
                     _ => self.unknown_operator(ident, written, errors),
                 }
                 return None;
@@ -1052,7 +1198,9 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) {
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-        if self.names.has_value(name, span) {
+        if self.names.namespaces().constant(name, span).is_some() {
+            errors.push(errors::constant_called(name, span, written));
+        } else if self.names.has_value(name, span) {
             errors.push(errors::not_an_operator(name, span, "a value"));
         } else if let Some(error) = errors::tutorial_d_test(name, span, written, self.namespaces())
         {
@@ -3300,6 +3448,24 @@ pub(crate) struct Assigned<'a> {
     pub(crate) operand: &'a Expr,
 }
 
+/// The qualifier of the name `expr` calls, a call, or a projection to the
+/// parser, if it has one.
+fn qualifier_of(expr: &Expr) -> Option<ast::Qualifier> {
+    match expr {
+        Expr::Call(call) => call.qualifier(),
+        Expr::Project(project) => match project.operand()? {
+            Expr::Qualified(written) => written.qualifier(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The qualifier of the name `expr` calls, as it is written.
+fn qualifier_text(expr: &Expr) -> String {
+    qualifier_of(expr).map_or_else(String::new, |q| q.syntax().text().to_string())
+}
+
 /// Whether `arg`, the argument for the parameter `name`, `param`, of
 /// `signature`, is marked as the parameter is: `var` for a `var` one,
 /// `out` for an `out` one, and `const` or nothing for another; or `false`,
@@ -3713,6 +3879,16 @@ impl Names for TupleNames<'_> {
         }
     }
 
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.outer.constant_of(name, unit, span, errors)
+    }
+
     fn candidates(&self, at: Span) -> Vec<String> {
         self.heading
             .named()
@@ -3852,6 +4028,16 @@ impl Names for ComponentNames<'_> {
             Lookup::Found(expr) => Lookup::Found(ops::deeper(expr)),
             other => other,
         }
+    }
+
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.outer.constant_of(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {

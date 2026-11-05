@@ -65,6 +65,8 @@ pub enum SyntaxKind {
     Ident,
     OperatorKw,
     VarKw,
+    /// `const`: a local constant's declaration, or a parameter's mode.
+    ConstKw,
     /// `true`, a boolean literal.
     TrueKw,
     /// `false`, a boolean literal.
@@ -352,6 +354,10 @@ pub enum SyntaxKind {
     PositionalArg,
     /// A name used as an expression, or as the operator in a call.
     NameRef,
+    /// `unit::name` used as an expression: a constant of the unit's, or an
+    /// operator's name before `{}` or names alone, which look like a
+    /// projection.
+    QualifiedName,
     /// `not x`, `-x` or `+x`
     UnaryExpr,
     /// `x and y`, `x + y`, `r join s`, `r where p`, and the other dyadic
@@ -472,12 +478,13 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 183] = [
+    pub const ALL: [SyntaxKind; 185] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
         SyntaxKind::VarKw,
+        SyntaxKind::ConstKw,
         SyntaxKind::TrueKw,
         SyntaxKind::FalseKw,
         SyntaxKind::TupleKw,
@@ -612,6 +619,7 @@ impl SyntaxKind {
         SyntaxKind::Arguments,
         SyntaxKind::PositionalArg,
         SyntaxKind::NameRef,
+        SyntaxKind::QualifiedName,
         SyntaxKind::UnaryExpr,
         SyntaxKind::BinaryExpr,
         SyntaxKind::IsExpr,
@@ -669,6 +677,7 @@ impl SyntaxKind {
             self,
             SyntaxKind::OperatorKw
                 | SyntaxKind::VarKw
+                | SyntaxKind::ConstKw
                 | SyntaxKind::TrueKw
                 | SyntaxKind::FalseKw
                 | SyntaxKind::TupleKw
@@ -895,6 +904,7 @@ impl SyntaxKind {
         Some(match self {
             SyntaxKind::OperatorKw => "operator",
             SyntaxKind::VarKw => "var",
+            SyntaxKind::ConstKw => "const",
             SyntaxKind::TrueKw => "true",
             SyntaxKind::FalseKw => "false",
             SyntaxKind::TupleKw => "tuple",
@@ -994,6 +1004,7 @@ impl SyntaxKind {
             SyntaxKind::Ident => "identifier",
             SyntaxKind::OperatorKw => "`operator`",
             SyntaxKind::VarKw => "`var`",
+            SyntaxKind::ConstKw => "`const`",
             SyntaxKind::TrueKw => "`true`",
             SyntaxKind::FalseKw => "`false`",
             SyntaxKind::TupleKw => "`tuple`",
@@ -1107,7 +1118,7 @@ impl SyntaxKind {
             SyntaxKind::RequirementList => "requirements",
             SyntaxKind::Requirement => "requirement",
             SyntaxKind::VarDecl => "variable declaration",
-            SyntaxKind::Name | SyntaxKind::NameRef => "name",
+            SyntaxKind::Name | SyntaxKind::NameRef | SyntaxKind::QualifiedName => "name",
             SyntaxKind::UnaryExpr
             | SyntaxKind::BinaryExpr
             | SyntaxKind::IsExpr

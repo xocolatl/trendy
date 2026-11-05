@@ -113,6 +113,7 @@ ast_node!(Gathering);
 ast_node!(AssignList);
 ast_node!(Assign);
 ast_node!(VarDecl);
+ast_node!(QualifiedName);
 ast_node!(Key);
 ast_node!(Name);
 ast_node!(TypeRef);
@@ -145,6 +146,8 @@ pub enum Item {
     Type(TypeDecl),
     /// A variable of the program's, without a database's name before it.
     Variable(VarDecl),
+    /// A constant of the program's, `const name[: type] := value;`.
+    Constant(VarDecl),
     /// A database's relvar, `var kitchen.pantry: …`.
     Relvar(VarDecl),
     Constraint(ConstraintDecl),
@@ -164,7 +167,9 @@ impl Item {
             .or_else(|| TypeDecl::cast(node.clone()).map(Item::Type))
             .or_else(|| {
                 VarDecl::cast(node.clone()).map(|decl| {
-                    if decl.part_of().is_some() {
+                    if decl.is_const() {
+                        Item::Constant(decl)
+                    } else if decl.part_of().is_some() {
                         Item::Relvar(decl)
                     } else {
                         Item::Variable(decl)
@@ -184,7 +189,7 @@ impl Item {
             Item::Kind(decl) => decl.syntax(),
             Item::Heading(decl) => decl.syntax(),
             Item::Type(decl) => decl.syntax(),
-            Item::Variable(decl) | Item::Relvar(decl) => decl.syntax(),
+            Item::Variable(decl) | Item::Constant(decl) | Item::Relvar(decl) => decl.syntax(),
             Item::Constraint(decl) => decl.syntax(),
             Item::Database(decl) => decl.syntax(),
         }
@@ -375,7 +380,15 @@ impl SourceFile {
         self.0
             .children()
             .filter_map(VarDecl::cast)
-            .filter(|decl| decl.part_of().is_none())
+            .filter(|decl| decl.part_of().is_none() && !decl.is_const())
+    }
+
+    /// The program's constants.
+    pub fn constants(&self) -> impl Iterator<Item = VarDecl> {
+        self.0
+            .children()
+            .filter_map(VarDecl::cast)
+            .filter(VarDecl::is_const)
     }
 
     /// The databases' relvars, each `var kitchen.pantry: …`.
@@ -2146,7 +2159,35 @@ impl NameRef {
     }
 }
 
+impl QualifiedName {
+    /// The name, after the unit's.
+    #[must_use]
+    pub fn ident(&self) -> Option<SyntaxToken> {
+        ident_of(&self.0)
+    }
+
+    /// The unit's name and `::` before the name.
+    #[must_use]
+    pub fn qualifier(&self) -> Option<Qualifier> {
+        self.0.children().find_map(Qualifier::cast)
+    }
+}
+
 impl VarDecl {
+    /// The word it starts with, `var` or `const`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// Whether it declares a constant, which is never assigned, rather than a
+    /// variable.
+    #[must_use]
+    pub fn is_const(&self) -> bool {
+        self.keyword()
+            .is_some_and(|keyword| keyword.kind() == SyntaxKind::ConstKw)
+    }
+
     #[must_use]
     pub fn name(&self) -> Option<Name> {
         self.0.children().find_map(Name::cast)
@@ -2291,6 +2332,7 @@ pub enum Expr {
     Relation(RelationLiteral),
     Array(ArrayLiteral),
     Name(NameRef),
+    Qualified(QualifiedName),
     Unary(UnaryExpr),
     Binary(BinaryExpr),
     Is(IsExpr),
@@ -2319,6 +2361,7 @@ impl Expr {
             .or_else(|| RelationLiteral::cast(node.clone()).map(Expr::Relation))
             .or_else(|| ArrayLiteral::cast(node.clone()).map(Expr::Array))
             .or_else(|| NameRef::cast(node.clone()).map(Expr::Name))
+            .or_else(|| QualifiedName::cast(node.clone()).map(Expr::Qualified))
             .or_else(|| UnaryExpr::cast(node.clone()).map(Expr::Unary))
             .or_else(|| BinaryExpr::cast(node.clone()).map(Expr::Binary))
             .or_else(|| IsExpr::cast(node.clone()).map(Expr::Is))
@@ -2346,6 +2389,7 @@ impl Expr {
             Expr::Relation(e) => e.syntax(),
             Expr::Array(e) => e.syntax(),
             Expr::Name(e) => e.syntax(),
+            Expr::Qualified(e) => e.syntax(),
             Expr::Unary(e) => e.syntax(),
             Expr::Binary(e) => e.syntax(),
             Expr::Is(e) => e.syntax(),
@@ -2914,6 +2958,23 @@ impl Literal {
             Err(LiteralError::Malformed)
         }
     }
+}
+
+/// Whether a name spelled `name` is written anywhere in `node`, other than as
+/// what the value after it is for, as in `name: value`.
+#[must_use]
+pub fn mentions(node: &SyntaxNode, name: &str) -> bool {
+    let labels = |token: &SyntaxToken| {
+        token
+            .parent()
+            .filter(|parent| parent.kind() == SyntaxKind::Name)
+            .and_then(|parent| parent.parent())
+            .and_then(AttributeValue::cast)
+            .is_some_and(|attribute| !attribute.is_shorthand())
+    };
+    node.descendants_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .any(|token| token.kind() == SyntaxKind::Ident && token.text() == name && !labels(&token))
 }
 
 fn ident_of(node: &SyntaxNode) -> Option<SyntaxToken> {

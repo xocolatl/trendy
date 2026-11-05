@@ -1,0 +1,51 @@
+/* Constants: names for values that never change, as Rust's `let` is, and `var`
+   its `let mut`. Any operator can read one, and a type's constraint, as a value
+   that never changes leaves them functions of their arguments. */
+
+/* Where a compass point takes you. The compiler computes this, and it is as if
+   the relation were written wherever it is read. */
+const moves := relation {
+    { direction: "north", dx: 0, dy: 1 },
+    { direction: "south", dx: 0, dy: -1 },
+    { direction: "east", dx: 1, dy: 0 },
+    { direction: "west", dx: -1, dy: 0 },
+}
+key { direction };
+
+/* In any order, each after what it reads. */
+const steps_per_day: integer := 2 * steps_per_leg;
+const steps_per_leg := 4;
+
+/* `series` runs a loop, which the compiler doesn't: the program computes this
+   once, before `main`, as it reads it below. */
+const milestones := series{from: 1, to: 5} rename {value as stone};
+const last_stone := max{r: milestones, of: stone};
+
+/* A type's constraint can read one, as it couldn't a variable. */
+type stone_number {
+    { n: integer },
+    constraint n >= 1 and n <= last_stone,
+};
+
+/* And a read-only operator. */
+operator walked{toward: text, legs: integer}: tuple { x: integer, y: integer } [
+    const move := tuple from (moves where direction = toward);
+    const steps := legs * steps_per_leg;
+    tuple { x: move.dx * steps, y: move.dy * steps }
+];
+
+operator main{} [
+    call debug_table{r: moves where dx > 0};
+    call debug_value{v: walked{toward: "south", legs: 2}};
+    call debug_value{v: steps_per_day};
+    call debug_value{v: last_stone};
+    call debug_value{v: stone_number{n: 3}};
+    /* A constant in a body is computed where it is declared, here each time the
+       loop comes round. */
+    for stone in array [1, 2] loop [
+        const left := last_stone - stone;
+        call debug_value{v: left};
+    ];
+    /* The prelude's `pi` is one too. */
+    call debug_value{v: cos{of: pi}};
+];

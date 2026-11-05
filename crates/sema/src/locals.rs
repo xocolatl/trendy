@@ -392,6 +392,10 @@ pub(crate) fn local(
             t,
         )
     });
+    if decl.is_const() && decl.initializer().is_none() {
+        errors.push(errors::constant_without_value(name, span, false));
+        return None;
+    }
     let mut checker = Checker::new(&mut *names);
     let (ty, value) = match (declared, decl.initializer()) {
         (None, None) => {

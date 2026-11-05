@@ -1001,8 +1001,9 @@ fn between_definitions(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool)
 /// a name or an operand, or a separator.
 fn spaced_after(kind: SyntaxKind) -> bool {
     use SyntaxKind::{
-        ArrayKw, AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw, IfKw,
-        InsertKw, NotKw, OperatorKw, RelationKw, ReturnKw, TransactionKw, TupleKw, UpdateKw, VarKw,
+        ArrayKw, AssignKw, BuiltinKw, CallKw, Colon, Comma, ConstKw, DInsertKw, DeleteKw,
+        IDeleteKw, IfKw, InsertKw, NotKw, OperatorKw, RelationKw, ReturnKw, TransactionKw, TupleKw,
+        UpdateKw, VarKw,
     };
     between_parts(kind)
         || matches!(
@@ -1010,6 +1011,7 @@ fn spaced_after(kind: SyntaxKind) -> bool {
             OperatorKw
                 | IfKw
                 | VarKw
+                | ConstKw
                 | TupleKw
                 | RelationKw
                 | ArrayKw
@@ -1437,6 +1439,13 @@ mod tests {
         assert_eq!(
             fmt("type c is shapes :: figure { { r: integer } };"),
             "type c is shapes::figure { { r: integer } };\n"
+        );
+        // A constant of another unit's, read, projected and in an expression.
+        assert_eq!(
+            fmt(
+                "var a := lakes . depths :: limit * 2 ;var b := lakes :: table {n,m} where n=lakes::one;"
+            ),
+            "var a := lakes.depths::limit * 2;\nvar b := lakes::table{n, m} where n = lakes::one;\n"
         );
     }
 

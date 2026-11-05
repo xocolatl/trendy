@@ -144,9 +144,10 @@ pub(crate) fn local_declared_again(
     .with_note(LOCAL_NAMES);
     // `var total := total + 1;`, as Rust declares a variable again to give
     // it a new value: the first one's assignment was meant, if it is
-    // declared before, by a `var`, as a loop's variable can't be assigned.
-    let before = matches!(first, crate::locals::Declaration::Var(_))
-        && first.name_span().start < decl.span().start;
+    // declared before, by a `var`, as a loop's variable can't be assigned,
+    // and neither can a constant.
+    let assignable = matches!(first, crate::locals::Declaration::Var(v) if !v.is_const());
+    let before = assignable && first.name_span().start < decl.span().start;
     match (
         decl.name(),
         decl.type_expr(),
@@ -160,6 +161,7 @@ pub(crate) fn local_declared_again(
                 replacement: String::new(),
             }],
         ),
+        _ if !assignable => d.with_help("give the second a name of its own"),
         _ => d.with_help(format!(
             "give the second a name of its own, or assign the first: `{name} := …;`"
         )),
@@ -2115,24 +2117,49 @@ pub(crate) fn unnumbered_position(name: &str, span: Span, candidates: &[&str]) -
 }
 
 /// The value `name`, which refers to nothing, written at `span` as another
-/// language writes a constant, such as `PI` or `Math.PI`: the read-only
-/// operator `operator`, which has no parameters, and whose call is the
-/// value.
-pub(crate) fn constant_as_value(name: &str, span: Span, operator: &str) -> Diagnostic {
-    let replacement = format!("{operator}{{}}");
+/// language writes a constant, such as `PI` or `Math.PI`: `meant`, the constant,
+/// or the call of a read-only operator without parameters, whose value it is.
+pub(crate) fn constant_as_value(name: &str, span: Span, meant: &str) -> Diagnostic {
     Diagnostic::error(
         Code::UnknownName,
         format!("unknown value `{name}`"),
         span,
         "a constant, as another language writes it",
     )
-    .with_note(format!(
-        "a constant is a read-only operator without parameters, whose value is its call's, written with braces after its name, as `{replacement}`, and names are case-sensitive"
-    ))
-    .with_suggestion(
-        format!("call `{operator}`"),
-        vec![Edit { span, replacement }],
+    .with_note(
+        "a constant's name is written as it is declared, without the library it is in: a name is case-sensitive, and a read-only operator without parameters is called with braces",
     )
+    .with_suggestion(
+        format!("write `{meant}`"),
+        vec![Edit {
+            span,
+            replacement: meant.to_string(),
+        }],
+    )
+}
+
+/// The constant `name`, at `span`, called, its arguments as `written`: a name
+/// for a value, which takes none, and no braces.
+pub(crate) fn constant_called(name: &str, span: Span, written: Written) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::NotAnOperator,
+        format!("`{name}` is a constant, not an operator"),
+        span,
+        "can't be called",
+    )
+    .with_note(CONSTANT_RULE);
+    match written {
+        Written::Nothing(list) if list.names().next().is_none() => d.with_suggestion(
+            format!("write `{name}`"),
+            vec![Edit {
+                span: Span::new(span.end, list.span().end),
+                replacement: String::new(),
+            }],
+        ),
+        _ => d.with_help(format!(
+            "a constant takes no arguments: its value is `{name}`, and a projection of it is `({name}){{a, b}}`"
+        )),
+    }
 }
 
 /// The value `ARRAY`, or another spelling of `array`, at `span`, which
@@ -2628,7 +2655,7 @@ pub(crate) fn counted_otherwise(
 }
 
 /// The operator `name`, at `span`, used as a value, of `operators`. A
-/// read-only operator's call is a value, as `pi{}` is, so it is called,
+/// read-only operator's call is a value, as `f{}` is, so it is called,
 /// and an update operator is invoked by a `call` statement.
 pub(crate) fn operator_as_value(name: &str, span: Span, operators: &Operators) -> Diagnostic {
     let d = Diagnostic::error(
@@ -2895,6 +2922,23 @@ fn variable_in_type_operator(name: &str, span: Span, operator: &Signature) -> Op
 /// fix passes it as a parameter of that name, which each call of the
 /// operator in the file gives the variable, but not a call of another of
 /// its name.
+/// The fix of declaring the variable `decl` a constant, if it has a value to
+/// be one of.
+pub(crate) fn declared_constant(decl: &VarDecl) -> Option<trendy_diag::Suggestion> {
+    let (name, keyword) = (decl.name()?, decl.keyword()?);
+    decl.initializer()?;
+    Some(trendy_diag::Suggestion {
+        message: format!(
+            "declare `{}` with `const`, as nothing assigns it",
+            name.syntax().text()
+        ),
+        edits: vec![Edit {
+            span: trendy_syntax::span(keyword.text_range()),
+            replacement: "const".to_string(),
+        }],
+    })
+}
+
 pub(crate) fn variable_in_read_only(
     name: &str,
     span: Span,
@@ -3514,11 +3558,10 @@ pub(crate) fn unknown_name_alone(name: &str, span: Span, candidates: &[&str]) ->
 /// `expr`, the names `list` after the name `ident`, which is both a
 /// projection of the value it names and a call of the operator it names.
 pub(crate) fn projection_or_call(
-    ident: &SyntaxToken,
+    name: &str,
     list: &trendy_syntax::ast::NameList,
     expr: &Expr,
 ) -> Diagnostic {
-    let name = ident.text();
     let names: Vec<String> = list
         .names()
         .map(|n| n.syntax().text().to_string())
@@ -3535,12 +3578,12 @@ pub(crate) fn projection_or_call(
     .with_help(format!("to project the value, write `({name}){{{}}}`", names.join(", ")))
 }
 
-/// `d`, about the projection of the value `ident` names on the names `list`,
+/// `d`, about the projection of the value `name` names on the names `list`,
 /// which doesn't fit: with the fix that makes it the call of the operator of
 /// that name, which has those parameters.
 pub(crate) fn as_a_call(
     d: Diagnostic,
-    ident: &SyntaxToken,
+    name: &str,
     list: &trendy_syntax::ast::NameList,
 ) -> Diagnostic {
     let edits = list
@@ -3552,10 +3595,7 @@ pub(crate) fn as_a_call(
         .collect();
     // Ahead of any fix of the projection, as an operator has these names.
     let mut d = d.with_suggestion(
-        format!(
-            "call the operator `{}`, which has these parameters",
-            ident.text()
-        ),
+        format!("call the operator `{name}`, which has these parameters"),
         edits,
     );
     d.suggestions.rotate_right(1);
@@ -4404,6 +4444,7 @@ fn negation(condition: &Expr) -> String {
     let text = condition.syntax().text();
     match condition {
         Expr::Name(_)
+        | Expr::Qualified(_)
         | Expr::Literal(_)
         | Expr::Paren(_)
         | Expr::Call(_)
@@ -6309,7 +6350,9 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
         (Global::CallConstraint(_), Some(_)) => {
             unreachable!("only a type's constraint is of a representation")
         }
-        (Global::Variable(_) | Global::Operator(_), _) => format!("`{}`", p.name),
+        (Global::Variable(_) | Global::Operator(_) | Global::Constant(_), _) => {
+            format!("`{}`", p.name)
+        }
     };
     // What selecting a value that checks it is, if it is a constraint.
     let selecting = |p: &Pending| match &p.representation {
@@ -6331,6 +6374,21 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
                     "a possible representation's conversion is computed whenever a value in it is, so one that leads back to itself, directly or through operators, would compute itself again",
                 )
                 .with_help("compute the components from those it is given, without selecting a value in the representation")
+        }
+        Global::Constant(_) => {
+            let message = match names.as_slice() {
+                [_] => format!("the constant `{}` depends on itself", first.name),
+                _ => format!(
+                    "the constant `{}` depends on itself through {}",
+                    first.name,
+                    trendy_diag::conjoin(&names[1..])
+                ),
+            };
+            Diagnostic::error(Code::CyclicInitialValues, message, first.defined, "declared here")
+                .with_note(
+                    "a constant is computed once, after what it reads, so one that reads itself, directly or through read-only operators, has no order to be computed in",
+                )
+                .with_help("give it a value that doesn't refer to itself")
         }
         Global::Variable(_) => {
             let message = match names.as_slice() {
@@ -6365,6 +6423,7 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
                 format!("{this} refers to itself")
             }
             (Global::Variable(_), _) => format!("{this} refers to {that}"),
+            (_, Global::Constant(_)) => format!("{this} reads {that}"),
             _ if pending.failing => format!("{this} fails with an error {that} writes"),
             _ if next.global == pending.global => format!("{this} calls itself"),
             _ => format!("{this} calls {that}"),
@@ -6767,7 +6826,7 @@ pub(crate) fn value_known_only_when_running(written: &Expr) -> Diagnostic {
         written.span(),
         "its statements, or an operator's it calls, are run then",
     )
-    .with_note("a variable's initial value is known when compiling, and the compiler runs no `if` statement, loop, transaction or `fail` statement, of a value block or of a read-only operator's body, and no operator that calls itself, directly or through the operators it calls, as they may not stop")
+    .with_note("a variable's initial value is known when compiling, and the compiler runs no `if` statement, loop, transaction or `fail` statement, of a value block or of a read-only operator's body, and no operator that calls itself, directly or through the operators it calls, as they may not stop, so a constant computed from one isn't known then either")
     .with_help("declare the variable with its type, and assign it in `main`")
 }
 
@@ -8382,6 +8441,28 @@ const FOR_UNCHANGED: &str = "a `for` loop goes through the elements of its array
 
 /// `name`, a `for` loop's variable, declared at `declared`, assigned at
 /// `span`.
+/// `written`, what one unit declares, as another unit writes it, assigned.
+pub(crate) fn assigned_qualified(written: &ast::QualifiedName) -> Diagnostic {
+    let whole = written.syntax().text();
+    let d = Diagnostic::error(
+        Code::NotAssignable,
+        format!("`{whole}` can't be assigned"),
+        written.span(),
+        "another unit's",
+    )
+    .with_note(
+        "a unit only reads what another unit declares: a constant never changes, and a unit's variables are its own, which its update operators assign",
+    );
+    let unit = written.qualifier().and_then(|q| q.unit());
+    match unit {
+        Some(unit) => d.with_help(format!(
+            "assign a variable of this unit's, or call an update operator of `{}`'s that assigns it",
+            unit.text()
+        )),
+        None => d,
+    }
+}
+
 pub(crate) fn assigned_loop_variable(name: &str, span: Span, declared: Span) -> Diagnostic {
     Diagnostic::error(
         Code::NotAssignable,
@@ -8398,6 +8479,131 @@ pub(crate) fn assigned_loop_variable(name: &str, span: Span, declared: Span) -> 
         "compute the new value in a local variable of its own: `var new_{name} := …;`"
     ))
 }
+
+/// The constant `name`, which `declaration` declares, assigned at `span`.
+pub(crate) fn assigned_constant(name: &str, span: Span, declaration: &VarDecl) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::NotAssignable,
+        format!("the constant `{name}` can't be assigned"),
+        span,
+        "a constant, which never changes",
+    )
+    .with_secondary(
+        declaration
+            .name()
+            .map_or_else(|| declaration.span(), |n| n.span()),
+        "declared with `const`",
+    )
+    .with_note(CONSTANT_RULE);
+    let Some(keyword) = declaration.keyword() else {
+        return d;
+    };
+    // An interface declares no variable, and the prelude's is in one.
+    if declaration
+        .syntax()
+        .parent()
+        .and_then(SourceFile::cast)
+        .is_some()
+        && trendy_syntax::ast::section_of(declaration.syntax())
+            == trendy_syntax::ast::Section::Interface
+    {
+        return d;
+    }
+    d.with_suggestion(
+        format!("declare `{name}` with `var`, so that it can change"),
+        vec![Edit {
+            span: trendy_syntax::span(keyword.text_range()),
+            replacement: "var".to_string(),
+        }],
+    )
+}
+
+/// The constant `name`, written at `span`, declared without a value anywhere, in
+/// its unit's interface if `interface`.
+pub(crate) fn constant_without_value(name: &str, span: Span, interface: bool) -> Diagnostic {
+    let help = if interface {
+        format!(
+            "give it its value here, or in the implementation, as in `const {name} := …;`, where a variable would go if it is to change"
+        )
+    } else {
+        format!(
+            "give it its value, as in `const {name} := …;`, or declare it with `var` to assign it later"
+        )
+    };
+    Diagnostic::error(
+        Code::ConstantWithoutValue,
+        format!("the constant `{name}` has no value"),
+        span,
+        "no value",
+    )
+    .with_note(CONSTANT_RULE)
+    .with_help(help)
+}
+
+/// The constant `name`, written at `span`, that its unit's interface declares
+/// without a type, for its value to give in the implementation.
+pub(crate) fn interface_constant_without_type(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConstantWithoutValue,
+        format!("the interface's constant `{name}` has no type"),
+        span,
+        "no type and no value",
+    )
+    .with_note("an interface that leaves a constant's value to the implementation says its type: what other units see of it is `const name: type;`")
+    .with_help(format!(
+        "write its type here, as in `const {name}: integer;`, or its value"
+    ))
+}
+
+/// The type `own` written in the implementation's part of the constant `name`,
+/// which isn't `declared`, the type its interface says.
+pub(crate) fn constant_type_differs(
+    name: &str,
+    own: &TypeExpr,
+    declared: &hir::Type,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::TypeMismatch,
+        format!("the constant `{name}` is of the type `{declared}` in its interface"),
+        own.span(),
+        "another type",
+    )
+    .with_note(CONSTANT_RULE)
+    .with_help(format!(
+        "write `{declared}`, or leave the type to the interface"
+    ))
+}
+
+/// The variable `name`, declared by `declaration`, read at `span`, in the value
+/// of the constant `constant`.
+pub(crate) fn variable_in_constant(
+    name: &str,
+    span: Span,
+    constant: &str,
+    declaration: &VarDecl,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::VariableInReadOnly,
+        format!("the constant `{constant}` can't read the variable `{name}`"),
+        span,
+        "a variable of the program's",
+    )
+    .with_note("a constant is a name for a value that never changes, so it is computed from literals, other constants and read-only operators, and reads no variable, whose value can (TTM, chapter 6, \"Relation Constants\")");
+    let keyword = declaration.keyword();
+    match keyword.filter(|_| declaration.initializer().is_some()) {
+        Some(keyword) => d.with_suggestion(
+            format!("declare `{name}` with `const`, if nothing is to assign it"),
+            vec![Edit {
+                span: trendy_syntax::span(keyword.text_range()),
+                replacement: "const".to_string(),
+            }],
+        ),
+        None => d.with_help(format!("declare `{constant}` with `var`")),
+    }
+}
+
+/// What a constant is, for notes.
+const CONSTANT_RULE: &str = "a constant, `const name[: type] := value;`, is a name for a value that never changes: it has its value from where it is declared, and is never assigned, as a variable, declared with `var`, can be";
 
 /// `name`, a variable the array of the `for` loop written at `array` is
 /// computed from, assigned at `span`, in the loop.
@@ -9057,6 +9263,86 @@ pub(crate) fn unknown_qualified_operator(
         &operators.names_in(unit, span),
         &format!("name one of the operators `{declaring}`'s interface declares"),
     )
+}
+
+/// `written`, whose name is `ident`, the name of no constant `unit` declares
+/// that it sees: an operator's, which a call gives a value, or a misspelling.
+pub(crate) fn unknown_qualified_value(
+    written: &ast::QualifiedName,
+    ident: &SyntaxToken,
+    unit: hir::FileId,
+    namespaces: &Namespaces,
+    operators: &Operators,
+) -> Diagnostic {
+    let name = ident.text();
+    let span = trendy_syntax::span(ident.text_range());
+    let whole = written.syntax().text().to_string();
+    if operators.names_in(unit, span).contains(&name) {
+        return qualified_operator_as_value(&whole, span, name, unit, operators);
+    }
+    let declaring = namespaces.units().name(unit);
+    let d = Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown value `{whole}`"),
+        span,
+        format!("not a constant `{declaring}` declares"),
+    )
+    .with_note(format!(
+        "`{declaring}`'s interface declares no constant `{name}`: a constant is the one value a unit's name qualifies, as a unit's variables are its own"
+    ))
+    .with_note(trendy_syntax::unit::QUALIFIED_RULE);
+    spelled_like(
+        d,
+        name,
+        span,
+        &namespaces.constant_names_in(unit, span),
+        &format!("name one of the constants `{declaring}`'s interface declares"),
+    )
+}
+
+/// `whole`, an operator's name, qualified, written as a value, of the
+/// operator `name` of `unit`, at `span`.
+fn qualified_operator_as_value(
+    whole: &str,
+    span: Span,
+    name: &str,
+    unit: hir::FileId,
+    operators: &Operators,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::OperatorAsValue,
+        format!("`{whole}` is an operator, not a value"),
+        span,
+        "operators can't be used as values",
+    );
+    let called = crate::WrittenName {
+        name,
+        at: span,
+        unit: Some(unit),
+    };
+    let overloads = operators.called(called);
+    let mut read_only = overloads.iter().filter(|signature| signature.read_only);
+    let Some(first) = read_only.next() else {
+        return d.with_help(format!(
+            "to invoke it, write a statement: `call {whole}{{…}};`"
+        ));
+    };
+    let d = d.with_note(
+        "a read-only operator's value is its call's, written with its arguments in braces after its name, `{}` if it has none",
+    );
+    if first.written.is_empty() || read_only.any(|signature| signature.written.is_empty()) {
+        return d.with_suggestion(
+            format!("call it: `{whole}{{}}`"),
+            vec![Edit {
+                span: Span::new(span.end, span.end),
+                replacement: "{}".to_string(),
+            }],
+        );
+    }
+    d.with_help(format!(
+        "call it with its arguments: the parameters are {}",
+        first.text()
+    ))
 }
 
 /// What a unit sees, for the notes of a clash.
@@ -9741,7 +10027,7 @@ pub(crate) fn tclose_operand(
     // A name or a parenthesized operand is projected as it is, and another
     // in parentheses, so that the projection is of all of it.
     let written = operand.syntax().text().to_string();
-    let projected = if matches!(operand, Expr::Name(_) | Expr::Paren(_)) {
+    let projected = if matches!(operand, Expr::Name(_) | Expr::Qualified(_) | Expr::Paren(_)) {
         written
     } else {
         format!("({written})")

@@ -164,6 +164,9 @@ fn starts_condition(kind: SyntaxKind) -> bool {
 /// trendy's statements, and other languages' that are reported.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatementStart {
+    /// `VAR name` or `CONST name`, a declaration's keyword in the wrong case, as
+    /// Tutorial D writes it.
+    MiscasedVar(&'static str),
     /// `constraint condition;`, which belongs in the operator's braces.
     BodyConstraint,
     /// Another language's `assert condition;`.
@@ -358,7 +361,7 @@ impl<'a> Parser<'a> {
             match found.kind {
                 SyntaxKind::OperatorKw => self.operator(),
                 SyntaxKind::BuiltinKw => self.builtin(),
-                SyntaxKind::VarKw => self.var_decl(),
+                SyntaxKind::VarKw | SyntaxKind::ConstKw => self.var_decl(),
                 SyntaxKind::Ident if self.at_kind() => self.kind_decl(),
                 SyntaxKind::Ident if self.at_type_decl() => self.type_decl(),
                 SyntaxKind::Ident if self.at_heading_decl() => self.heading_decl(),
@@ -1428,6 +1431,25 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// C's `const int x`, a type before the declared name, its word one trendy
+    /// recognizes from other languages: consumed, and reported, with the fix that
+    /// moves it after the name.
+    fn type_before_name(&mut self) {
+        let Some(written) = self
+            .found()
+            .filter(|f| f.kind == SyntaxKind::Ident && errors::foreign_keyword(f.text))
+        else {
+            return;
+        };
+        let Some(name) = self.found_after(1).filter(|f| f.kind == SyntaxKind::Ident) else {
+            return;
+        };
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        self.builder.finish_node();
+        self.errors.push(errors::type_before_name(written, name));
+    }
+
     /// Tutorial D's kind of relvar after a variable's name, `REAL`, `BASE`,
     /// `PUBLIC` or `PRIVATE`, in any case, before its type, consumed and
     /// reported: a private relvar is a variable of the program's, and the
@@ -1911,7 +1933,7 @@ impl<'a> Parser<'a> {
     /// tuple, so they are one too, reported.
     fn at_value_block(&mut self) -> bool {
         let declares = self.found_after(1).is_some_and(|f| {
-            f.kind == SyntaxKind::VarKw
+            matches!(f.kind, SyntaxKind::VarKw | SyntaxKind::ConstKw)
                 || (f.kind == SyntaxKind::Ident && errors::foreign_keyword(f.text))
         }) && self
             .found_after(2)
@@ -2050,7 +2072,7 @@ impl<'a> Parser<'a> {
             .rsplit('\n')
             .next()
             .is_some_and(str::is_empty);
-        if found.kind != SyntaxKind::VarKw || !unindented {
+        if !matches!(found.kind, SyntaxKind::VarKw | SyntaxKind::ConstKw) || !unindented {
             return false;
         }
         let mut depth = 0usize;
@@ -2111,8 +2133,10 @@ impl<'a> Parser<'a> {
             StatementStart::Exit
         } else if self.at_call_keyword() {
             StatementStart::Call
-        } else if found.kind == SyntaxKind::VarKw {
+        } else if matches!(found.kind, SyntaxKind::VarKw | SyntaxKind::ConstKw) {
             StatementStart::Var
+        } else if let Some(keyword) = self.at_miscased_declaration() {
+            StatementStart::MiscasedVar(keyword)
         } else if self.at_foreign_declaration() {
             StatementStart::ForeignVar
         } else if found.kind == SyntaxKind::AssignKw {
@@ -2267,8 +2291,14 @@ impl<'a> Parser<'a> {
             }
             Some(StatementStart::Call) => self.call_stmt(),
             Some(StatementStart::Var) => self.var_decl(),
+            Some(StatementStart::MiscasedVar(keyword)) => {
+                self.errors.push(errors::miscased_keyword(found, keyword));
+                self.var_decl();
+            }
             Some(StatementStart::ForeignVar) => {
-                self.errors.push(errors::foreign_declaration(found));
+                let mutable = self.found_after(1).filter(|word| word.text == "mut");
+                self.errors
+                    .push(errors::foreign_declaration(found, mutable.map(|m| m.span)));
                 self.var_decl();
             }
             Some(StatementStart::AssignBlock) => self.assign_block(),
@@ -2519,20 +2549,40 @@ impl<'a> Parser<'a> {
     /// as in `let x = 1;` or `int x = 1;`: the word, a name, and what follows
     /// a variable's name.
     fn at_foreign_declaration(&mut self) -> bool {
-        self.found()
-            .is_some_and(|f| f.kind == SyntaxKind::Ident && errors::foreign_keyword(f.text))
+        // Rust's `let mut x`, the name after the word for what can change.
+        let mutable = self.found().is_some_and(|f| f.text == "let")
+            && self.found_after(1).is_some_and(|f| f.text == "mut")
             && self
-                .found_after(1)
-                .is_some_and(|f| f.kind == SyntaxKind::Ident)
-            && self.found_after(2).is_some_and(|f| {
-                matches!(
-                    f.kind,
-                    SyntaxKind::Eq
-                        | SyntaxKind::ColonEq
-                        | SyntaxKind::Colon
-                        | SyntaxKind::Semicolon
-                )
-            })
+                .found_after(2)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident);
+        mutable
+            || self
+                .found()
+                .is_some_and(|f| f.kind == SyntaxKind::Ident && errors::foreign_keyword(f.text))
+                && self
+                    .found_after(1)
+                    .is_some_and(|f| f.kind == SyntaxKind::Ident)
+                && self.found_after(2).is_some_and(|f| {
+                    matches!(
+                        f.kind,
+                        SyntaxKind::Eq
+                            | SyntaxKind::ColonEq
+                            | SyntaxKind::Colon
+                            | SyntaxKind::Semicolon
+                    )
+                })
+    }
+
+    /// The keyword, if `VAR` or `CONST`, in another case, starts a declaration
+    /// here, as Tutorial D writes one: before a name, then what can follow it.
+    fn at_miscased_declaration(&mut self) -> Option<&'static str> {
+        let found = self.found().filter(|f| f.kind == SyntaxKind::Ident)?;
+        let keyword = [SyntaxKind::VarKw, SyntaxKind::ConstKw]
+            .into_iter()
+            .find(|keyword| found.spells(*keyword))?;
+        self.found_after(1)
+            .filter(|name| name.kind == SyntaxKind::Ident)?;
+        keyword.fixed_text()
     }
 
     /// Whether an assignment, or a shorthand for one, starts here: a
@@ -2542,7 +2592,9 @@ impl<'a> Parser<'a> {
         let Some(found) = self.found() else {
             return false;
         };
-        let after = self.after_target_path(1);
+        // The name, after any qualifier, which sema reports of a target.
+        let name = self.qualifier_len(0).unwrap_or(0);
+        let after = self.after_target_path(name + 1);
         let assigned = (found.kind == SyntaxKind::Ident || found.kind.is_keyword())
             && self
                 .found_after(after)
@@ -3922,6 +3974,10 @@ impl<'a> Parser<'a> {
 
     /// The variable an assignment assigns, and its name, if it is there.
     fn target(&mut self) -> Option<&'a str> {
+        if let Some(len) = self.qualifier_len(0) {
+            self.qualified_name(len);
+            return None;
+        }
         if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::NameRef);
             let span = self.bump();
@@ -4066,12 +4122,16 @@ impl<'a> Parser<'a> {
     /// an operator.
     fn at_call(&mut self) -> bool {
         let named = |f: Option<Found>| f.is_some_and(|f| f.kind == SyntaxKind::Ident);
-        if !named(self.found()) {
-            return false;
-        }
-        match self.found_after(1).map(|f| f.kind) {
+        named(self.found()) && self.at_call_after(0)
+    }
+
+    /// Whether the name at the significant token `n` after the next one is
+    /// followed by a call's arguments, in braces, or, where they can be a
+    /// call's, in parentheses.
+    fn at_call_after(&mut self, n: usize) -> bool {
+        match self.found_after(n + 1).map(|f| f.kind) {
             Some(SyntaxKind::LParen) => self.paren_calls,
-            Some(SyntaxKind::LBrace) => self.at_arguments(1),
+            Some(SyntaxKind::LBrace) => self.at_arguments(n + 1),
             _ => false,
         }
     }
@@ -4146,6 +4206,14 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// `unit::name`, without arguments, whose qualifier is `len` tokens long.
+    fn qualified_name(&mut self, len: usize) {
+        self.start_node(SyntaxKind::QualifiedName);
+        self.qualifier(len);
+        self.bump();
+        self.builder.finish_node();
+    }
+
     /// A call's arguments, in braces, or in parentheses, which are reported,
     /// with a fix.
     fn arguments(&mut self) {
@@ -4173,18 +4241,35 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `var name: type := value;`, where either the type or the value may be
-    /// left out. Sema checks that at least one is there.
+    /// `var name: type := value;`, or `const` for `var`, where either the type
+    /// or the value may be left out. Sema checks that at least one is there, and
+    /// that a constant has its value.
     fn var_decl(&mut self) {
         let outer_form = std::mem::replace(&mut self.form, errors::VARIABLE_FORM);
         self.start_node(SyntaxKind::VarDecl);
+        let first = self.found();
+        let constant = first.is_some_and(|f| f.spells(SyntaxKind::ConstKw));
         self.bump();
-        self.part_of();
-        self.name(
-            "add a name after `var`, such as `var count: integer := 0;`",
-            &[SyntaxKind::Colon, SyntaxKind::ColonEq, SyntaxKind::Eq],
-        );
-        self.relvar_kind();
+        // Rust's `let mut x`, whose word is removed with the keyword.
+        if first.is_some_and(|f| f.text == "let") && self.found().is_some_and(|f| f.text == "mut") {
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            self.builder.finish_node();
+        }
+        self.type_before_name();
+        if constant {
+            self.name(
+                "add a name after `const`, such as `const limit: integer := 10;`",
+                &[SyntaxKind::Colon, SyntaxKind::ColonEq, SyntaxKind::Eq],
+            );
+        } else {
+            self.part_of();
+            self.name(
+                "add a name after `var`, such as `var count: integer := 0;`",
+                &[SyntaxKind::Colon, SyntaxKind::ColonEq, SyntaxKind::Eq],
+            );
+            self.relvar_kind();
+        }
 
         let starts_type = |k| {
             matches!(
@@ -5907,9 +5992,11 @@ impl<'a> Parser<'a> {
                 errors::boolean_spelling(found.text).expect("just checked"),
             ));
         } else if let Some(len) = self.qualifier_len(0) {
-            // A qualified name, where a value goes, is an operator's, as no
-            // value is another unit's but one an operator gives.
-            self.call_expr(Some(len));
+            if self.at_call_after(len) {
+                self.call_expr(Some(len));
+            } else {
+                self.qualified_name(len);
+            }
         } else if self.at_call() {
             self.call_expr(None);
         } else if self.at(SyntaxKind::Ident) {
@@ -6287,7 +6374,9 @@ impl<'a> Parser<'a> {
         let word =
             |f: Found, word: &str| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word);
         let first = self.nth_found(n)?;
-        let mode = if first.spells(SyntaxKind::VarKw) || word(first, "const") || word(first, "out")
+        let mode = if first.spells(SyntaxKind::VarKw)
+            || first.spells(SyntaxKind::ConstKw)
+            || word(first, "out")
         {
             ModeWords {
                 count: 1,
@@ -6352,7 +6441,7 @@ impl<'a> Parser<'a> {
         };
         let first = self.found()?;
         let (count, foreign) = if first.spells(SyntaxKind::VarKw)
-            || word(Some(first), "const")
+            || first.spells(SyntaxKind::ConstKw)
             || word(Some(first), "out")
         {
             (1, None)
@@ -6678,7 +6767,10 @@ impl<'a> Parser<'a> {
         while self.peek().is_some_and(|k| {
             !matches!(
                 k,
-                SyntaxKind::OperatorKw | SyntaxKind::VarKw | SyntaxKind::BuiltinKw
+                SyntaxKind::OperatorKw
+                    | SyntaxKind::VarKw
+                    | SyntaxKind::ConstKw
+                    | SyntaxKind::BuiltinKw
             )
         }) && !self.at_heading_decl()
             && !self.at_type_decl()
@@ -6699,10 +6791,14 @@ impl<'a> Parser<'a> {
             return;
         }
         // `VAR` or `Operator`: a definition keyword in the wrong case.
-        let miscased = [SyntaxKind::OperatorKw, SyntaxKind::VarKw]
-            .into_iter()
-            .filter_map(SyntaxKind::fixed_text)
-            .find(|k| first.kind == SyntaxKind::Ident && k.eq_ignore_ascii_case(first.text));
+        let miscased = [
+            SyntaxKind::OperatorKw,
+            SyntaxKind::VarKw,
+            SyntaxKind::ConstKw,
+        ]
+        .into_iter()
+        .filter_map(SyntaxKind::fixed_text)
+        .find(|k| first.kind == SyntaxKind::Ident && k.eq_ignore_ascii_case(first.text));
         self.errors.push(match miscased {
             Some(keyword) => errors::miscased_keyword(first, keyword),
             None => errors::expected_definition(
@@ -6739,11 +6835,13 @@ impl<'a> Parser<'a> {
         }
         if EXPORT_WORDS.iter().any(|word| is(word))
             && self.found_after(1).is_some_and(|f| {
-                matches!(f.kind, SyntaxKind::OperatorKw | SyntaxKind::VarKw)
-                    || (f.kind == SyntaxKind::Ident
-                        && ["type", "heading"]
-                            .iter()
-                            .any(|w| f.text.eq_ignore_ascii_case(w)))
+                matches!(
+                    f.kind,
+                    SyntaxKind::OperatorKw | SyntaxKind::VarKw | SyntaxKind::ConstKw
+                ) || (f.kind == SyntaxKind::Ident
+                    && ["type", "heading"]
+                        .iter()
+                        .any(|w| f.text.eq_ignore_ascii_case(w)))
             })
         {
             self.start_node(SyntaxKind::Error);
@@ -7411,11 +7509,51 @@ SourceFile
         // In a body, the declaration is parsed as what it means.
         assert_eq!(
             fix("operator f{} [ let x = 0; const y: integer = x; ];"),
-            "operator f{} [ var x := 0; var y: integer := x; ];"
+            "operator f{} [ var x := 0; const y: integer := x; ];"
         );
-        assert_eq!(fix("const x: integer := 0;"), "var x: integer := 0;");
         assert_eq!(fix("int x;"), "var x;");
         assert_eq!(fix("int main() {}"), "operator main() {}");
+    }
+
+    #[test]
+    fn local_constants_are_declared_as_variables_are() {
+        let body = |statement: &str| format!("operator f{{}} [ {statement} ];");
+        for written in [
+            "const x := 0;",
+            "const x: integer := 0;",
+            "const r := relation { { a: 1 } } key { a };",
+        ] {
+            let parse = parse_str(&body(written));
+            assert!(parse.errors.is_empty(), "{written}: {:#?}", parse.errors);
+        }
+        // Other languages' ways, and Tutorial D's.
+        for (written, fixed) in [
+            ("const x = 0;", "const x := 0;"),
+            ("CONST x := 0;", "const x := 0;"),
+            ("VAR x := 0;", "var x := 0;"),
+            ("let mut x = 0;", "var x := 0;"),
+            ("val x = 0;", "const x := 0;"),
+            ("const int x = 0;", "const x: int := 0;"),
+            ("var int x;", "var x: int;"),
+        ] {
+            assert_eq!(fix(&body(written)), body(fixed), "{written}");
+        }
+        // Inside a value block, which it starts as `var` does.
+        assert!(
+            parse_str("operator f{}: integer [ [ const x := 1; x ] ];")
+                .errors
+                .is_empty()
+        );
+        // It is a keyword, as a name, and a parameter's mode, as it was.
+        assert_eq!(
+            parse_str(&body("const const := 0;")).errors[0].code,
+            trendy_diag::Code::KeywordAsName
+        );
+        assert!(
+            parse_str("operator f{const n: integer} [];")
+                .errors
+                .is_empty()
+        );
     }
 
     #[test]
@@ -8772,12 +8910,11 @@ SourceFile
         );
         // As an expression's, a call's arguments can have modes too.
         assert!(messages("var x := f{const n: 1};").is_empty());
-        // `const` and `out` are names elsewhere, and either before a name
-        // without its `:` is no mode.
-        assert!(messages("var x := tuple { const: 1, out: 2 };").is_empty());
-        assert!(
-            messages("operator f{const: integer, out: integer} [ call f{out: 1}; ];").is_empty()
-        );
+        // `out` is a name elsewhere, and before a name without its `:` is no
+        // mode. `const` is a keyword, as `var` is.
+        assert!(messages("var x := tuple { out: 2 };").is_empty());
+        assert!(messages("operator f{out: integer} [ call f{out: 1}; ];").is_empty());
+        assert!(!messages("var x := tuple { const: 1 };").is_empty());
     }
 
     #[test]
@@ -9362,6 +9499,56 @@ var b := tuple { fail: fail }.fail;",
                 &[Code::QualifiedForm],
             ),
         ]);
+    }
+
+    #[test]
+    fn a_qualified_name_without_arguments_is_a_value_or_a_target() {
+        // A constant's, and before names, or nothing, which sema tells from a
+        // call, as it does an unqualified name.
+        let value = |source: &str| {
+            let parse = parse_str(&format!("var a := {source};"));
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+            let decl = parse.tree.variables().next().expect("declared");
+            decl.initializer().expect("an initial value")
+        };
+        let qualified = |expr: Option<Expr>| {
+            let Some(Expr::Qualified(written)) = expr else {
+                panic!("{expr:?}");
+            };
+            let unit = written.qualifier().and_then(|q| q.unit()).unwrap().text();
+            (unit, written.ident().unwrap().text().to_string())
+        };
+        let lakes = ("lakes.depths".to_string(), "limit".to_string());
+        assert_eq!(qualified(Some(value("lakes.depths::limit"))), lakes);
+        for source in ["lakes.depths::limit{}", "lakes.depths::limit{a, b}"] {
+            let Expr::Project(project) = value(source) else {
+                panic!("{source}");
+            };
+            assert_eq!(qualified(project.operand()), lakes);
+        }
+        // Arguments are a call's, in braces, or in parentheses, if reported.
+        assert!(matches!(value("lakes::f{a: 1}"), Expr::Call(_)));
+        fixed_with(&[(
+            "var a := lakes::f(a: 1);",
+            "var a := lakes::f{a: 1};",
+            &[Code::WrongDelimiter][..],
+        )]);
+        // A target, which sema reports.
+        for source in [
+            "lakes::limit := 1;",
+            "lakes::limit[1] := 1;",
+            "insert lakes::table r;",
+            "delete lakes::table where a;",
+        ] {
+            let parse = parse_str(&format!("operator main{{}} [ {source} ];"));
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+            let written = parse
+                .tree
+                .syntax()
+                .descendants()
+                .find_map(trendy_syntax::ast::QualifiedName::cast);
+            assert!(written.is_some(), "{source}");
+        }
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub struct Program {
     /// the prelude's first.
     pub operators: Vec<Operator>,
     pub variables: Vec<Variable>,
+    /// The constants, each by its [`ConstantId`]. One known when compiling is
+    /// read as its value, so only one that isn't has any use for its entry.
+    pub constants: Vec<Constant>,
     /// Each file of the program, by [`FileId`], its units' and those that
     /// come with the compiler: the path a failure in it writes it by.
     pub files: Vec<String>,
@@ -200,6 +203,10 @@ pub struct OperatorId(pub usize);
 /// Index into [`Program::variables`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VariableId(pub usize);
+
+/// Index into [`Program::constants`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConstantId(pub usize);
 
 /// Index into an update operator's local variables
 /// ([`OperatorKind::Update`]).
@@ -2303,6 +2310,10 @@ pub enum Expr {
     /// in a hierarchy is laid out as every value of its root's, so nothing
     /// changes when running, and it can't fail.
     Treat(Box<Type>, Box<Expr>),
+    /// The value of a constant that isn't known when compiling, computed before
+    /// `main`, of the type: a read of what that left, which can't fail, as that
+    /// has.
+    ComputedConstant(ConstantId, Box<Type>),
     /// The value of the expression, as a value of the type, a subtype of
     /// its type: TREAT down (IM Prescription 14), which fails unless the
     /// value is of the type. A name narrowed by a test, `x is t`, is one,
@@ -2415,7 +2426,10 @@ impl Expr {
                 Type::Defined(defined) => Type::Tuple(defined.components),
                 other => panic!("the components of {other}"),
             },
-            Expr::Treat(ty, _) | Expr::TreatAs(ty, _) | Expr::Fail(_, ty) => (**ty).clone(),
+            Expr::ComputedConstant(_, ty)
+            | Expr::Treat(ty, _)
+            | Expr::TreatAs(ty, _)
+            | Expr::Fail(_, ty) => (**ty).clone(),
         }
     }
 }
@@ -2432,6 +2446,7 @@ impl Expr {
         match self {
             Expr::Constant(_)
             | Expr::Variable(_)
+            | Expr::ComputedConstant(..)
             | Expr::Parameter(_)
             | Expr::Local(_)
             | Expr::Current(..) => false,
@@ -2627,6 +2642,7 @@ impl Expr {
         match self {
             Expr::Constant(_)
             | Expr::Variable(_)
+            | Expr::ComputedConstant(..)
             | Expr::Parameter(_)
             | Expr::Local(_)
             | Expr::Current(..) => self,
@@ -2722,6 +2738,7 @@ impl Expr {
         match self {
             Expr::Constant(_)
             | Expr::Variable(_)
+            | Expr::ComputedConstant(..)
             | Expr::Parameter(_)
             | Expr::Local(_)
             | Expr::Current(..) => {}
@@ -2895,7 +2912,10 @@ impl Expr {
         };
         match self {
             Expr::Constant(value) => Expr::Constant(value.instantiated(types)),
-            Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) => self.clone(),
+            Expr::Variable(_)
+            | Expr::ComputedConstant(..)
+            | Expr::Parameter(_)
+            | Expr::Local(_) => self.clone(),
             Expr::Let(local, value, body) => Expr::Let(*local, inst(value), inst(body)),
             Expr::Run(block, value) => Expr::Run(Box::new(block.instantiated(types)), inst(value)),
             Expr::At(site, expr) => Expr::At(*site, inst(expr)),
@@ -3759,6 +3779,23 @@ pub struct ConstraintPart {
     pub locals: Vec<Local>,
     /// The part as it is written.
     pub written: String,
+}
+
+/// A constant defined at the top level of the program: a name for a value,
+/// computed from no variable, so that when it is computed makes no difference.
+/// One that the compiler can't compute is computed once, before `main`, if the
+/// program reaches it (see [`Expr::ComputedConstant`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Constant {
+    /// Unique among variables, constants and operators.
+    pub name: String,
+    pub ty: Type,
+    /// A relation's keys, as a variable's ([`Variable::keys`]), which are
+    /// checked of `value` when it is computed, if that isn't when compiling.
+    pub keys: Vec<Key>,
+    /// The local variables of the value blocks in `value`.
+    pub locals: Vec<Local>,
+    pub value: Expr,
 }
 
 /// A variable defined at the top level of the program.

@@ -1153,7 +1153,23 @@ assignment gives one a new id, as `Locals::reassigned` does), so each value
 is computed once, however many times it is used, where substituting it
 for each use would copy it, as many times again for each local variable
 computed from it. Assignments are checked as an update operator's are,
-through `assign::Assigning`. Evaluating a call substitutes a `Let`'s value
+through `assign::Assigning`. A local constant is a `VarDecl` that starts with
+`const` (`ast::VarDecl::is_const`), checked as a local variable's is, but for
+having its value there (A0080), and each way of finding what to assign refuses it
+(A0026), so nothing after sema can tell it from a variable that is never assigned.
+A constant of the program's is evaluated as a variable is, on demand in `Globals`
+(`Globals::constant`, a `Global::Constant` while it is), and a reference to it is
+recorded, as one to an operator is, so that a cycle through it, of constants and
+read-only operators, is found however it is reached (A0021). One whose value is known
+then is read as that value (`globals::read_of`); and what isn't, as what a loop or a
+recursion computes, stays an expression: the HIR's `Program::constants`, which
+`Expr::ComputedConstant` reads. It is only known that a constant's value depends on
+nothing that can change, so when it is computed doesn't matter, and lowering keeps one
+of those in a static (`computed_constant`) with a function that computes it, lowered
+as lowered code first reads it, so after those it reads, which the entry calls in that
+order, before `main`. An interface's `const name: type;` has its value in the
+implementation (`scope::ConstantDecl::completed`).
+Evaluating a call substitutes a `Let`'s value
 in the rest once it is known (`ops::Substitution::locals`); lowering places
 the local variable where the value is, with no copy and no references of
 its own, since nothing changes it while the expression is computed. Checking a call checks its
@@ -1877,7 +1893,8 @@ with a rename that fixes both.
 
 **Provides:** the optimizer, from HIR to HIR: a program that means the same
 and costs less to run. Sema computes, when compiling, whatever it can, so
-this rewrites what is left for the program to compute when it runs. It is
+this rewrites what is left for the program to compute when it runs: its
+operators, and the constants the compiler can't compute. It is
 a layer of its own so that sema checks and lower translates, and neither
 has to optimize. A rewrite never changes what a program means, which
 includes the failures it can have: every operand is still computed, and

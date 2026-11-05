@@ -340,7 +340,9 @@ pub(crate) fn kinds(
                 decl.span(),
                 "a relvar",
             )),
+            // A constant is read as a unit's is.
             Item::Builtin(_)
+            | Item::Constant(_)
             | Item::Kind(_)
             | Item::Operator(_)
             | Item::Type(_)

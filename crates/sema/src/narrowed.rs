@@ -393,6 +393,16 @@ impl Names for Narrowed<'_> {
         self.outer.narrowing_ended(name)
     }
 
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.outer.constant_of(name, unit, span, errors)
+    }
+
     fn candidates(&self, at: Span) -> Vec<String> {
         self.outer.candidates(at)
     }
@@ -464,6 +474,16 @@ impl Names for Unnarrowed<'_> {
 
     fn narrowing_ended(&self, name: &str) -> Option<Span> {
         self.outer.narrowing_ended(name)
+    }
+
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.outer.constant_of(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {

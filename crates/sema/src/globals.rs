@@ -34,6 +34,12 @@ pub(crate) struct Evaluated {
     /// Each call in a read-only operator's body that gives a type parameter a
     /// type built from its caller's own.
     pub(crate) growing: Vec<Growing>,
+    /// Each constant, by id: `None` for one with errors, already reported.
+    pub(crate) constants: Vec<Option<hir::Constant>>,
+    /// Each variable of the program's a read-only operator reads, and where,
+    /// whose error has the fix of making it a constant, unless something assigns
+    /// it, as the update operators' bodies, checked after, say.
+    pub(crate) read_variables: Vec<(hir::VariableId, Span)>,
 }
 
 /// Evaluates the globals, each when first needed.
@@ -46,6 +52,8 @@ pub(crate) struct Globals<'a> {
     declared: &'a scope::Variables,
     /// Each variable, by id, once its evaluation has started.
     variables: Vec<Option<State<hir::Variable>>>,
+    /// Each constant, by id, once its evaluation has started.
+    constants: Vec<Option<State<hir::Constant>>>,
     /// Each read-only operator whose value's checking has started.
     operator_states: HashMap<hir::OperatorId, State<()>>,
     /// Each valid read-only operator's value.
@@ -57,6 +65,8 @@ pub(crate) struct Globals<'a> {
     /// Each read-only operator, and each variable of the program's it reads,
     /// already reported.
     read: HashSet<(hir::OperatorId, String)>,
+    /// Each of those, as [`Evaluated::read_variables`] has it.
+    read_variables: Vec<(hir::VariableId, Span)>,
     /// Each cycle already reported, by the globals in it, from the first
     /// reached.
     cycles: HashSet<Vec<Global>>,
@@ -71,20 +81,42 @@ pub(crate) struct Globals<'a> {
     /// Each call in a read-only operator's body that gives a type parameter
     /// a type built from its caller's own.
     growing: Vec<Growing>,
-    /// Each reference an operator or constraint being checked has made.
+    /// Each reference an operator, a constraint or a constant being checked has
+    /// made.
     references: Vec<Reference>,
-    /// Each operator or constraint whose checking has started, as a cycle
-    /// shows it.
-    pendings: HashMap<hir::OperatorId, Pending>,
+    /// Each operator, constraint or constant whose checking has started, as a
+    /// cycle shows it.
+    pendings: HashMap<Referred, Pending>,
 }
 
-/// A reference, written at `at`, that checking `from` makes to the read-only
-/// operator `to`, whether or not it has been checked yet.
+/// What a reference is from, or to.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Referred {
+    Operator(hir::OperatorId),
+    Constant(hir::ConstantId),
+}
+
+/// A reference, written at `at`, that checking `from` makes to `to`, whether or
+/// not it has been checked yet.
 #[derive(Clone, Copy)]
 struct Reference {
-    from: hir::OperatorId,
-    to: hir::OperatorId,
+    from: Referred,
+    to: Referred,
     at: Span,
+}
+
+impl Global {
+    /// What a reference from it is from, if one can lead back to it: a
+    /// variable's initial value is what nothing else refers to.
+    fn referred(self) -> Option<Referred> {
+        match self {
+            Global::Operator(id) | Global::Constraint(id) | Global::CallConstraint(id) => {
+                Some(Referred::Operator(id))
+            }
+            Global::Constant(id) => Some(Referred::Constant(id)),
+            Global::Variable(_) => None,
+        }
+    }
 }
 
 /// What a global being evaluated is.
@@ -94,6 +126,8 @@ pub(crate) enum Global {
     Variable(hir::VariableId),
     /// A read-only operator, which a call checks.
     Operator(hir::OperatorId),
+    /// A constant, which reading it checks.
+    Constant(hir::ConstantId),
     /// A constraint of a type of the program's own, which selecting one of
     /// its values checks.
     Constraint(hir::OperatorId),
@@ -142,11 +176,13 @@ impl<'a> Globals<'a> {
             operators,
             declared,
             variables: vec![None; declared.len()],
+            constants: vec![None; declared.constants()],
             operator_states: HashMap::new(),
             values: HashMap::new(),
             locals: HashMap::new(),
             stack: Vec::new(),
             read: HashSet::new(),
+            read_variables: Vec::new(),
             cycles: HashSet::new(),
             block_locals: Vec::new(),
             recursive: HashSet::new(),
@@ -174,6 +210,9 @@ impl<'a> Globals<'a> {
                 variable(&decl, &mut self, errors);
             }
         }
+        for constant in 0..self.constants.len() {
+            self.constant(hir::ConstantId(constant), errors);
+        }
         let operators = self.operators;
         for signature in operators.iter().filter(|s| s.read_only) {
             if let Some(defined) = signature.defined() {
@@ -181,7 +220,21 @@ impl<'a> Globals<'a> {
             }
         }
         self.report_cycles_through_what_was_checked(errors);
+        // What their value blocks declare, as they all number theirs together.
+        let locals = self.block_locals.clone();
+        let constants = std::mem::take(&mut self.constants)
+            .into_iter()
+            .map(|state| match state {
+                Some(State::Done(constant)) => constant.map(|constant| hir::Constant {
+                    locals: locals.clone(),
+                    ..constant
+                }),
+                _ => None,
+            })
+            .collect();
         Evaluated {
+            constants,
+            read_variables: std::mem::take(&mut self.read_variables),
             variables: self
                 .variables
                 .into_iter()
@@ -224,6 +277,76 @@ impl<'a> Globals<'a> {
         self.stack.pop();
         self.variables[id.0] = Some(State::Done(variable.clone()));
         variable
+    }
+
+    /// The constant `id`, evaluated if it isn't yet.
+    fn constant(
+        &mut self,
+        id: hir::ConstantId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Constant> {
+        match &self.constants[id.0] {
+            Some(State::Done(constant)) => return constant.clone(),
+            Some(State::Evaluating) => unreachable!("cycles are caught at the reference"),
+            None => {}
+        }
+        let declared = self.declared.constant(id).clone();
+        let ident = declared.first.name()?.ident()?;
+        let defined = trendy_syntax::span(ident.text_range());
+        self.constants[id.0] = Some(State::Evaluating);
+        let pending = Pending {
+            global: Global::Constant(id),
+            name: ident.text().to_string(),
+            representation: None,
+            defined,
+            via: defined,
+            failing: false,
+        };
+        self.pendings
+            .insert(Referred::Constant(id), pending.clone());
+        self.stack.push(pending);
+        let constant = constant(&declared, self, errors);
+        self.stack.pop();
+        self.constants[id.0] = Some(State::Done(constant.clone()));
+        constant
+    }
+
+    /// What reading the constant `id` at `span` is, evaluated if it isn't yet,
+    /// or that it is reported, as a cycle its reference closes is.
+    fn constant_read(
+        &mut self,
+        id: hir::ConstantId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        if let Some(from) = self
+            .stack
+            .last()
+            .and_then(|pending| pending.global.referred())
+        {
+            self.references.push(Reference {
+                from,
+                to: Referred::Constant(id),
+                at: span,
+            });
+        }
+        if let Some(State::Evaluating) = self.constants[id.0] {
+            let start = self
+                .stack
+                .iter()
+                .position(|p| p.global == Global::Constant(id));
+            if let Some(start) = start {
+                self.cycle(start, span, errors);
+            }
+            return Lookup::Reported;
+        }
+        if let Some(innermost) = self.stack.last_mut() {
+            innermost.via = span;
+        }
+        match self.constant(id, errors) {
+            Some(constant) => Lookup::Found(read_of(id, &constant)),
+            None => Lookup::Reported,
+        }
     }
 
     /// The variable `id`, referred to at `span`, evaluated if it isn't
@@ -334,11 +457,16 @@ impl<'a> Globals<'a> {
             }
             return valid;
         }
-        if let Some(
-            Global::Operator(from) | Global::Constraint(from) | Global::CallConstraint(from),
-        ) = self.stack.last().map(|pending| pending.global)
+        if let Some(from) = self
+            .stack
+            .last()
+            .and_then(|pending| pending.global.referred())
         {
-            self.references.push(Reference { from, to: id, at });
+            self.references.push(Reference {
+                from,
+                to: Referred::Operator(id),
+                at,
+            });
         }
         match self.operator_states.get(&id) {
             Some(State::Done(done)) => return done.is_some(),
@@ -375,7 +503,8 @@ impl<'a> Globals<'a> {
             via: defined,
             failing: false,
         };
-        self.pendings.insert(id, pending.clone());
+        self.pendings
+            .insert(Referred::Operator(id), pending.clone());
         self.stack.push(pending);
         let value = self.value(signature, errors);
         self.stack.pop();
@@ -420,7 +549,10 @@ impl<'a> Globals<'a> {
         };
         let operators_alone = self.stack[start..].iter().all(|p| match p.global {
             Global::Operator(o) => self.operators.get(o).from_type.is_none(),
-            Global::Constraint(_) | Global::CallConstraint(_) | Global::Variable(_) => false,
+            Global::Constraint(_)
+            | Global::CallConstraint(_)
+            | Global::Variable(_)
+            | Global::Constant(_) => false,
         });
         if !operators_alone {
             self.cycle(start, at, errors);
@@ -457,14 +589,19 @@ impl<'a> Globals<'a> {
     /// [`Expr::fails`]: hir::Expr::fails
     fn report_cycles_through_what_was_checked(&mut self, errors: &mut Vec<Diagnostic>) {
         let references = std::mem::take(&mut self.references);
+        let operators = self.operators.iter().count();
+        let node = |referred: Referred| match referred {
+            Referred::Operator(id) => id.0,
+            Referred::Constant(id) => operators + id.0,
+        };
         let count = references
             .iter()
-            .map(|reference| reference.from.0.max(reference.to.0) + 1)
+            .map(|reference| node(reference.from).max(node(reference.to)) + 1)
             .max()
             .unwrap_or(0);
         let mut edges = vec![Vec::new(); count];
         for reference in &references {
-            edges[reference.from.0].push(reference.to.0);
+            edges[node(reference.from)].push(node(reference.to));
         }
         let cycles = hir::cycles_of(&edges);
         // Those already reported, whose errors say enough.
@@ -472,11 +609,9 @@ impl<'a> Globals<'a> {
             .cycles
             .iter()
             .flatten()
-            .filter_map(|global| match *global {
-                Global::Operator(id) | Global::Constraint(id) | Global::CallConstraint(id) => {
-                    cycles.get(id.0).copied().flatten()
-                }
-                Global::Variable(_) => None,
+            .filter_map(|global| {
+                let referred = global.referred()?;
+                cycles.get(node(referred)).copied().flatten()
             })
             .collect();
         let writes_errors: Vec<hir::OperatorId> =
@@ -484,26 +619,30 @@ impl<'a> Globals<'a> {
                 message.versions.iter().map(|v| v.operator).collect()
             });
         for reference in &references {
-            let Some(cycle) = cycles[reference.from.0] else {
+            let Some(cycle) = cycles[node(reference.from)] else {
                 continue;
             };
-            if cycles[reference.to.0] != Some(cycle) || reported.contains(&cycle) {
+            if cycles[node(reference.to)] != Some(cycle) || reported.contains(&cycle) {
                 continue;
             }
-            let failing = writes_errors.contains(&reference.to)
-                && self
-                    .values
-                    .get(&reference.from)
-                    .is_some_and(hir::Expr::fails);
+            let failing = match (reference.from, reference.to) {
+                (Referred::Operator(from), Referred::Operator(to)) => {
+                    writes_errors.contains(&to)
+                        && self.values.get(&from).is_some_and(hir::Expr::fails)
+                }
+                _ => false,
+            };
             let from = &self.pendings[&reference.from];
-            let checks_itself = !matches!(from.global, Global::Operator(_))
-                || self.operators.get(reference.from).from_type.is_some();
+            let checks_itself = match from.global {
+                Global::Operator(id) => self.operators.get(id).from_type.is_some(),
+                _ => true,
+            };
             if !failing && !checks_itself {
                 continue;
             }
             reported.insert(cycle);
-            let leading = references_between(&references, reference.to, reference.from, |id| {
-                cycles[id.0] == Some(cycle)
+            let leading = references_between(&references, reference.to, reference.from, |to| {
+                cycles[node(to)] == Some(cycle)
             });
             let mut shown = vec![Pending {
                 via: reference.at,
@@ -521,11 +660,16 @@ impl<'a> Globals<'a> {
     /// Report the `cycle`, unless it is reported already: see
     /// [`Globals::cycle`].
     fn report_cycle(&mut self, mut cycle: Vec<Pending>, errors: &mut Vec<Diagnostic>) {
-        if let Some(constraint) = cycle
+        let first = cycle
             .iter()
             .position(|p| matches!(p.global, Global::Constraint(_) | Global::CallConstraint(_)))
-        {
-            cycle.rotate_left(constraint);
+            .or_else(|| {
+                cycle
+                    .iter()
+                    .position(|p| matches!(p.global, Global::Constant(_)))
+            });
+        if let Some(first) = first {
+            cycle.rotate_left(first);
         }
         if self.cycles.insert(cycle.iter().map(|p| p.global).collect()) {
             errors.push(errors::cycle(&cycle));
@@ -980,18 +1124,18 @@ fn reassigned(
     true
 }
 
-/// The references, the fewest, that lead from the operator `from` to the operator
-/// `to`, by those that `within` says of: none if it is `from`.
+/// The references, the fewest, that lead from `from` to `to`, by those that
+/// `within` says of: none if it is `from`.
 fn references_between(
     references: &[Reference],
-    from: hir::OperatorId,
-    to: hir::OperatorId,
-    within: impl Fn(hir::OperatorId) -> bool,
+    from: Referred,
+    to: Referred,
+    within: impl Fn(Referred) -> bool,
 ) -> Vec<Reference> {
     if from == to {
         return Vec::new();
     }
-    let mut came_by: HashMap<hir::OperatorId, Reference> = HashMap::new();
+    let mut came_by: HashMap<Referred, Reference> = HashMap::new();
     let mut next = VecDeque::from([from]);
     while let Some(at) = next.pop_front() {
         for reference in references.iter().filter(|r| r.from == at && within(r.to)) {
@@ -1025,7 +1169,25 @@ impl Names for Globals<'_> {
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        if let Some(constant) = self.declared.find_constant(name, span) {
+            return self.constant_read(constant, span, errors);
+        }
         if let Some(id) = self.declared.find(name, span) {
+            // What a constant is computed from never changes.
+            if let Some(Pending {
+                global: Global::Constant(_),
+                name: constant,
+                ..
+            }) = self.stack.last()
+            {
+                errors.push(errors::variable_in_constant(
+                    name,
+                    span,
+                    constant,
+                    self.declared.decl(id),
+                ));
+                return Lookup::Reported;
+            }
             return match self.reach(id, span, errors) {
                 // Of its declared type, which can be a supertype of its
                 // value's.
@@ -1040,6 +1202,18 @@ impl Names for Globals<'_> {
             return Lookup::Reported;
         }
         Lookup::Unknown
+    }
+
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.declared
+            .constant_in(name, unit, span)
+            .map_or(Lookup::Unknown, |id| self.constant_read(id, span, errors))
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
@@ -1190,15 +1364,25 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         if let Some(id) = self.globals.declared.find(name, span) {
             if self.globals.read.insert((self.within, name.to_string())) {
                 let ty = self.globals.written_type(id);
-                errors.push(errors::variable_in_read_only(
+                let mut error = errors::variable_in_read_only(
                     name,
                     span,
                     self.signature(),
                     self.globals.operators,
                     ty,
-                ));
+                );
+                // Ahead of passing it, and withdrawn if something assigns it.
+                error.suggestions.splice(
+                    0..0,
+                    errors::declared_constant(self.globals.declared.decl(id)),
+                );
+                errors.push(error);
+                self.globals.read_variables.push((id, span));
             }
             return Lookup::Reported;
+        }
+        if let Some(constant) = self.globals.declared.find_constant(name, span) {
+            return self.globals.constant_read(constant, span, errors);
         }
         if let Some(relation) = self.globals.operators.get(self.within).per_relation(name) {
             errors.push(errors::per_as_value(name, relation, span));
@@ -1213,6 +1397,21 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             return Lookup::Reported;
         }
         Lookup::Unknown
+    }
+
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.globals
+            .declared
+            .constant_in(name, unit, span)
+            .map_or(Lookup::Unknown, |id| {
+                self.globals.constant_read(id, span, errors)
+            })
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
@@ -1292,6 +1491,12 @@ impl Assigning for ReadOnlyNames<'_, '_, '_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee> {
         match self.locals.find(name) {
+            Some(Local::Declared(_, _, Declaration::Var(declaration)))
+                if declaration.is_const() =>
+            {
+                errors.push(errors::assigned_constant(name, span, declaration));
+                return None;
+            }
             Some(Local::Declared(id, local, Declaration::Var(declaration))) => {
                 return Some(Assignee::local(id, local, declaration));
             }
@@ -1374,6 +1579,12 @@ impl Around for ReadOnlyNames<'_, '_, '_> {
             errors.push(errors::assigned_parameter(name, span, hidden));
         } else if self.globals.declared.find(name, span).is_some() {
             errors.push(errors::assigned_in_read_only(name, span, &op.name));
+        } else if let Some(id) = self.globals.declared.find_constant(name, span) {
+            errors.push(errors::assigned_constant(
+                name,
+                span,
+                &self.globals.declared.constant(id).first,
+            ));
         } else if let Some((kind, _)) = self.globals.namespaces.operator(name, span) {
             errors.push(errors::assigned_operator(name, span, kind));
         } else {
@@ -1445,4 +1656,105 @@ fn variable(
         init,
         keys,
     })
+}
+
+/// The constant `declared`, its declaration, its value computed when compiling
+/// if it can be: and otherwise, as nothing but statements or calls that may not
+/// stop are left of it, as an expression, which the program computes first. It is
+/// of the type its interface says, or its own says, or else its value's.
+fn constant(
+    declared: &scope::ConstantDecl,
+    globals: &mut Globals,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Constant> {
+    let ident = declared.first.name()?.ident()?;
+    let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+    let valued = declared.completed.as_ref().unwrap_or(&declared.first);
+    let Some(written) = valued.initializer() else {
+        let interface = ast::section_of(valued.syntax()) == ast::Section::Interface;
+        errors.push(errors::constant_without_value(name, span, interface));
+        return None;
+    };
+    if declared.completed.is_some() && declared.first.type_expr().is_none() {
+        errors.push(errors::interface_constant_without_type(name, span));
+        return None;
+    }
+    let namespaces = globals.namespaces;
+    let type_expr = declared.first.type_expr().or_else(|| valued.type_expr());
+    let declared_type = match &type_expr {
+        Some(written) => {
+            let mut parameters = types::TypeParameters::None;
+            Some((
+                types::resolve(written, &mut parameters, namespaces, errors),
+                written.clone(),
+            ))
+        }
+        None => None,
+    };
+    if let (Some((Some(ty), _)), Some(own)) = (&declared_type, valued.type_expr())
+        && declared.completed.is_some()
+    {
+        let mut parameters = types::TypeParameters::None;
+        if let Some(own_type) = types::resolve(&own, &mut parameters, namespaces, errors)
+            && own_type != *ty
+        {
+            errors.push(errors::constant_type_differs(name, &own, ty));
+            return None;
+        }
+    }
+    let at = globals.site(trendy_syntax::span(valued.syntax().text_range()));
+    let mut checker = Checker::new(&mut *globals);
+    let (ty, value) = match declared_type {
+        None => {
+            let value = checker.expr(&written, None, errors)?;
+            (checker.ty(&value), value)
+        }
+        Some((None, _)) => {
+            // The type is invalid, but the value can still have errors of its
+            // own.
+            checker.expr(&written, None, errors);
+            return None;
+        }
+        Some((Some(ty), type_expr)) => {
+            let expected = types::Expected {
+                ty: ty.clone(),
+                origin: types::Origin::Type(type_expr),
+            };
+            let value = checker.expr(&written, Some(&expected), errors)?;
+            (ty, value)
+        }
+    };
+    let value = if ops::known_value(&value).is_some() {
+        value
+    } else {
+        match ops::evaluated(value, globals.bindings()) {
+            Ok(value) => value,
+            Err(failed) => {
+                errors.push(errors::failed(&failed, &written));
+                return None;
+            }
+        }
+    };
+    let known = ops::known_value(&value).cloned();
+    let keys = keys::keys(valued, name, &ty, known.as_ref(), globals, errors)?;
+    let value = match known {
+        Some(known) => hir::Expr::Constant(known),
+        None => hir::Expr::at(at, value),
+    };
+    Some(hir::Constant {
+        name: declared.identity.clone(),
+        ty,
+        keys,
+        locals: Vec::new(),
+        value,
+    })
+}
+
+/// What reading the constant `id`, `constant`, is: its value, if that is known
+/// when compiling, and otherwise what the program computes first.
+pub(crate) fn read_of(id: hir::ConstantId, constant: &hir::Constant) -> hir::Expr {
+    if let hir::Expr::Constant(value) = &constant.value {
+        return hir::Expr::Constant(value.clone()).treated(&constant.ty);
+    }
+    hir::Expr::ComputedConstant(id, Box::new(constant.ty.clone()))
 }

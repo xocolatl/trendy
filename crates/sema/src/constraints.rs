@@ -335,11 +335,27 @@ impl Names for ConditionNames<'_, '_> {
                 None => Lookup::Reported,
             };
         }
+        if let Some(id) = self.cx.declared.find_constant(name, span) {
+            return self.cx.constant_read(id);
+        }
         if self.cx.namespaces.operator(name, span).is_some() {
             errors.push(errors::operator_as_value(name, span, self.cx.operators));
             return Lookup::Reported;
         }
         Lookup::Unknown
+    }
+
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        _errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.cx
+            .declared
+            .constant_in(name, unit, span)
+            .map_or(Lookup::Unknown, |id| self.cx.constant_read(id))
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {

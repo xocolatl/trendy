@@ -29,11 +29,21 @@ pub(crate) struct Context<'a> {
     pub(crate) recursive: &'a HashSet<hir::OperatorId>,
     /// Each variable, by id: `None` for one with errors, already reported.
     pub(crate) variables: &'a [Option<hir::Variable>],
+    /// Each constant, by id: `None` for one with errors, already reported.
+    pub(crate) constants: &'a [Option<hir::Constant>],
     /// Each variable's id and declaration, by the name its unit writes.
     pub(crate) declared: &'a scope::Variables,
 }
 
 impl Context<'_> {
+    /// What reading the constant `id` is, if it has no errors.
+    pub(crate) fn constant_read(&self, id: hir::ConstantId) -> Lookup {
+        match &self.constants[id.0] {
+            Some(constant) => Lookup::Found(crate::globals::read_of(id, constant)),
+            None => Lookup::Reported,
+        }
+    }
+
     /// What evaluating a call in a body substitutes: the read-only
     /// operators' values.
     pub(crate) fn bindings(&self) -> ops::Bindings<'_> {
@@ -1216,6 +1226,7 @@ pub(crate) fn deferred_checks(
     bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
     evaluated: &crate::globals::Evaluated,
     operators: &Operators,
+    declared: &scope::Variables,
     errors: &mut Vec<Diagnostic>,
 ) {
     for passed in &deferred.passed {
@@ -1229,6 +1240,9 @@ pub(crate) fn deferred_checks(
                 passed.span,
             ));
         }
+    }
+    for (id, at) in &evaluated.read_variables {
+        withdraw_constant(*id, *at, declared, bodies, operators, errors);
     }
     let growing = deferred.growing.iter().chain(&evaluated.growing);
     growing_recursion(growing, bodies, &evaluated.values, operators, errors);
@@ -1369,6 +1383,62 @@ fn passed_in(block: &hir::Block, passed: &mut Vec<hir::VariableId>) {
             }
         }
     });
+}
+
+/// Withdraw from the error for a read-only operator reading the variable `id`
+/// at `at`, if it was kept, the fix of declaring it `const`, if something may
+/// assign it.
+fn withdraw_constant(
+    id: hir::VariableId,
+    at: Span,
+    declared: &scope::Variables,
+    bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+    operators: &Operators,
+    errors: &mut [Diagnostic],
+) {
+    let decl = declared.decl(id);
+    let (Some(keyword), Some(name)) = (decl.keyword(), decl.name()) else {
+        return;
+    };
+    if !may_be_assigned(
+        id,
+        name.syntax().text().to_string().as_str(),
+        bodies,
+        operators,
+    ) {
+        return;
+    }
+    let keyword = trendy_syntax::span(keyword.text_range());
+    let reported = errors
+        .iter_mut()
+        .find(|e| e.code == trendy_diag::Code::VariableInReadOnly && e.primary.span == at);
+    if let Some(error) = reported {
+        error
+            .suggestions
+            .retain(|fix| fix.edits.iter().all(|edit| edit.span != keyword));
+    }
+}
+
+/// Whether something may assign the variable `id`, named `name`: a body that
+/// does, directly or by passing it to a `var` or `out` parameter, or a body with
+/// errors, whose statements nothing says, in which a word of that name is.
+fn may_be_assigned(
+    id: hir::VariableId,
+    name: &str,
+    bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+    operators: &Operators,
+) -> bool {
+    let assigned = bodies.values().any(|(_, body)| {
+        body.assigned()
+            .iter()
+            .any(|target| matches!(target, hir::Target::Variable(v) if *v == id))
+    });
+    assigned
+        || operators
+            .iter()
+            .filter(|signature| !signature.read_only && !bodies.contains_key(&signature.id))
+            .filter_map(|signature| signature.decl.as_ref()?.body())
+            .any(|body| ast::mentions(body.syntax(), name))
 }
 
 /// The variables of the program that the update operator `id` reads, in
@@ -1571,6 +1641,16 @@ impl Names for BodyNames<'_> {
             .or_else(|| self.around.narrowing_ended(name))
     }
 
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.around.constant_of(name, unit, span, errors)
+    }
+
     fn candidates(&self, at: Span) -> Vec<String> {
         self.locals
             .names()
@@ -1664,6 +1744,12 @@ impl BodyNames<'_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee> {
         match self.locals.find(name) {
+            Some(Local::Declared(_, _, Declaration::Var(declaration)))
+                if declaration.is_const() =>
+            {
+                errors.push(errors::assigned_constant(name, span, declaration));
+                return None;
+            }
             Some(Local::Declared(id, local, Declaration::Var(declaration))) => {
                 return Some(Assignee::local(id, local, declaration));
             }
@@ -1740,6 +1826,9 @@ impl Names for UpdateNames<'_, '_> {
                 None => Lookup::Reported,
             };
         }
+        if let Some(id) = self.cx.declared.find_constant(name, span) {
+            return self.cx.constant_read(id);
+        }
         if let Some(relation) = self.signature().per_relation(name) {
             errors.push(errors::per_as_value(name, relation, span));
             return Lookup::Reported;
@@ -1751,8 +1840,35 @@ impl Names for UpdateNames<'_, '_> {
         Lookup::Unknown
     }
 
+    fn resolve_variable(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        if self.signature().parameter(name).is_none()
+            && let Some(id) = self.cx.declared.find_constant(name, span)
+        {
+            errors.push(errors::assigned_constant(
+                name,
+                span,
+                &self.cx.declared.constant(id).first,
+            ));
+            return Lookup::Reported;
+        }
+        self.resolve(name, span, errors)
+    }
+
     fn narrowing_ended(&self, _: &str) -> Option<Span> {
         None
+    }
+
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        _errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.cx
+            .declared
+            .constant_in(name, unit, span)
+            .map_or(Lookup::Unknown, |id| self.cx.constant_read(id))
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
@@ -1851,7 +1967,13 @@ impl Around for UpdateNames<'_, '_> {
                 narrowed: None,
             });
         }
-        if let Some((kind, _)) = cx.namespaces.operator(name, span) {
+        if let Some(id) = cx.declared.find_constant(name, span) {
+            errors.push(errors::assigned_constant(
+                name,
+                span,
+                &cx.declared.constant(id).first,
+            ));
+        } else if let Some((kind, _)) = cx.namespaces.operator(name, span) {
             errors.push(errors::assigned_operator(name, span, kind));
         } else {
             let variables: Vec<&str> = locals

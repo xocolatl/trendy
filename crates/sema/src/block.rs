@@ -133,6 +133,16 @@ impl Names for Outside<'_> {
         self.outer.resolve_variable(name, span, errors)
     }
 
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.outer.constant_of(name, unit, span, errors)
+    }
+
     fn candidates(&self, at: Span) -> Vec<String> {
         self.outer.candidates(at)
     }
@@ -406,6 +416,16 @@ impl Names for BlockNames<'_> {
         }
     }
 
+    fn constant_of(
+        &mut self,
+        name: &str,
+        unit: hir::FileId,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        self.outer.constant_of(name, unit, span, errors)
+    }
+
     fn candidates(&self, at: Span) -> Vec<String> {
         self.declared()
             .map(str::to_string)
@@ -480,6 +500,10 @@ impl Assigning for BlockNames<'_> {
                     &local.decl,
                     false,
                 ));
+                return None;
+            }
+            if local.decl.is_const() {
+                errors.push(errors::assigned_constant(name, span, &local.decl));
                 return None;
             }
             let (id, variable, known) = local.current.as_ref()?;

@@ -1,12 +1,13 @@
 /* A unit of the `units` example, `lakes.depths`, named by its path from
    the directory of the program's main file. Its interface declares what
-   other units see of it: here a type, a heading, and operators, each
-   operator by its heading alone. Its implementation repeats each such
-   operator's heading with its body, declares the type again with how its
-   representations convert, and keeps what no other unit sees: which
-   representation the type's values are stored as, and the variable the
-   lakes are recorded in, which other units reach only through its update
-   operators, so what is true of it is the unit's to keep. */
+   other units see of it: here a type, a constant, a heading, and
+   operators, each operator by its heading alone. Its implementation gives
+   the constant its value, repeats each such operator's heading with its
+   body, declares the type again with how its representations convert, and
+   keeps what no other unit sees: which representation the type's values
+   are stored as, and the variable the lakes are recorded in, which other
+   units reach only through its update operators, so what is true of it is
+   the unit's to keep. */
 
 interface
 
@@ -17,6 +18,10 @@ type metres {
     constraint m > 0,
     order [asc m],
 };
+
+/* How deep a shallow lake is, at most. An interface declares a constant by
+   its type alone, and its implementation says what it is. */
+const shallow_limit: metres;
 
 /* A lake, its name in its own language too, and how deep it is. */
 heading lake := { name: text, native: text, depth: metres };
@@ -38,6 +43,8 @@ type metres {
         to { m := cm div 100 }
         from { cm := m * 100 },
 };
+
+const shallow_limit := metres{m: 500};
 
 var known: relation lake key { name };
 

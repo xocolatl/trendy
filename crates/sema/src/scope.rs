@@ -594,6 +594,14 @@ impl<T> Declared<T> {
     }
 }
 
+/// What a name means among the program's variables, constants and databases.
+#[derive(Clone, Copy)]
+enum Value {
+    Variable(hir::VariableId),
+    Constant(hir::ConstantId),
+    Database,
+}
+
 /// The program's variables, each by its id, its first declaration's place
 /// among them in source order, found by the name the units that see it
 /// write, in the namespace they share with databases.
@@ -606,12 +614,58 @@ pub(crate) struct Variables {
     /// Each one's first declaration, and what it is called in the program,
     /// by id.
     declared: Vec<(VarDecl, String)>,
+    /// The constants, in the namespace they share.
+    constant_ids: Declared<hir::ConstantId>,
+    /// Each one's declarations, by id.
+    constants: Vec<ConstantDecl>,
+}
+
+/// A constant's declaration.
+#[derive(Clone)]
+pub(crate) struct ConstantDecl {
+    /// Where it is first declared.
+    pub(crate) first: VarDecl,
+    /// The implementation's part, with its value, of what `first` declares
+    /// without one in its unit's interface.
+    pub(crate) completed: Option<VarDecl>,
+    /// What it is called in the program.
+    pub(crate) identity: String,
 }
 
 impl Variables {
     /// The variables `first` declares, each the first declaration of its
     /// name in its unit, in source order, as `namespaces` has them.
-    pub(crate) fn new(first: impl Iterator<Item = VarDecl>, namespaces: &Namespaces) -> Self {
+    pub(crate) fn new(
+        first: impl Iterator<Item = VarDecl>,
+        all_constants: impl Iterator<Item = VarDecl>,
+        namespaces: &Namespaces,
+    ) -> Self {
+        let mut constant_ids = Declared::default();
+        let mut constants: Vec<ConstantDecl> = Vec::new();
+        for decl in all_constants {
+            let Some(ident) = decl.name().and_then(|n| n.ident()) else {
+                continue;
+            };
+            let unit = namespaces.unit_at(trendy_syntax::span(ident.text_range()));
+            if namespaces.is_first_constant(&ident) {
+                let section = trendy_syntax::ast::section_of(decl.syntax());
+                constant_ids.insert(
+                    ident.text(),
+                    unit,
+                    section,
+                    hir::ConstantId(constants.len()),
+                );
+                constants.push(ConstantDecl {
+                    first: decl,
+                    completed: None,
+                    identity: namespaces.value_identity(ident.text(), unit),
+                });
+            } else if let Some(&id) = constant_ids.first_in(ident.text(), unit)
+                && crate::completes_constant(&constants[id.0].first, &decl)
+            {
+                constants[id.0].completed = Some(decl);
+            }
+        }
         let mut ids = Declared::default();
         let mut declared = Vec::new();
         for decl in first {
@@ -634,23 +688,74 @@ impl Variables {
             ids,
             databases,
             declared,
+            constant_ids,
+            constants,
         }
     }
 
     /// The variable named `name` that what is written at `at` sees, unless
     /// it sees a database of that name, or several of either.
     pub(crate) fn find(&self, name: &str, at: Span) -> Option<hir::VariableId> {
+        match self.value(name, at)? {
+            Value::Variable(id) => Some(id),
+            Value::Constant(_) | Value::Database => None,
+        }
+    }
+
+    /// The constant named `name` that what is written at `at` sees, as for
+    /// [`Variables::find`].
+    pub(crate) fn find_constant(&self, name: &str, at: Span) -> Option<hir::ConstantId> {
+        match self.value(name, at)? {
+            Value::Constant(id) => Some(id),
+            Value::Variable(_) | Value::Database => None,
+        }
+    }
+
+    /// The constant named `name` that `unit` declares, if what is written at
+    /// `at` sees it.
+    pub(crate) fn constant_in(
+        &self,
+        name: &str,
+        unit: hir::FileId,
+        at: Span,
+    ) -> Option<hir::ConstantId> {
+        self.constant_ids
+            .seen_in(name, unit, self.units.viewer(at), &self.units)
+            .copied()
+    }
+
+    /// What `name` means in the namespace of variables, constants and databases,
+    /// to what is written at `at`, unless it sees several.
+    fn value(&self, name: &str, at: Span) -> Option<Value> {
         let viewer = self.units.viewer(at);
-        let variables = self.ids.candidates(name, viewer, &self.units).map(Some);
+        let variables = self
+            .ids
+            .candidates(name, viewer, &self.units)
+            .map(|&id| Value::Variable(id));
+        let constants = self
+            .constant_ids
+            .candidates(name, viewer, &self.units)
+            .map(|&id| Value::Constant(id));
         let databases = self
             .databases
             .candidates(name, viewer, &self.units)
-            .map(|&()| None);
+            .map(|&()| Value::Database);
         variables
+            .merged(constants)
             .merged(databases)
             .resolved()
             .one()
-            .and_then(|(_, id)| id.copied())
+            .map(|(_, value)| value)
+    }
+
+    /// The declarations of the constant `id`.
+    pub(crate) fn constant(&self, id: hir::ConstantId) -> &ConstantDecl {
+        &self.constants[id.0]
+    }
+
+    /// How many constants there are.
+    pub(crate) fn constants(&self) -> usize {
+        self.constants.len()
     }
 
     /// The first declaration of the variable `id`.
@@ -666,7 +771,10 @@ impl Variables {
     /// The names of the variables what is written at `at` sees, for
     /// suggestions.
     pub(crate) fn names(&self, at: Span) -> impl Iterator<Item = &str> {
-        self.ids.names_visible(self.units.viewer(at), &self.units)
+        let viewer = self.units.viewer(at);
+        self.ids
+            .names_visible(viewer, &self.units)
+            .chain(self.constant_ids.names_visible(viewer, &self.units))
     }
 
     /// How many there are.

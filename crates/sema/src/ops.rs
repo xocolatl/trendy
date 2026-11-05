@@ -2664,6 +2664,7 @@ fn substitute(
         | hir::Expr::Constant(_)
         | hir::Expr::Parameter(_)
         | hir::Expr::Variable(_)
+        | hir::Expr::ComputedConstant(..)
         | hir::Expr::Run(..) => expr,
         hir::Expr::Call(called) => {
             let args = called
