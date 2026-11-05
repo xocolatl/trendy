@@ -434,6 +434,11 @@ pub enum RuntimeFn {
     /// tuples of the relation's transitive closure whose attribute, 0 or 1 by
     /// name order, is `value`, searching only by paths from or to it.
     TcloseOf,
+    /// `trendy_rt_tclose_of_each(dst, relation, values, descriptor,
+    /// values_descriptor, common)`: the tuples of the relation's transitive closure
+    /// whose attribute `common` says, of those it describes in each, is a value in
+    /// the relation `values`, searching only by paths from or to those.
+    TcloseOfEach,
     /// `trendy_rt_drop_operand(value, descriptor)`: give up the current scope's
     /// reference to what the operand at `value` points to, if it is the only
     /// one, as the operation that read it has its result.
@@ -739,7 +744,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 92] = [
+    pub const ALL: [RuntimeFn; 93] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -782,6 +787,7 @@ impl RuntimeFn {
         RuntimeFn::OverlappingSubtypes,
         RuntimeFn::BrokenCallConstraint,
         RuntimeFn::TcloseOf,
+        RuntimeFn::TcloseOfEach,
         RuntimeFn::DropOperand,
         RuntimeFn::TooDeep,
         RuntimeFn::Run,
@@ -867,6 +873,7 @@ impl RuntimeFn {
             | RuntimeFn::KeyAdded
             | RuntimeFn::TooDeep
             | RuntimeFn::TcloseOf
+            | RuntimeFn::TcloseOfEach
             | RuntimeFn::Insert
             | RuntimeFn::Remove
             | RuntimeFn::RemoveRun
@@ -985,6 +992,7 @@ impl RuntimeFn {
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::BrokenCallConstraint => "trendy_rt_broken_call_constraint",
             RuntimeFn::TcloseOf => "trendy_rt_tclose_of",
+            RuntimeFn::TcloseOfEach => "trendy_rt_tclose_of_each",
             RuntimeFn::DropOperand => "trendy_rt_drop_operand",
             RuntimeFn::TooDeep => "trendy_rt_too_deep",
             RuntimeFn::Run => "trendy_rt_run",

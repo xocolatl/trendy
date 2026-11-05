@@ -8236,6 +8236,233 @@ fn a_closure_of_one_value_gives_up_its_operand() {
     assert!(peak < 195 << 20, "{peak} bytes");
 }
 
+/// A diamond, then a cycle, a value only an arc ends at, and an arc to itself, asked
+/// about values that reach something and those that don't, by `matching` and `join`,
+/// on one attribute or both, and for each tuple of a relation.
+#[test]
+fn a_closure_can_be_asked_about_many_values() {
+    let (code, stderr) = run_source(
+        "closure_of_values",
+        r#"
+operator main{} [
+    var one := 1;
+    var edges := relation {
+        { a: one * 1, b: one * 2 },
+        { a: one * 1, b: one * 3 },
+        { a: one * 2, b: one * 4 },
+        { a: one * 3, b: one * 4 },
+        { a: one * 4, b: one * 5 },
+        { a: one * 5, b: one * 4 },
+        { a: one * 5, b: one * 6 },
+        { a: one * 7, b: one * 7 },
+    };
+    var from := relation { { a: one * 2 }, { a: one * 6 }, { a: one * 7 }, { a: one * 9 } };
+    var to := relation { { b: one * 4 }, { b: one * 1 }, { b: one * 9 } };
+    call debug_value{v: (edges tclose) matching from};
+    call debug_value{v: (edges tclose) matching to};
+    call debug_value{v: join{edges tclose, from}};
+    call debug_value{v: join{to, edges tclose}};
+    var named := relation { { a: one * 2, name: "two" }, { a: one * 7, name: "seven" } };
+    call debug_value{v: (edges tclose) matching named};
+    call debug_value{v: join{edges tclose, named}};
+    var pairs := relation { { a: one * 1, b: one * 6 }, { a: one * 6, b: one * 1 } };
+    call debug_value{v: (edges tclose) matching pairs};
+    call debug_value{v: join{pairs, edges tclose}};
+    call debug_value{v: (edges tclose) matching relation { { a: one * 1 } }};
+    call debug_value{v: (edges tclose) matching (from where a > 100)};
+    call debug_value{v: count{r: ((edges where a > 100) tclose) matching from}};
+    call debug_value{v: from extend { n := count{r: (edges tclose) matching relation { tuple { a } }} }};
+    call debug_value{v: count{r: (edges tclose) not matching from}};
+    var nothing := (relation { { x: one } } extend { a := tuple {}, b := tuple {} }) remove {x};
+    call debug_value{v: (nothing tclose) matching nothing{a}};
+    /* Values that come twice, and that aren't in order in their relation's tuples. */
+    var twice := relation {
+        { a: one * 2, name: "two" },
+        { a: one * 2, name: "zwei" },
+        { a: one * 7, name: "seven" },
+    };
+    call debug_value{v: (edges tclose) matching twice};
+    var unordered := relation { { aa: one, b: one * 6 }, { aa: one * 2, b: one * 2 } };
+    call debug_value{v: (edges tclose) matching unordered};
+    /* Values no arc has, before those that one does, and nothing in common. */
+    var absent := relation { { a: one * 0 }, { a: one * 7 } };
+    call debug_value{v: (edges tclose) matching absent};
+    var gap := relation { { a: one * 1, b: one * 5 }, { a: one * 5, b: one * 6 } };
+    call debug_value{v: (gap tclose) matching relation { { a: one * 1 }, { a: one * 3 } }};
+    var other := relation { { x: one } };
+    call debug_value{v: count{r: times{edges tclose, other}}};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let integers = "relation { a: integer, b: integer }";
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            format!("{integers} {{ {{ a: 2, b: 4 }}, {{ a: 2, b: 5 }}, {{ a: 2, b: 6 }}, {{ a: 7, b: 7 }} }}"),
+            format!("{integers} {{ {{ a: 1, b: 4 }}, {{ a: 2, b: 4 }}, {{ a: 3, b: 4 }}, {{ a: 4, b: 4 }}, {{ a: 5, b: 4 }} }}"),
+            format!("{integers} {{ {{ a: 2, b: 4 }}, {{ a: 2, b: 5 }}, {{ a: 2, b: 6 }}, {{ a: 7, b: 7 }} }}"),
+            format!("{integers} {{ {{ a: 1, b: 4 }}, {{ a: 2, b: 4 }}, {{ a: 3, b: 4 }}, {{ a: 4, b: 4 }}, {{ a: 5, b: 4 }} }}"),
+            format!("{integers} {{ {{ a: 2, b: 4 }}, {{ a: 2, b: 5 }}, {{ a: 2, b: 6 }}, {{ a: 7, b: 7 }} }}"),
+            "relation { a: integer, b: integer, name: text } { { a: 2, b: 4, name: \"two\" }, { a: 2, b: 5, name: \"two\" }, { a: 2, b: 6, name: \"two\" }, { a: 7, b: 7, name: \"seven\" } }".to_string(),
+            format!("{integers} {{ {{ a: 1, b: 6 }} }}"),
+            format!("{integers} {{ {{ a: 1, b: 6 }} }}"),
+            format!("{integers} {{ {{ a: 1, b: 2 }}, {{ a: 1, b: 3 }}, {{ a: 1, b: 4 }}, {{ a: 1, b: 5 }}, {{ a: 1, b: 6 }} }}"),
+            format!("{integers} {{}}"),
+            "0".to_string(),
+            "relation { a: integer, n: integer } { { a: 2, n: 3 }, { a: 6, n: 0 }, { a: 7, n: 1 }, { a: 9, n: 0 } }".to_string(),
+            "14".to_string(),
+            "relation { a: tuple {}, b: tuple {} } { { a: tuple {}, b: tuple {} } }".to_string(),
+            format!("{integers} {{ {{ a: 2, b: 4 }}, {{ a: 2, b: 5 }}, {{ a: 2, b: 6 }}, {{ a: 7, b: 7 }} }}"),
+            format!("{integers} {{ {{ a: 1, b: 2 }}, {{ a: 1, b: 6 }}, {{ a: 2, b: 6 }}, {{ a: 3, b: 6 }}, {{ a: 4, b: 6 }}, {{ a: 5, b: 6 }} }}"),
+            format!("{integers} {{ {{ a: 7, b: 7 }} }}"),
+            format!("{integers} {{ {{ a: 1, b: 5 }}, {{ a: 1, b: 6 }} }}"),
+            "18".to_string(),
+        ]
+    );
+}
+
+/// More values than a batch of them, of each kind, freed memory being scribbled over,
+/// each set of them with what the whole closure has for it, which `not matching` makes.
+#[test]
+fn a_closure_of_many_values_has_what_the_whole_closure_does() {
+    let (code, stderr) = run_source(
+        "closure_of_values_kinds",
+        r"
+operator same_integers{
+    edges: relation { a: integer, b: integer },
+    from: relation { a: integer },
+    to: relation { b: integer },
+}: boolean [
+    (edges tclose) matching from = (edges tclose) minus ((edges tclose) not matching from)
+        and (edges tclose) matching to = (edges tclose) minus ((edges tclose) not matching to)
+];
+
+operator same_texts{
+    edges: relation { a: text, b: text },
+    from: relation { a: text },
+    to: relation { b: text },
+}: boolean [
+    (edges tclose) matching from = (edges tclose) minus ((edges tclose) not matching from)
+        and (edges tclose) matching to = (edges tclose) minus ((edges tclose) not matching to)
+];
+
+operator main{} [
+    var n := 200;
+    /* A chain, with a way back near its end, and arcs that skip some of it. */
+    var chain := (series{from: 1, to: n - 1} rename {value as a}) extend { b := a + 1 };
+    var edges := chain union relation { { a: n, b: n - 20 } } union (((series{from: 1, to: n - 7} rename {value as a}) where a mod 5 = 0) extend { b := a + 7 });
+    for size in array [2, 63, 64, 65, 128, 129, 190] loop [
+        var from := (series{from: 1, to: size} rename {value as a}) where a mod 1 = 0;
+        var to := from rename {a as b};
+        call debug_value{v: same_integers{edges, from, to}};
+        var named := (edges extend { c := to_text{from: a}, d := to_text{from: b} }){c, d} rename {c as a, d as b};
+        var text_from := (from extend { c := to_text{from: a} }){c} rename {c as a};
+        call debug_value{v: same_texts{edges: named, from: text_from, to: text_from rename {a as b}}};
+    ];
+];
+",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), ["true"; 14]);
+}
+
+/// What a closure is asked about can fail, as any operand can.
+#[test]
+fn a_closure_of_many_values_fails_as_they_do() {
+    let (code, stderr) = run_source(
+        "closure_of_values_fails",
+        r"
+operator main{} [
+    var one := 1;
+    var edges := relation { { a: one, b: one + 1 } };
+    var from := relation { { a: one } };
+    call debug_value{v: (edges tclose) matching (from where 1 div (a - 1) = 0)};
+];
+",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with("error[R0002]: division by zero"),
+        "{stderr}"
+    );
+}
+
+/// Their paths from or to ten values, of a chain of twenty thousand: with all the
+/// closure's 200 million tuples made first, that would come to over 3 GB.
+#[test]
+fn a_closure_of_many_values_makes_no_more_of_it() {
+    let source = "operator main{} [
+    var n := 20_000;
+    var edges := (series{from: 1, to: n} rename {value as a}) extend { b := a + 1 };
+    var values := (series{from: 1, to: 10} rename {value as x}) extend { a := n - x, b := x };
+    call debug_value{v: count{r: (edges tclose) matching values{a}}};
+    call debug_value{v: count{r: (edges tclose) matching values{b}}};
+    call debug_value{v: count{r: join{edges tclose, values{a}}}};
+    call debug_value{v: count{r: join{values{b}, edges tclose}}};
+];";
+    let peak = peak_memory_of("closure_of_many", source, 0);
+    assert!(peak < 50 << 20, "{peak} bytes");
+}
+
+/// Every value of a graph of a million arcs, each reaching about as many: following
+/// the paths from each in turn would take over a minute.
+#[test]
+fn a_closure_of_every_value_takes_about_what_the_whole_does() {
+    let source = "operator main{} [
+    var n := 1500;
+    var p := series{from: 1, to: n} rename {value as a};
+    var q := series{from: 1, to: n} rename {value as b};
+    var edges := (p times q) where a < b;
+    call debug_value{v: count{r: (edges tclose) matching p}};
+    call debug_value{v: count{r: (edges tclose) matching q}};
+];";
+    let start = std::time::Instant::now();
+    let (code, stderr) = run_source("closure_of_every", source);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), ["1124250", "1124250"]);
+    let taken = start.elapsed();
+    assert!(taken.as_secs() < 10, "{taken:?}");
+}
+
+/// What a closure of many values reads is given up once it has its result, as any
+/// operation's operand is: of 64 MB, which with the next operand's would make 192
+/// here, rather than 128.
+#[test]
+fn a_closure_of_many_values_gives_up_its_operand() {
+    let source = "operator main{} [
+    var n := 40_000;
+    var one := 1;
+    var t := times{series{from: 1, to: n} rename {value as a}, series{from: 1, to: 100} rename {value as b}};
+    var c := relation { { c: one }, { c: one + 1 } };
+    call debug_value{
+        v: count{
+            r: ((t rename {a as c, b as d}) tclose matching c){d} union (t rename {a as c, b as d}){d},
+        },
+    };
+];";
+    let peak = peak_memory_of("closure_values_operand", source, 0);
+    assert!(peak < 195 << 20, "{peak} bytes");
+}
+
+/// What it is asked about too, of 64 MB, which is given up before the next operand.
+#[test]
+fn a_closure_of_many_values_gives_up_what_it_is_asked_about() {
+    let source = "operator main{} [
+    var n := 40_000;
+    var one := 1;
+    var edges := relation { { c: one, d: one + 1 } };
+    var t := times{series{from: 1, to: n} rename {value as a}, series{from: 1, to: 100} rename {value as b}};
+    call debug_value{
+        v: count{
+            r: ((edges tclose) matching (t rename {a as c, b as e})){d} union (t rename {a as d, b as e}){d},
+        },
+    };
+];";
+    let peak = peak_memory_of("closure_values_other", source, 0);
+    assert!(peak < 195 << 20, "{peak} bytes");
+}
+
 /// Arrays the program computes: `||` holds what its elements point to, and `<` is
 /// element by element, one that runs out first coming first.
 #[test]

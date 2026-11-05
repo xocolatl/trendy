@@ -2571,7 +2571,11 @@ pub unsafe extern "C" fn trendy_rt_tclose(
         };
         let value = &*from.desc;
         let (tuples, count) = read_slice(src);
-        let arcs = Arcs::of(tuples, count, element.size, [from.offset, to.offset], value)?;
+        let laid = Arcset::Laid {
+            at: tuples,
+            size: element.size,
+        };
+        let arcs = Arcs::of(count, laid, [from.offset, to.offset], value)?;
         let reached = reaching(&arcs)?;
         let numbered = arcs.into_values();
         let values = numbered.values();
@@ -2604,10 +2608,8 @@ pub unsafe extern "C" fn trendy_rt_tclose(
 /// Store at `dst` the tuples of the transitive closure of the relation at `src`,
 /// as for [`trendy_rt_tclose`], whose attribute `*attribute`, 0 or 1 by name order,
 /// is the value at `value`, in memory the statement owns: following only paths from
-/// that value, or to it, rather than making the whole closure. The tuples are in
-/// order by the first attribute, so paths from a value find each arc by binary
-/// search, and paths to one sort them by the second first. Fails if the memory
-/// can't be allocated.
+/// that value, or to it, rather than making the whole closure (`closure_of`).
+/// Fails if the memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -2624,119 +2626,612 @@ pub unsafe extern "C" fn trendy_rt_tclose_of(
     desc: *const TypeDesc,
     attribute: *const usize,
 ) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let forward = attribute.read_unaligned() == 0;
+        let (bytes, len) = closure_of(src, &*desc, forward, &[value])?;
+        dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
+/// Store at `dst` the tuples of the transitive closure of the relation at `src`,
+/// as for [`trendy_rt_tclose`], whose attribute `common` says is a value in the
+/// relation at `values`, which `values_desc` describes, in memory the statement owns:
+/// following only paths from those values, or to them, rather than making the whole
+/// closure (`closure_of`). Fails if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `src` must point to a valid relation of the type `desc` describes, a relation of
+/// two attributes of one type, `values` to a valid relation, `common` to where an
+/// attribute of that type is in each, `lhs` for the first, and `dst` to memory for a
+/// relation. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_tclose_of_each(
+    dst: *mut Text,
+    src: *const u8,
+    values: *const u8,
+    desc: *const TypeDesc,
+    values_desc: *const TypeDesc,
+    common: *const Common,
+) -> bool {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes.
     status(|| unsafe {
-        let desc = &*desc;
+        let (desc, common) = (&*desc, &*common);
+        let [first, _] = attributes(desc.element()) else {
+            internal_error("the transitive closure of a relation without two attributes");
+        };
+        let value = &*common.desc;
+        let (tuples, count) = read_slice(values);
+        let size = (*values_desc).element().size;
+        let mut starts = pointers(tuples.wrapping_add(common.rhs), count, size)?;
+        let starts = starts.values();
+        starts.sort_unstable_by(|a, b| order(*a, *b, value));
+        let distinct = deduplicated(starts, value);
+        let forward = common.lhs == first.offset;
+        let (bytes, len) = closure_of(src, desc, forward, &starts[..distinct])?;
+        dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
+/// The tuples of the transitive closure of the relation at `src`, which `desc`
+/// describes, whose first attribute by name order is one of `starts`, if `forward`,
+/// and otherwise whose second is, in memory the current statement owns, and how many
+/// there are: following only paths from those values, or to them, rather than making
+/// the whole closure. The tuples are in order by the first attribute, so paths from a
+/// value find each arc by binary search, and paths to one sort them by the second
+/// first. Fails if there is no memory.
+///
+/// # Safety
+///
+/// `src` must point to a valid relation `desc` describes, of two attributes of one
+/// type, and each of `starts` to a valid value of it, if the relation has a tuple,
+/// `starts` being in order and each only once.
+#[cfg(not(test))]
+unsafe fn closure_of(
+    src: *const u8,
+    desc: &TypeDesc,
+    forward: bool,
+    starts: &[*const u8],
+) -> Fallible<(*mut u8, usize)> {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes.
+    unsafe {
         let element = desc.element();
         let [first, second] = attributes(element) else {
             internal_error("the transitive closure of a relation without two attributes");
         };
         let (tuples, count) = read_slice(src);
-        let (found, len) = if attribute.read_unaligned() == 0 {
-            let tuple = |i: usize| tuples.add(i * element.size);
-            paths_from(value, count, tuple, first, second)?
+        if forward {
+            let tuples = Arcset::Laid {
+                at: tuples,
+                size: element.size,
+            };
+            let paths = Paths::new(count, tuples, first, second)?;
+            paths_written(paths, starts, desc, true)
         } else {
             let mut by_second = pointers(tuples, count, element.size)?;
             let by_second = by_second.values();
             by_second.sort_unstable_by(|a, b| {
                 order(a.add(second.offset), b.add(second.offset), &*second.desc)
             });
-            paths_from(value, count, |i: usize| by_second[i], second, first)?
-        };
-        let (given, other) = if attribute.read_unaligned() == 0 {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        let size = (*given.desc).size;
-        let (bytes, len) = made_in_order(len, desc, |made| {
-            for i in 0..len {
-                let tuple = made.add(i * element.size);
-                core::ptr::copy_nonoverlapping(value, tuple.add(given.offset), size);
-                let end = found.ptr().add(i).read();
-                core::ptr::copy_nonoverlapping(end, tuple.add(other.offset), size);
-            }
-        })?;
-        dst.write_unaligned(Text { bytes, len });
-        Ok(())
-    })
+            let paths = Paths::new(count, Arcset::Pointed(by_second), second, first)?;
+            paths_written(paths, starts, desc, false)
+        }
+    }
 }
 
-/// The values that paths from `start` reach, in order, once each, and how many:
-/// of the `count` tuples `tuple` gives, in order by the attribute `from`, each an
-/// arc from that attribute's value to the attribute `to`'s, each followed once,
-/// from each value they come to, however many ways lead to it. Each is where it is
-/// in its tuple, and so lasts as long as they do. Fails if there is no memory.
+/// The tuples of the relation `desc` describes for what `paths` find from `starts`,
+/// in memory the current statement owns, and how many there are, in canonical order
+/// as they are found if `in_order` says so. Fails if there is no memory.
 ///
 /// # Safety
 ///
-/// `tuple` must give `count` valid tuples with those attributes, in that order,
-/// and `start` must point to a valid value of their type, if `count` isn't 0.
+/// As for [`Paths::follow`], with `starts` in order and each only once, and `desc` must
+/// be of tuples of the two attributes `paths` follows.
 #[cfg(not(test))]
-unsafe fn paths_from(
-    start: *const u8,
-    count: usize,
-    tuple: impl Fn(usize) -> *const u8,
-    from: &Attr,
-    to: &Attr,
-) -> Fallible<(Temp<*const u8>, usize)> {
-    // SAFETY: guaranteed by the caller; each pointer is to a value of the
-    // attributes' type, and no more than `count` are in either list, as each
-    // arc is followed once, from its value's first.
+unsafe fn paths_written(
+    mut paths: Paths<'_>,
+    starts: &[*const u8],
+    desc: &TypeDesc,
+    in_order: bool,
+) -> Fallible<(*mut u8, usize)> {
+    // SAFETY: guaranteed by the caller; the first of each array that says so is
+    // written.
     unsafe {
-        let value = &*from.desc;
-        let source = |i: usize| tuple(i).add(from.offset);
-        let mut followed = Temp::<u64>::zeroed(count / 64 + 1)?;
-        let followed = followed.values();
-        let waiting = Temp::<usize>::new(count.max(1))?;
-        // Only those below `waits` are read, once written.
-        let waiting = core::slice::from_raw_parts_mut(waiting.ptr(), count.max(1));
-        let mut waits = 0;
-        // The first tuple of those from `value_at`, unless none are, or they have
-        // been followed, to follow next.
-        let mut first_from = |value_at: *const u8| {
-            let run = partition_point(0, count, |i| order(source(i), value_at, value).is_lt());
-            let (word, bit) = (run / 64, 1_u64 << (run % 64));
-            let fresh = run < count
-                && followed[word] & bit == 0
-                && order(source(run), value_at, value).is_eq();
-            if fresh {
-                followed[word] |= bit;
-            }
-            fresh.then_some(run)
+        let written = Written {
+            desc,
+            given: paths.from,
+            other: paths.to,
         };
-        if let Some(run) = first_from(start) {
-            waiting[waits] = run;
-            waits += 1;
+        if let [start] = *starts {
+            let (ends, len) = paths.ends_from(start)?;
+            let ends = core::slice::from_raw_parts(ends.ptr(), len);
+            return written.tuples(starts, &[len], ends, true);
         }
-        let found = Temp::<*const u8>::new(count.max(1))?;
-        let mut len = 0;
-        while waits > 0 {
-            waits -= 1;
-            let run = waiting[waits];
-            let mut i = run;
-            while i < count && order(source(i), source(run), value).is_eq() {
-                let end = tuple(i).add(to.offset);
-                found.ptr().add(len).write(end);
-                len += 1;
-                if let Some(run) = first_from(end) {
-                    waiting[waits] = run;
+        let arcs = paths.arcs_from(starts)?;
+        let (kept, numbers, count) = numbered_starts(&arcs, starts, &*paths.from.desc)?;
+        if count == 0 {
+            return written.tuples(&[], &[], &[], true);
+        }
+        let numbers = core::slice::from_raw_parts(numbers.ptr(), count);
+        let (ends, until) = ends_from_each(&arcs, numbers)?;
+        written.tuples(
+            core::slice::from_raw_parts(kept.ptr(), count),
+            core::slice::from_raw_parts(until.ptr(), count),
+            core::slice::from_raw_parts(ends.memory.ptr(), ends.len),
+            in_order,
+        )
+    }
+}
+
+/// The tuples of a closure's that follow paths from values of one of its attributes,
+/// `given`, to the other's, `other`.
+#[cfg(not(test))]
+struct Written<'a> {
+    desc: &'a TypeDesc,
+    given: &'a Attr,
+    other: &'a Attr,
+}
+
+#[cfg(not(test))]
+impl Written<'_> {
+    /// A tuple for each of `starts` and each of `ends` up to where its `until` says,
+    /// after those of the one before it, in memory the current statement owns, and
+    /// how many there are. They are in canonical order as they come, if `in_order`
+    /// says so, and otherwise are sorted, taking that memory twice over while they are.
+    /// Fails if there is no memory.
+    ///
+    /// # Safety
+    ///
+    /// Each of `starts` and `ends` must point to a valid value of the attributes' type,
+    /// and `until` have one for each of `starts`, none less than the one before it, and
+    /// none more than there are of `ends`.
+    unsafe fn tuples(
+        &self,
+        starts: &[*const u8],
+        until: &[usize],
+        ends: &[*const u8],
+        in_order: bool,
+    ) -> Fallible<(*mut u8, usize)> {
+        // SAFETY: guaranteed by the caller; `made` has room for a tuple for each of
+        // `ends`.
+        unsafe {
+            let size = self.desc.element().size;
+            let value_size = (*self.given.desc).size;
+            let write = |made: *mut u8| {
+                let mut k = 0;
+                for (start, until) in starts.iter().zip(until) {
+                    while k < *until {
+                        let tuple = made.add(k * size);
+                        let at = tuple.add(self.given.offset);
+                        core::ptr::copy_nonoverlapping(*start, at, value_size);
+                        let at = tuple.add(self.other.offset);
+                        core::ptr::copy_nonoverlapping(ends[k], at, value_size);
+                        k += 1;
+                    }
+                }
+            };
+            if in_order {
+                return made_in_order(ends.len(), self.desc, write);
+            }
+            let Some(bytes) = ends.len().checked_mul(size) else {
+                return Err(out_of_memory());
+            };
+            let unsorted = Temp::<u8>::zeroed(bytes)?;
+            write(unsorted.ptr());
+            canonical(unsorted.ptr(), ends.len(), self.desc)
+        }
+    }
+}
+
+/// Those of `starts`, in order, that are among the values `arcs` numbers, as the others
+/// reach nothing, their numbers, and how many there are. Fails if there is no memory.
+///
+/// # Safety
+///
+/// Each of `starts` must point to a valid value of the type `value` describes, as the
+/// values of `arcs` must, and be in order.
+#[cfg(not(test))]
+unsafe fn numbered_starts(
+    arcs: &Arcs,
+    starts: &[*const u8],
+    value: &TypeDesc,
+) -> Fallible<(Temp<*const u8>, Temp<u32>, usize)> {
+    // SAFETY: guaranteed by the caller; no more are kept than there are of `starts`.
+    unsafe {
+        let kept = Temp::<*const u8>::new(starts.len().max(1))?;
+        let numbers = Temp::<u32>::new(starts.len().max(1))?;
+        let values = core::slice::from_raw_parts(arcs.values.ptr(), arcs.count);
+        let (mut count, mut at) = (0, 0);
+        for &start in starts {
+            at += values[at..].partition_point(|v| order(*v, start, value).is_lt());
+            if at < values.len() && order(values[at], start, value).is_eq() {
+                kept.ptr().add(count).write(start);
+                numbers.ptr().add(count).write(number_of(at));
+                count += 1;
+            }
+        }
+        Ok((kept, numbers, count))
+    }
+}
+
+/// What paths through `arcs` from each of `starts`, by their numbers, reach, in order,
+/// one start's after another, and where each start's stop. Each batch of 64 starts is
+/// one pass through the components their paths come to, a bit for each start in a word
+/// for each value, so that a batch takes about as long as one start would, and nothing
+/// is kept of what isn't one's. Fails if there is no memory.
+#[cfg(not(test))]
+fn ends_from_each(arcs: &Arcs, starts: &[u32]) -> Fallible<(Growing<*const u8>, Temp<usize>)> {
+    let count = arcs.count;
+    let Some(fields) = count.checked_mul(2) else {
+        return Err(out_of_memory());
+    };
+    let mut of_value = Temp::<u32>::zeroed(count.max(1))?;
+    let mut memory = Temp::<u32>::zeroed(fields + 1)?;
+    // SAFETY: they are written, as zeros.
+    let (members, member_starts) = unsafe { memory.values() }.split_at_mut(count);
+    let mut found = Components {
+        // SAFETY: as above.
+        of_value: unsafe { of_value.values() },
+        members,
+        member_starts,
+        count: 0,
+    };
+    walk_components(arcs, &mut found, |_, _| Ok(()))?;
+    let mut seeded = Temp::<u64>::zeroed(count.max(1))?;
+    let mut reached = Temp::<u64>::zeroed(count.max(1))?;
+    let mut stamps = Temp::<u32>::zeroed(found.count.max(1))?;
+    let mut components = Temp::<u32>::zeroed(found.count.max(1))?;
+    let mut touched = Temp::<u32>::zeroed(count.max(1))?;
+    // SAFETY: they are written, as zeros.
+    let mut batch = unsafe {
+        Batch {
+            arcs,
+            found: &found,
+            seeded: seeded.values(),
+            reached: reached.values(),
+            stamps: stamps.values(),
+            components: components.values(),
+            touched: touched.values(),
+        }
+    };
+    let until = Temp::<usize>::new(starts.len().max(1))?;
+    let mut ends = Growing::<*const u8>::new()?;
+    for (number, chunk) in starts.chunks(64).enumerate() {
+        let values_reached = batch.reach(chunk, number_of(number + 1));
+        let mut sizes = [0_usize; 64];
+        let touched = &mut batch.touched[..values_reached];
+        touched.sort_unstable();
+        for &value in &*touched {
+            each_bit(batch.reached[value as usize], |bit| sizes[bit] += 1);
+        }
+        let mut places = [0_usize; 64];
+        let mut place = ends.len;
+        for (bit, _) in chunk.iter().enumerate() {
+            places[bit] = place;
+            place += sizes[bit];
+            // SAFETY: there are as many as there are of `starts`.
+            unsafe { until.ptr().add(number * 64 + bit).write(place) };
+        }
+        ends.make_room(place)?;
+        for &value in &*touched {
+            let at = &mut batch.reached[value as usize];
+            // SAFETY: each value is numbered, and there is room for the end of each
+            // that `sizes` counted, as `places` keeps within.
+            each_bit(*at, |bit| unsafe {
+                let end = arcs.values.ptr().add(value as usize).read();
+                ends.memory.ptr().add(places[bit]).write(end);
+                places[bit] += 1;
+            });
+            *at = 0;
+        }
+        ends.len = place;
+        for &start in chunk {
+            batch.seeded[start as usize] = 0;
+        }
+    }
+    Ok((ends, until))
+}
+
+/// The memory of [`ends_from_each`]'s passes, one for each batch of starts.
+#[cfg(not(test))]
+struct Batch<'a> {
+    arcs: &'a Arcs,
+    found: &'a Components<'a>,
+    /// Of each value, the bit of the start of the batch it is, if it is one.
+    seeded: &'a mut [u64],
+    /// Of each value, a bit for each start of the batch whose paths reach it.
+    reached: &'a mut [u64],
+    /// Of each component, the last batch to come to it, and one more.
+    stamps: &'a mut [u32],
+    /// The components this batch's paths come to.
+    components: &'a mut [u32],
+    /// The values this batch's paths reach.
+    touched: &'a mut [u32],
+}
+
+#[cfg(not(test))]
+impl Batch<'_> {
+    /// Come to the component of `value`, unless batch `stamp` has, after the first
+    /// `come_to`: how many there now are.
+    fn come_to(&mut self, value: u32, stamp: u32, come_to: usize) -> usize {
+        let of = self.found.of(value);
+        if self.stamps[of] == stamp {
+            return come_to;
+        }
+        self.stamps[of] = stamp;
+        self.components[come_to] = number_of(of);
+        come_to + 1
+    }
+
+    /// Set a bit for each of `starts`, none of which has been in this batch, in what
+    /// each reaches, and how many values those are, in `touched`. A component is
+    /// found after those it leads to, so going through them backwards, each has all
+    /// that lead to it first, and the word for all its values is all it hands on.
+    fn reach(&mut self, starts: &[u32], stamp: u32) -> usize {
+        let (arcs, found) = (self.arcs, self.found);
+        let mut come_to = 0;
+        for (bit, &start) in starts.iter().enumerate() {
+            self.seeded[start as usize] = 1 << bit;
+            come_to = self.come_to(start, stamp, come_to);
+        }
+        let mut next = 0;
+        while next < come_to {
+            let component = self.components[next] as usize;
+            next += 1;
+            for &member in found.members_of(component) {
+                for &end in arcs.ends_of(member) {
+                    come_to = self.come_to(end, stamp, come_to);
+                }
+            }
+        }
+        self.components[..come_to].sort_unstable_by(|a, b| b.cmp(a));
+        let mut touches = 0;
+        for at in 0..come_to {
+            let members = found.members_of(self.components[at] as usize);
+            let word = members.iter().fold(0, |word, &member| {
+                word | self.seeded[member as usize] | self.reached[member as usize]
+            });
+            for &member in members {
+                for &end in arcs.ends_of(member) {
+                    let reached = &mut self.reached[end as usize];
+                    if *reached == 0 {
+                        self.touched[touches] = end;
+                        touches += 1;
+                    }
+                    *reached |= word;
+                }
+            }
+        }
+        touches
+    }
+}
+
+/// `act` with each bit that is set in `word`, from the lowest.
+#[cfg(not(test))]
+fn each_bit(mut word: u64, mut act: impl FnMut(usize)) {
+    while word != 0 {
+        act(word.trailing_zeros() as usize);
+        word &= word - 1;
+    }
+}
+
+/// The tuples of a relation of arcs, in some order.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+enum Arcset<'a> {
+    /// One after another, each `size` bytes, from `at`.
+    Laid { at: *const u8, size: usize },
+    /// Each where it says.
+    Pointed(&'a [*const u8]),
+}
+
+#[cfg(not(test))]
+impl Arcset<'_> {
+    /// The tuple numbered `i`.
+    ///
+    /// # Safety
+    ///
+    /// There must be one.
+    unsafe fn at(self, i: usize) -> *const u8 {
+        match self {
+            // SAFETY: guaranteed by the caller.
+            Arcset::Laid { at, size } => unsafe { at.add(i * size) },
+            Arcset::Pointed(pointers) => pointers[i],
+        }
+    }
+}
+
+/// A search through arcs, each followed once, from each value it comes to, however
+/// many ways lead to it. Each is one of `count` of `tuples`, in order by the attribute
+/// `from`, an arc from that attribute's value to the attribute `to`'s.
+#[cfg(not(test))]
+struct Paths<'a> {
+    count: usize,
+    tuples: Arcset<'a>,
+    from: &'a Attr,
+    to: &'a Attr,
+    /// A bit for each tuple, set if it is the first of those from its value, and
+    /// they have been followed.
+    followed: Temp<u64>,
+    /// The first tuple of those from each value the search has come to.
+    waiting: Temp<usize>,
+}
+
+#[cfg(not(test))]
+impl<'a> Paths<'a> {
+    /// The search of `count` of `tuples`. Fails if there is no memory.
+    fn new(count: usize, tuples: Arcset<'a>, from: &'a Attr, to: &'a Attr) -> Fallible<Self> {
+        Ok(Paths {
+            count,
+            tuples,
+            from,
+            to,
+            followed: Temp::zeroed(count / 64 + 1)?,
+            waiting: Temp::new(count.max(1))?,
+        })
+    }
+
+    /// The value at the attribute `from` of the tuple numbered `i`.
+    ///
+    /// # Safety
+    ///
+    /// `i` must be below `count`, and the tuples valid.
+    unsafe fn source(&self, i: usize) -> *const u8 {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.tuples.at(i).add(self.from.offset) }
+    }
+
+    /// The first tuple of those from `value`, unless none are, or they have been
+    /// followed, to follow next, as they now have been.
+    ///
+    /// # Safety
+    ///
+    /// The tuples must be valid, and `value` must point to a valid value of their
+    /// attributes' type, if there are any.
+    unsafe fn first_from(&self, value: *const u8) -> Option<usize> {
+        // SAFETY: guaranteed by the caller; `followed` has a bit for each tuple.
+        unsafe {
+            let of_type = &*self.from.desc;
+            let run = partition_point(0, self.count, |i| {
+                order(self.source(i), value, of_type).is_lt()
+            });
+            if run == self.count || order(self.source(run), value, of_type).is_ne() {
+                return None;
+            }
+            let word = self.followed.ptr().add(run / 64);
+            let bit = 1_u64 << (run % 64);
+            (word.read() & bit == 0).then(|| {
+                word.write(word.read() | bit);
+                run
+            })
+        }
+    }
+
+    /// Follow each arc that a path from one of `starts` goes through, once, giving
+    /// `arc` the tuple of each: how many values were followed from, each the first of
+    /// its tuples in `waiting`.
+    ///
+    /// # Safety
+    ///
+    /// The tuples must be valid, and each of `starts` must point to a valid value of
+    /// their attributes' type, if there are any.
+    unsafe fn follow(&self, starts: &[*const u8], mut arc: impl FnMut(*const u8)) -> usize {
+        // SAFETY: guaranteed by the caller; each pointer is to a value of the
+        // attributes' type, and no more than `count` are in `waiting`, as each value's
+        // are followed once.
+        unsafe {
+            let value = &*self.from.desc;
+            let waiting = self.waiting.ptr();
+            let mut waits = 0;
+            for start in starts {
+                if let Some(run) = self.first_from(*start) {
+                    waiting.add(waits).write(run);
                     waits += 1;
                 }
-                i += 1;
             }
+            let mut next = 0;
+            while next < waits {
+                let run = waiting.add(next).read();
+                next += 1;
+                let mut i = run;
+                while i < self.count && order(self.source(i), self.source(run), value).is_eq() {
+                    let tuple = self.tuples.at(i);
+                    arc(tuple);
+                    if let Some(run) = self.first_from(tuple.add(self.to.offset)) {
+                        waiting.add(waits).write(run);
+                        waits += 1;
+                    }
+                    i += 1;
+                }
+            }
+            waits
         }
-        let values = core::slice::from_raw_parts_mut(found.ptr(), len);
-        values.sort_unstable_by(|a, b| order(*a, *b, value));
+    }
+
+    /// The values that paths from `start` reach, in order, once each, and how many,
+    /// each where it is in its tuple, so that it lasts as long as they do. Fails if
+    /// there is no memory.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Paths::follow`].
+    unsafe fn ends_from(&mut self, start: *const u8) -> Fallible<(Temp<*const u8>, usize)> {
+        // SAFETY: guaranteed by the caller; no more than `count` arcs are followed.
+        unsafe {
+            let found = Temp::<*const u8>::new(self.count.max(1))?;
+            let mut len = 0;
+            let offset = self.to.offset;
+            self.follow(&[start], |tuple| {
+                found.ptr().add(len).write(tuple.add(offset));
+                len += 1;
+            });
+            let value = &*self.from.desc;
+            let values = core::slice::from_raw_parts_mut(found.ptr(), len);
+            values.sort_unstable_by(|a, b| order(*a, *b, value));
+            let kept = deduplicated(values, value);
+            Ok((found, kept))
+        }
+    }
+
+    /// The arcs that paths from `starts` go through, numbered, each value's together.
+    /// Fails if there is no memory.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Paths::follow`], and the relation must outlive what this gives.
+    unsafe fn arcs_from(&mut self, starts: &[*const u8]) -> Fallible<Arcs> {
+        // SAFETY: guaranteed by the caller; no more than `count` arcs are followed,
+        // and their first tuples, in order, keep the tuples in order by `from`.
+        unsafe {
+            let mut arcs = 0;
+            let waits = self.follow(starts, |_| arcs += 1);
+            core::slice::from_raw_parts_mut(self.waiting.ptr(), waits).sort_unstable();
+            let found = Temp::<*const u8>::new(arcs.max(1))?;
+            let value = &*self.from.desc;
+            let mut len = 0;
+            for at in 0..waits {
+                let run = self.waiting.ptr().add(at).read();
+                let mut i = run;
+                while i < self.count && order(self.source(i), self.source(run), value).is_eq() {
+                    found.ptr().add(len).write(self.tuples.at(i));
+                    len += 1;
+                    i += 1;
+                }
+            }
+            let found = core::slice::from_raw_parts(found.ptr(), len);
+            Arcs::of(
+                len,
+                Arcset::Pointed(found),
+                [self.from.offset, self.to.offset],
+                value,
+            )
+        }
+    }
+}
+
+/// How many values `values`, in order, have once each, moved to where they start.
+///
+/// # Safety
+///
+/// Each must point to a valid value of the type `value` describes.
+#[cfg(not(test))]
+unsafe fn deduplicated(values: &mut [*const u8], value: &TypeDesc) -> usize {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
         let mut kept = 0;
-        for i in 0..len {
+        for i in 0..values.len() {
             if kept == 0 || order(values[kept - 1], values[i], value).is_ne() {
                 values[kept] = values[i];
                 kept += 1;
             }
         }
-        Ok((found, kept))
+        kept
     }
 }
 
@@ -2758,17 +3253,17 @@ struct Arcs {
 
 #[cfg(not(test))]
 impl Arcs {
-    /// The arcs of the `len` tuples at `tuples`, each `size` bytes, in canonical
-    /// order, from the value of the type `value` describes at the first of
-    /// `offsets` in each to the one at the second. Fails if there is no memory.
+    /// The arcs of `len` of `tuples`, in canonical order, from the value of the type
+    /// `value` describes at the first of `offsets` in each to the one at the second.
+    /// Fails if there is no memory.
     ///
     /// # Safety
     ///
-    /// `tuples` must point to those tuples, and the relation must outlive this.
+    /// There must be that many, in order by the first, and the relation must outlive
+    /// this.
     unsafe fn of(
-        tuples: *const u8,
         len: usize,
-        size: usize,
+        tuples: Arcset<'_>,
         offsets: [usize; 2],
         value: &TypeDesc,
     ) -> Fallible<Arcs> {
@@ -2778,11 +3273,14 @@ impl Arcs {
         // SAFETY: guaranteed by the caller; each is a value of that type, and
         // there are at most `both` of them, which the memory has room for.
         unsafe {
-            let first_end = tuples.add(offsets[1]);
-            let mut by_end = pointers(first_end, len, size)?;
-            let by_end = by_end.values();
-            by_end.sort_unstable_by(|a, b| order(*a, *b, value));
-            let start_of = |i: usize| tuples.add(i * size + offsets[0]);
+            let end_of = |i: usize| tuples.at(i).add(offsets[1]);
+            let by_end = Temp::<usize>::new(len.max(1))?;
+            for i in 0..len {
+                by_end.ptr().add(i).write(i);
+            }
+            let by_end = core::slice::from_raw_parts_mut(by_end.ptr(), len);
+            by_end.sort_unstable_by(|a, b| order(end_of(*a), end_of(*b), value));
+            let start_of = |i: usize| tuples.at(i).add(offsets[0]);
             let values = Temp::<*const u8>::new(both.max(1))?;
             let starts = Temp::<usize>::new(both + 1)?;
             let ends = Temp::<u32>::new(len.max(1))?;
@@ -2790,11 +3288,12 @@ impl Arcs {
             // the ends now are: the two go through the values together.
             let (mut count, mut i, mut j) = (0, 0, 0);
             while i < len || j < len {
-                let next = if j == len || (i < len && order(start_of(i), by_end[j], value).is_le())
+                let next = if j == len
+                    || (i < len && order(start_of(i), end_of(by_end[j]), value).is_le())
                 {
                     start_of(i)
                 } else {
-                    by_end[j]
+                    end_of(by_end[j])
                 };
                 let Some(number) = u32::try_from(count).ok().filter(|n| *n < u32::MAX) else {
                     return Err(out_of_memory());
@@ -2804,11 +3303,8 @@ impl Arcs {
                 while i < len && order(start_of(i), next, value).is_eq() {
                     i += 1;
                 }
-                while j < len && order(by_end[j], next, value).is_eq() {
-                    // A value that takes no memory has one tuple, the first.
-                    let arc = by_end[j].offset_from_unsigned(first_end);
-                    let arc = arc.checked_div(size).unwrap_or(0);
-                    ends.ptr().add(arc).write(number);
+                while j < len && order(end_of(by_end[j]), next, value).is_eq() {
+                    ends.ptr().add(by_end[j]).write(number);
                     j += 1;
                 }
                 count += 1;
@@ -2891,28 +3387,47 @@ impl Reached {
     }
 }
 
-/// Numbers, in memory of a function's own, which grows as they are added.
+/// Values, in memory of a function's own, which grows as they are added.
 #[cfg(not(test))]
-struct Numbers {
-    memory: Temp<u32>,
+struct Growing<T> {
+    memory: Temp<T>,
     len: usize,
 }
 
+/// Numbers, in memory of a function's own, which grows as they are added.
 #[cfg(not(test))]
-impl Numbers {
-    /// Add `number`, after those so far. Fails if there is no memory for it.
-    fn push(&mut self, number: u32) -> Fallible {
-        if self.len == self.memory.len {
-            self.memory.grow(self.len.saturating_mul(2).max(4))?;
+type Numbers = Growing<u32>;
+
+#[cfg(not(test))]
+impl<T: Copy> Growing<T> {
+    /// None yet, with room for a few. Fails if there is no memory for them.
+    fn new() -> Fallible<Self> {
+        Ok(Growing {
+            memory: Temp::new(4)?,
+            len: 0,
+        })
+    }
+
+    /// Have room for `len` values, the most yet. Fails if there is no memory for them.
+    fn make_room(&mut self, len: usize) -> Fallible {
+        if len > self.memory.len {
+            self.memory
+                .grow(len.max(self.memory.len.saturating_mul(2)))?;
         }
+        Ok(())
+    }
+
+    /// Add `value`, after those so far. Fails if there is no memory for it.
+    fn push(&mut self, value: T) -> Fallible {
+        self.make_room(self.len.saturating_add(1))?;
         // SAFETY: the memory has room for one more.
-        unsafe { self.memory.ptr().add(self.len).write(number) };
+        unsafe { self.memory.ptr().add(self.len).write(value) };
         self.len += 1;
         Ok(())
     }
 
-    /// The number at `index`, one of those added.
-    fn at(&self, index: usize) -> u32 {
+    /// The value at `index`, one of those added.
+    fn at(&self, index: usize) -> T {
         // SAFETY: the first `len` are written.
         unsafe { *self.memory.ptr().add(index) }
     }
@@ -2935,36 +3450,65 @@ fn number_of(n: usize) -> u32 {
 #[cfg(not(test))]
 fn reaching(arcs: &Arcs) -> Fallible<Reached> {
     let count = arcs.count;
-    let Some(fields) = count.checked_mul(8) else {
+    let Some(fields) = count.checked_mul(3) else {
         return Err(out_of_memory());
     };
     let mut memory = Temp::<u32>::zeroed(fields + 1)?;
     // SAFETY: they are written, as zeros.
     let memory = unsafe { memory.values() };
-    let (number, memory) = memory.split_at_mut(count);
-    let (low, memory) = memory.split_at_mut(count);
-    let (next, memory) = memory.split_at_mut(count);
-    let (calls, memory) = memory.split_at_mut(count);
-    let (waiting, memory) = memory.split_at_mut(count);
     let (seen, memory) = memory.split_at_mut(count);
     let (members, member_starts) = memory.split_at_mut(count);
     let mut components = Temp::<u32>::zeroed(count.max(1))?;
     let mut starts = Temp::<usize>::zeroed(count + 1)?;
     let mut found = Components {
-        arcs,
         // SAFETY: they are written, as zeros.
         of_value: unsafe { components.values() },
-        seen,
         members,
         member_starts,
+        count: 0,
+    };
+    let mut reaches = Reaches {
+        arcs,
+        seen,
         // SAFETY: as above.
         starts: unsafe { starts.values() },
         values: Numbers {
             memory: Temp::new(count.max(4))?,
             len: 0,
         },
-        count: 0,
     };
+    walk_components(arcs, &mut found, |found, component| {
+        reaches.of_component(found, component)
+    })?;
+    let Reaches { values, .. } = reaches;
+    Ok(Reached {
+        components,
+        starts,
+        values,
+    })
+}
+
+/// The strongly connected components of `arcs`, in `found`, each with those it leads to
+/// before it (Tarjan's algorithm, without recursion of its own, so that no path is too
+/// long for the stack), calling `done` with each as it is found. Fails if there is no
+/// memory, or as `done` does.
+#[cfg(not(test))]
+fn walk_components(
+    arcs: &Arcs,
+    found: &mut Components<'_>,
+    mut done: impl FnMut(&Components<'_>, usize) -> Fallible,
+) -> Fallible {
+    let count = arcs.count;
+    let Some(fields) = count.checked_mul(5) else {
+        return Err(out_of_memory());
+    };
+    let mut memory = Temp::<u32>::zeroed(fields.max(1))?;
+    // SAFETY: they are written, as zeros.
+    let memory = unsafe { memory.values() };
+    let (number, memory) = memory.split_at_mut(count);
+    let (low, memory) = memory.split_at_mut(count);
+    let (next, memory) = memory.split_at_mut(count);
+    let (calls, waiting) = memory.split_at_mut(count);
     let mut walk = Walk {
         number,
         low,
@@ -3002,20 +3546,16 @@ fn reaching(arcs: &Arcs) -> Fallible<Reached> {
                     .iter()
                     .rposition(|&value| value == at)
                     .unwrap_or_else(|| internal_error("a value that isn't waiting"));
-                found.component(&walk.waiting[first..walk.waits])?;
+                let component = found.add(&walk.waiting[first..walk.waits]);
+                done(found, component)?;
                 walk.waits = first;
             }
         }
     }
-    let Components { values, .. } = found;
-    Ok(Reached {
-        components,
-        starts,
-        values,
-    })
+    Ok(())
 }
 
-/// Where [`reaching`]'s walk through the arcs is.
+/// Where [`walk_components`]'s walk through the arcs is.
 #[cfg(not(test))]
 struct Walk<'a> {
     /// The order each value was first come to in, from 1, or 0 if it hasn't been.
@@ -3048,31 +3588,23 @@ impl Walk<'_> {
     }
 }
 
-/// The components [`reaching`] has found, and what they reach.
+/// The components [`walk_components`] has found.
 #[cfg(not(test))]
 struct Components<'a> {
-    arcs: &'a Arcs,
     /// The component each value is in, and one more, or 0 if it hasn't one yet.
     of_value: &'a mut [u32],
-    /// Of each value, the last component to reach it, and one more.
-    seen: &'a mut [u32],
     /// The values of each component, one after another.
     members: &'a mut [u32],
     /// Where each component's begin in `members`, and then where the last ends.
     member_starts: &'a mut [u32],
-    /// Where each component's reached values begin in `values`, and then where
-    /// the last ends.
-    starts: &'a mut [usize],
-    values: Numbers,
     /// How many there are.
     count: usize,
 }
 
 #[cfg(not(test))]
 impl Components<'_> {
-    /// `members`, a component, every other component it leads to having been
-    /// found: what it reaches, in order. Fails if there is no memory for them.
-    fn component(&mut self, members: &[u32]) -> Fallible {
+    /// Add `members`, a component, and say which it is.
+    fn add(&mut self, members: &[u32]) -> usize {
         let component = self.count;
         let stamp = number_of(component + 1);
         let member_start = self.member_starts[component] as usize;
@@ -3082,18 +3614,54 @@ impl Components<'_> {
         for &member in members {
             self.of_value[member as usize] = stamp;
         }
+        self.count += 1;
+        component
+    }
+
+    /// The component `value` is in, which must have one.
+    fn of(&self, value: u32) -> usize {
+        self.of_value[value as usize] as usize - 1
+    }
+
+    /// The values of `component`.
+    fn members_of(&self, component: usize) -> &[u32] {
+        let (first, last) = (
+            self.member_starts[component],
+            self.member_starts[component + 1],
+        );
+        &self.members[first as usize..last as usize]
+    }
+}
+
+/// What the components [`reaching`]'s walk has found reach.
+#[cfg(not(test))]
+struct Reaches<'a> {
+    arcs: &'a Arcs,
+    /// Of each value, the last component to reach it, and one more.
+    seen: &'a mut [u32],
+    /// Where each component's reached values begin in `values`, and then where
+    /// the last ends.
+    starts: &'a mut [usize],
+    values: Numbers,
+}
+
+#[cfg(not(test))]
+impl Reaches<'_> {
+    /// What `component` reaches, in order, every other component it leads to having
+    /// been found. Fails if there is no memory for them.
+    fn of_component(&mut self, found: &Components<'_>, component: usize) -> Fallible {
+        let stamp = number_of(component + 1);
         let start = self.values.len;
         let arcs = self.arcs;
-        for &member in members {
+        for &member in found.members_of(component) {
             for &end in arcs.ends_of(member) {
                 if self.seen[end as usize] == stamp {
                     continue;
                 }
                 // Its own, if a cycle is in it, with nothing yet that it reaches.
-                let of = self.of_value[end as usize] as usize - 1;
-                let (first, last) = (self.member_starts[of], self.member_starts[of + 1]);
-                for i in first as usize..last as usize {
-                    self.add(self.members[i], stamp)?;
+                let of = found.of(end);
+                for &member in found.members_of(of) {
+                    self.add(member, stamp)?;
                 }
                 for i in self.starts[of]..self.starts[of + 1] {
                     self.add(self.values.at(i), stamp)?;
@@ -3109,7 +3677,6 @@ impl Components<'_> {
             )
         }
         .sort_unstable();
-        self.count += 1;
         Ok(())
     }
 

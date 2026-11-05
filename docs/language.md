@@ -6367,6 +6367,11 @@ operator main{} [
   closure wouldn't fit in memory can be asked about one value at a time. The value
   is a value that is the same for each tuple, and the result what the closure's
   would be.
+- **So does asking about a relation of values:** `(r tclose) matching s` and
+  `join{r tclose, s}`, where `s` has an attribute of the closure's, follow only the
+  paths from `s`'s values, or to them, and the result is what the whole closure's
+  would be. A dense graph, where nearly everything can be reached, takes up to about
+  three times as long as making the closure would, and any other far less.
 - **Postfix, binding like a projection:** `r tclose where a = b` closes
   `r`, then restricts the closure, and `r{a, b} tclose` closes a
   projection. Tutorial D's `TCLOSE r` is fixed to `r tclose` (P0054).

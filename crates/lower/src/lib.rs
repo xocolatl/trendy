@@ -5487,13 +5487,7 @@ impl<'a> FunctionBuilder<'a> {
         condition: &hir::Expr,
         cx: &mut Lowering,
     ) -> Option<(lir::Place, Vec<hir::Expr>)> {
-        let mut closure = operand;
-        while let hir::Expr::At(_, inner) = closure {
-            closure = inner;
-        }
-        let hir::Expr::Tclose(arcs) = closure else {
-            return None;
-        };
+        let arcs = arcs_of_closure(operand)?;
         let conjuncts = condition.conjuncts();
         let (mut found, mut can_fail) = (None, None);
         'attributes: for (i, (name, ty)) in heading.attributes().enumerate() {
@@ -5537,6 +5531,49 @@ impl<'a> FunctionBuilder<'a> {
             .map(|(_, conjunct)| conjunct.clone())
             .collect();
         Some((dst, rest))
+    }
+
+    /// If `closure` is a transitive closure, and the relation `other` has attributes
+    /// in common with it: the tuples of the closure whose first such attribute has a
+    /// value it has in `other`, in a new slot, found by following only the paths from
+    /// or to those values ([`lir::RuntimeFn::TcloseOfEach`]), and where `other` is, which
+    /// the caller reads. With no attribute in common, `other` says nothing of the values
+    /// of the closure.
+    fn closure_matched(
+        &mut self,
+        closure: &hir::Expr,
+        other: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> Option<(lir::Place, lir::Place)> {
+        let arcs = arcs_of_closure(closure)?;
+        let (ty, other_ty) = (self.type_of(arcs), self.type_of(other));
+        let (hir::Type::Relation(heading), hir::Type::Relation(other_heading)) = (&ty, &other_ty)
+        else {
+            return None;
+        };
+        let common = common_attributes(heading, other_heading, cx);
+        if common.is_empty() {
+            return None;
+        }
+        let (src, values) = (self.place(arcs, cx), self.place(other, cx));
+        let dst = self.slot(cx.layout(&ty));
+        let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
+            lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
+        };
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::TcloseOfEach,
+            args: vec![
+                dst.clone(),
+                src.clone(),
+                values.clone(),
+                descriptor(&ty, cx),
+                descriptor(&other_ty, cx),
+                lir::Place::whole(lir::Base::Data(cx.constant(common))),
+            ],
+        });
+        self.scoped = true;
+        self.operand_read(arcs, &src, &ty, cx);
+        Some((dst, values))
     }
 
     /// The part of the relation at `src`, of type `ty`, with `heading`, that
@@ -6701,9 +6738,6 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
-    /// The tuples of the relation `lhs` that have a match in `rhs`, or, if
-    /// `negated`, those that have none, computed by the runtime into a new
-    /// stack slot.
     /// The transitive closure of the relation `operand`, of two attributes
     /// of one type, in a new slot, in memory the statement owns: the
     /// runtime's, given the relation's descriptor, the result's too.
@@ -6721,6 +6755,9 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
+    /// The tuples of the relation `lhs` that have a match in `rhs`, or, if
+    /// `negated`, those that have none, computed by the runtime into a new
+    /// stack slot. A transitive closure's are found without making the rest of it.
     fn matching(
         &mut self,
         lhs: &hir::Expr,
@@ -6737,8 +6774,21 @@ impl<'a> FunctionBuilder<'a> {
         };
         let common = common_attributes(lhs_heading, rhs_heading, cx);
         let common_count = usize_constant(len(common.len()), cx);
+        let narrowed = if negated {
+            None
+        } else {
+            self.closure_matched(lhs, rhs, cx)
+        };
+        let (lhs_place, rhs_place) = match narrowed {
+            // On one attribute, those are the tuples that have a match.
+            Some((closure, other)) if common.len() == 1 => {
+                self.operand_read(rhs, &other, &rhs_ty, cx);
+                return closure;
+            }
+            Some(places) => places,
+            None => (self.place(lhs, cx), self.place(rhs, cx)),
+        };
         let negated = usize_constant(u64::from(negated), cx);
-        let (lhs_place, rhs_place) = (self.place(lhs, cx), self.place(rhs, cx));
         let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
             lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
         };
@@ -6904,7 +6954,25 @@ impl<'a> FunctionBuilder<'a> {
         }
         let lhs_ty = self.type_of(lhs);
         let rhs_ty = self.type_of(rhs);
-        let (lhs_place, rhs_place) = (self.place(lhs, cx), self.place(rhs, cx));
+        // A relation of only the attribute a closure's tuples were found by adds
+        // nothing to them, and keeps no others.
+        let is_one_attribute = |ty: &hir::Type| matches!(ty, hir::Type::Relation(heading) if heading.attributes().count() == 1);
+        let (lhs_place, rhs_place) =
+            if let Some((closure, other)) = self.closure_matched(lhs, rhs, cx) {
+                if is_one_attribute(&rhs_ty) {
+                    self.operand_read(rhs, &other, &rhs_ty, cx);
+                    return closure;
+                }
+                (closure, other)
+            } else if let Some((closure, other)) = self.closure_matched(rhs, lhs, cx) {
+                if is_one_attribute(&lhs_ty) {
+                    self.operand_read(lhs, &other, &lhs_ty, cx);
+                    return closure;
+                }
+                (other, closure)
+            } else {
+                (self.place(lhs, cx), self.place(rhs, cx))
+            };
         if let hir::Type::Tuple(_) = lhs_ty {
             return self.tuple_join(&lhs_ty, &rhs_ty, &lhs_place, &rhs_place, cx);
         }
@@ -7611,6 +7679,17 @@ fn common_attributes(lhs: &hir::Heading, rhs: &hir::Heading, cx: &mut Lowering) 
             ]))
         })
         .collect()
+}
+
+/// The relation whose transitive closure `expr` is, if it is one.
+fn arcs_of_closure(mut expr: &hir::Expr) -> Option<&hir::Expr> {
+    while let hir::Expr::At(_, inner) = expr {
+        expr = inner;
+    }
+    match expr {
+        hir::Expr::Tclose(arcs) => Some(arcs),
+        _ => None,
+    }
 }
 
 /// A constant of `layout` with every byte zero, as a place: a value whose

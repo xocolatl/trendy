@@ -1875,6 +1875,21 @@ them by the second attribute, each arc once, and the rest of the condition goes
 through what that finds. The time and memory it takes are then about the part of
 the graph that value reaches, but for that sort, and for a bit for each arc.
 
+A `matching` or a `join` of a closure with a relation that shares an attribute with
+it makes no closure either (`FunctionBuilder::closure_matched`,
+`trendy_rt_tclose_of_each`), taking the first such attribute. Following each value's
+paths in turn would take as long as each value reaches, however many reach the same,
+which on a dense graph is far longer than making the closure. So it follows the paths
+from all the values together, once (`Paths::arcs_from`), numbers those arcs alone
+(`Arcs::of`), finds their components (`walk_components`, which the whole closure
+uses too), and then makes one pass for each batch of 64 values (`ends_from_each`, `Batch`),
+through only the components that batch comes to, those leading to others first, with
+a bit for each value of the batch in a word for each value reached. So each batch takes
+about as long as one value would, nothing is kept of what isn't asked for, and a chain
+whose closure wouldn't fit in memory can be asked about many values. Paths to values
+come out in order of those, so their tuples are sorted. A join with a relation of more
+attributes, or a `matching` on both of the closure's, then goes through what that finds.
+
 The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
 comes from the expected type when it is numeric, and otherwise from the
