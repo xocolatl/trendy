@@ -1918,7 +1918,8 @@ with a rename that fixes both.
 **Provides:** the optimizer, from HIR to HIR: a program that means the same
 and costs less to run. Sema computes, when compiling, whatever it can, so
 this rewrites what is left for the program to compute when it runs: its
-operators, and the constants the compiler can't compute. It is
+operators, the constants the compiler can't compute, and the conditions of
+constraints on variables, which each assignment to one of them computes. It is
 a layer of its own so that sema checks and lower translates, and neither
 has to optimize. A rewrite never changes what a program means, which
 includes the failures it can have: every operand is still computed, and

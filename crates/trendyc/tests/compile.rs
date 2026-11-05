@@ -9759,3 +9759,46 @@ operator main{} [
         ]
     );
 }
+
+/// A constraint's condition is planned, which changes nothing it says.
+#[test]
+fn a_planned_constraint_says_what_it_said() {
+    let (code, stderr) = run_source(
+        "planned_constraint",
+        r#"
+var regions: relation { region: integer, name: text };
+var customers: relation { customer: integer, region: integer };
+var orders: relation { customer: integer, amount: integer };
+
+constraint no_refunds_in_one := is_empty{
+    r: (orders join customers join regions) where amount < 0 and name = "one",
+};
+
+operator main{} [
+    regions := relation { { region: 1, name: "one" }, { region: 2, name: "two" } };
+    customers := relation { { customer: 7, region: 1 }, { customer: 8, region: 2 } };
+    orders := relation { { customer: 7, amount: 5 }, { customer: 8, amount: -5 } };
+    call debug_value{v: count{r: orders}};
+    insert orders relation { { customer: 8, amount: -9 } };
+    call debug_value{v: count{r: orders}};
+    insert orders relation { { customer: 7, amount: -1 }, { customer: 7, amount: 2 } };
+    call debug_value{v: "not here"};
+];
+"#,
+    );
+    let broken = trendy_diag::Code::ConstraintViolated.id();
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with(&format!("2\n3\nerror[{broken}]: ")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("the constraint `no_refunds_in_one` is broken"),
+        "{stderr}"
+    );
+    // Only the tuple that breaks it, with what it joins.
+    assert!(stderr.contains("amount: -1"), "{stderr}");
+    assert!(!stderr.contains("amount: 2"), "{stderr}");
+    assert!(!stderr.contains("amount: -9"), "{stderr}");
+    assert!(!stderr.contains("not here"), "{stderr}");
+}

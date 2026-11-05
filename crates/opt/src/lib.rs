@@ -2,8 +2,8 @@
 //! less to run.
 //!
 //! Sema computes, when compiling, whatever it can, and leaves the rest for
-//! the program to compute when it runs, operators and constants, which is
-//! what this rewrites. A
+//! the program to compute when it runs, operators, constants and the conditions
+//! of constraints on variables, which is what this rewrites. A
 //! rewrite never changes what a program means, which includes the failures
 //! it can have: every operand is still computed, and an operand that can
 //! fail only where it would be (see `language.md`'s "Evaluation").
@@ -29,10 +29,48 @@ pub fn optimized(program: hir::Program) -> hir::Program {
         .iter()
         .map(|constant| optimized_constant(&program, constant))
         .collect();
+    let constraints = program
+        .constraints
+        .iter()
+        .map(|constraint| optimized_constraint(&program, constraint))
+        .collect();
     hir::Program {
         operators,
         constants,
+        constraints,
         ..program
+    }
+}
+
+/// `constraint`, of `program`, optimized: what each of its parts computes, which
+/// the program does at each assignment to one of its variables. Each part says the
+/// same of the same tuples, and its text is as it is written.
+fn optimized_constraint(
+    program: &hir::Program,
+    constraint: &hir::VariableConstraint,
+) -> hir::VariableConstraint {
+    let parts = constraint
+        .parts
+        .iter()
+        .map(|part| {
+            let optimizer = Optimizer {
+                program,
+                params: &BTreeMap::new(),
+                locals: &part.locals,
+            };
+            hir::ConstraintPart {
+                condition: optimizer.expr(part.condition.clone()),
+                breaking: part
+                    .breaking
+                    .as_ref()
+                    .map(|breaking| optimizer.expr(breaking.clone())),
+                ..part.clone()
+            }
+        })
+        .collect();
+    hir::VariableConstraint {
+        parts,
+        ..constraint.clone()
     }
 }
 
@@ -391,6 +429,7 @@ mod tests {
     fn shorthand(optimizer: &Optimizer, expr: &hir::Expr) -> String {
         match expr {
             hir::Expr::Parameter(name) => name.clone(),
+            hir::Expr::Variable(id) => optimizer.program.variables[id.0].name.clone(),
             hir::Expr::ComputedConstant(id, _) => optimizer.program.constants[id.0].name.clone(),
             hir::Expr::At(_, inner) => shorthand(optimizer, inner),
             hir::Expr::And(lhs, rhs) => format!(
@@ -491,6 +530,41 @@ mod tests {
             planned(&f("times{b, a, c} where p")),
             "(((b where p) and a) and c)"
         );
+    }
+
+    /// How the first constraint's first part's relation, of an `is_empty`, is planned
+    /// in its condition, and in what it says breaks it.
+    fn planned_constraint(source: &str) -> (String, String) {
+        let program = program(source);
+        let part = &program.constraints[0].parts[0];
+        let optimizer = Optimizer {
+            program: &program,
+            params: &BTreeMap::new(),
+            locals: &part.locals,
+        };
+        let hir::Expr::Call(call) = &part.condition else {
+            panic!("the condition is `is_empty`: {:?}", part.condition);
+        };
+        let breaking = part.breaking.as_ref().expect("`is_empty` says which");
+        (
+            shorthand(&optimizer, &call.args["r"]),
+            shorthand(&optimizer, breaking),
+        )
+    }
+
+    #[test]
+    fn a_constraints_condition_is_planned_as_an_operators_is() {
+        let vars = "var regions: relation { region: integer, size: integer };\nvar customers: relation { customer: integer, region: integer };\nvar orders: relation { customer: integer, amount: integer };\n";
+        let main = "operator main{} [];";
+        // What it says is broken is planned too, by the same rule.
+        let (condition, breaking) = planned_constraint(&format!(
+            "{vars}constraint c := is_empty{{r: (orders join customers join regions) where amount < 0 and size = 1}};\n{main}"
+        ));
+        assert_eq!(
+            condition,
+            "((((orders where amount < 0) and customers) and regions) where size = 1)"
+        );
+        assert_eq!(breaking, condition);
     }
 
     #[test]
