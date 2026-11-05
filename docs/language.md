@@ -120,6 +120,13 @@ operator recorded{out lakes: relation lake} [
 operator main{} [];
 ```
 
+- **A unit has a use:** `main`, where a program starts, or an interface that
+  declares something for other units to see, or both, as a library can
+  carry a small program of its own. With neither, nothing can run it or use
+  it, which is an error (A0002), in a unit that is used, or under a database's
+  directory, too. `trendyc` makes a program, so it reports a unit without
+  `main` however good its interface. `trendyc --check` checks either kind and
+  makes nothing, as the language server does.
 - **The interface declares types, headings and operators, each operator
   by its heading alone.** The implementation gives each such operator's
   body, repeating its whole heading, its parameters with their modes and
@@ -224,7 +231,12 @@ operator main{} [
 ### Using other units
 
 A section names the units it uses with `uses`, and sees every name their
-interfaces declare. For the unit `lakes/depths.trendy`:
+interfaces declare. A unit's name is its path from the program's root, the
+directory of `main`'s file. A unit without `main`, checked on its own, is
+part of some program above it, so its root is the nearest directory above it
+where the units it uses are: `lakes/depths.trendy`, which uses `lakes.names`,
+is `lakes.depths`, from the directory that has `lakes/names.trendy`. For the
+unit `lakes/depths.trendy`:
 
 ```trendy,unit lakes.depths
 interface
@@ -4020,7 +4032,9 @@ operator main{} [];
   relvar's.
 - **In the interface:** a unit's interface may declare a database and add
   to it, as what is shared and outlives the program, while its other
-  variables stay its implementation's.
+  variables stay its implementation's. A unit that only adds to one has
+  nothing else to give a program, so that is what gives it a use, and the
+  fix for one without `interface` writes it (A0002).
 - **Only its own units add to it:** the unit that declares it, and the
   units under its directory, as `library/loans.trendy` is under
   `library.trendy`'s (A0070, the catalog's `own_parts`). The compiler

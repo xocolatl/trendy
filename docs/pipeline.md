@@ -693,16 +693,19 @@ also be idempotent: formatting its own output changes nothing.
 
 ### load (`trendy_load`)
 
-**Input:** the path of a program's main file and its text. **Output:** the
-program's units (`trendy_load::Program`): main's, named by its file's
-stem, then each unit it uses, through any path, by name, as they are in no
+**Input:** the path of a program's main file, or of a unit to check, and its
+text. **Output:** the program's units (`trendy_load::Program`): that file's,
+named by its path from their root, then each unit it uses, through any path, by name, as they are in no
 order, each read from its file and parsed, and each file there is that
 couldn't be read; and, apart, the units that come with the compiler
 (`trendy_load::library`), parsed from `trendy_prelude::UNITS`, which every
 program has, as drivers give them to sema.
 
-**Owns:** where a unit's text is: its name's path from the directory of
-main's file (`trendy_syntax::unit::path_of`), and, for the units that come
+**Owns:** where a unit's text is: its name's path from the root
+(`trendy_syntax::unit::path_of`), the directory of a file with `main`, and, of
+a file without, the nearest directory above it, as far as its path can name
+it, where the most of the units it uses have files, or its own if none has,
+as a unit doesn't know which program it is part of (`rooted`); and, for the units that come
 with the compiler, under `trendy.`, which are no files, the compiler's
 own; and that a unit that
 declares a database brings each unit under its directory, used or not, as
@@ -2578,16 +2581,17 @@ results. They contain no language logic of their own.
   renders diagnostics (`--error-format=human|json`), over the program's
   units, the catalog and the prelude, shown as `<catalog>` and
   `<prelude>`, and links the object
-  with the system `cc`. `trendyc --explain <code>` prints an error code's
+  with the system `cc`. `trendyc --check <input>` stops after sema, with
+  `trendy_sema::check_unit`, which needs no `main` of a unit with an interface,
+  and writes nothing. `trendyc --explain <code>` prints an error code's
   explanation.
 - **`trendyfmt`**, the formatter command: runs lexer, parser and fmt, then
   rewrites files in place. With `--check`, it lists unformatted files and
   exits non-zero instead.
 - **`trendy-lsp`** (crate `trendy_lsp`), the language server, speaking LSP over
-  stdio. It checks a document as a program's main unit, with the units it
-  uses, loaded from their files beside it, if it is a file
-  (`trendy_load`), or else alone, and the prelude's and the catalog's own
-  files as themselves. On every change it reports all lexer and parser
+  stdio. It checks a document as `trendyc --check` does, first among the units
+  it uses, loaded from their files if it is a file (`trendy_load`), or else
+  alone, and the prelude's and the catalog's own files as themselves. On every change it reports all lexer and parser
   errors, or, if there are none, all sema errors, one in another file, and
   a label there, as a related location in that file. It offers each suggestion as a quick fix,
   provides semantic highlighting by classifying tokens in the CST (so

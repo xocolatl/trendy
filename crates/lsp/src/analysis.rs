@@ -83,11 +83,7 @@ fn errors(uri: &Uri, source: &str, checked: &Checked) -> Vec<trendy_diag::Diagno
             if !errors.is_empty() {
                 return errors;
             }
-            LIBRARY.with(|library| {
-                trendy_sema::analyze(&files(&program.units), &files(library))
-                    .err()
-                    .unwrap_or_default()
-            })
+            LIBRARY.with(|library| trendy_sema::check_unit(&files(&program.units), &files(library)))
         }
         Checked::Library(unit) => {
             let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
@@ -458,6 +454,45 @@ mod tests {
             related[0].location.uri,
             source_uri(&depths.display().to_string())
         );
+    }
+
+    #[test]
+    fn a_unit_for_others_to_use_needs_no_main() {
+        let source = "interface\n\noperator f{};\n\nimplementation\n\noperator f{} [];";
+        assert_eq!(diagnostics(&uri(), source), []);
+        // With neither, nothing can run it or use it.
+        let diags = diagnostics(&uri(), "operator f{} [];");
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert!(
+            diags[0]
+                .message
+                .starts_with("program has no `main` operator")
+        );
+    }
+
+    #[test]
+    fn a_unit_is_checked_from_where_the_units_it_uses_are() {
+        let root = std::env::temp_dir().join(format!("trendy-lsp-rooted-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("library")).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(
+            root.join("library.trendy"),
+            "interface\n\ndatabase library;\n\nvar library.books: relation { isbn: text } key { isbn };\n",
+        )
+        .unwrap();
+        let loans = root.join("library/loans.trendy");
+        let source = "interface\n\nuses { library };\n\nvar library.loans: relation { isbn: text } key { isbn };\n\nconstraint library.lent := loans{isbn} <= books{isbn};\n";
+        // The document's text, as it is being edited, not the file's, and in
+        // the name its path from there gives it, which a database's rule reads.
+        std::fs::write(&loans, "").unwrap();
+        let uri = source_uri(&loans.display().to_string());
+        assert_eq!(diagnostics(&uri, source), []);
+        let diags = diagnostics(&uri, &source.replace("books{isbn}", "boks{isbn}"));
+        assert!(
+            diags.iter().any(|d| d.message.contains("boks")),
+            "{diags:#?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

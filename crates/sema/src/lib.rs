@@ -56,10 +56,7 @@ use crate::operators::Operators;
 pub fn analyze(units: &[File], library: &[File]) -> Result<hir::Program, Vec<Diagnostic>> {
     let files = Files::new(units, library);
     let mut errors = Vec::new();
-    for unit in files.sectioned() {
-        sections::check(unit, &mut errors);
-    }
-    let checked = check(&files, &mut errors);
+    let checked = units_checked(&files, &mut errors);
     let main = files.main().expect("a program has main's unit");
     let entry = entry(main, &checked.namespaces, &checked.operators, &mut errors);
     errors.sort_by_key(|d| d.span().start);
@@ -67,6 +64,38 @@ pub fn analyze(units: &[File], library: &[File]) -> Result<hir::Program, Vec<Dia
         Some(entry) if errors.is_empty() => Ok(checked.finish(entry, &files)),
         _ => Err(errors),
     }
+}
+
+/// Check the unit first in `units`, with those it uses, and the `library`,
+/// without making a program of it: what [`analyze`] reports, but that it
+/// needn't have `main` if its interface gives other units something to use.
+///
+/// Every error, in source order, in the same spans as [`analyze`]'s.
+///
+/// # Panics
+///
+/// As for [`analyze`].
+#[must_use]
+pub fn check_unit(units: &[File], library: &[File]) -> Vec<Diagnostic> {
+    let files = Files::new(units, library);
+    let mut errors = Vec::new();
+    let checked = units_checked(&files, &mut errors);
+    let main = files.main().expect("a program has main's unit");
+    if main.declares_main() || !main.exports() {
+        entry(main, &checked.namespaces, &checked.operators, &mut errors);
+    }
+    errors.sort_by_key(|d| d.span().start);
+    errors
+}
+
+/// What [`analyze`] and [`check_unit`] both check: each unit's sections, that
+/// each used unit has a use, and all of them together.
+fn units_checked(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
+    for unit in files.sectioned() {
+        sections::check(unit, errors);
+    }
+    files.used_have_a_use(errors);
+    check(files, errors)
 }
 
 /// Check the units that come with the compiler, the `library`, alone, as
@@ -215,6 +244,31 @@ impl Files {
             .first()
             .filter(|(source, _)| *source == Source::Program)
             .map(|(_, tree)| tree)
+    }
+
+    /// Report each unit of the program's but main's, whose own use is its
+    /// [`entry`]'s to say, with neither `main` nor anything in its interface:
+    /// nothing can run it, and nothing can use it (A0002).
+    fn used_have_a_use(&self, errors: &mut Vec<Diagnostic>) {
+        let program: Vec<&SourceFile> = self
+            .units
+            .iter()
+            .take_while(|(source, _)| *source == Source::Program)
+            .map(|(_, tree)| tree)
+            .collect();
+        for (i, unit) in program.iter().enumerate().skip(1) {
+            if unit.declares_main() || unit.exports() {
+                continue;
+            }
+            let name = self.names.name(hir::FileId(i));
+            let used_at = program
+                .iter()
+                .flat_map(|other| other.uses())
+                .flat_map(|uses| uses.units().collect::<Vec<_>>())
+                .find(|used| used.name().is_some_and(|n| n.text() == name))
+                .map(|used| used.span());
+            errors.push(errors::unit_of_no_use(name, unit, used_at));
+        }
     }
 
     /// Each unit with sections, whose rules are checked: every one but
@@ -14322,10 +14376,15 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
     /// A unit that declares one of each kind of name, the same as another's.
     const LAKES: &str = "var count := 1;\nheading place := { name: text };\ntype metres { { m: integer } };\nvar depth := metres{m: 3};\nconstraint positive := count > 0;\noperator twice{n: integer}: integer [ n * 2 ];\noperator bump{} [ count := twice{n: count}; ];";
 
+    /// A unit's start that gives other units something to use, as a used
+    /// unit must, for one that has nothing else in its interface.
+    const EXPORTS: &str = "interface\n\nheading exported := { a: integer };\n\nimplementation\n\n";
+
     /// The errors of the program `source`, with the units `a` and `b`, and
     /// `source` with their fixes in it applied.
     fn with_units_a_and_b(source: &str) -> (Vec<Code>, String) {
-        let errors = analyze_units(&[("program", source), ("a", ""), ("b", "")]).unwrap_err();
+        let errors =
+            analyze_units(&[("program", source), ("a", EXPORTS), ("b", EXPORTS)]).unwrap_err();
         let mut edits: Vec<_> = errors
             .iter()
             .filter_map(|d| d.suggestions.first())
@@ -14364,7 +14423,7 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         // One in each section.
         let source =
             "interface\n\nuses { a };\n\nimplementation\n\nuses { b };\n\noperator main{} [];";
-        assert!(analyze_units(&[("program", source), ("a", ""), ("b", "")]).is_ok());
+        assert!(analyze_units(&[("program", source), ("a", EXPORTS), ("b", EXPORTS)]).is_ok());
     }
 
     /// A unit that declares a type, a heading and operators in its
@@ -14890,13 +14949,197 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         assert_eq!(program.variables[0].ty.to_string(), "lakes.depths::metres");
     }
 
+    /// The errors of the first of `units`, checked as a unit, not a program.
+    fn checked_unit(units: &[(&str, &str)]) -> Vec<Diagnostic> {
+        with_library(None, |library| {
+            let parsed: Vec<(String, SourceFile)> = units
+                .iter()
+                .map(|(name, source)| ((*name).to_string(), parse(source)))
+                .collect();
+            let files: Vec<File> = parsed
+                .iter()
+                .map(|(name, tree)| File {
+                    name,
+                    path: name,
+                    tree,
+                })
+                .collect();
+            check_unit(&files, library)
+        })
+    }
+
+    #[test]
+    fn a_unit_has_main_or_an_interface_or_both() {
+        let codes = |units: &[(&str, &str)]| -> Vec<Code> {
+            checked_unit(units).iter().map(|e| e.code).collect()
+        };
+        let exports =
+            "interface\n\noperator f{}: integer;\n\nimplementation\n\noperator f{}: integer [1];";
+        assert_eq!(codes(&[("unit", exports)]), []);
+        assert_eq!(codes(&[("unit", "operator main{} [];")]), []);
+        let both = format!("{exports}\n\noperator main{{}} [];");
+        assert_eq!(codes(&[("unit", &both)]), []);
+        // Neither, which is no more of a use for its having sections, or for
+        // what they use.
+        for neither in [
+            "",
+            "operator f{} [];",
+            "interface\n\nimplementation\n\noperator f{} [];",
+            "interface\n\nuses { trendy.files };\n\nimplementation\n\noperator f{} [];",
+        ] {
+            assert_eq!(
+                codes(&[("unit", neither)]),
+                [Code::MissingMain],
+                "{neither}"
+            );
+        }
+        // `main` of any use is still a program's, whatever else it has.
+        let wrong = format!("{exports}\n\noperator main{{a: integer}} [];");
+        assert_eq!(codes(&[("unit", &wrong)]), [Code::MainSignature]);
+        // A `Main` beside an interface is an operator like any other.
+        let named = "interface\n\noperator Main{};\n\nimplementation\n\noperator Main{} [];";
+        assert_eq!(codes(&[("unit", named)]), []);
+    }
+
+    #[test]
+    fn a_used_unit_has_a_use_too() {
+        let main = "uses { helper };\n\noperator main{} [];";
+        let helper = "operator f{}: integer [1];";
+        let errors = analyze_units(&[("program", main), ("helper", helper)]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::MissingMain);
+        assert_eq!(
+            errors[0].message,
+            "the unit `helper` has neither `main` nor an interface, so nothing can run or use it"
+        );
+        // Where `interface` would go, in it, not at the end of the unit before.
+        assert_eq!(errors[0].primary.span.start, main.len());
+        assert_eq!(errors[0].primary.span.end, main.len() + "operator".len());
+        assert_eq!(
+            &main[errors[0].secondary[0].span.start..errors[0].secondary[0].span.end],
+            "helper"
+        );
+        // What it should export isn't certain, so there is no fix.
+        assert!(errors[0].suggestions.is_empty(), "{errors:#?}");
+        assert!(errors[0].help[0].contains("`interface`"), "{errors:#?}");
+        // Used through another, the same.
+        let used = "interface\n\nuses { helper };\n\nheading h := { a: integer };";
+        let errors = analyze_units(&[
+            ("program", "uses { used };\n\noperator main{} [];"),
+            ("used", used),
+            ("helper", helper),
+        ])
+        .unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::MissingMain);
+        // One with `main` can be run on its own, so it is of use.
+        let tool = "operator main{} [];";
+        assert!(analyze_units(&[("program", main), ("helper", tool)]).is_ok());
+    }
+
+    #[test]
+    fn a_program_needs_main_and_a_unit_says_what_it_is_for() {
+        // With an interface, adding an empty `main` wouldn't help.
+        let library = "interface\n\noperator f{};\n\nimplementation\n\noperator f{} [];";
+        let errors = errors(library);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::MissingMain);
+        assert_eq!(
+            errors[0].message,
+            "this unit has an interface but no `main` operator, so it can't be run"
+        );
+        assert_eq!(errors[0].primary.span, Span::new(0, "interface".len()));
+        assert!(errors[0].suggestions.is_empty(), "{errors:#?}");
+        assert!(
+            errors[0].help[0].contains("`trendyc --check`"),
+            "{errors:#?}"
+        );
+        // But a near miss is still fixed.
+        let named = "interface\n\noperator Main{};\n\nimplementation\n\noperator Main{} [];";
+        assert!(fix(named).contains("operator main{};"), "{}", fix(named));
+        // Neither gets an empty `main`, and is told of the other way.
+        let errors = self::errors("operator f{} [];");
+        assert_eq!(errors[0].message, "program has no `main` operator");
+        assert!(errors[0].help[0].contains("`interface`"), "{errors:#?}");
+        assert!(
+            fix("operator f{} [];").ends_with("operator main{} [];\n"),
+            "{}",
+            fix("operator f{} [];")
+        );
+    }
+
+    #[test]
+    fn what_only_adds_to_a_database_is_fixed_to_its_interface() {
+        let library = "interface\n\ndatabase library;\n\nvar library.books: relation { isbn: text } key { isbn };";
+        let part = "/* What is on loan. */\nuses { library };\n\nvar library.loans: relation { isbn: text } key { isbn };\n\nconstraint library.lent := loans{isbn} <= books{isbn};";
+        let main = "uses { library };\n\noperator main{} [];";
+        let errors = analyze_units(&[
+            ("program", main),
+            ("library", library),
+            ("library.loans", part),
+        ])
+        .unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::MissingMain);
+        let start = main.len() + library.len();
+        let edit = &errors[0].suggestions[0].edits[0];
+        assert_eq!(
+            edit.span,
+            Span::empty(start + "/* What is on loan. */\n".len())
+        );
+        let fixed = format!(
+            "/* What is on loan. */\n{}{}",
+            edit.replacement,
+            &part["/* What is on loan. */\n".len()..]
+        );
+        assert!(
+            analyze_units(&[
+                ("program", main),
+                ("library", library),
+                ("library.loans", &fixed),
+            ])
+            .is_ok(),
+            "{fixed}"
+        );
+        // Checked alone, or built, it gets the same fix rather than an empty `main`.
+        let errors = checked_unit(&[("loans", part), ("library", library)]);
+        let inserted = errors
+            .iter()
+            .filter(|e| e.code == Code::MissingMain)
+            .flat_map(|e| &e.suggestions)
+            .flat_map(|s| &s.edits)
+            .map(|e| e.replacement.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(inserted, ["interface\n\n"]);
+        // Anything that isn't shared in any case is for its author to sort.
+        let found = analyze_units(&[
+            ("program", "uses { helper };\n\noperator main{} [];"),
+            (
+                "helper",
+                "heading h := { a: integer };\nconstraint c := 1 = 1;",
+            ),
+        ])
+        .unwrap_err();
+        let of_no_use = found.iter().find(|e| e.code == Code::MissingMain).unwrap();
+        assert!(of_no_use.suggestions.is_empty(), "{found:#?}");
+        let errors = analyze_units(&[
+            ("program", "uses { helper };\n\noperator main{} [];"),
+            ("helper", "heading h := { a: integer };\noperator f{} [];"),
+        ])
+        .unwrap_err();
+        assert!(errors[0].suggestions.is_empty(), "{errors:#?}");
+    }
+
     #[test]
     fn a_unit_uses_units_of_the_program() {
         // The catalog's `known_units`, broken by a unit there isn't, at each
         // `uses` of it, with the file it would be.
         let errors = analyze_units(&[
             ("program", "uses { lakes.depth };\n\noperator main{} [];"),
-            ("lakes.depths", "uses { recipes };"),
+            (
+                "lakes.depths",
+                "interface\n\nuses { recipes };\n\nheading depth := { m: integer };",
+            ),
         ])
         .unwrap_err();
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
@@ -14953,14 +15196,14 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
     #[test]
     fn only_a_databases_own_units_add_to_it() {
         let library = "interface\n\ndatabase library;\n\nvar library.books: relation { isbn: text, title: text } key { isbn };";
-        let loans = "uses { library };\n\nvar library.loans: relation { isbn: text, member: integer } key { isbn };\n\nconstraint library.lent_books := loans{isbn} <= books{isbn};";
+        let loans = "interface\n\nuses { library };\n\nvar library.loans: relation { isbn: text, member: integer } key { isbn };\n\nconstraint library.lent_books := loans{isbn} <= books{isbn};";
         let program = analyze_units(&[
             ("program", "uses { library };\n\noperator main{} [];"),
             ("library", library),
             ("library.loans", loans),
             (
                 "library.loans.late",
-                "uses { library };\n\nvar library.late: relation { isbn: text };",
+                "interface\n\nuses { library };\n\nvar library.late: relation { isbn: text };",
             ),
         ]);
         assert!(program.is_ok(), "{program:#?}");
@@ -14990,7 +15233,7 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             ("library", library),
             (
                 "libraryx",
-                "uses { library };\n\nvar library.x: relation { a: integer };",
+                "interface\n\nuses { library };\n\nvar library.x: relation { a: integer };",
             ),
         ])
         .unwrap_err();
@@ -15006,8 +15249,14 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         // once for each cycle, at the first unit's `uses`.
         let errors = analyze_units(&[
             ("program", "uses { a };\n\noperator main{} [];"),
-            ("a", "uses { b };"),
-            ("b", "implementation\n\nuses { a };"),
+            (
+                "a",
+                "interface\n\nuses { b };\n\nheading a := { x: integer };",
+            ),
+            (
+                "b",
+                "interface\n\nheading b := { x: integer };\n\nimplementation\n\nuses { a };",
+            ),
         ])
         .unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:#?}");
@@ -15017,9 +15266,18 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         assert!(errors[0].suggestions.is_empty());
         let errors = analyze_units(&[
             ("program", "uses { a };\n\noperator main{} [];"),
-            ("a", "uses { b };"),
-            ("b", "uses { c };"),
-            ("c", "uses { a };"),
+            (
+                "a",
+                "interface\n\nuses { b };\n\nheading a := { x: integer };",
+            ),
+            (
+                "b",
+                "interface\n\nuses { c };\n\nheading b := { x: integer };",
+            ),
+            (
+                "c",
+                "interface\n\nuses { a };\n\nheading c := { x: integer };",
+            ),
         ])
         .unwrap_err();
         assert_eq!(
@@ -15031,7 +15289,7 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         );
         // A unit of its own: the fix removes it from its `uses`.
         let source = "uses { program, a };\n\noperator main{} [];";
-        let errors = analyze_units(&[("program", source), ("a", "")]).unwrap_err();
+        let errors = analyze_units(&[("program", source), ("a", EXPORTS)]).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert_eq!(errors[0].message, "the unit `program` uses itself");
         let edit = &errors[0].suggestions[0].edits[0];
@@ -15043,7 +15301,10 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
     #[test]
     fn units_see_their_own_names_and_the_preludes() {
         // Another unit's names are unknown, and not suggested.
-        let helper = ("helper", "operator greet{} [];\nvar depth := 1;");
+        let helper = (
+            "helper",
+            "interface\n\nheading h := { a: integer };\n\nimplementation\n\noperator greet{} [];\nvar depth := 1;",
+        );
         let errors = analyze_units(&[("program", "operator main{} [ call greet{}; ];"), helper])
             .unwrap_err();
         assert_eq!(
@@ -15073,7 +15334,7 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             ),
             (
                 "helper",
-                "operator f{} [ call debug_value{v: sqrt{of: 9e0}}; ];",
+                &format!("{EXPORTS}operator f{{}} [ call debug_value{{v: sqrt{{of: 9e0}}}}; ];"),
             ),
         ]);
         assert!(program.is_ok(), "{program:?}");
@@ -15084,7 +15345,8 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         // Each unit's own, though another declares the same names: no
         // duplicates, and each qualified by its unit in the program.
         let main = format!("{LAKES}\noperator main{{}} [ call bump{{}}; ];");
-        let program = analyze_units(&[("program", &main), ("lakes", LAKES)]).unwrap();
+        let lakes = format!("{EXPORTS}{LAKES}");
+        let program = analyze_units(&[("program", &main), ("lakes", &lakes)]).unwrap();
         let variables: Vec<&str> = program.variables.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(
             variables,
@@ -15130,7 +15392,7 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             ),
             (
                 "helper",
-                "operator f{y: integer} [];\noperator g{} [ call f{y: 2}; ];",
+                "interface\n\nheading h := { a: integer };\n\nimplementation\n\noperator f{y: integer} [];\noperator g{} [ call f{y: 2}; ];",
             ),
         ])
         .unwrap();
@@ -15146,7 +15408,7 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         let failure = "type no_lake is error { { lake: text } };\noperator message{error: no_lake}: text [ \"no lake \" || error.lake ];";
         let program = analyze_units(&[
             ("program", &format!("{failure}\noperator main{{}} [];")),
-            ("lakes", failure),
+            ("lakes", &format!("{EXPORTS}{failure}")),
         ])
         .unwrap();
         let message = program.operator(program.message);

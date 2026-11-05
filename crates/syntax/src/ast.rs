@@ -329,6 +329,25 @@ impl UnitName {
 }
 
 impl SourceFile {
+    /// Whether it declares an operator named `main`, where a program starts.
+    #[must_use]
+    pub fn declares_main(&self) -> bool {
+        self.items().any(|item| match item {
+            Item::Operator(operator) => operator
+                .name()
+                .and_then(|name| name.ident())
+                .is_some_and(|ident| ident.text() == "main"),
+            _ => false,
+        })
+    }
+
+    /// Whether its interface declares anything, for other units to see.
+    #[must_use]
+    pub fn exports(&self) -> bool {
+        self.items()
+            .any(|item| section_of(item.syntax()) == Section::Interface)
+    }
+
     /// Its sections' headers, in source order.
     pub fn headers(&self) -> impl Iterator<Item = SectionHeader> {
         self.0.children().filter_map(SectionHeader::cast)

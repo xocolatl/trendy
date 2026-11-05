@@ -9424,3 +9424,60 @@ operator main{} [
         ]
     );
 }
+
+/// `trendyc --check` checks a unit or a program, and makes nothing.
+#[test]
+fn check_writes_nothing_and_needs_no_main_of_a_unit_with_an_interface() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("check");
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = |name: &str, source: &str| {
+        let input = dir.join(format!("{name}.trendy"));
+        std::fs::write(&input, source).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_trendyc"))
+            .current_dir(&dir)
+            .arg("--check")
+            .arg(&input)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    let unit = "interface\n\noperator f{};\n\nimplementation\n\noperator f{} [];\n";
+    assert_eq!(run("unit", unit), (true, String::new(), String::new()));
+    assert!(!dir.join("unit").exists());
+    assert_eq!(
+        run("program", "operator main{} [];\n"),
+        (true, String::new(), String::new())
+    );
+    assert!(!dir.join("program").exists());
+    // What is wrong with one is reported, as building reports it.
+    let (ok, stdout, stderr) = run("broken", "interface\n\nvar a := 1;\n");
+    assert!(!ok);
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains(trendy_diag::Code::InterfaceDeclaration.id()),
+        "{stderr}"
+    );
+    // With neither, nothing can run it or use it.
+    let (ok, _, stderr) = run("neither", "operator f{} [];\n");
+    assert!(!ok);
+    assert!(
+        stderr.contains(trendy_diag::Code::MissingMain.id()),
+        "{stderr}"
+    );
+    // Building one with an interface can't succeed, and says why.
+    let (ok, _, stderr) = trendyc("library", unit, &[]);
+    assert!(!ok);
+    assert!(stderr.contains("so it can't be run"), "{stderr}");
+    assert!(stderr.contains("`trendyc --check`"), "{stderr}");
+    // It makes nothing, so it can't be told where.
+    let out = Command::new(env!("CARGO_BIN_EXE_trendyc"))
+        .args(["--check", "x.trendy", "-o", "x"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8(out.stderr).unwrap().starts_with("usage:"));
+}

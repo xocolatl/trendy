@@ -1,6 +1,8 @@
 /* What is on loan from the library, a unit of its database's own, under
    the directory of the unit that declares it. In a constraint, the
    database's relvars are named alone, whichever of its units adds them. */
+interface
+
 uses { databases };
 
 /* A book is on loan to one member at a time. */

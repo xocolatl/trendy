@@ -323,6 +323,34 @@ pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagno
         );
     }
 
+    // A unit other units use can't be run, and adding `main` to it wouldn't
+    // make it what it is for.
+    if file.exports() {
+        let header = file
+            .syntax()
+            .children()
+            .find_map(ast::SectionHeader::cast)
+            .and_then(|header| header.keyword());
+        return Diagnostic::error(
+            Code::MissingMain,
+            "this unit has an interface but no `main` operator, so it can't be run",
+            header.map_or(file.span(), |keyword| {
+                trendy_syntax::span(keyword.text_range())
+            }),
+            "for other units to use",
+        )
+        .with_note(ENTRY_NOTE)
+        .with_note(UNIT_USE)
+        .with_help(
+            "compile a program that uses it, or check this unit alone with `trendyc --check`",
+        );
+    }
+    if let Some(moved) = interface_inserted(file) {
+        return unit_without_use(MESSAGE, file).with_suggestion(
+            "declare them in the interface, as what they add is shared",
+            vec![moved],
+        );
+    }
     let end = file.span().end;
     let text = file.syntax().to_string();
     let separator = match () {
@@ -337,6 +365,8 @@ pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagno
         "expected an operator named `main` in this file",
     )
     .with_note(ENTRY_NOTE)
+    .with_note(UNIT_USE)
+    .with_help("for a unit other units use, declare what they see after `interface`")
     .with_suggestion(
         "add an entry point: `operator main{} [];`",
         vec![Edit {
@@ -344,6 +374,80 @@ pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagno
             replacement: format!("{separator}operator main{{}} [];\n"),
         }],
     )
+}
+
+/// What a unit is for, for notes.
+const UNIT_USE: &str = "a unit has `main`, where a program starts, or an interface that declares what other units see of it, or both: with neither, nothing can run it or use it";
+
+/// The edit that writes `interface` before all that `file` says, if all it
+/// says is what is shared in any case, and so belongs there, and so nothing
+/// else could make it of use: what it adds to a database, and headings.
+fn interface_inserted(file: &SourceFile) -> Option<Edit> {
+    let shared = |item: ast::Item| match item {
+        ast::Item::Relvar(_) | ast::Item::Database(_) | ast::Item::Heading(_) => true,
+        ast::Item::Constraint(constraint) => constraint.part_of().is_some(),
+        _ => false,
+    };
+    let mut items = file.items().peekable();
+    items.peek()?;
+    if !items.all(shared) {
+        return None;
+    }
+    let first = file.syntax().children().find(|node| {
+        ast::UsesDecl::cast(node.clone()).is_some() || ast::Item::cast(node.clone()).is_some()
+    })?;
+    Some(Edit {
+        span: Span::empty(usize::from(first.text_range().start())),
+        replacement: "interface\n\n".to_string(),
+    })
+}
+
+/// A unit's lack of a use, of the file `file`, with the message `message`.
+fn unit_without_use(message: impl Into<String>, file: &SourceFile) -> Diagnostic {
+    // Where `interface` would go, or the whole of it: an empty span between
+    // two units would be in the one before it.
+    let first = file
+        .syntax()
+        .children()
+        .find(|node| {
+            ast::UsesDecl::cast(node.clone()).is_some() || ast::Item::cast(node.clone()).is_some()
+        })
+        .and_then(|node| node.first_token())
+        .map_or_else(
+            || file.span(),
+            |token| trendy_syntax::span(token.text_range()),
+        );
+    Diagnostic::error(
+        Code::MissingMain,
+        message,
+        first,
+        "no `main`, and nothing in an interface",
+    )
+    .with_note(UNIT_USE)
+}
+
+/// The unit `name`, `file`, which `used_at` uses, if a unit does, with neither
+/// `main` nor anything in its interface.
+pub(crate) fn unit_of_no_use(name: &str, file: &SourceFile, used_at: Option<Span>) -> Diagnostic {
+    let d = unit_without_use(
+        format!(
+            "the unit `{name}` has neither `main` nor an interface, so nothing can run or use it"
+        ),
+        file,
+    );
+    let d = match used_at {
+        Some(at) => d.with_secondary(at, "used here"),
+        None => d,
+    };
+    match interface_inserted(file) {
+        Some(moved) => d.with_suggestion(
+            "declare them in the interface, as what they add is shared",
+            vec![moved],
+        ),
+        None => d.with_help(
+            "write `interface` before what other units should see, each operator by its heading alone, and `implementation` before their bodies",
+        ),
+    }
 }
 
 /// The type name `ident` doesn't name a type.
