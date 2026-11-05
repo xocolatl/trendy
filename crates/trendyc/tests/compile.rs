@@ -8256,12 +8256,31 @@ fn constants() {
     );
 }
 
-/// A constant the compiler can't compute is computed once, before `main`, after
-/// those it reads, however it is reached: the failure of one stops the program,
-/// where it is declared, before anything `main` does, and one nothing reaches
-/// isn't computed.
+/// A constant's only read needs what is around it needs: this closure would be 450
+/// million tuples, and only one value's paths are followed.
 #[test]
-fn a_constant_is_computed_before_main_if_the_program_reaches_it() {
+fn a_constants_only_read_needs_no_more_of_it_than_that_read() {
+    let (code, stderr) = run_source(
+        "only_read",
+        r"
+const arcs := (series{from: 1, to: 30000} rename {value as a}) extend { b := a + 1 };
+const reach := arcs tclose;
+
+operator main{} [
+    call debug_value{v: count{r: reach where a = 1}};
+];
+",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), ["30000"]);
+}
+
+/// A constant the compiler can't compute is computed when a read first needs it,
+/// after those it reads, however it is reached: the failure of one stops the
+/// program, where it is declared, after what the program did before that, and one
+/// that nothing needs isn't computed, whether it has one read or several.
+#[test]
+fn a_constant_is_computed_when_a_read_first_needs_it() {
     let (code, stderr) = run_source(
         "computed_constants",
         r#"
@@ -8269,6 +8288,8 @@ const read_last := read_first + 1;
 const read_first := max{r: series{from: 1, to: 3}, of: value};
 const texts := (series{from: 1, to: 2} extend { t := "n" || to_text{from: value} }){t};
 const unreached := 1 div (max{r: series{from: 0, to: 0}, of: value});
+const not_needed := 1 div (max{r: series{from: 0, to: 0}, of: value});
+const not_needed_twice := 1 div (max{r: series{from: 0, to: 0}, of: value});
 
 operator also{}: integer [
     read_last * 2
@@ -8292,6 +8313,11 @@ operator main{} [
         n := n + count{r: texts union with_it{}};
     ];
     call debug_value{v: n};
+    if n = 0 then [
+        call debug_value{v: not_needed};
+        call debug_value{v: not_needed_twice};
+        call debug_value{v: not_needed_twice};
+    ];
 ];
 "#,
     );
@@ -8310,25 +8336,112 @@ operator main{} [
             "4"
         ]
     );
+}
+
+/// A constant that can't be computed stops the program when a read first needs it,
+/// where it is declared, after what the program did before that.
+#[test]
+fn a_constant_fails_when_a_read_first_needs_it() {
+    // Its only read.
+    let broken = "const broken := 1 div (max{r: series{from: 0, to: 0}, of: value});\n";
     let (code, stderr) = run_source(
         "constant_fails",
-        r#"
-const broken := 1 div (max{r: series{from: 0, to: 0}, of: value});
-
-operator main{} [
-    call debug_value{v: "before anything"};
-    call debug_value{v: broken};
+        &format!(
+            r#"{broken}
+operator main{{}} [
+    call debug_value{{v: "before it"}};
+    call debug_value{{v: broken}};
 ];
-"#,
+"#
+        ),
     );
     assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[0], "\"before it\"", "{stderr}");
+    assert_eq!(
+        lines[1],
+        "error[R0002]: division by zero: 1 div 0 has no result"
+    );
+    assert!(lines[2].ends_with("constant_fails.trendy:1:1"), "{stderr}");
+    assert!(!stderr.contains("called at"), "{stderr}");
+    // Read by what an operator computes, the first read that needs it, in the
+    // trace, as a call's is.
+    let (code, stderr) = run_source(
+        "shared_constant_fails",
+        &format!(
+            r#"{broken}
+operator shown{{}}: integer [
+    broken + 1
+];
+
+operator main{{}} [
+    call debug_value{{v: "before it"}};
+    call debug_value{{v: shown{{}}}};
+    call debug_value{{v: broken}};
+];
+"#
+        ),
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[0], "\"before it\"", "{stderr}");
     assert!(
-        stderr.starts_with("error[R0002]: division by zero"),
+        lines[2].ends_with("shared_constant_fails.trendy:1:1"),
         "{stderr}"
     );
-    assert!(stderr.contains("constant_fails.trendy:2:"), "{stderr}");
-    assert!(!stderr.contains("before anything"), "{stderr}");
-    // Its keys, checked as it is computed.
+    assert!(
+        lines[3].contains("in `constant broken`, called at") && lines[3].ends_with(":4:5"),
+        "{stderr}"
+    );
+    assert!(lines[4].contains("in `shown`, called at"), "{stderr}");
+    // The program is at its own place again after a read computes one.
+    let (code, stderr) = run_source(
+        "after_a_constant",
+        r"
+const many := max{r: series{from: 1, to: 3}, of: value};
+
+operator main{} [
+    call debug_value{v: 1 div (many - many)};
+];
+",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("after_a_constant.trendy:5:"), "{stderr}");
+    assert!(!stderr.contains("called at"), "{stderr}");
+    // Failing doesn't count as having been computed, and what a transaction
+    // that is undone computed stays computed, as nothing assigned it.
+    let (code, stderr) = run_source(
+        "constants_in_transactions",
+        &format!(
+            r"{broken}const many := max{{r: series{{from: 1, to: 3}}, of: value}};
+
+operator main{{}} [
+    var errors: relation transaction_collection;
+    var i := 0;
+    while i < 2 loop [
+        transaction collecting errors [
+            call debug_value{{v: many}};
+            call debug_value{{v: broken}};
+        ];
+        i := i + 1;
+    ];
+    call debug_value{{v: broken_count{{errors: errors}}}};
+    call debug_value{{v: many}};
+];
+
+operator broken_count{{errors: relation transaction_collection}}: integer [
+    count{{r: errors}}
+];
+"
+        ),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), ["3", "3", "1", "3"]);
+}
+
+/// A constant's keys are checked as it is computed.
+#[test]
+fn a_constants_keys_are_checked_as_it_is_computed() {
     let (code, stderr) = run_source(
         "constant_keys",
         r"

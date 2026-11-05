@@ -330,6 +330,38 @@ impl Mode {
 }
 
 impl Operator {
+    /// The local variables of its body or its value.
+    #[must_use]
+    pub fn locals(&self) -> &[Local] {
+        match &self.kind {
+            OperatorKind::Update { locals, .. } | OperatorKind::ReadOnly { locals, .. } => locals,
+            OperatorKind::Builtin(_) | OperatorKind::Specification { .. } => &[],
+        }
+    }
+
+    /// The operator with each expression in its body or its value replaced by
+    /// what `f` makes of it.
+    #[must_use]
+    pub fn map_exprs(self, f: &mut dyn FnMut(Expr) -> Expr) -> Operator {
+        let kind = match self.kind {
+            OperatorKind::Update { locals, body } => OperatorKind::Update {
+                locals,
+                body: body.map_exprs(f),
+            },
+            OperatorKind::ReadOnly {
+                result,
+                locals,
+                value,
+            } => OperatorKind::ReadOnly {
+                result,
+                locals,
+                value: f(value),
+            },
+            kind @ (OperatorKind::Builtin(_) | OperatorKind::Specification { .. }) => kind,
+        };
+        Operator { kind, ..self }
+    }
+
     /// The operator a call that gives the type parameters `types` calls:
     /// this one with each type parameter replaced by its type, so it has
     /// none.
@@ -2310,9 +2342,11 @@ pub enum Expr {
     /// in a hierarchy is laid out as every value of its root's, so nothing
     /// changes when running, and it can't fail.
     Treat(Box<Type>, Box<Expr>),
-    /// The value of a constant that isn't known when compiling, computed before
-    /// `main`, of the type: a read of what that left, which can't fail, as that
-    /// has.
+    /// The value of a constant that isn't known when compiling, of the type. It
+    /// is computed when a read first needs it, at most once, and a failure in
+    /// that is the constant's, wherever that is. So a read counts as unable to
+    /// fail, and a rewrite can move it, as its value is the same whenever it is
+    /// computed.
     ComputedConstant(ConstantId, Box<Type>),
     /// The value of the expression, as a value of the type, a subtype of
     /// its type: TREAT down (IM Prescription 14), which fails unless the
@@ -3783,8 +3817,9 @@ pub struct ConstraintPart {
 
 /// A constant defined at the top level of the program: a name for a value,
 /// computed from no variable, so that when it is computed makes no difference.
-/// One that the compiler can't compute is computed once, before `main`, if the
-/// program reaches it (see [`Expr::ComputedConstant`]).
+/// One that the compiler can't compute is computed when a read first needs it,
+/// or written where it is read if the optimizer says so (see
+/// [`Expr::ComputedConstant`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Constant {
     /// Unique among variables, constants and operators.

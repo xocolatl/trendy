@@ -17,7 +17,7 @@ const steps_per_day: integer := 2 * steps_per_leg;
 const steps_per_leg := 4;
 
 /* `series` runs a loop, which the compiler doesn't: the program computes this
-   once, before `main`, as it reads it below. */
+   when something first needs it, at most once, and not at all if nothing does. */
 const milestones := series{from: 1, to: 5} rename {value as stone};
 const last_stone := max{r: milestones, of: stone};
 

@@ -13,9 +13,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_hir as hir;
 
+mod inserted;
+
 /// `program`, optimized.
 #[must_use]
 pub fn optimized(program: hir::Program) -> hir::Program {
+    let program = inserted::constants_inserted(program);
     let operators = program
         .operators
         .iter()
@@ -49,43 +52,12 @@ fn optimized_constant(program: &hir::Program, constant: &hir::Constant) -> hir::
 
 /// `operator`, of `program`, optimized.
 fn optimized_operator(program: &hir::Program, operator: &hir::Operator) -> hir::Operator {
-    let kind = match &operator.kind {
-        hir::OperatorKind::Update { locals, body } => {
-            let optimizer = Optimizer {
-                program,
-                params: &operator.params,
-                locals,
-            };
-            hir::OperatorKind::Update {
-                locals: locals.clone(),
-                body: optimizer.block(body.clone()),
-            }
-        }
-        hir::OperatorKind::ReadOnly {
-            result,
-            locals,
-            value,
-        } => {
-            let optimizer = Optimizer {
-                program,
-                params: &operator.params,
-                locals,
-            };
-            hir::OperatorKind::ReadOnly {
-                result: result.clone(),
-                locals: locals.clone(),
-                value: optimizer.expr(value.clone()),
-            }
-        }
-        hir::OperatorKind::Builtin(builtin) => hir::OperatorKind::Builtin(*builtin),
-        hir::OperatorKind::Specification { result } => hir::OperatorKind::Specification {
-            result: result.clone(),
-        },
+    let optimizer = Optimizer {
+        program,
+        params: &operator.params,
+        locals: operator.locals(),
     };
-    hir::Operator {
-        kind,
-        ..operator.clone()
-    }
+    operator.clone().map_exprs(&mut |expr| optimizer.expr(expr))
 }
 
 /// Optimizes the expressions of an operator, with these parameters and
@@ -97,15 +69,11 @@ struct Optimizer<'a> {
 }
 
 impl Optimizer<'_> {
-    fn block(&self, block: hir::Block) -> hir::Block {
-        block.map_exprs(&mut |expr| self.expr(expr))
-    }
-
     /// `expr`, and every expression in it, optimized: an AND of relations,
     /// restricted or not, is [`Optimizer::planned`].
     fn expr(&self, expr: hir::Expr) -> hir::Expr {
         match expr {
-            hir::Expr::Restrict(operand, condition) if matches!(*operand, hir::Expr::And(..)) => {
+            hir::Expr::Restrict(operand, condition) if is_and(&operand) => {
                 let condition = self.expr(*condition);
                 self.planned(*operand, condition.conjuncts().to_vec())
             }
@@ -201,10 +169,30 @@ struct Guard {
     reads: BTreeSet<String>,
 }
 
+/// Whether `expr` is an AND, at a site of its own or not, as a value written
+/// elsewhere is.
+fn is_and(expr: &hir::Expr) -> bool {
+    match expr {
+        hir::Expr::And(..) => true,
+        hir::Expr::At(_, inner) => is_and(inner),
+        _ => false,
+    }
+}
+
 /// The operands of `expr`, of an AND, and of each AND among them: of a
-/// chain of ANDs, however it is grouped, as AND is associative.
+/// chain of ANDs, however it is grouped, as AND is associative. Those of an AND
+/// at a site of its own are each computed there, where a failure in it says it
+/// is.
 fn and_operands(expr: hir::Expr, operands: &mut Vec<hir::Expr>) {
     match expr {
+        hir::Expr::At(site, inner) if is_and(&inner) => {
+            let mut own = Vec::new();
+            and_operands(*inner, &mut own);
+            operands.extend(
+                own.into_iter()
+                    .map(|operand| hir::Expr::At(site, Box::new(operand))),
+            );
+        }
         hir::Expr::And(lhs, rhs) => {
             and_operands(*lhs, operands);
             and_operands(*rhs, operands);
@@ -510,11 +498,154 @@ mod tests {
         let source = "const a := series{from: 1, to: 3} rename {value as x};\n\
              const b := series{from: 1, to: 3} rename {value as y};\n\
              const few := times{a, b} where x = 1 and y = 2;\n\
-             operator main{} [ call debug_table{r: few}; ];";
+             operator main{} [ call debug_table{r: few}; call debug_table{r: a}; call debug_table{r: b}; ];";
         assert_eq!(
             planned_constant(source, "few"),
             "((a where x = 1) and (b where y = 2))"
         );
+    }
+
+    /// The name of each constant of `source` an operator still reads.
+    fn shared(source: &str) -> Vec<String> {
+        let program = program(source);
+        let mut read = Vec::new();
+        let mut note = |expr: &hir::Expr| reads(expr, &program, &mut read);
+        for operator in &program.operators {
+            match &operator.kind {
+                hir::OperatorKind::Update { body, .. } => body.for_each_expr(&mut note),
+                hir::OperatorKind::ReadOnly { value, .. } => note(value),
+                hir::OperatorKind::Builtin(_) | hir::OperatorKind::Specification { .. } => {}
+            }
+        }
+        read.sort();
+        read.dedup();
+        read
+    }
+
+    /// The name of each constant `expr` reads, and those they read.
+    fn reads(expr: &hir::Expr, program: &hir::Program, read: &mut Vec<String>) {
+        if let hir::Expr::ComputedConstant(id, _) = expr {
+            let constant = &program.constants[id.0];
+            read.push(constant.name.clone());
+            reads(&constant.value, program, read);
+        }
+        expr.for_each_child(|child, _| reads(child, program, read));
+    }
+
+    const SERIES: &str = "series{from: 1, to: 3}";
+
+    #[test]
+    fn a_constants_only_read_that_runs_once_is_its_value() {
+        let two = format!(
+            "const a := {SERIES} rename {{value as x}};\n\
+             const b := {SERIES} rename {{value as y}};\n"
+        );
+        // Its only read, in `main`, in a branch, or in what `main` calls once;
+        // a constant it reads, however many read that one.
+        for source in [
+            format!("{two}operator main{{}} [ call debug_table{{r: a}}; ];"),
+            format!(
+                "{two}operator main{{}} [ var n := 0; if n > 0 then [ call debug_table{{r: a}}; ]; ];"
+            ),
+            format!(
+                "{two}operator f{{}} [ call debug_table{{r: a}}; ];\noperator main{{}} [ call f{{}}; ];"
+            ),
+            format!(
+                "{two}operator f{{}}: integer [ count{{r: a}} ];\noperator main{{}} [ call debug_value{{v: f{{}}}}; ];"
+            ),
+            format!(
+                "const b := {SERIES};\nconst a := b;\noperator main{{}} [ call debug_table{{r: a}}; ];"
+            ),
+        ] {
+            assert_eq!(shared(&source), Vec::<String>::new(), "{source}");
+        }
+        // Its value seen by what reads it: the closure restricted to one value.
+        let source = format!(
+            "const a := ({SERIES} rename {{value as x}}) extend {{ y := x }};\n\
+             const r := a tclose;\n\
+             operator main{{}} [ call debug_table{{r: r where x = 1}}; ];"
+        );
+        let program = program(&source);
+        let main = program.operator(program.entry);
+        let hir::OperatorKind::Update { body, .. } = &main.kind else {
+            panic!("`main` is an update operator");
+        };
+        let mut closures = 0;
+        body.for_each_expr(&mut |expr| closures += restricted_closures(expr));
+        assert_eq!(closures, 1);
+    }
+
+    /// How many restrictions of a closure are in `expr`.
+    fn restricted_closures(expr: &hir::Expr) -> usize {
+        let mut found = 0;
+        if let hir::Expr::Restrict(operand, _) = expr {
+            let mut closure = &**operand;
+            while let hir::Expr::At(_, inner) = closure {
+                closure = inner;
+            }
+            found = usize::from(matches!(closure, hir::Expr::Tclose(_)));
+        }
+        expr.for_each_child(|child, _| found += restricted_closures(child));
+        found
+    }
+
+    #[test]
+    fn a_plan_sees_what_a_constant_inserted_is() {
+        // The `a` and `b` of `f` stay read, so that they are shared, by `main`.
+        let source = format!(
+            "const a := {SERIES} rename {{value as x}};\n\
+             const b := {SERIES} rename {{value as y}};\n\
+             const pairs := times{{a, b}};\n\
+             operator f{{}} [ call debug_table{{r: pairs where x = 1 and y = 2}}; ];\n\
+             operator main{{}} [ call f{{}}; call debug_table{{r: a}}; call debug_table{{r: b}}; ];"
+        );
+        assert_eq!(planned(&source), "((a where x = 1) and (b where y = 2))");
+    }
+
+    #[test]
+    fn a_constant_read_more_than_once_is_shared() {
+        let a = format!("const a := {SERIES} rename {{value as x}};\n");
+        let table = "call debug_table{r: a};";
+        for body in [
+            // Two reads, in one statement or two.
+            format!("operator main{{}} [ {table} {table} ];"),
+            "operator main{} [ call debug_table{r: a union a}; ];".to_string(),
+            // In a loop, or its condition.
+            format!("operator main{{}} [ var n := 0; while n < 3 loop [ {table} n := n + 1; ]; ];"),
+            "operator main{} [ var n := 0; while n < count{r: a} loop [ n := n + 1; ]; ];".to_string(),
+            format!("operator main{{}} [ for x in array [1, 2] loop [ {table} ]; ];"),
+            // For each tuple.
+            format!(
+                "operator main{{}} [ call debug_table{{r: ({SERIES} rename {{value as y}}) where y = count{{r: a}}}}; ];"
+            ),
+            format!(
+                "operator main{{}} [ call debug_table{{r: ({SERIES} rename {{value as y}}) extend {{ n := count{{r: a}} }}}}; ];"
+            ),
+            // In what is called more than once, or from a loop, or in a cycle.
+            format!("operator f{{}} [ {table} ];\noperator main{{}} [ call f{{}}; call f{{}}; ];"),
+            format!(
+                "operator f{{}} [ {table} ];\noperator main{{}} [ var n := 0; while n < 3 loop [ call f{{}}; n := n + 1; ]; ];"
+            ),
+            "operator f{n: integer}: integer [ if n = 0 then count{r: a} else f{n: n - 1} ];\noperator main{} [ call debug_value{v: f{n: 3}}; ];".to_string(),
+            // In what is called for each value of a type, and beside a constraint's,
+            // which is checked at each assignment.
+            "type t { { n: integer }, constraint n <= count{r: a} };\noperator main{} [ var m := 1; call debug_value{v: t{n: m}}; ];".to_string(),
+            format!(
+                "var v: relation {{ x: integer }};\nconstraint c := is_empty{{r: v where x > count{{r: a}}}};\noperator main{{}} [ v := relation {{}}; {table} ];"
+            ),
+        ] {
+            let source = format!("{a}{body}");
+            assert_eq!(shared(&source), ["a"], "{source}");
+        }
+        // With a key to check, or local variables, whatever reads it.
+        let table = "operator main{} [ call debug_table{r: a}; ];";
+        let source =
+            format!("const a := ({SERIES} extend {{ same := 1 }}) key {{ same }};\n{table}");
+        assert_eq!(shared(&source), ["a"]);
+        let source = format!(
+            "const a := [ var n := 0; while n < 3 loop [ n := n + 1; ]; {SERIES} where value = n ];\n{table}"
+        );
+        assert_eq!(shared(&source), ["a"]);
     }
 
     #[test]

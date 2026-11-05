@@ -71,9 +71,7 @@ fn entry(
     let waiting = cx.waiting(program);
     let written = Written::new(&mut b, waiting, cx);
     let given = Given::new(&mut b, cx);
-    let mut first = None;
     b.catching(handle, |b| {
-        first = Some(b.position());
         b.insts.push(lir::Inst::Call {
             function: main,
             args: given.as_ref().map(|given| given.args.clone()),
@@ -112,27 +110,6 @@ fn entry(
     }
     let after = b.new_block();
     b.end_block(lir::Terminator::Failed, after);
-    // Each constant the program reaches, now that all of it is lowered, the
-    // messages too, leaving the program at no site for `main`.
-    let (block, at) = first.expect("`catching` lowers what it is given");
-    let entered = b.entered();
-    let computed = std::mem::take(&mut cx.computed_first);
-    for (i, function) in computed.into_iter().enumerate() {
-        b.insert(
-            (block, at + 2 * i),
-            lir::Inst::Call {
-                function,
-                args: None,
-                result: None,
-            },
-        );
-        b.insert(
-            (block, at + 2 * i + 1),
-            lir::Inst::RestoreSite {
-                src: entered.clone(),
-            },
-        );
-    }
     let lowered = b.finish(None, cx);
     cx.functions.insert(id.0, lowered);
     id
@@ -611,17 +588,36 @@ fn in_data(data: lir::DataId) -> lir::Place {
     }
 }
 
-/// Where the constant `id`, read by lowered code, is kept: null until a function
-/// computes it, which is lowered here, so after those of the constants it reads,
-/// which the entry calls in that order, before `main`.
+/// What lowered code reads of a constant the compiler can't compute.
+#[derive(Clone, Copy)]
+struct ComputedConstant {
+    /// Where it is kept: its value, zero until it is computed, and whether it
+    /// has been.
+    data: lir::DataId,
+    /// The function that computes it.
+    function: lir::FunctionId,
+}
+
+impl ComputedConstant {
+    /// Where it says whether it has been computed.
+    fn computed(self) -> lir::Place {
+        lir::Place {
+            base: lir::Base::Data(self.data),
+            path: vec![1],
+        }
+    }
+}
+
+/// The constant `id`, read by lowered code, whose function is lowered here, so
+/// after those of the constants it reads.
 fn computed_constant(
     program: &hir::Program,
     variable_data: &[lir::DataId],
     id: hir::ConstantId,
     cx: &mut Lowering,
-) -> lir::DataId {
-    if let Some(&data) = cx.constants.get(&id) {
-        return data;
+) -> ComputedConstant {
+    if let Some(&computed) = cx.constants.get(&id) {
+        return computed;
     }
     let constant = &program.constants[id.0];
     let layout = cx.layout(&constant.ty);
@@ -630,26 +626,30 @@ fn computed_constant(
             name: constant.name.clone(),
         },
         writable: true,
-        fields: vec![zero_field(&layout)],
+        fields: vec![zero_field(&layout), lir::Field::U8(0)],
     });
-    cx.constants.insert(id, data);
-    let function_id = cx.number();
-    let name = format!("the value of `{}`", constant.name);
+    let computed = ComputedConstant {
+        data,
+        function: cx.number(),
+    };
+    cx.constants.insert(id, computed);
+    let name = format!("constant {}", constant.name);
     let mut builder = FunctionBuilder::new(program, name, BTreeMap::new(), variable_data);
     builder.bind(constant.locals.clone());
     builder.scoped(|this| {
         let src = this.place(&constant.value, cx);
         this.named_keys_of(&constant.name, &constant.keys, &constant.ty, &src, None, cx);
-        let dst = lir::Place {
-            base: lir::Base::Data(data),
-            path: vec![0],
-        };
-        this.assign_place(dst, src, &constant.ty, cx);
+        this.assign_place(in_data(data), src, &constant.ty, cx);
+        let one = u8_constant(1, cx);
+        this.insts.push(lir::Inst::Copy {
+            dst: computed.computed(),
+            src: one,
+            layout: lir::Layout::U8,
+        });
     });
     let lowered = builder.finish(None, cx);
-    cx.functions.insert(function_id.0, lowered);
-    cx.computed_first.push(function_id);
-    data
+    cx.functions.insert(computed.function.0, lowered);
+    computed
 }
 
 /// A part of a constraint, which lowered code checks with a function of
@@ -766,11 +766,8 @@ struct Lowering {
     paths: HashMap<hir::FileId, lir::Field>,
     /// Which operators call themselves, directly or through others.
     recursion: hir::Recursion,
-    /// Each constant lowered code reads, where it is kept.
-    constants: HashMap<hir::ConstantId, lir::DataId>,
-    /// The function that computes each of those, each after those it reads,
-    /// which the entry calls first.
-    computed_first: Vec<lir::FunctionId>,
+    /// Each constant lowered code reads.
+    constants: HashMap<hir::ConstantId, ComputedConstant>,
     /// Where the arguments of a tail call of each function wait, as the
     /// frame they were made in goes, until the function copies them.
     tail_arguments: HashMap<lir::FunctionId, lir::DataId>,
@@ -801,7 +798,6 @@ impl Lowering {
             paths: HashMap::new(),
             recursion: hir::Recursion::default(),
             constants: HashMap::new(),
-            computed_first: Vec::new(),
             tail_arguments: HashMap::new(),
             numbered: 0,
             waiting: None,
@@ -4614,6 +4610,29 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
+    /// Where the constant `id` is, computed first if this read is the first to
+    /// need it. A failure in that goes where any call's does.
+    fn constant_read(&mut self, id: hir::ConstantId, cx: &mut Lowering) -> lir::Place {
+        let constant = computed_constant(self.program, self.variable_data, id, cx);
+        let (compute, computed) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: constant.computed(),
+                then: computed,
+                otherwise: compute,
+            },
+            compute,
+        );
+        self.insts.push(lir::Inst::Call {
+            function: constant.function,
+            args: None,
+            result: None,
+        });
+        self.after_call(cx);
+        self.end_block(lir::Terminator::Jump(computed), computed);
+        in_data(constant.data)
+    }
+
     /// Where `expr`'s value is in memory: computed into a new stack slot, if
     /// it is computed.
     fn place(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
@@ -4623,9 +4642,7 @@ impl<'a> FunctionBuilder<'a> {
                 in_data(cx.constant(vec![field]))
             }
             hir::Expr::Variable(id) => in_data(self.variable_data[id.0]),
-            hir::Expr::ComputedConstant(id, _) => {
-                in_data(computed_constant(self.program, self.variable_data, *id, cx))
-            }
+            hir::Expr::ComputedConstant(id, _) => self.constant_read(*id, cx),
             hir::Expr::Local(id) => self.local_places[id.0]
                 .as_ref()
                 .expect("a local variable is placed before it is used")
@@ -8137,6 +8154,64 @@ mod tests {
 
     fn integer() -> hir::Type {
         hir::Type::Scalar(hir::Scalar::Integer)
+    }
+
+    #[test]
+    fn a_read_computes_a_constant_unless_that_is_done() {
+        let read = hir::Expr::ComputedConstant(hir::ConstantId(0), Box::new(integer()));
+        let mut program = program(
+            vec![
+                debug_value(),
+                user("main", &[], vec![call(0, vec![("v", read)])]),
+            ],
+            Vec::new(),
+        );
+        program.constants = vec![hir::Constant {
+            name: "c".to_string(),
+            ty: integer(),
+            keys: Vec::new(),
+            locals: Vec::new(),
+            value: hir::Expr::Constant(hir::Value::Integer(1)),
+        }];
+        let lowered = lower(&program);
+        let function = |name: &str| {
+            lowered
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is lowered"))
+        };
+        // The read branches on whether it is computed, and only if it isn't,
+        // calls the function, then goes on as it would have.
+        let main = function("main");
+        let branch = main
+            .blocks
+            .iter()
+            .find_map(|block| match &block.terminator {
+                lir::Terminator::Branch {
+                    condition,
+                    then,
+                    otherwise,
+                } => Some((condition, *then, *otherwise)),
+                _ => None,
+            });
+        let (computed, then, otherwise) = branch.expect("the read branches");
+        let compute = &main.blocks[otherwise.0];
+        let called = compute.insts.iter().find_map(|inst| match inst {
+            lir::Inst::Call { function, .. } => Some(*function),
+            _ => None,
+        });
+        let called = called.expect("computing it calls its function");
+        assert_eq!(lowered.functions[called.0].name, "constant c");
+        assert_eq!(compute.terminator, lir::Terminator::Jump(then));
+        // Its function says it is done, as the last thing it does.
+        let sets: Vec<&lir::Inst> = function("constant c")
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter(|inst| matches!(inst, lir::Inst::Copy { dst, .. } if dst == computed))
+            .collect();
+        assert_eq!(sets.len(), 1, "{sets:?}");
     }
 
     fn user(name: &str, params: &[&str], body: Vec<hir::Statement>) -> hir::Operator {

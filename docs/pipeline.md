@@ -1164,10 +1164,14 @@ read-only operators, is found however it is reached (A0021). One whose value is 
 then is read as that value (`globals::read_of`); and what isn't, as what a loop or a
 recursion computes, stays an expression: the HIR's `Program::constants`, which
 `Expr::ComputedConstant` reads. It is only known that a constant's value depends on
-nothing that can change, so when it is computed doesn't matter, and lowering keeps one
-of those in a static (`computed_constant`) with a function that computes it, lowered
-as lowered code first reads it, so after those it reads, which the entry calls in that
-order, before `main`. An interface's `const name: type;` has its value in the
+nothing that can change, so when it is computed doesn't matter, and opt writes it where
+it is read if that is worth it (`constants_inserted`). Lowering keeps any other in a
+static (`computed_constant`), with whether it has been computed, and a function that
+computes it, lowered as lowered code first reads it. Each read branches on that, and
+calls the function if it hasn't, so a failure in that goes where a call's does, with
+the read in its trace. A read counts as unable to fail (`Expr::can_fail`), so that a
+restriction that reads one can still be planned, as what is shared is computed at most
+once, whichever read that is. An interface's `const name: type;` has its value in the
 implementation (`scope::ConstantDecl::completed`).
 Evaluating a call substitutes a `Let`'s value
 in the rest once it is known (`ops::Substitution::locals`); lowering places
@@ -1898,7 +1902,21 @@ operators, and the constants the compiler can't compute. It is
 a layer of its own so that sema checks and lower translates, and neither
 has to optimize. A rewrite never changes what a program means, which
 includes the failures it can have: every operand is still computed, and
-one that can fail only where it would be.
+one that can fail only where it would be. A constant's failure is the one
+exception, as it happens when something first needs its value, wherever a
+rewrite puts that.
+
+A constant means its expression, so each read can compute that where it is, or
+share one computed value (`inserted`). What is around the read can then need less of
+it: a restriction of a closure to one value follows only that value's paths, and a
+join's plan restricts its operands. But computing it at each read of a loop costs more
+than computing it once, so it is written where it is read only if that can't cost
+more: if that is its only read, and runs at most once (`Sites::runs_at_most_once`), not
+in a loop, for each tuple, in a constraint, or in an operator called from anywhere but
+one such place. It is done first, so that plans see what it writes. One with a key to
+check stays shared, as checking takes all of it, and so does one with value blocks, as
+nothing around a statement can reduce it and their local variables are numbered among
+the constant's.
 
 An AND of relations, restricted or not, is planned (`Optimizer::planned`),
 as one AND of any number of operands, since a chain of `And`s is one

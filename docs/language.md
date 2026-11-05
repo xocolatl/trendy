@@ -2533,10 +2533,18 @@ operator main{} [
   through the operators it calls, is an error (A0021).
 - **When it is computed is the compiler's to choose.** One the compiler can compute
   is as if its value were written where it is read. Otherwise, as `digits`' is above,
-  with the loop in `series`, the program computes it once, before `main`, if it
-  reaches it, after the constants it reads, and a failure in that stops the program
-  as any other does. A variable's initial value, known when compiling, can't read
-  one of those (A0077).
+  with the loop in `series`, the program computes it when a read first needs it, at
+  most once, and not at all if nothing does. If it has one read, which runs at most
+  once, it is as if its expression were written there, so that what is around that
+  can need less of it, as a restriction of a closure to one value needs only that
+  value's paths. A variable's initial value, known when compiling, can't read one of
+  those (A0077).
+- **A failure in computing it stops the program as any other does,** where it is
+  declared, when that first happens, after what the program has done by then. As a
+  constant has one value, whenever it is computed, a read counts as unable to fail, so
+  the compiler can compute it before the order things are written in says, as it can
+  move any operand that can't fail: another conjunct doesn't guard it (see
+  [Evaluation](#evaluation)).
 - **A local constant is computed where it is declared,** from the parameters and
   variables then, each time that runs: in a loop, each time round. A `const`
   parameter is the same thing, the value its caller gives.
@@ -6061,7 +6069,8 @@ Expressions have no side effects. Every operand is evaluated, so an error in
 one is never skipped, but for an `if`'s branches, only the one its
 condition takes, and for the operands of `and`, `or` and `implies` that
 can fail, which those that can't guard (see [Boolean
-operators](#boolean-operators)). Whatever doesn't depend on parameters,
+operators](#boolean-operators)), and for a constant's expression, evaluated
+when a read first needs it (see [Constants](#constants)). Whatever doesn't depend on parameters,
 variables or input is evaluated when compiling, and so is whatever a constant operand decides: `p
 and false` is just `false`, whatever `p` is, `true and p` is just `p`, and
 `n * 1` is just `n`. But `(n + 1) * 0` is still computed, since `n + 1` can
