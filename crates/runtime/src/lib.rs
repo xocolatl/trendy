@@ -919,10 +919,11 @@ pub unsafe extern "C" fn trendy_rt_hand_out(value: *const u8, desc: *const TypeD
 }
 
 /// Give up the references that the value at `value`, a local variable's of
-/// the type `desc` describes, holds, at the end of its block, and make its
-/// pointers null, so that the block, run again, has nothing to give up when
-/// it first assigns it. Nothing points into what is freed: every statement
-/// that could has ended, and a statement's scope holds its own references.
+/// the type `desc` describes, holds, at the end of its block, and make all of
+/// it zero, so that the block, run again, has nothing to give up when it first
+/// assigns it. Nothing points into what is freed: every statement that could
+/// has ended, and a statement's scope holds its own references. Nothing reads
+/// any of it from then on, numbers included, as lowering has copied them out.
 ///
 /// # Safety
 ///

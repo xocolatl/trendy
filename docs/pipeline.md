@@ -2015,7 +2015,7 @@ product. Each is lowered as written.
 blocks: each block is a list of instructions (`Copy`, `Call`,
 `CallRuntime`, the boolean and integer `Unary` and `Binary`, `Unary`'s
 conversions of a count to an integer and of an array's position less 1 to
-an index, `Element` and `Increment` for loops and indexes, and `Address`
+an index, `Element` and `Increment` for loops and indexes, `IsNull`, and `Address`
 for a variable passed to a `var` or `out` parameter) ending in a
 terminator: `Return`, `Jump`, `Branch`, `Fail`, `Raise`, `Failed` or
 `TailCall`, which goes to a function in place of this one, its result where
@@ -2029,6 +2029,16 @@ stack slot, the parameter struct, or what the address in a slot points to
 (`Base::Indirect`, such as the tuple a loop is at), plus a path through
 nested structs. Every value's shape is a `Layout`. There is no nesting and
 nothing implicit: every jump and return is spelled out.
+
+`trendy_rt_release` makes all of a slot zero, so a value read from it later would
+be zero, a wrong number with nothing to say so. `Function::read_after_release`
+finds any way through a function that reads a slot, or an address into it, after
+that, with nothing having written all of it since, and the driver reports it as an
+internal error (X0000) before compiling, for every program. `IsNull` means to read
+that zero, a `trendy_rt_lookup` reads only what it guards, and `trendy_rt_assign`
+and `trendy_rt_index` only store. It sees slots, not buffers: what
+`trendy_rt_drop_operand` frees is left to the rule above, that only the operation
+reads the operand.
 
 It also describes static data (`Data`) field by field, rather than as bytes,
 so the description doesn't depend on the target. Values are represented like
@@ -2131,15 +2141,18 @@ A local variable is a slot in its operator's function, assigned by
 with null pointers, so that its declaration, the first assignment, has no
 references to give up; `trendy_rt_release` gives them up at the end of
 its block, when every statement that could point into its buffers has
-ended, and makes its pointers null again, so a block run again starts as
-the first time did.
+ended, and makes all of it zero again, numbers too, so a block run again starts
+as the first time did.
 
 A read-only operator's local variable, and a value block's, is a `Let`,
 which binds it for the rest of the chain of them the expression is
 (`FunctionBuilder::let_chain`). Its value is computed once, in a scope of
 its own, and copied to a slot of the binding's own, which takes
 references to what it points to (`trendy_rt_retain`) before that scope
-ends; one that points to nothing is copied only out of a buffer. The
+ends; one that points to nothing stays where it is computed, unless it can stop
+being there (`FunctionBuilder::can_be_given_up`): in a buffer, or part of a slot
+that holds references, as `t.a` is of the binding `t`, whose release would make it
+zero. The
 binding is given up (`trendy_rt_release`) once nothing after it in the
 chain reads it: after the value of the next binding that does, or else
 at the chain's end, whose value, which may point into the bindings still
@@ -2449,7 +2462,7 @@ tuple, needn't sort that relation again for each. The first tuple that
 needs it computes it and its index on the common attributes,
 `trendy_rt_index`'s array of its tuples' positions sorted by them, and
 slots keep both until the loop ends, as a `Let`'s binding is kept: null
-until then, and released by the function's failure exit and by a
+until then, which `lir::Inst::IsNull` tests, and released by the function's failure exit and by a
 transaction's rollback. Each tuple then finds the run that agrees with
 its own by binary search (`trendy_rt_lookup`), already in canonical order,
 since the attributes the tuple adds are the same in each. So the relation

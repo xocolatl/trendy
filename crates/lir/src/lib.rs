@@ -91,6 +91,8 @@
 //! fields. Its sizes and offsets are [`Field::Size`] and [`Field::Offset`],
 //! which codegen resolves with the same layout rules it uses for values.
 
+use std::collections::BTreeSet;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub functions: Vec<Function>,
@@ -124,8 +126,79 @@ pub struct Function {
 }
 
 /// Index into [`Function::slots`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SlotId(pub usize);
+
+impl Function {
+    /// A slot that something reads after [`RuntimeFn::Release`] has made it zero, with
+    /// nothing having written all of it since, on some way through the function, and the
+    /// block that reads it. An address taken of a slot or into its value is given up with
+    /// it. A value read from there has lost all it held, so lowering must have copied it
+    /// out first.
+    #[must_use]
+    pub fn read_after_release(&self) -> Option<(BlockId, SlotId)> {
+        let mut derived: Vec<(SlotId, SlotId)> = Vec::new();
+        for inst in self.blocks.iter().flat_map(|block| &block.insts) {
+            if let Inst::Element {
+                dst, array: from, ..
+            }
+            | Inst::Address { dst, src: from } = inst
+                && let (Base::Slot(address), Base::Slot(of)) = (&dst.base, &from.base)
+            {
+                derived.push((*address, *of));
+            }
+        }
+        let mut entering: Vec<Option<BTreeSet<SlotId>>> = vec![None; self.blocks.len()];
+        entering[0] = Some(BTreeSet::new());
+        let mut waiting = vec![BlockId(0)];
+        while let Some(at) = waiting.pop() {
+            let block = &self.blocks[at.0];
+            let mut released = entering[at.0].clone().unwrap_or_default();
+            // What fails can do so anywhere in the block.
+            let mut ever = released.clone();
+            let mut found = None;
+            for inst in &block.insts {
+                inst.released(&mut released, &derived, &mut |slot| found = Some(slot));
+                ever.extend(released.iter().copied());
+            }
+            block
+                .terminator
+                .each_read(&mut |place| read_of(place, &released, &mut |slot| found = Some(slot)));
+            if let Some(slot) = found {
+                return Some((at, slot));
+            }
+            for (next, state) in block
+                .terminator
+                .successors()
+                .into_iter()
+                .map(|next| (next, &released))
+                .chain(block.failure.map(|next| (next, &ever)))
+            {
+                let known = &mut entering[next.0];
+                let grows = match known {
+                    Some(known) => !state.is_subset(known),
+                    None => true,
+                };
+                if grows {
+                    known.get_or_insert_default().extend(state.iter().copied());
+                    waiting.push(next);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// `found` with the slot `place` reads, if it is among `released`.
+fn read_of(place: &Place, released: &BTreeSet<SlotId>, found: &mut impl FnMut(SlotId)) {
+    let slot = match &place.base {
+        Base::Slot(slot) | Base::Indirect { slot, .. } => *slot,
+        Base::Data(_) | Base::Params | Base::Result => return,
+    };
+    if released.contains(&slot) {
+        found(slot);
+    }
+}
 
 /// The shape of a value in memory. Codegen derives sizes, alignments and
 /// offsets from it for the target: every field at its natural alignment, and
@@ -498,8 +571,9 @@ pub enum RuntimeFn {
     Concat,
     /// `trendy_rt_release(value, descriptor)`: give up the references
     /// that a local variable's value, of the type the descriptor
-    /// describes, holds, at the end of its block, and make its pointers
-    /// null, as they are before its declaration.
+    /// describes, holds, at the end of its block, and make all of it zero, as
+    /// its pointers are before its declaration: so nothing is to read it, or part
+    /// of it, from then on ([`Function::read_after_release`]).
     Release,
     /// `trendy_rt_begin(scope)`: begin a statement's scope, in a slot laid
     /// out as [`Layout::scope`]. Until [`RuntimeFn::End`], it holds a
@@ -1103,6 +1177,10 @@ pub enum Inst {
         index: Place,
         element: Layout,
     },
+    /// Whether the address at `src` is null, as a slot's is once
+    /// [`RuntimeFn::Release`] has made it zero, or before anything has been made for
+    /// it: the one read of such a slot that means what it says.
+    IsNull { dst: Place, src: Place },
     /// Add 1 to the [`Layout::Usize`] at `place`, which counts a loop's
     /// iterations, and so never overflows.
     Increment { place: Place },
@@ -1621,6 +1699,127 @@ pub struct Block {
     pub failure: Option<BlockId>,
 }
 
+impl Inst {
+    /// What the instruction does to `released`, the slots [`RuntimeFn::Release`] has made
+    /// zero, with `derived` the addresses taken of each, as
+    /// [`Function::read_after_release`] says: `found` with each of them it reads.
+    fn released(
+        &self,
+        released: &mut BTreeSet<SlotId>,
+        derived: &[(SlotId, SlotId)],
+        found: &mut impl FnMut(SlotId),
+    ) {
+        if let Inst::CallRuntime {
+            function: RuntimeFn::Release,
+            args,
+        } = self
+        {
+            if let Some(Place {
+                base: Base::Slot(slot),
+                ..
+            }) = args.first()
+            {
+                released.insert(*slot);
+                let mut more = vec![*slot];
+                while let Some(of) = more.pop() {
+                    for (address, origin) in derived {
+                        if *origin == of && released.insert(*address) {
+                            more.push(*address);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        let (reads, written) = self.reads_and_write();
+        for place in reads {
+            read_of(place, released, found);
+        }
+        if let Some(Place {
+            base: Base::Slot(slot),
+            path,
+        }) = written
+            && path.is_empty()
+        {
+            released.remove(slot);
+        }
+    }
+
+    /// The places the instruction reads, and the one it writes, if it does.
+    fn reads_and_write(&self) -> (Vec<&Place>, Option<&Place>) {
+        match self {
+            Inst::CheckStack | Inst::Site(_) => (Vec::new(), None),
+            Inst::Copy { dst, src, .. }
+            | Inst::Unary { dst, src, .. }
+            | Inst::Widen { dst, src, .. }
+            | Inst::Narrow { dst, src, .. }
+            | Inst::Address { dst, src } => (vec![src], Some(dst)),
+            Inst::Call { args, result, .. } => (args.iter().collect(), result.as_ref()),
+            Inst::SaveSite { dst } | Inst::IsNull { dst, .. } => (Vec::new(), Some(dst)),
+            Inst::RestoreSite { src } => (vec![src], None),
+            // They store a value there, whatever was: a variable's old one, or the
+            // index of a loop that has ended.
+            Inst::CallRuntime {
+                function: RuntimeFn::Assign | RuntimeFn::Index,
+                args,
+            } => (args.iter().skip(1).collect(), args.first()),
+            // What it looks up in is made first, if `IsNull` says it hasn't been.
+            Inst::CallRuntime {
+                function: RuntimeFn::Lookup,
+                args,
+            } => (
+                args.iter()
+                    .enumerate()
+                    .filter(|(i, _)| !matches!(i, 1 | 2))
+                    .map(|(_, arg)| arg)
+                    .collect(),
+                None,
+            ),
+            Inst::CallRuntime { args, .. } => (args.iter().collect(), None),
+            Inst::Binary { dst, lhs, rhs, .. } => (vec![lhs, rhs], Some(dst)),
+            Inst::Element {
+                dst, array, index, ..
+            } => (vec![array, index], Some(dst)),
+            Inst::Increment { place } => (vec![place], None),
+        }
+    }
+}
+
+impl Terminator {
+    /// What it goes to next, without failing.
+    fn successors(&self) -> Vec<BlockId> {
+        match self {
+            Terminator::Jump(next) => vec![*next],
+            Terminator::Branch {
+                then, otherwise, ..
+            } => vec![*then, *otherwise],
+            Terminator::Return
+            | Terminator::Fail(_)
+            | Terminator::Raise
+            | Terminator::TailCall { .. }
+            | Terminator::Failed => Vec::new(),
+        }
+    }
+
+    /// `read` with each place it reads.
+    fn each_read(&self, read: &mut impl FnMut(&Place)) {
+        match self {
+            Terminator::Branch { condition, .. } => read(condition),
+            Terminator::TailCall { args, .. } => {
+                if let Some(args) = args {
+                    read(args);
+                }
+            }
+            Terminator::Fail(failure) => {
+                for place in failure.call().1 {
+                    read(place);
+                }
+            }
+            Terminator::Return | Terminator::Jump(_) | Terminator::Raise | Terminator::Failed => {}
+        }
+    }
+}
+
 impl Block {
     /// Whether something in the block can fail: a call, a runtime
     /// function's that can, an arithmetic instruction, a
@@ -1759,5 +1958,244 @@ impl Field {
             Field::Usize(0),
             Field::Usize(0),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(n: usize) -> Place {
+        Place::whole(Base::Slot(SlotId(n)))
+    }
+
+    fn part(n: usize) -> Place {
+        Place {
+            base: Base::Slot(SlotId(n)),
+            path: vec![1],
+        }
+    }
+
+    fn descriptor() -> Place {
+        Place::whole(Base::Data(DataId(0)))
+    }
+
+    fn release(n: usize) -> Inst {
+        Inst::CallRuntime {
+            function: RuntimeFn::Release,
+            args: vec![slot(n), descriptor()],
+        }
+    }
+
+    fn copy(dst: Place, src: Place) -> Inst {
+        Inst::Copy {
+            dst,
+            src,
+            layout: Layout::I64,
+        }
+    }
+
+    fn block(insts: Vec<Inst>, terminator: Terminator) -> Block {
+        Block {
+            insts,
+            terminator,
+            failure: None,
+        }
+    }
+
+    fn function(blocks: Vec<Block>) -> Function {
+        Function {
+            name: "f".to_string(),
+            params: None,
+            result: None,
+            recursive: false,
+            slots: vec![Layout::I64; 8],
+            blocks,
+        }
+    }
+
+    fn found(blocks: Vec<Block>) -> Option<(usize, usize)> {
+        function(blocks)
+            .read_after_release()
+            .map(|(block, slot)| (block.0, slot.0))
+    }
+
+    fn one(insts: Vec<Inst>) -> Option<(usize, usize)> {
+        found(vec![block(insts, Terminator::Return)])
+    }
+
+    #[test]
+    fn a_read_after_a_release_is_found() {
+        // Part of it, as all of it is made zero.
+        assert_eq!(one(vec![release(0), copy(slot(1), part(0))]), Some((0, 0)));
+        assert_eq!(one(vec![release(0), copy(slot(1), slot(0))]), Some((0, 0)));
+        // By any instruction that reads.
+        let binary = Inst::Binary {
+            dst: slot(1),
+            op: BinaryOp::Compare(Comparison::Less, Operand::Usize),
+            lhs: slot(2),
+            rhs: part(0),
+        };
+        assert_eq!(one(vec![release(0), binary]), Some((0, 0)));
+        let call = Inst::CallRuntime {
+            function: RuntimeFn::Retain,
+            args: vec![slot(0), descriptor()],
+        };
+        assert_eq!(one(vec![release(0), call]), Some((0, 0)));
+        // By what the block ends with.
+        let branch = Terminator::Branch {
+            condition: part(0),
+            then: BlockId(0),
+            otherwise: BlockId(0),
+        };
+        assert_eq!(found(vec![block(vec![release(0)], branch)]), Some((0, 0)));
+    }
+
+    #[test]
+    fn what_comes_before_a_release_or_after_a_write_is_read_as_it_was() {
+        assert_eq!(one(vec![copy(slot(1), part(0)), release(0)]), None);
+        assert_eq!(
+            one(vec![
+                release(0),
+                copy(slot(0), slot(1)),
+                copy(slot(2), part(0))
+            ]),
+            None
+        );
+        // Writing part of it leaves the rest as it is.
+        assert_eq!(
+            one(vec![
+                release(0),
+                copy(part(0), slot(1)),
+                copy(slot(2), slot(0))
+            ]),
+            Some((0, 0))
+        );
+        // What stores a value in a slot doesn't read it.
+        for function in [RuntimeFn::Assign, RuntimeFn::Index] {
+            let stores = Inst::CallRuntime {
+                function,
+                args: vec![slot(0), slot(1), descriptor()],
+            };
+            assert_eq!(one(vec![release(0), stores, copy(slot(2), slot(0))]), None);
+        }
+        // Another slot, and releasing it again, which reads nothing.
+        assert_eq!(
+            one(vec![release(0), release(0), copy(slot(1), slot(2))]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_null_test_and_what_it_guards_read_what_they_mean_to() {
+        let tested = Inst::IsNull {
+            dst: slot(1),
+            src: part(0),
+        };
+        assert_eq!(one(vec![release(0), tested]), None);
+        let lookup = Inst::CallRuntime {
+            function: RuntimeFn::Lookup,
+            args: vec![slot(1), slot(0), slot(2), slot(3), descriptor()],
+        };
+        assert_eq!(one(vec![release(0), release(2), lookup.clone()]), None);
+        // Its key is read like anything.
+        assert_eq!(one(vec![release(3), lookup]), Some((0, 3)));
+    }
+
+    #[test]
+    fn a_release_is_followed_along_every_way_through_the_function() {
+        let jump = |to| Terminator::Jump(BlockId(to));
+        let branch = |then, otherwise| Terminator::Branch {
+            condition: slot(7),
+            then: BlockId(then),
+            otherwise: BlockId(otherwise),
+        };
+        // On one branch of two.
+        assert_eq!(
+            found(vec![
+                block(vec![], branch(1, 2)),
+                block(vec![release(0)], jump(3)),
+                block(vec![], jump(3)),
+                block(vec![copy(slot(1), slot(0))], Terminator::Return),
+            ]),
+            Some((3, 0))
+        );
+        assert_eq!(
+            found(vec![
+                block(vec![], branch(2, 1)),
+                block(vec![release(0)], jump(3)),
+                block(vec![], jump(3)),
+                block(vec![copy(slot(1), slot(0))], Terminator::Return),
+            ]),
+            Some((3, 0))
+        );
+        // Round a loop, where it is read before it is released.
+        assert_eq!(
+            found(vec![
+                block(vec![], jump(1)),
+                block(vec![copy(slot(1), slot(0)), release(0)], branch(1, 2)),
+                block(vec![], Terminator::Return),
+            ]),
+            Some((1, 0))
+        );
+        // But not if each time round writes it first.
+        assert_eq!(
+            found(vec![
+                block(vec![], jump(1)),
+                block(
+                    vec![copy(slot(0), slot(2)), copy(slot(1), slot(0)), release(0)],
+                    branch(1, 2)
+                ),
+                block(vec![], Terminator::Return),
+            ]),
+            None
+        );
+        // Where the block fails to, from anywhere in it.
+        let mut failing = block(vec![release(0), copy(slot(0), slot(1))], Terminator::Return);
+        failing.failure = Some(BlockId(1));
+        assert_eq!(
+            found(vec![
+                failing,
+                block(vec![copy(slot(2), slot(0))], Terminator::Failed),
+            ]),
+            Some((1, 0))
+        );
+    }
+
+    #[test]
+    fn an_address_of_what_is_released_goes_with_it() {
+        let at_element = |address| Place {
+            base: Base::Indirect {
+                slot: SlotId(address),
+                pointee: Layout::I64,
+            },
+            path: Vec::new(),
+        };
+        let element = Inst::Element {
+            dst: slot(1),
+            array: slot(0),
+            index: slot(2),
+            element: Layout::I64,
+        };
+        assert_eq!(
+            one(vec![
+                element.clone(),
+                release(0),
+                copy(slot(3), at_element(1))
+            ]),
+            Some((0, 1))
+        );
+        assert_eq!(
+            one(vec![element, copy(slot(3), at_element(1)), release(0)]),
+            None
+        );
+        let address = Inst::Address {
+            dst: slot(1),
+            src: slot(0),
+        };
+        assert_eq!(
+            one(vec![address, release(0), copy(slot(3), at_element(1))]),
+            Some((0, 1))
+        );
     }
 }

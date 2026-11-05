@@ -409,6 +409,14 @@ impl Functions {
                 let address = self.address(src, frame, b)?;
                 self.store(dst, address, frame, b)?;
             }
+            lir::Inst::IsNull { dst, src } => {
+                let address = self.load(self.config.pointer_type(), src, frame, b)?;
+                let null = b.ins().iconst(self.config.pointer_type(), 0);
+                let result = b
+                    .ins()
+                    .icmp(condition(lir::Comparison::Equal, false), address, null);
+                self.store(dst, result, frame, b)?;
+            }
             lir::Inst::Binary { dst, op, lhs, rhs } => {
                 let ty = match op {
                     lir::BinaryOp::Compare(_, lir::Operand::Usize) => self.config.pointer_type(),

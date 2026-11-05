@@ -8463,6 +8463,212 @@ fn a_closure_of_many_values_gives_up_what_it_is_asked_about() {
     assert!(peak < 195 << 20, "{peak} bytes");
 }
 
+/// A number read from a tuple that holds something else, which printed 1000: the tuple
+/// was given up after the statement that last read it, making all of it zero, and the
+/// constant was only another name for part of it. Whatever else the tuple holds.
+#[test]
+fn a_number_read_from_a_tuple_lasts_past_the_tuple() {
+    for (i, (ty, value)) in [
+        ("relation { x: integer }", "relation { { x: n } }"),
+        ("text", "to_text{from: n}"),
+        ("array integer", "array [n]"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source = format!(
+            "heading made := {{ cells: {ty}, at: integer }};
+
+operator make{{n: integer}}: tuple made [
+    tuple {{ cells: {value}, at: n * 2 }}
+];
+
+operator late{{n: integer}}: integer [
+    const landed := make{{n}};
+    const at_value := landed.at;
+    const other := series{{from: 1, to: 1000}};
+    at_value + count{{r: other}}
+];
+
+operator main{{}} [
+    call debug_value{{v: late{{n: 21}}}};
+];
+"
+        );
+        let (code, stderr) = run_source(&format!("number_from_tuple_{i}"), &source);
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(stderr.trim(), "1042", "{ty}");
+    }
+}
+
+/// Programs that read from what is given up, as
+/// [`a_value_read_from_what_is_given_up_stays_what_it_was`] runs them.
+const READ_FROM_WHAT_IS_GIVEN_UP: &str = r#"
+heading made := {
+    cells: relation { x: integer },
+    at: integer,
+    pos: tuple { i: integer, j: integer },
+    name: text,
+};
+
+operator make{n: integer}: tuple made [
+    tuple { cells: relation { { x: n } }, at: n * 2, pos: tuple { i: n, j: n + 5 }, name: "abc" }
+];
+
+operator late{n: integer}: integer [
+    const landed := make{n};
+    const at_value := landed.at;
+    const other := series{from: 1, to: 1000};
+    at_value + count{r: other}
+];
+
+operator late_var{n: integer}: integer [
+    const landed := make{n};
+    var at_value := landed.at;
+    const other := series{from: 1, to: 1000};
+    at_value + count{r: other}
+];
+
+operator folded{n: integer}: integer [
+    const landed := make{n};
+    const at_value := landed.at + 0;
+    const other := series{from: 1, to: 1000};
+    at_value + count{r: other}
+];
+
+/* By way of another name for it, and of a part of a part. */
+operator again{n: integer}: integer [
+    const landed := make{n};
+    const at_value := landed.at;
+    const named := at_value;
+    const other := series{from: 1, to: 1000};
+    named + count{r: other}
+];
+
+operator deep{n: integer}: integer [
+    const landed := make{n};
+    const j := landed.pos.j;
+    const other := series{from: 1, to: 1000};
+    j + count{r: other}
+];
+
+operator whole_part{n: integer}: integer [
+    const landed := make{n};
+    const pos := landed.pos;
+    const other := series{from: 1, to: 1000};
+    pos.j + count{r: other}
+];
+
+/* In a value block, as an argument, and for each tuple. */
+operator in_block{n: integer}: integer [
+    const value := [ const landed := make{n}; const at_value := landed.at; at_value ];
+    const other := series{from: 1, to: 1000};
+    value + count{r: other}
+];
+
+operator same{x: integer}: integer [ x ];
+
+operator as_argument{n: integer}: integer [
+    const landed := make{n};
+    const at_value := landed.at;
+    same{x: at_value} + count{r: series{from: 1, to: 1000}}
+];
+
+operator each{n: integer}: integer [
+    const values := (series{from: 1, to: n} rename {value as x}) extend {
+        y := [
+            const landed := make{n: x};
+            const at_value := landed.at;
+            const other := series{from: 1, to: 10};
+            at_value + count{r: other}
+        ],
+    };
+    sum{r: values, of: y}
+];
+
+/* With the next call in the function's place, which gives everything up first. */
+operator countdown{k: integer, total: integer}: integer [
+    if k = 0 then total else [
+        const landed := make{n: k};
+        const at_value := landed.at;
+        const other := series{from: 1, to: 10};
+        countdown{k: k - 1, total: total + at_value + count{r: other}}
+    ]
+];
+
+/* What points to something holds it itself, of the same kinds of tuple. */
+operator kept{n: integer}: integer [
+    const landed := make{n};
+    const cells := landed.cells;
+    const other := series{from: 1, to: 1000};
+    count{r: cells} + count{r: other}
+];
+
+operator text_kept{n: integer}: integer [
+    const landed := make{n};
+    const name := landed.name;
+    const other := series{from: 1, to: 1000};
+    length{a: to_characters{from: name}} + count{r: other}
+];
+
+/* Out of a buffer, which giving it up frees. */
+operator element{n: integer}: integer [
+    var numbers: array integer;
+    load numbers value from series{from: 1, to: n} order [asc value];
+    const last_of := [ const held := numbers || numbers; const at := held[n]; at ];
+    const other := series{from: 1, to: 1000};
+    last_of + count{r: other}
+];
+
+operator only_tuple{n: integer}: integer [
+    const one := series{from: 1, to: n} where value = 3;
+    const it := tuple from one;
+    const other := series{from: 1, to: 1000};
+    it.value + count{r: other}
+];
+
+/* Read last as an operand, where the operation gives it up as it ends. */
+operator counted_first{n: integer}: integer [
+    const numbers := series{from: 1, to: n};
+    const how_many := count{r: numbers};
+    const some := numbers where value > 3;
+    how_many + count{r: some}
+];
+
+operator main{} [
+    call debug_value{v: late{n: 21}};
+    call debug_value{v: late_var{n: 21}};
+    call debug_value{v: folded{n: 21}};
+    call debug_value{v: again{n: 21}};
+    call debug_value{v: deep{n: 21}};
+    call debug_value{v: whole_part{n: 21}};
+    call debug_value{v: in_block{n: 21}};
+    call debug_value{v: as_argument{n: 21}};
+    call debug_value{v: each{n: 3}};
+    call debug_value{v: countdown{k: 3, total: 0}};
+    call debug_value{v: kept{n: 21}};
+    call debug_value{v: text_kept{n: 21}};
+    call debug_value{v: counted_first{n: 7}};
+    call debug_value{v: element{n: 7}};
+    call debug_value{v: only_tuple{n: 7}};
+];
+"#;
+
+/// What is read from a tuple, a relation or an array lasts past what it was read from,
+/// which is given up once nothing reads it, making all of it zero, numbers too.
+#[test]
+fn a_value_read_from_what_is_given_up_stays_what_it_was() {
+    let (code, stderr) = run_source("read_from_what_is_given_up", READ_FROM_WHAT_IS_GIVEN_UP);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "1042", "1042", "1042", "1042", "1026", "1026", "1042", "1042", "42", "42", "1001",
+            "1003", "11", "1007", "1003",
+        ]
+    );
+}
+
 /// Arrays the program computes: `||` holds what its elements point to, and `<` is
 /// element by element, one that runs out first coming first.
 #[test]

@@ -2224,10 +2224,10 @@ impl<'a> FunctionBuilder<'a> {
     /// binding's own, which takes references to what it points to, if it
     /// points to anything, as the scope ends, so that only the binding
     /// holds what the computation made for it. A value that points to
-    /// nothing is copied only if it is in a buffer, which another
-    /// binding's release could free, and is otherwise where it is
-    /// computed. The binding's place, and its type, are given; one that
-    /// points to anything is null from the function's entry on, until then.
+    /// nothing stays where it is computed, unless that can be given up before it
+    /// is read (see [`FunctionBuilder::can_be_given_up`]), and is then copied. The
+    /// binding's place, and its type, are given; one that points to anything is
+    /// null from the function's entry on, until then.
     fn let_bound(
         &mut self,
         id: hir::LocalId,
@@ -2242,7 +2242,8 @@ impl<'a> FunctionBuilder<'a> {
             self.nested_scope(cx, |this, cx| {
                 let src = this.place(value, cx);
                 this.check_keys(&hir::Target::Local(id), &src, cx);
-                place = Some(if matches!(src.base, lir::Base::Indirect { .. }) {
+                let goes = this.can_be_given_up(&src);
+                place = Some(if goes {
                     let copy = this.slot(cx.layout(&ty));
                     this.insts.push(lir::Inst::Copy {
                         dst: copy.clone(),
@@ -2287,8 +2288,21 @@ impl<'a> FunctionBuilder<'a> {
         (slot, ty)
     }
 
+    /// Whether what is at `place` can stop being there while the function goes on:
+    /// in a buffer, which a release can free, or part of a slot that holds references,
+    /// as `t.a` is of the binding `t`, whose release makes all of it zero. No other slot
+    /// is released, so what is read from one stays what it is.
+    fn can_be_given_up(&self, place: &lir::Place) -> bool {
+        match place.base {
+            lir::Base::Indirect { .. } => true,
+            lir::Base::Slot(_) => self.lets.iter().any(|(slot, _)| slot.base == place.base),
+            lir::Base::Data(_) | lir::Base::Params | lir::Base::Result => false,
+        }
+    }
+
     /// Give up the references the value at `place`, of type `ty`, holds,
-    /// making its pointers null (see [`lir::RuntimeFn::Release`]).
+    /// making all of it zero (see [`lir::RuntimeFn::Release`]), so that what is
+    /// read later must have been copied out first.
     fn release_place(&mut self, place: &lir::Place, ty: &hir::Type, cx: &mut Lowering) {
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
         self.insts.push(lir::Inst::CallRuntime {
@@ -7111,12 +7125,9 @@ impl<'a> FunctionBuilder<'a> {
         let mut pointer = index.clone();
         pointer.path.push(0);
         let unmade = self.slot(lir::Layout::U8);
-        let null = usize_constant(0, cx);
-        self.insts.push(lir::Inst::Binary {
+        self.insts.push(lir::Inst::IsNull {
             dst: unmade.clone(),
-            op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
-            lhs: pointer,
-            rhs: null,
+            src: pointer,
         });
         let (compute, computed) = (self.new_block(), self.new_block());
         self.end_block(

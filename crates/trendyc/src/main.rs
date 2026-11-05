@@ -115,6 +115,15 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
     // Past sema, every failure is a compiler bug, not a user error.
     let hir = trendy_opt::optimized(hir);
     let lir = trendy_lower::lower(&hir);
+    // Read from what has been given up, a value would be zero, with nothing to say so.
+    for function in &lir.functions {
+        if let Some((block, slot)) = function.read_after_release() {
+            return Err(format!(
+                "error[X0000]: internal compiler error: `{}` reads a value it has given up (slot {}, block {})",
+                function.name, slot.0, block.0
+            ));
+        }
+    }
     let object = trendy_codegen::compile(&lir)
         .map_err(|e| format!("error[X0000]: internal compiler error: {e}"))?;
     link(&object, output)
