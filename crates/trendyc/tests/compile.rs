@@ -8463,6 +8463,754 @@ fn a_closure_of_many_values_gives_up_what_it_is_asked_about() {
     assert!(peak < 195 << 20, "{peak} bytes");
 }
 
+/// Every kind of reader of a relation, given one nothing need have sorted, or through a
+/// rename: its tuples come in another order than canonical, as the key comes first in
+/// neither operand, and the others go the other way.
+const READERS_OF_A_RELATION: &str = r#"
+/* Tuples a join gives in another order than canonical: the key is neither relation's first
+   attribute, and the values of the others go the other way. */
+type tied { { a: integer, b: integer }, order [desc a, desc b] };
+
+operator counted{r: relation { a: integer, k: integer, z: integer }}: integer [ count{r} ];
+
+operator main{} [
+    var one := 1;
+    var p := series{from: 1, to: 6} extend { k := (value * one) mod 4, a := 60 - value } remove {value};
+    var q := series{from: 1, to: 4} extend { k := (value * one) mod 4, z := 40 - value } remove {value};
+    var far := series{from: 1, to: 200} extend { k := (value * one) mod 40, a := 900 - value } remove {value};
+    var near := series{from: 1, to: 4} extend { k := value * one } remove {value};
+
+    /* What doesn't depend on the order. */
+    call debug_value{v: count{r: p join q}};
+    call debug_value{v: is_empty{r: p join q}};
+    call debug_value{v: is_empty{r: (p join q) where a < 0}};
+    call debug_value{v: sum{r: p join q, of: a}};
+    call debug_value{v: product{r: (p join q) where a < 56, of: a}};
+    call debug_value{v: min{r: p join q, of: z}};
+    call debug_value{v: max{r: p join q, of: z}};
+    call debug_value{v: (tuple from (p join q) where a = 59 and z = 39).k};
+    call debug_value{v: (p join q){k}};
+    call debug_value{v: (p join q){z, k}};
+    call debug_value{v: (p join q) where a > 57};
+    call debug_value{v: (p join q) rename {a as y}};
+    call debug_value{v: (p join q) rename {a as zz}};
+    call debug_value{v: (p join q) extend { c := z + a }};
+    call debug_value{v: (p join q) replace { a := a div 10, z := z div 10 }};
+    call debug_value{v: ((p join q) replace { a := a div 10 }) remove {z}};
+    /* Replacing can make two tuples one, and what counts them has to know. */
+    call debug_value{v: count{r: (p join q) replace { a := a div 10, z := z div 10 }}};
+    call debug_value{v: sum{r: (p join q) replace { a := a div 10, z := z div 10 }, of: k}};
+    call debug_value{v: is_empty{r: (p join q) replace { a := 0, z := 0 }}};
+    const replaced := (p join q) replace { a := a div 10, z := z div 10 };
+    call debug_value{v: count{r: replaced}};
+
+    /* What does: an operand in the order it comes, then what it gives. */
+    call debug_value{v: (p join q) join near};
+    call debug_value{v: near join (p join q)};
+    call debug_value{v: (p join q) matching near};
+    call debug_value{v: (p join q) not matching near};
+    call debug_value{v: (p join q) union (q join p)};
+    call debug_value{v: (p join q) minus ((p join q) where a > 56)};
+    call debug_value{v: (p join q) = (q join p)};
+    call debug_value{v: (p join q) <= (q join p)};
+    call debug_value{v: counted{r: p join q}};
+    call debug_value{v: ((p join q){a, k}) tclose};
+    call debug_value{v: (p join q) group { g := {z} }};
+    call debug_value{v: (((p join q) group { g := {z} }) ungroup {g})};
+    call debug_value{v: (p join q) times relation { { t: "x" }, { t: "y" } } where a = 59};
+    call debug_table{r: p join q};
+
+    /* Their first attribute the key, as would be in order if they were canonical: they
+       come in the order of another. */
+    var by_a := relation { { a: one * 59 }, { a: one * 56 } };
+    call debug_value{v: (p join q) join by_a};
+    call debug_value{v: by_a join (p join q)};
+    call debug_value{v: (p join q) matching by_a};
+    call debug_value{v: (p join q) not matching by_a};
+    call debug_value{v: by_a matching (p join q)};
+    call debug_value{v: (p join q) join (p join q){a, k}};
+    /* Values a merge would pass, believing they are in order. */
+    var passed := relation { { a: one * 55 }, { a: one * 58 } };
+    call debug_value{v: (p join q) join passed};
+    call debug_value{v: passed join (p join q)};
+    call debug_value{v: (p join q) matching passed};
+    call debug_value{v: (p join q) not matching passed};
+    /* What it makes in order if its operands are, with nothing to say they are. */
+    call debug_value{v: (p join q) times relation { { zz: "x" }, { zz: "y" } }};
+    call debug_value{v: relation { { aa: "x" }, { aa: "y" } } times (p join q)};
+    /* Read by a join while a loop goes through it, which mustn't sort it there. */
+    const looping := p join q;
+    call debug_value{v: looping extend { c := count{r: looping join by_a} }};
+
+    /* The same, by name, with what reads it two ways, and renames of them. */
+    const joined := p join q;
+    const by_any := joined{k};
+    const renamed := joined rename {a as y};
+    const again := renamed join near;
+    call debug_value{v: count{r: joined}};
+    call debug_value{v: by_any};
+    call debug_value{v: again};
+    call debug_value{v: joined = (q join p)};
+    const only_loose := far join near;
+    const chain := only_loose rename {a as y, k as x};
+    const further := chain rename {x as k};
+    call debug_value{v: count{r: further}};
+    call debug_value{v: further{k}};
+    call debug_value{v: further join near};
+
+    /* A condition on what is named, which isn't pushed into the join: it is on tuples in
+       no order, and those that agree aren't together. A value block's constants are
+       bound for what comes after them, as a read-only operator's are. */
+    call debug_value{v: [ const named := p join q; named where a > 57 ]};
+    call debug_value{v: [ const named := p join q; count{r: named where a > 57} ]};
+    call debug_value{v: [ const named := p join q; named where a = 55 ]};
+    call debug_value{v: [ const named := p join q; named where a = 55 and z = 38 ]};
+    call debug_value{v: [ const named := p join q; named matching by_a where a = 56 ]};
+    call debug_value{v: [ const named := p join q; count{r: (named extend { c := a }) where c > 57} ]};
+    call debug_value{v: [ const named := p join q; const vs := named where a > 55; vs join by_a ]};
+    /* Read one way and another, which sorts it, and by what only counts it. */
+    call debug_value{v: [ const named := p join q; count{r: named} + count{r: named where a > 57} ]};
+    call debug_value{v: [ const named := p join q; named union named ]};
+    call debug_value{v: [ const named := p join q; named = (q join p) ]};
+    call debug_value{v: [ const named := p join q; counted{r: named} ]};
+    call debug_value{v: [ const named := p join q; is_empty{r: named} ]};
+    /* Renames by name, read through and otherwise. */
+    call debug_value{v: [ const vl := p rename {a as y}; const vr := q rename {z as b}; vl join vr ]};
+    call debug_value{v: [ const vl := p rename {k as x}; const vr := q rename {k as x}; vr matching vl ]};
+    call debug_value{v: [ const vl := p rename {a as y}; vl where y > 57 ]};
+    call debug_value{v: [ const vl := p rename {a as y}; count{r: vl} + count{r: vl where y > 57} ]};
+    call debug_value{v: [ const vl := p rename {a as y}; const va := vl rename {y as yy}; va{yy} ]};
+    call debug_value{v: [ const vj := p join q; const vr := vj rename {a as y}; vr join near ]};
+    /* A semijoin and what it reads, by name, keep what they were given. */
+    call debug_value{v: [ const named := p join q; const vs := named matching by_a; vs rename {a as b} ]};
+    call debug_value{v: [ const named := p join q; const vs := named not matching by_a; vs{k} ]};
+
+    /* Through a rename on either side, and both, in each kind of operation. */
+    const left := p rename {a as y};
+    const right := q rename {z as b};
+    call debug_value{v: left join right};
+    call debug_value{v: left matching right};
+    call debug_value{v: left not matching right};
+    call debug_value{v: right matching left};
+    call debug_value{v: (p rename {k as x}) join (q rename {k as x})};
+    call debug_value{v: (p rename {k as x}) matching (q rename {k as x})};
+    call debug_value{v: (p rename {a as k, k as a}) join (q rename {k as a})};
+    call debug_value{v: count{r: left}};
+    call debug_value{v: is_empty{r: left}};
+    call debug_value{v: sum{r: left, of: y}};
+    call debug_value{v: left{y}};
+    call debug_value{v: (p rename {a as b}){b}};
+    /* A name that keeps its place, and one that doesn't: the same tuples. */
+    call debug_value{v: (p rename {a as c}) = (p rename {a as c})};
+    call debug_value{v: p rename {a as c}};
+    call debug_value{v: p rename {a as zz}};
+
+    /* In a type's own order, not as it is stored. */
+    var values := series{from: 1, to: 4} extend { c := tied{a: value mod 2, b: 10 - value}, k := value mod 3 } remove {value};
+    var keys := relation { { k: one * 0 }, { k: one * 1 }, { k: one * 2 } };
+    call debug_value{v: min{r: values join keys, of: c}};
+    call debug_value{v: max{r: values join keys, of: c}};
+    /* Exact, in any order. */
+    var numbers := series{from: 1, to: 6} extend { k := value mod 2, n := to_approximate{from: value} / 7e0 } remove {value};
+    var both := relation { { k: one * 0 }, { k: one * 1 } };
+    call debug_value{v: sum{r: numbers join both, of: n}};
+    call debug_value{v: product{r: numbers join both, of: n}};
+
+    /* Named, as statements are, for what doesn't depend on the order, and what does. */
+    const counted_join := p join q;
+    call debug_value{v: count{r: counted_join}};
+    const printed_join := p join q;
+    call debug_value{v: printed_join};
+    const restricted_join := (p join q) where a > 56;
+    call debug_value{v: sum{r: restricted_join, of: a}};
+    const held_semijoin := p matching q;
+    call debug_value{v: count{r: held_semijoin join q}};
+    const named_rename := p rename {a as w};
+    call debug_value{v: count{r: named_rename join q}};
+    const read_as_renamed := p rename {a as w};
+    call debug_value{v: read_as_renamed};
+    const read_twice := p join q;
+    call debug_value{v: count{r: read_twice}};
+    call debug_value{v: read_twice};
+    const failing_join := p join q;
+    call debug_value{v: count{r: failing_join where a + one > 0}};
+    var shrunk := p join q;
+    shrunk := shrunk where a > 56;
+    call debug_value{v: count{r: shrunk}};
+    var joined_again := p join q;
+    joined_again := joined_again join near;
+    call debug_value{v: count{r: joined_again}};
+    var assigned_anew := p join q;
+    assigned_anew := far join q;
+    call debug_value{v: count{r: assigned_anew}};
+    /* Nothing above wants them in order, however deep they are: joined by an attribute that is
+       first in what isn't in order by it, which has to find that out. `p join q` is in order of
+       `k`, and comes first by `a`. */
+    var by_first := series{from: 1, to: 3} extend { a := 53 + value * one, y := 90 + value } remove {value};
+    var few := series{from: 1, to: 2} extend { a := 55 + value * one } remove {value};
+    call debug_value{v: count{r: (p join q) join by_first}};
+    call debug_value{v: sum{r: (p join q) join by_first, of: y}};
+    call debug_value{v: count{r: by_first join (p join q)}};
+    call debug_value{v: count{r: ((p join q) join by_first){a, y}}};
+    call debug_value{v: is_empty{r: (p join q) join by_first}};
+    call debug_value{v: count{r: ((p join q) where a > 55) join by_first}};
+    call debug_value{v: count{r: ((p join q) where a = 57) join by_first}};
+    call debug_value{v: count{r: (p join q) where a = 57}};
+    call debug_value{v: sum{r: (p join q) where a = 57, of: z}};
+    call debug_value{v: count{r: ((p join q) where a = 57 and z > 36)}};
+    call debug_value{v: count{r: ((p join q) matching few) join by_first}};
+    call debug_value{v: count{r: ((p join q) not matching few) join by_first}};
+    call debug_value{v: count{r: (p join q) matching by_first}};
+    call debug_value{v: count{r: by_first matching (p join q)}};
+    call debug_value{v: count{r: by_first not matching (p join q)}};
+    call debug_value{v: count{r: ((p join q) rename {z as zed}) join by_first}};
+    call debug_value{v: count{r: ((p join q) rename {a as aa, z as zz}) join by_first rename {a as aa}}};
+    call debug_value{v: count{r: ((p join q) extend { w := a * 2 }) join by_first}};
+    call debug_value{v: sum{r: ((p join q) extend { w := a + z }) join by_first, of: w}};
+    call debug_value{v: count{r: ((p join q) times few rename {a as other}) join by_first}};
+    call debug_value{v: count{r: (p join q){a, z} join by_first}};
+    const held_join := p join q;
+    call debug_value{v: count{r: held_join join by_first}};
+    const held_semi := (p join q) matching few;
+    call debug_value{v: count{r: held_semi join by_first}};
+    const held_where := (p join q) where a > 55;
+    call debug_value{v: count{r: held_where join by_first}};
+    const held_renamed := (p join q) rename {z as zed};
+    call debug_value{v: count{r: held_renamed join by_first}};
+    const held_for_equal := p join q;
+    call debug_value{v: count{r: held_for_equal where a = 57}};
+    const held_for_equal_and := p join q;
+    call debug_value{v: sum{r: held_for_equal_and where a = 57 and z > 36, of: z}};
+    const held_moved := (p join q) rename {a as zz, z as aa};
+    call debug_value{v: count{r: held_moved join by_first rename {a as zz}}};
+    const held_moved_read := (p join q) rename {a as zz, z as aa};
+    call debug_value{v: sum{r: held_moved_read, of: aa}};
+    const held_extended := (p join q) extend { w := a * 2 };
+    call debug_value{v: count{r: held_extended join by_first}};
+    const held_in_a_value := [ const inner := p join q; const narrowed := inner where a > 55; count{r: narrowed join by_first} ];
+    call debug_value{v: held_in_a_value};
+    /* Of what can't be sorted in place, for pointing to something. */
+    var ps := p extend { t := to_text{from: a} };
+    var bys := by_first extend { u := to_text{from: y} };
+    call debug_value{v: count{r: (ps join q) join bys}};
+    call debug_value{v: sum{r: (ps join q) join bys, of: y}};
+    call debug_value{v: count{r: ((ps join q) where a > 55) join bys}};
+    call debug_value{v: count{r: (ps join q) matching bys}};
+    const held_text := ps join q;
+    call debug_value{v: count{r: held_text join bys}};
+    /* A rename of something else, read once, in any order. */
+    const of_far := far rename {a as w};
+    call debug_value{v: count{r: of_far join near}};
+    call debug_value{v: count{r: (far rename {a as w}) matching near}};
+    /* Tuples, renamed and joined, have no order. */
+    var one_tuple := tuple { a: one, b: one + 1 };
+    call debug_value{v: (one_tuple rename {a as c}).c};
+    /* Who wants order, and gets it, through what passes it down. */
+    call debug_value{v: (p join q) join by_first};
+    call debug_value{v: ((p join q) where a > 55) join by_first};
+    call debug_value{v: (p join q) matching by_first};
+    call debug_value{v: ((p join q) rename {z as zed}) join by_first};
+    var total := 0;
+    var i := 0;
+    while i < 3 loop [
+        const each_round := p join q;
+        const renamed_each_round := each_round rename {a as w};
+        total := total * 10 + count{r: renamed_each_round where w > 56 + i};
+        i := i + 1;
+    ];
+    call debug_value{v: total};
+    transaction [
+        const in_a_transaction := p join q;
+        call debug_value{v: count{r: in_a_transaction}};
+    ];
+    if count{r: p} > one then [
+        const in_a_branch := p join q;
+        call debug_value{v: count{r: in_a_branch}};
+    ];
+];
+"#;
+
+/// What the compiler before relations could be read in any order wrote for
+/// [`READERS_OF_A_RELATION`]: it depends on no such thing.
+const WRITTEN_BY_READERS: &[&str] = &[
+    "6",
+    "false",
+    "true",
+    "339",
+    "2970",
+    "36",
+    "39",
+    "1",
+    "relation { k: integer } { { k: 0 }, { k: 1 }, { k: 2 }, { k: 3 } }",
+    "relation { k: integer, z: integer } { { k: 0, z: 36 }, { k: 1, z: 39 }, { k: 2, z: 38 }, { k: 3, z: 37 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "relation { k: integer, y: integer, z: integer } { { k: 0, y: 56, z: 36 }, { k: 1, y: 55, z: 39 }, { k: 1, y: 59, z: 39 }, { k: 2, y: 54, z: 38 }, { k: 2, y: 58, z: 38 }, { k: 3, y: 57, z: 37 } }",
+    "relation { k: integer, z: integer, zz: integer } { { k: 0, z: 36, zz: 56 }, { k: 1, z: 39, zz: 55 }, { k: 1, z: 39, zz: 59 }, { k: 2, z: 38, zz: 54 }, { k: 2, z: 38, zz: 58 }, { k: 3, z: 37, zz: 57 } }",
+    "relation { a: integer, c: integer, k: integer, z: integer } { { a: 54, c: 92, k: 2, z: 38 }, { a: 55, c: 94, k: 1, z: 39 }, { a: 56, c: 92, k: 0, z: 36 }, { a: 57, c: 94, k: 3, z: 37 }, { a: 58, c: 96, k: 2, z: 38 }, { a: 59, c: 98, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 5, k: 0, z: 3 }, { a: 5, k: 1, z: 3 }, { a: 5, k: 2, z: 3 }, { a: 5, k: 3, z: 3 } }",
+    "relation { a: integer, k: integer } { { a: 5, k: 0 }, { a: 5, k: 1 }, { a: 5, k: 2 }, { a: 5, k: 3 } }",
+    "4",
+    "6",
+    "false",
+    "4",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 56, k: 0, z: 36 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 56, k: 0, z: 36 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 56, k: 0, z: 36 } }",
+    "true",
+    "true",
+    "6",
+    "relation { a: integer, k: integer } { { a: 54, k: 2 }, { a: 55, k: 1 }, { a: 56, k: 0 }, { a: 57, k: 3 }, { a: 58, k: 2 }, { a: 59, k: 1 } }",
+    "relation { a: integer, g: relation { z: integer }, k: integer } { { a: 54, g: relation { z: integer } { { z: 38 } }, k: 2 }, { a: 55, g: relation { z: integer } { { z: 39 } }, k: 1 }, { a: 56, g: relation { z: integer } { { z: 36 } }, k: 0 }, { a: 57, g: relation { z: integer } { { z: 37 } }, k: 3 }, { a: 58, g: relation { z: integer } { { z: 38 } }, k: 2 }, { a: 59, g: relation { z: integer } { { z: 39 } }, k: 1 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 56, k: 0, z: 36 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    r#"relation { a: integer, k: integer, t: text, z: integer } { { a: 59, k: 1, t: "x", z: 39 }, { a: 59, k: 1, t: "y", z: 39 } }"#,
+    "┌────┬───┬────┐",
+    "│ a  │ k │ z  │",
+    "├────┼───┼────┤",
+    "│ 54 │ 2 │ 38 │",
+    "│ 55 │ 1 │ 39 │",
+    "│ 56 │ 0 │ 36 │",
+    "│ 57 │ 3 │ 37 │",
+    "│ 58 │ 2 │ 38 │",
+    "│ 59 │ 1 │ 39 │",
+    "└────┴───┴────┘",
+    "relation { a: integer, k: integer, z: integer } { { a: 56, k: 0, z: 36 }, { a: 59, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 56, k: 0, z: 36 }, { a: 59, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 56, k: 0, z: 36 }, { a: 59, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 } }",
+    "relation { a: integer } { { a: 56 }, { a: 59 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 56, k: 0, z: 36 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 55, k: 1, z: 39 }, { a: 58, k: 2, z: 38 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 55, k: 1, z: 39 }, { a: 58, k: 2, z: 38 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 55, k: 1, z: 39 }, { a: 58, k: 2, z: 38 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 56, k: 0, z: 36 }, { a: 57, k: 3, z: 37 }, { a: 59, k: 1, z: 39 } }",
+    r#"relation { a: integer, k: integer, z: integer, zz: text } { { a: 54, k: 2, z: 38, zz: "x" }, { a: 54, k: 2, z: 38, zz: "y" }, { a: 55, k: 1, z: 39, zz: "x" }, { a: 55, k: 1, z: 39, zz: "y" }, { a: 56, k: 0, z: 36, zz: "x" }, { a: 56, k: 0, z: 36, zz: "y" }, { a: 57, k: 3, z: 37, zz: "x" }, { a: 57, k: 3, z: 37, zz: "y" }, { a: 58, k: 2, z: 38, zz: "x" }, { a: 58, k: 2, z: 38, zz: "y" }, { a: 59, k: 1, z: 39, zz: "x" }, { a: 59, k: 1, z: 39, zz: "y" } }"#,
+    r#"relation { a: integer, aa: text, k: integer, z: integer } { { a: 54, aa: "x", k: 2, z: 38 }, { a: 54, aa: "y", k: 2, z: 38 }, { a: 55, aa: "x", k: 1, z: 39 }, { a: 55, aa: "y", k: 1, z: 39 }, { a: 56, aa: "x", k: 0, z: 36 }, { a: 56, aa: "y", k: 0, z: 36 }, { a: 57, aa: "x", k: 3, z: 37 }, { a: 57, aa: "y", k: 3, z: 37 }, { a: 58, aa: "x", k: 2, z: 38 }, { a: 58, aa: "y", k: 2, z: 38 }, { a: 59, aa: "x", k: 1, z: 39 }, { a: 59, aa: "y", k: 1, z: 39 } }"#,
+    "relation { a: integer, c: integer, k: integer, z: integer } { { a: 54, c: 2, k: 2, z: 38 }, { a: 55, c: 2, k: 1, z: 39 }, { a: 56, c: 2, k: 0, z: 36 }, { a: 57, c: 2, k: 3, z: 37 }, { a: 58, c: 2, k: 2, z: 38 }, { a: 59, c: 2, k: 1, z: 39 } }",
+    "6",
+    "relation { k: integer } { { k: 0 }, { k: 1 }, { k: 2 }, { k: 3 } }",
+    "relation { k: integer, y: integer, z: integer } { { k: 1, y: 55, z: 39 }, { k: 1, y: 59, z: 39 }, { k: 2, y: 54, z: 38 }, { k: 2, y: 58, z: 38 }, { k: 3, y: 57, z: 37 } }",
+    "true",
+    "20",
+    "relation { k: integer } { { k: 1 }, { k: 2 }, { k: 3 }, { k: 4 } }",
+    "relation { k: integer, y: integer } { { k: 1, y: 739 }, { k: 1, y: 779 }, { k: 1, y: 819 }, { k: 1, y: 859 }, { k: 1, y: 899 }, { k: 2, y: 738 }, { k: 2, y: 778 }, { k: 2, y: 818 }, { k: 2, y: 858 }, { k: 2, y: 898 }, { k: 3, y: 737 }, { k: 3, y: 777 }, { k: 3, y: 817 }, { k: 3, y: 857 }, { k: 3, y: 897 }, { k: 4, y: 736 }, { k: 4, y: 776 }, { k: 4, y: 816 }, { k: 4, y: 856 }, { k: 4, y: 896 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "2",
+    "relation { a: integer, k: integer, z: integer } { { a: 55, k: 1, z: 39 } }",
+    "relation { a: integer, k: integer, z: integer } {}",
+    "relation { a: integer, k: integer, z: integer } { { a: 56, k: 0, z: 36 } }",
+    "2",
+    "relation { a: integer, k: integer, z: integer } { { a: 56, k: 0, z: 36 }, { a: 59, k: 1, z: 39 } }",
+    "8",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 56, k: 0, z: 36 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "true",
+    "6",
+    "false",
+    "relation { b: integer, k: integer, y: integer } { { b: 36, k: 0, y: 56 }, { b: 37, k: 3, y: 57 }, { b: 38, k: 2, y: 54 }, { b: 38, k: 2, y: 58 }, { b: 39, k: 1, y: 55 }, { b: 39, k: 1, y: 59 } }",
+    "relation { x: integer, z: integer } { { x: 0, z: 36 }, { x: 1, z: 39 }, { x: 2, z: 38 }, { x: 3, z: 37 } }",
+    "relation { k: integer, y: integer } { { k: 1, y: 59 }, { k: 2, y: 58 } }",
+    "8",
+    "relation { yy: integer } { { yy: 54 }, { yy: 55 }, { yy: 56 }, { yy: 57 }, { yy: 58 }, { yy: 59 } }",
+    "relation { k: integer, y: integer, z: integer } { { k: 1, y: 55, z: 39 }, { k: 1, y: 59, z: 39 }, { k: 2, y: 54, z: 38 }, { k: 2, y: 58, z: 38 }, { k: 3, y: 57, z: 37 } }",
+    "relation { b: integer, k: integer, z: integer } { { b: 56, k: 0, z: 36 }, { b: 59, k: 1, z: 39 } }",
+    "relation { k: integer } { { k: 1 }, { k: 2 }, { k: 3 } }",
+    "relation { b: integer, k: integer, y: integer } { { b: 36, k: 0, y: 56 }, { b: 37, k: 3, y: 57 }, { b: 38, k: 2, y: 54 }, { b: 38, k: 2, y: 58 }, { b: 39, k: 1, y: 55 }, { b: 39, k: 1, y: 59 } }",
+    "relation { k: integer, y: integer } { { k: 0, y: 56 }, { k: 1, y: 55 }, { k: 1, y: 59 }, { k: 2, y: 54 }, { k: 2, y: 58 }, { k: 3, y: 57 } }",
+    "relation { k: integer, y: integer } {}",
+    "relation { b: integer, k: integer } { { b: 36, k: 0 }, { b: 37, k: 3 }, { b: 38, k: 2 }, { b: 39, k: 1 } }",
+    "relation { a: integer, x: integer, z: integer } { { a: 54, x: 2, z: 38 }, { a: 55, x: 1, z: 39 }, { a: 56, x: 0, z: 36 }, { a: 57, x: 3, z: 37 }, { a: 58, x: 2, z: 38 }, { a: 59, x: 1, z: 39 } }",
+    "relation { a: integer, x: integer } { { a: 54, x: 2 }, { a: 55, x: 1 }, { a: 56, x: 0 }, { a: 57, x: 3 }, { a: 58, x: 2 }, { a: 59, x: 1 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 0, k: 56, z: 36 }, { a: 1, k: 55, z: 39 }, { a: 1, k: 59, z: 39 }, { a: 2, k: 54, z: 38 }, { a: 2, k: 58, z: 38 }, { a: 3, k: 57, z: 37 } }",
+    "6",
+    "false",
+    "339",
+    "relation { y: integer } { { y: 54 }, { y: 55 }, { y: 56 }, { y: 57 }, { y: 58 }, { y: 59 } }",
+    "relation { b: integer } { { b: 54 }, { b: 55 }, { b: 56 }, { b: 57 }, { b: 58 }, { b: 59 } }",
+    "true",
+    "relation { c: integer, k: integer } { { c: 54, k: 2 }, { c: 55, k: 1 }, { c: 56, k: 0 }, { c: 57, k: 3 }, { c: 58, k: 2 }, { c: 59, k: 1 } }",
+    "relation { k: integer, zz: integer } { { k: 0, zz: 56 }, { k: 1, zz: 55 }, { k: 1, zz: 59 }, { k: 2, zz: 54 }, { k: 2, zz: 58 }, { k: 3, zz: 57 } }",
+    "tied{a: 1, b: 9}",
+    "tied{a: 0, b: 6}",
+    "3e0",
+    "6.119899021666141e-3",
+    "6",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 56, k: 0, z: 36 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "174",
+    "6",
+    "6",
+    "relation { k: integer, w: integer } { { k: 0, w: 56 }, { k: 1, w: 55 }, { k: 1, w: 59 }, { k: 2, w: 54 }, { k: 2, w: 58 }, { k: 3, w: 57 } }",
+    "6",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 56, k: 0, z: 36 }, { a: 57, k: 3, z: 37 }, { a: 58, k: 2, z: 38 }, { a: 59, k: 1, z: 39 } }",
+    "6",
+    "3",
+    "5",
+    "20",
+    "3",
+    "276",
+    "3",
+    "3",
+    "false",
+    "1",
+    "0",
+    "1",
+    "37",
+    "1",
+    "1",
+    "2",
+    "3",
+    "3",
+    "0",
+    "3",
+    "3",
+    "3",
+    "278",
+    "6",
+    "3",
+    "3",
+    "1",
+    "1",
+    "3",
+    "1",
+    "37",
+    "3",
+    "227",
+    "3",
+    "1",
+    "3",
+    "276",
+    "1",
+    "3",
+    "3",
+    "20",
+    "20",
+    "1",
+    "relation { a: integer, k: integer, y: integer, z: integer } { { a: 54, k: 2, y: 91, z: 38 }, { a: 55, k: 1, y: 92, z: 39 }, { a: 56, k: 0, y: 93, z: 36 } }",
+    "relation { a: integer, k: integer, y: integer, z: integer } { { a: 56, k: 0, y: 93, z: 36 } }",
+    "relation { a: integer, k: integer, z: integer } { { a: 54, k: 2, z: 38 }, { a: 55, k: 1, z: 39 }, { a: 56, k: 0, z: 36 } }",
+    "relation { a: integer, k: integer, y: integer, zed: integer } { { a: 54, k: 2, y: 91, zed: 38 }, { a: 55, k: 1, y: 92, zed: 39 }, { a: 56, k: 0, y: 93, zed: 36 } }",
+    "321",
+    "6",
+    "6",
+];
+
+#[test]
+fn a_relation_read_in_any_order_gives_what_it_did_in_canonical_order() {
+    let (code, stderr) = run_source("readers_of_a_relation", READERS_OF_A_RELATION);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), WRITTEN_BY_READERS);
+}
+
+/// What can fail for a tuple says which, so it has to come to the same one first: the
+/// first in canonical order, whose `a` is 51, of a join whose key has it in its second run,
+/// so that it would give others first, as anything but the failure needn't sort it.
+#[test]
+fn what_fails_for_a_tuple_fails_for_the_same_one_in_any_order() {
+    for (name, value) in [
+        (
+            "where",
+            "count{r: (p join q) where 9223372036854775800 + a > 0}",
+        ),
+        (
+            "extend",
+            "count{r: (p join q) extend { c := 9223372036854775800 + a }}",
+        ),
+        (
+            "replace",
+            "count{r: (p join q) replace { a := 9223372036854775800 + a }}",
+        ),
+        ("constant", "count{r: j where 9223372036854775800 + a > 0}"),
+        (
+            "semijoin",
+            "count{r: (p matching q) where 9223372036854775800 + a > 0}",
+        ),
+    ] {
+        let source = format!(
+            "operator main{{}} [
+    var one := 1;
+    var p := series{{from: 1, to: 9}} extend {{ k := (value * one + 1) mod 3, a := 60 - value }} remove {{value}};
+    var q := series{{from: 1, to: 4}} extend {{ k := (value * one) mod 3, z := 40 - value }} remove {{value}};
+    const j := p join q;
+    call debug_value{{v: count{{r: j}}}};
+    call debug_value{{v: {value}}};
+];
+"
+        );
+        let (code, stderr) = run_source(&format!("fails_in_order_{name}"), &source);
+        assert_eq!(code, 1, "{name}: {stderr}");
+        let failure = stderr.lines().nth(1).unwrap();
+        assert_eq!(
+            failure, "error[R0001]: overflow: 9223372036854775800 + 51 is out of its type's range",
+            "{name}"
+        );
+    }
+}
+
+/// A closure is found from what it is matched with, in canonical order, whatever that is
+/// named: its binding is read once, gives up its reference once, and is right.
+#[test]
+fn a_closure_matched_with_a_named_join_gives_it_up_once() {
+    let source = "operator closed{arcs: relation { x: integer, z: integer }, n: integer}: integer [
+    const left := series{from: 1, to: 5 * n} extend { z := value mod 3 } remove {value};
+    const right := series{from: 1, to: n} extend { z := value mod 997, k := value mod 11 } remove {value};
+    const side := left join right;
+    const found := (arcs tclose) join side;
+    n * count{r: found}
+];
+
+operator main{} [
+    const arcs := series{from: 1, to: 20} extend { x := (value * 3) mod 5, z := (value * 7) mod 3 } remove {value};
+    var total := 0;
+    var n := 1;
+    while n <= 40 loop [
+        total := total + closed{arcs, n};
+        n := n + 1;
+    ];
+    call debug_value{v: total};
+];
+";
+    let (code, stderr) = run_source("closure_named_join", source);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.trim(), "8195");
+}
+
+/// Whether lowering `source` left a relation in no particular order and then sorted it, which
+/// gives the right answer, for a sort that keeping it in order would have saved, each time.
+fn sorts_what_it_left_unsorted(source: &str) -> bool {
+    trendy_lower::lower(&trendy_opt::optimized(analyze(source))).sorts_what_it_left_unsorted()
+}
+
+/// A relation is left in no particular order only if nothing goes on to want it in order, however
+/// far above it that is: what can fail for a tuple, or a reader that depends on order, reached
+/// through a restriction, a join or a rename, once for each tuple of something. Each of these
+/// cost twice what it had when that wasn't followed: 2015 day 3, and 2017 day 11, read a rename
+/// for each tuple, and 2025 day 1, and 2023 day 24, read something that can fail.
+#[test]
+fn nothing_left_in_no_particular_order_is_sorted_later() {
+    assert!(!sorts_what_it_left_unsorted(READERS_OF_A_RELATION));
+    let heading = "heading step := { n: integer, a: integer, b: integer };
+";
+    for body in [
+        "const taken := s rename {n as m, a as east, b as north};
+    const reached := s extend { x := sum{r: taken where m <= n, of: east} };
+    count{r: reached{x}}",
+        "const taken := s rename {n as m, a as east, b as north};
+    const reached := s extend { x := sum{r: (taken where m <= n) extend { far := east * north }, of: far} };
+    count{r: reached{x}}",
+        "const pairs := (s join s rename {a as c}) where n > 0;
+    const speeds := series{from: 1, to: 9} rename {value as speed};
+    count{r: (pairs times speeds) where b mod speed = 0}",
+        "const joined := s join s rename {a as c};
+    const narrowed := joined where a > b;
+    const read := narrowed where c > 0;
+    count{r: read extend { d := a + b }}",
+        "const joined := s join s rename {a as c};
+    max{r: joined, of: a + c} + sum{r: joined, of: b}",
+    ] {
+        for (form, statements) in [
+            ("bindings", ""),
+            (
+                "statements",
+                "var ran := 0;
+    while ran < 1 loop [
+        ran := ran + 1;
+    ];
+    ",
+            ),
+        ] {
+            let source = format!(
+                "{heading}
+operator f{{s: relation step}}: integer [
+    {statements}{body}
+];
+
+operator main{{}} [
+    call debug_value{{v: f{{s: series{{from: 1, to: 9}} extend {{ n := value, a := value mod 3, b := value mod 2 }} remove {{value}}}}}};
+];
+"
+            );
+            assert!(!sorts_what_it_left_unsorted(&source), "{form}: {body}");
+        }
+    }
+    let mut lowered = 0;
+    for entry in std::fs::read_dir(workspace_root().join("examples")).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "trendy")
+        {
+            let source = std::fs::read_to_string(&path).unwrap();
+            if source.lines().any(|line| line.starts_with("uses ")) {
+                continue;
+            }
+            assert!(!sorts_what_it_left_unsorted(&source), "{}", path.display());
+            lowered += 1;
+        }
+    }
+    assert!(lowered > 10, "only {lowered} examples");
+}
+
+/// A rename named by a `const` reads what it renames in place, but only if that is already
+/// computed: a rename of what could fail is computed where it was written, before what comes
+/// after it, as what it fails with says.
+#[test]
+fn a_rename_of_what_is_computed_fails_where_it_was_named() {
+    let source = "operator f{p: relation { a: integer }, one: integer}: integer [
+    const renamed := (p extend { b := 9223372036854775800 + a }) rename {b as c};
+    const later := 9223372036854775807 + one;
+    later + count{r: renamed rename {c as d}}
+];
+
+operator main{} [
+    call debug_value{v: f{p: series{from: 10, to: 12} rename {value as a}, one: 1}};
+];
+";
+    let (code, stderr) = run_source("rename_fails_where_named", source);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("9223372036854775800 + 10 is out of"),
+        "{stderr}"
+    );
+}
+
+/// A rename named by a `const` is the value of what it renamed as it was then, whatever is
+/// assigned after: it can only be read where it was written if that can't have changed.
+#[test]
+fn a_named_rename_has_the_value_it_had_when_it_was_named() {
+    let source = "operator in_a_loop{p: relation { a: integer }}: integer [
+    var x := p;
+    var seen := 0;
+    var i := 0;
+    while i < 3 loop [
+        const r := x rename {a as b};
+        x := x where a > i + 1;
+        seen := seen * 100 + count{r: r rename {b as c}} * 10 + count{r: x};
+        i := i + 1;
+    ];
+    seen
+];
+
+operator after_it{p: relation { a: integer }}: integer [
+    var x := p;
+    var i := 0;
+    while i < 1 loop [
+        i := i + 1;
+    ];
+    const r := x rename {a as b};
+    x := x where a > 2;
+    count{r: r rename {b as c}} * 10 + count{r: x}
+];
+
+operator assigned_again{p: relation { a: integer }}: integer [
+    var i := 0;
+    while i < 1 loop [
+        i := i + 1;
+    ];
+    var r := p rename {a as b};
+    r := (p where a > 3) rename {a as b};
+    count{r: r rename {b as c}}
+];
+
+operator of_a_var_parameter{var v: relation { a: integer }, out seen: integer} [
+    const r := v rename {a as b};
+    v := v where a > 3;
+    seen := count{r: r rename {b as c}} * 10 + count{r: v};
+];
+
+operator main{} [
+    const p := series{from: 1, to: 5} rename {value as a};
+    call debug_value{v: in_a_loop{p}};
+    call debug_value{v: after_it{p}};
+    call debug_value{v: assigned_again{p}};
+    var v := p;
+    var seen := 0;
+    call of_a_var_parameter{var v, out seen};
+    call debug_value{v: seen};
+    const named := v rename {a as b};
+    v := v where a > 4;
+    call debug_value{v: count{r: named rename {b as c}} * 10 + count{r: v}};
+    var again := p rename {a as b};
+    again := (p where a > 3) rename {a as b};
+    call debug_value{v: count{r: again rename {b as c}}};
+];
+";
+    let (code, stderr) = run_source("named_rename_when_named", source);
+    assert_eq!(code, 0, "{stderr}");
+    let written: Vec<&str> = stderr.lines().collect();
+    assert_eq!(written, ["544332", "53", "2", "52", "21", "2"], "{stderr}");
+}
+
+/// A rename that is only an operand moves no tuples, by name or not, on either side, so
+/// that what it renames is the same each time, and earns an index: reshaping and sorting
+/// for each of these would take over ten minutes.
+#[test]
+fn a_rename_that_is_only_an_operand_costs_nothing() {
+    for (name, setup, query) in [
+        (
+            "keeping_order",
+            "",
+            "small_one join big_one rename {v as w}",
+        ),
+        (
+            "moving_the_key",
+            "",
+            "small_one rename {k as x} join big_one rename {k as x, v as a}",
+        ),
+        (
+            "by_name",
+            "const small_named := small_one rename {k as x};
+    const big_named := big_one rename {k as x, v as a};
+    ",
+            "small_named join big_named",
+        ),
+        (
+            "semijoin",
+            "",
+            "big_one rename {k as x, v as a} matching small_one rename {k as x}",
+        ),
+        (
+            "by_name_as_statements",
+            "var ran := 0;
+    while ran < 1 loop [
+        ran := ran + 1;
+    ];
+    const small_named := small_one rename {k as x};
+    const big_named := big_one rename {k as x, v as a};
+    ",
+            "small_named join big_named",
+        ),
+    ] {
+        let source = format!(
+            "heading big := {{ k: integer, v: integer }};
+
+operator round{{big_one: relation big, small_one: relation {{ k: integer }}}}: integer [
+    {setup}count{{r: {query}}}
+];
+
+operator rounds{{big_one: relation big, small_one: relation {{ k: integer }}, left: integer, seen: integer}}: integer [
+    if left = 0
+        then seen
+        else rounds{{big_one, small_one, left: left - 1, seen: seen + round{{big_one, small_one}}}}
+];
+
+operator main{{}} [
+    const numbers := series{{from: 1, to: 250000}};
+    const big_one := numbers extend {{ k := value, v := (value * 7919) mod 250007 }} remove {{value}};
+    const small_one := series{{from: 1, to: 10}} extend {{ k := value * 1000 }} remove {{value}};
+    call debug_value{{v: rounds{{big_one, small_one, left: 20000, seen: 0}}}};
+];
+"
+        );
+        let start = std::time::Instant::now();
+        let (code, stderr) = run_source(&format!("rename_operand_{name}"), &source);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert_eq!(stderr.trim(), "200000", "{name}");
+        let taken = start.elapsed();
+        assert!(taken.as_secs() < 30, "{name}: {taken:?}");
+    }
+}
+
 /// A join of 10 tuples with 250,000, a thousand times, on an attribute that comes first
 /// in name order or doesn't, or the same as a semijoin: which took 170 billion
 /// instructions, and 0.7 at most now, as it reads all the larger's tuples only until it

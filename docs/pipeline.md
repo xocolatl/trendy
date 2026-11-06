@@ -2435,8 +2435,63 @@ the address and number of the tuples, so it must go when those stop meaning the 
 tuples: `release_buffer` when the buffer is freed, and `with_room` and `removed_from`,
 the only things that change a relation's tuples where they are.
 
-The results are sorted into the canonical order, if they aren't in it, into memory
-released like a text's. A product, of operands with no attribute in common, is made in
+A relation's array is kept in canonical order so that equal relations have equal arrays,
+but only what depends on that needs it. So what a relation is wanted for flows down from its
+reader. `FunctionBuilder::place` gives a relation in canonical order, computing everything
+under it in that order too, as tuples in order cost nothing to keep so, through a join as
+through a restriction, where a reader that wants them in order would otherwise have to sort
+what comes out, which is often much larger. `FunctionBuilder::loose_place`, which only a reader
+that doesn't depend on order asks, gives one as it comes, if that is less work, and says which
+it is. A value given that way is loose: its tuples are all different, in no particular order.
+A join's result is left as it comes then, as are a rename's, a semijoin's and a restriction's
+of a loose operand, and an `extend`'s of a new attribute, and so is the projection that gives a
+`per` parameter's relation, whose wrapped attribute keeps every tuple apart.
+
+What takes one is a join, a semijoin, a projection or a rename of it, `count`, `is_empty`,
+`sum` and `product`, which are exact, `min` and `max` of a type with no order of its own,
+`tuple from`, and, if nothing it computes for a tuple can fail, `where` and `extend`: what
+can fail says which tuple it failed for, so has to come to the same one first. A closure
+matched with a relation is found from its values, in canonical order, so that relation
+isn't taken loose. A `replace` can make two tuples equal, so it is sorted, unless a
+projection reads it, which removes those itself (`Order::Repeated`).
+
+A `Let`'s binding is loose if all that reads it, followed up through what passes order down,
+as far as a reader that wants it or doesn't, takes it so (`FunctionBuilder::reads_only_loosely`,
+`passes_order_down`), and so is a block's local variable, a `const` in a body with statements,
+if it is assigned only where it is declared (`FunctionBuilder::note_loose_locals`). What a
+join or a semijoin searches more than once, or once for each tuple of something, is sorted
+all the same, as sorting it once is less work. Read another way, a loose one is sorted there,
+in a copy, which gives the right answer and is a mistake: it costs that sort each time, for
+what sorting it once would have saved. `lir::Program::sorts_what_it_left_unsorted` finds that,
+and `crates/trendyc/tests/compile.rs` checks that nothing does. A binding gives up its own
+reference, not that copy's, in `operand_read`.
+
+A rename needn't move any tuples for what reads attributes by where they are: a join reads
+what is renamed through a `Shape`, its tuples where they are, in the order they are in, and
+so the same each time, which can earn an index (`FunctionBuilder::view_of`). A semijoin
+finds its tuples in what is renamed, and reshapes those. If attributes keep their places, a
+rename is what it renames for anything (`Shape::is_as_laid_out`). None of that is done for a
+join whose result is wanted in order (`FunctionBuilder::operand_view`). `trendy_opt` writes a
+binding of a rename of what is only read wherever it is read, if that is once, and not again for
+each tuple of something (`Optimizer::read_once_through_a_rename`), so that lowering only sees
+one directly around what it renames. It does the same of a block's local variable, if that is
+assigned nowhere else and what it renames doesn't change while the block runs
+(`Optimizer::named_rename`): a `const` is the value of what it renamed as it was then.
+
+A loose relation reaching what depends on canonical order would give a wrong answer with
+nothing to say so, as equality, merges and binary searches all assume it. So
+`lir::Function::loose_read` follows them through each function, and the driver reports one
+as an internal error (X0000), as for `read_after_release`. A runtime function can only be
+given one if the check lists it: anything new is assumed to depend on the order. What
+compiled code fills is loose until it says otherwise (`lir::Inst::InAnyOrder`,
+`InOrderOf`), so forgetting to say so fails, rather than being trusted. And a flag says what
+each operand of `trendy_rt_and` and `trendy_rt_matching` is, which the check compares with
+what it knows. Each operand's `in_order` then says what is true of what it is given, and a
+loose one of integers that only the statement holds, with the common attributes first, is
+sorted where it is, rather than through pointers to it (`Operand::sorts_here`).
+
+The results are sorted into the canonical order, if they aren't in it, and they are to be,
+into memory released like a text's. A product, of operands with no attribute in common, is made in
 that order where it can be (`product`): if all one operand's attributes come
 before all the other's in name order, each of its tuples with each of the
 other's is that order, so the result is written as it is made, with no

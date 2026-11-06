@@ -1313,13 +1313,16 @@ impl<T> Drop for Temp<T> {
 /// and `offsets` gives, for each attribute of `result`, the offset in a
 /// tuple of `src` of the attribute it comes from. Removing attributes is
 /// reshaping, and can make tuples equal; renaming is too, and can change
-/// their order.
+/// their order. If `*orders` has [`LOOSE_RESULT`], which it can only if no two
+/// can be equal, as of a renaming, they stay in the source's order instead. The
+/// source can be in any order.
 ///
 /// # Safety
 ///
 /// `src` must point to a valid relation of the type `source` describes,
 /// `result` and `source` to valid relation descriptors, `offsets` to one
-/// offset per attribute of `result`, and `dst` to memory for a relation.
+/// offset per attribute of `result`, `orders` to a set of `LOOSE_` bits, and
+/// `dst` to memory for a relation.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_reshape(
@@ -1328,6 +1331,7 @@ pub unsafe extern "C" fn trendy_rt_reshape(
     result: *const TypeDesc,
     source: *const TypeDesc,
     offsets: *const usize,
+    orders: *const usize,
 ) -> bool {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes.
@@ -1338,7 +1342,7 @@ pub unsafe extern "C" fn trendy_rt_reshape(
         let attributes = attributes(result);
         let offsets = core::slice::from_raw_parts(offsets, attributes.len());
         // Each tuple with only the kept attributes, in the source's order.
-        let (bytes, len) = made_canonical(count, result, |projected| {
+        let write = |projected: *mut u8| {
             for i in 0..count {
                 let from = tuples.add(i * source.element().size);
                 let to = projected.add(i * size);
@@ -1350,8 +1354,58 @@ pub unsafe extern "C" fn trendy_rt_reshape(
                     );
                 }
             }
-        })?;
+        };
+        let (bytes, len) = if orders.read_unaligned() & LOOSE_RESULT == 0 {
+            made_canonical(count, result, write)?
+        } else {
+            made_loose(count, result, write)?
+        };
         dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
+/// In the `orders` of a join, a semijoin or a reshape: its left operand's tuples are in
+/// no particular order, only all different. Such a relation is loose: it never reaches
+/// anything that depends on canonical order, as `lir::Function::loose_read` checks.
+pub const LOOSE_LHS: usize = 1;
+/// As for [`LOOSE_LHS`], of its right operand.
+pub const LOOSE_RHS: usize = 2;
+/// In the `orders` of a join or a reshape: nothing depends on its result's order, so it
+/// is left as it comes, rather than sorted.
+pub const LOOSE_RESULT: usize = 4;
+
+/// Put the relation at `relation`, of the type `desc` describes, whose tuples are all
+/// different and hold references to what they point to, in canonical order: where they
+/// are, if nothing else holds them and they are integers, and otherwise a copy, in memory
+/// the statement owns, giving up the buffer it had if only the statement's scope holds it.
+///
+/// # Safety
+///
+/// `relation` must point to a valid relation of that type, in any order, that nothing else
+/// points into, if only the current scope holds its buffer. The statement must have begun
+/// a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_put_in_order(
+    relation: *mut Text,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let desc = &*desc;
+        let (tuples, count) = read_slice(relation.cast());
+        if in_canonical_order(tuples, count, desc) {
+            return Ok(());
+        }
+        if sorts_in_place(desc) && only_in_scope(tuples.cast_mut()).is_some() {
+            let (bytes, len) = sorted_in_place(tuples.cast_mut(), count, desc)?;
+            relation.write_unaligned(Text { bytes, len });
+            return Ok(());
+        }
+        let (bytes, len) = canonical(tuples, count, desc)?;
+        relation.write_unaligned(Text { bytes, len });
+        release_replaced(tuples.cast_mut());
         Ok(())
     })
 }
@@ -1417,8 +1471,9 @@ struct Group {
 
 /// Store at `dst` the relation `result` describes whose tuples are each
 /// made of a tuple of the relation `lhs` and one of `rhs` that agree on
-/// their common attributes (Algebra A's AND), in canonical order, in memory
-/// the statement owns. `lhs_desc` and `rhs_desc` describe the operands. `sources` says where each attribute of `result` comes
+/// their common attributes (Algebra A's AND), in memory the statement owns: in
+/// canonical order, unless `*orders` has [`LOOSE_RESULT`], and of operands each in
+/// any order if it has [`LOOSE_LHS`] or [`LOOSE_RHS`]. `lhs_desc` and `rhs_desc` describe the operands. `sources` says where each attribute of `result` comes
 /// from, and `common` lists the `*common_count` common attributes.
 ///
 /// Both operands' tuples are sorted on the common attributes, then merged:
@@ -1432,8 +1487,8 @@ struct Group {
 /// `lhs` and `rhs` must point to valid relations of the types `lhs_desc`
 /// and `rhs_desc` describe, `result` to a valid descriptor of the relation
 /// type with the attributes of both, `sources` to one source per attribute
-/// of `result`, `common` to `*common_count` common attributes, and `dst`
-/// to memory for a relation.
+/// of `result`, `common` to `*common_count` common attributes, `orders` to a set of
+/// `LOOSE_` bits, and `dst` to memory for a relation.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_and(
@@ -1446,6 +1501,7 @@ pub unsafe extern "C" fn trendy_rt_and(
     sources: *const Source,
     common: *const Common,
     common_count: *const usize,
+    orders: *const usize,
 ) -> bool {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes.
@@ -1455,6 +1511,7 @@ pub unsafe extern "C" fn trendy_rt_and(
         let result_attrs = attributes(result);
         let sources = array(sources, result_attrs.len());
         let common = array(common, common_count.read_unaligned());
+        let orders = orders.read_unaligned();
         if common.is_empty() {
             let (bytes, len) = product(
                 Tuples {
@@ -1469,13 +1526,28 @@ pub unsafe extern "C" fn trendy_rt_and(
                 },
                 result,
                 sources,
+                orders,
             )?;
             dst.write_unaligned(Text { bytes, len });
             return Ok(());
         }
         let (lhs, rhs) = (
-            Operand::of(common, lhs, lhs_count, lhs_desc, true),
-            Operand::of(common, rhs, rhs_count, rhs_desc, false),
+            Operand::of(
+                common,
+                lhs,
+                lhs_count,
+                lhs_desc,
+                true,
+                orders & LOOSE_LHS != 0,
+            ),
+            Operand::of(
+                common,
+                rhs,
+                rhs_count,
+                rhs_desc,
+                false,
+                orders & LOOSE_RHS != 0,
+            ),
         );
         let (mut lhs_pointers, mut rhs_pointers) = (None, None);
         let matches = Matches::of(common, lhs, rhs, &mut lhs_pointers, &mut rhs_pointers)?;
@@ -1493,7 +1565,7 @@ pub unsafe extern "C" fn trendy_rt_and(
         })?;
 
         let size = result.element().size;
-        let (bytes, len) = made_canonical(total, result, |joined| {
+        let write = |joined: *mut u8| {
             let mut k = 0;
             for at in 0..groups.len {
                 let group = groups.at(at);
@@ -1514,7 +1586,12 @@ pub unsafe extern "C" fn trendy_rt_and(
                     }
                 }
             }
-        })?;
+        };
+        let (bytes, len) = if orders & LOOSE_RESULT == 0 {
+            made_canonical(total, result, write)?
+        } else {
+            made_loose(total, result, write)?
+        };
         dst.write_unaligned(Text { bytes, len });
         Ok(())
     })
@@ -1550,8 +1627,9 @@ impl Tuples {
 /// name order. If all one operand's come before all the other's, each tuple
 /// of that one, in its order, with each of the other's, in its order, is
 /// the canonical order of the result, which is written as it is made, with
-/// no sorting and no copy. Otherwise the tuples must be sorted. They are all
-/// different, as each operand's are.
+/// no sorting and no copy. Otherwise the tuples must be sorted, as they must if an
+/// operand is in no particular order, unless `orders` has [`LOOSE_RESULT`]. They are
+/// all different, as each operand's are.
 ///
 /// # Safety
 ///
@@ -1562,6 +1640,7 @@ unsafe fn product(
     rhs: Tuples,
     result: &TypeDesc,
     sources: &[Source],
+    orders: usize,
 ) -> Fallible<(*mut u8, usize)> {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes, and each tuple written has room.
@@ -1595,7 +1674,10 @@ unsafe fn product(
             .windows(2)
             .filter(|pair| pair[0].from != pair[1].from)
             .count();
-        if changes > 1 {
+        if orders & LOOSE_RESULT != 0 {
+            return made_loose(total, result, write);
+        }
+        if changes > 1 || orders & (LOOSE_LHS | LOOSE_RHS) != 0 {
             return made_canonical(total, result, write);
         }
         made_in_order(total, result, write)
@@ -2506,8 +2588,9 @@ pub unsafe extern "C" fn trendy_rt_remove_marked(
 /// Store at `dst` the tuples of the relation `lhs`, which `lhs_desc`
 /// describes, that have a match in the relation `rhs`, which `rhs_desc`
 /// describes, on the `*common_count` attributes in `common`, or, if
-/// `*negated` is 1, those that have none (the semijoin and the antijoin), in
-/// canonical order, in memory the statement owns.
+/// `*negated` is 1, those that have none (the semijoin and the antijoin), in the
+/// order they are in `lhs`, in memory the statement owns. Each operand can be in any
+/// order if `*orders` has [`LOOSE_LHS`] or [`LOOSE_RHS`].
 ///
 /// # Safety
 ///
@@ -2523,6 +2606,7 @@ pub unsafe extern "C" fn trendy_rt_matching(
     common: *const Common,
     common_count: *const usize,
     negated: *const usize,
+    orders: *const usize,
 ) -> bool {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes.
@@ -2531,10 +2615,25 @@ pub unsafe extern "C" fn trendy_rt_matching(
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
         let common = array(common, common_count.read_unaligned());
         let negated = negated.read_unaligned() == 1;
+        let orders = orders.read_unaligned();
         let size = lhs_desc.element().size;
         let (left, right) = (
-            Operand::of(common, lhs, lhs_count, lhs_desc, true),
-            Operand::of(common, rhs, rhs_count, rhs_desc, false),
+            Operand::of(
+                common,
+                lhs,
+                lhs_count,
+                lhs_desc,
+                true,
+                orders & LOOSE_LHS != 0,
+            ),
+            Operand::of(
+                common,
+                rhs,
+                rhs_count,
+                rhs_desc,
+                false,
+                orders & LOOSE_RHS != 0,
+            ),
         );
         let (mut lhs_pointers, mut rhs_pointers) = (None, None);
         let matches = Matches::of(common, left, right, &mut lhs_pointers, &mut rhs_pointers)?;
@@ -3822,12 +3921,18 @@ struct Operand {
     /// Whether its tuples are in order on the common attributes as they are: those
     /// attributes come first in name order, which is what they are sorted by.
     in_order: bool,
+    /// How many integers its tuples are, if they can be sorted where they are, into that
+    /// order: they are in no particular order, but would be if they were canonical, and
+    /// only the current scope holds them. That takes less time and memory than sorting
+    /// pointers to them.
+    sorts_here: Option<usize>,
 }
 
 #[cfg(not(test))]
 impl Operand {
     /// The `count` tuples at `tuples`, of the relation `desc` describes, as the left
-    /// operand if `is_lhs` and otherwise the right, of an operation on `common`.
+    /// operand if `is_lhs` and otherwise the right, of an operation on `common`, in no
+    /// particular order if `loose`.
     ///
     /// # Safety
     ///
@@ -3839,22 +3944,31 @@ impl Operand {
         count: usize,
         desc: &TypeDesc,
         is_lhs: bool,
+        loose: bool,
     ) -> Operand {
         // SAFETY: guaranteed by the caller.
         let (attributes, size) = unsafe { (attributes(desc), desc.element().size) };
         // Two attributes are at one place only if the first takes no memory, so has
         // one value, which orders nothing.
-        let in_order = attributes
+        let leads = attributes
             .iter()
             .zip(common)
             .all(|(attr, c)| attr.offset == if is_lhs { c.lhs } else { c.rhs })
             && common.len() <= attributes.len();
+        // SAFETY: guaranteed by the caller, which a relation of no tuples isn't asked of.
+        let sorts_here = (loose
+            && leads
+            && count > 0
+            && sorts_in_place(desc)
+            && unsafe { only_in_scope(tuples.cast_mut()) }.is_some())
+        .then_some(desc.integers);
         Operand {
             tuples,
             count,
             size,
             is_lhs,
-            in_order,
+            in_order: leads && !loose,
+            sorts_here,
         }
     }
 
@@ -3897,8 +4011,14 @@ impl Operand {
         if self.in_order {
             return Ok(self.laid());
         }
-        // SAFETY: guaranteed by the caller.
+        // SAFETY: guaranteed by the caller; only the current scope holds them, and what
+        // reads them doesn't depend on the order they are in, which leaves them all there.
         unsafe {
+            if let Some(integers) = self.sorts_here {
+                KEPT.forget(self.tuples);
+                sort_integers(self.tuples.cast_mut(), self.count, integers);
+                return Ok(self.laid());
+            }
             let sorted = pointers.insert(self.sorted_on(common)?);
             Ok(Ordered::Pointed(sorted.values()))
         }
@@ -4890,6 +5010,34 @@ unsafe fn made_in_order(
         write(out);
         adopt(out, count, element);
         Ok((out, count))
+    }
+}
+
+/// The relation `desc` describes of the `count` tuples that `write` writes at the address
+/// it is given, all different, in the order it writes them, for what doesn't depend on
+/// that, in memory the current statement owns, which takes references to what they point
+/// to. Integers have no padding to be zero, so aren't zeroed first.
+///
+/// # Safety
+///
+/// `write` must write `count` valid tuples of that relation, none of them equal.
+#[cfg(not(test))]
+unsafe fn made_loose(
+    count: usize,
+    desc: &TypeDesc,
+    write: impl FnOnce(*mut u8),
+) -> Fallible<(*mut u8, usize)> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        if sorts_in_place(desc) {
+            let Some(bytes) = count.checked_mul(desc.element().size) else {
+                return Err(out_of_memory());
+            };
+            let out = allocate_buffer(bytes, desc)?;
+            write(out);
+            return Ok((out, count));
+        }
+        made_in_order(count, desc, write)
     }
 }
 

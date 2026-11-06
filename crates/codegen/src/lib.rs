@@ -409,6 +409,8 @@ impl Functions {
                 let address = self.address(src, frame, b)?;
                 self.store(dst, address, frame, b)?;
             }
+            // They only say what is true of a relation.
+            lir::Inst::InAnyOrder(_) | lir::Inst::InOrderOf { .. } => {}
             lir::Inst::IsNull { dst, src } => {
                 let address = self.load(self.config.pointer_type(), src, frame, b)?;
                 let null = b.ins().iconst(self.config.pointer_type(), 0);

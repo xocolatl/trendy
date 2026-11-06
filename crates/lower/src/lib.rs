@@ -1337,6 +1337,101 @@ struct FunctionBuilder<'a> {
     /// The `Let`s' bindings that the value being computed reads for the last
     /// time, as an operand (see [`FunctionBuilder::operand_read`]).
     last_read: Vec<hir::LocalId>,
+    /// The `Let`s' bindings, and the local variables, of relations whose tuples are in no
+    /// particular order, as nothing that reads them depends on it (see
+    /// [`FunctionBuilder::loose_place`]).
+    loose_locals: Vec<hir::LocalId>,
+    /// The blocks' local variables that can be so, when they are assigned (see
+    /// [`FunctionBuilder::note_loose_locals`]).
+    may_be_loose: Vec<hir::LocalId>,
+}
+
+/// What is around a read of a relation, as [`FunctionBuilder::reads_only_loosely`] goes down.
+#[derive(Clone, Copy)]
+struct Around {
+    /// Whether what it is part of has to come out in canonical order.
+    in_order: bool,
+    /// Whether it is part of what a join or a semijoin searches, by order.
+    searched: bool,
+    /// Whether it is read again for each tuple of something, or time round a loop.
+    repeated: bool,
+}
+
+impl Around {
+    /// What is around a value that its reader wants in canonical order.
+    fn wanted_in_order() -> Around {
+        Around {
+            in_order: true,
+            searched: false,
+            repeated: false,
+        }
+    }
+}
+
+/// How a relation's tuples are ordered, or are to be.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Order {
+    /// In canonical order, so that equal relations have equal arrays.
+    Canonical,
+    /// In no particular order, only all different: what nothing depends the order of needn't
+    /// be sorted (see [`FunctionBuilder::loose_place`]).
+    Loose,
+    /// In no particular order, with some perhaps the same: for what removes those itself,
+    /// as a projection does.
+    Repeated,
+}
+
+/// How a relation is read through a rename, which needs none of its tuples moved, as what
+/// reads it reads attributes by where they are: its heading, and the name each attribute
+/// is read by and has there.
+struct Shape {
+    physical: hir::Heading,
+    /// By the name it is read by, in name order, as the result has them.
+    names: BTreeMap<String, String>,
+}
+
+impl Shape {
+    /// A relation or a tuple of `heading`, read as it is.
+    fn plain(heading: &hir::Heading) -> Shape {
+        Shape {
+            physical: heading.clone(),
+            names: heading
+                .attributes()
+                .map(|(name, _)| (name.to_string(), name.to_string()))
+                .collect(),
+        }
+    }
+
+    /// Where the attribute read as `name` is among the heading's, if it has one.
+    fn position(&self, name: &str) -> Option<usize> {
+        let own = self.names.get(name)?;
+        self.physical.attributes().position(|(a, _)| a == own)
+    }
+
+    /// Where each attribute is among the heading's, in the order they are read by name.
+    fn positions(&self) -> Vec<usize> {
+        self.names
+            .keys()
+            .map(|name| {
+                self.position(name)
+                    .expect("a rename reads only attributes the operand has")
+            })
+            .collect()
+    }
+
+    /// Whether what is read has the layout and the order of what it is read from: each
+    /// attribute comes where it did, whatever it is called.
+    fn is_as_laid_out(&self) -> bool {
+        self.positions().into_iter().eq(0..self.names.len())
+    }
+}
+
+/// `inner`, of type `ty`, read as `named` through the renames around it, as `shape` says.
+struct View<'e> {
+    inner: &'e hir::Expr,
+    ty: hir::Type,
+    named: hir::Type,
+    shape: Shape,
 }
 
 /// A variable a transaction keeps as it begins: where it is, the slot its
@@ -1553,6 +1648,8 @@ impl<'a> FunctionBuilder<'a> {
             tail_blocks: Vec::new(),
             outer_scope: None,
             last_read: Vec::new(),
+            loose_locals: Vec::new(),
+            may_be_loose: Vec::new(),
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -1723,13 +1820,14 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Treat(_, inner) => self.returned(inner, ty, cx),
             hir::Expr::Let(..) => {
-                let (end, alive) = self.let_bindings(expr, cx);
+                let (end, alive) = self.let_bindings(expr, Order::Canonical, cx);
                 self.reading_last(end, alive.iter().map(|(id, ..)| *id), |this| {
                     this.returned(end, ty, cx);
                 });
                 self.keep_past_bindings(&result, ty, alive, cx);
             }
             hir::Expr::Run(block, value) => {
+                self.note_loose_locals(block, Some(value));
                 self.running(block, &result, ty, cx, |this, cx| {
                     this.returned(value, ty, cx);
                 });
@@ -1845,6 +1943,7 @@ impl<'a> FunctionBuilder<'a> {
     /// update operator's last statement is, and of a branch of an `if` that is
     /// one, then the release of the references its local variables hold.
     fn tail_block(&mut self, block: &hir::Block, cx: &mut Lowering) {
+        self.note_loose_locals(block, None);
         if let Some(((site, last), statements)) = block.statements.split_last() {
             for (site, statement) in statements {
                 self.at(Some(*site), cx);
@@ -1870,6 +1969,7 @@ impl<'a> FunctionBuilder<'a> {
     /// pointers null, so that one assigned again, when the block runs
     /// again, has none to give up.
     fn block(&mut self, block: &hir::Block, cx: &mut Lowering) {
+        self.note_loose_locals(block, None);
         self.statements_of(block, cx);
         self.release_locals_of(block, cx);
     }
@@ -1966,6 +2066,7 @@ impl<'a> FunctionBuilder<'a> {
     /// `lets`). Its statements have scopes of their own, which the
     /// statement this is in may be using.
     fn run(&mut self, block: &hir::Block, value: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        self.note_loose_locals(block, Some(value));
         let ty = self.type_of(value);
         let result = self.slot(cx.layout(&ty));
         self.running(block, &result, &ty, cx, |this, cx| {
@@ -2037,11 +2138,22 @@ impl<'a> FunctionBuilder<'a> {
     /// the end's, which may point into it, and which the scope it is in
     /// then keeps. So a relation a body declares lasts no longer than its
     /// last use, as a statement's values do.
-    fn let_chain(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+    fn let_chain(
+        &mut self,
+        expr: &hir::Expr,
+        want: Order,
+        cx: &mut Lowering,
+    ) -> (lir::Place, Order) {
         let outer = self.site;
-        let (end, alive) = self.let_bindings(expr, cx);
+        let (end, alive) = self.let_bindings(expr, want, cx);
         let bound = alive.iter().map(|(id, ..)| *id);
-        let mut value = self.reading_last(end, bound, |this| this.place(end, cx));
+        let (mut value, order) = self.reading_last(end, bound, |this| {
+            if want == Order::Loose {
+                this.loose_place(end, cx)
+            } else {
+                (this.place(end, cx), Order::Canonical)
+            }
+        });
         if !alive.is_empty() {
             // The end's value may point into the bindings still alive, so
             // it is copied out of them first.
@@ -2059,7 +2171,7 @@ impl<'a> FunctionBuilder<'a> {
         if outer.is_some() && self.site != outer {
             self.at(outer, cx);
         }
-        value
+        (value, order)
     }
 
     /// Have the scope keep the value at `value`, of the type `ty`, which may
@@ -2128,8 +2240,10 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::At(_, inner) | hir::Expr::Treat(_, inner) => {
                 self.operand_read(inner, place, ty, cx);
             }
+            // The binding's own reference: `place` may be a copy, put in order to be read.
             hir::Expr::Local(id) if self.last_read.contains(id) => {
-                self.release_place(place, ty, cx);
+                let (own, _) = self.local_place(*id);
+                self.release_place(&own, ty, cx);
             }
             hir::Expr::Local(_)
             | hir::Expr::Variable(_)
@@ -2153,6 +2267,7 @@ impl<'a> FunctionBuilder<'a> {
     fn let_bindings<'e>(
         &mut self,
         expr: &'e hir::Expr,
+        want: Order,
         cx: &mut Lowering,
     ) -> (&'e hir::Expr, Vec<(hir::LocalId, lir::Place, hir::Type)>) {
         // The chain's sites and bindings, in order, then its end.
@@ -2190,6 +2305,33 @@ impl<'a> FunctionBuilder<'a> {
             }
             end.reads_local(id)
         };
+        // Whether each binding can be left as it comes: the last first, as whether one can
+        // says what those it is computed from can be.
+        let mut loose = vec![false; parts.len()];
+        for k in (0..parts.len()).rev() {
+            let Part::Let(id, _) = &parts[k] else {
+                continue;
+            };
+            let mut searches = 0;
+            let mut read_as = |expr: &hir::Expr, in_order: bool| {
+                let around = Around {
+                    in_order,
+                    ..Around::wanted_in_order()
+                };
+                self.reads_only_loosely(*id, expr, around, &mut searches)
+            };
+            let later =
+                parts[k + 1..]
+                    .iter()
+                    .zip(&loose[k + 1..])
+                    .all(|(part, is_loose)| match part {
+                        Part::Let(bound, value) => bound != id && read_as(value, !is_loose),
+                        Part::Site(_) => true,
+                    });
+            loose[k] = later
+                && read_as(end, want == Order::Canonical)
+                && self.is_relation_of_no_key_to_check(*id);
+        }
         let mut alive: Vec<(hir::LocalId, lir::Place, hir::Type)> = Vec::new();
         for (k, part) in parts.iter().enumerate() {
             match part {
@@ -2201,7 +2343,7 @@ impl<'a> FunctionBuilder<'a> {
                         .filter(|bound| !read_after(k, *bound))
                         .collect();
                     let (slot, ty) = self.reading_last(value, ending.into_iter(), |this| {
-                        this.let_bound(*id, value, cx)
+                        this.let_bound(*id, value, loose[k], cx)
                     });
                     if cx.points(&ty) {
                         alive.push((*id, slot, ty));
@@ -2232,6 +2374,7 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         id: hir::LocalId,
         value: &hir::Expr,
+        may_be_loose: bool,
         cx: &mut Lowering,
     ) -> (lir::Place, hir::Type) {
         self.bound_in_loops(&[id]);
@@ -2267,7 +2410,14 @@ impl<'a> FunctionBuilder<'a> {
         let slot = self.slot(layout.clone());
         self.lets.push((slot.clone(), ty.clone()));
         self.nested_scope(cx, |this, cx| {
-            let src = this.place(value, cx);
+            let (src, order) = if may_be_loose {
+                this.loose_place(value, cx)
+            } else {
+                (this.place(value, cx), Order::Canonical)
+            };
+            if order == Order::Loose {
+                this.loose_locals.push(id);
+            }
             this.check_keys(&hir::Target::Local(id), &src, cx);
             this.insts.push(lir::Inst::Copy {
                 dst: slot.clone(),
@@ -3812,6 +3962,20 @@ impl<'a> FunctionBuilder<'a> {
             | hir::OperatorKind::Update { .. }
             | hir::OperatorKind::Specification { .. } => {}
         }
+        if let Some(asked) = self.asks_if_empty(call) {
+            let inner = self.view_of(asked).inner;
+            let (mut count, _) = self.loose_place(inner, cx);
+            count.path.push(1);
+            let dst = self.slot(lir::Layout::U8);
+            let zero = usize_constant(0, cx);
+            self.insts.push(lir::Inst::Binary {
+                dst: dst.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+                lhs: count,
+                rhs: zero,
+            });
+            return dst;
+        }
         let params = params_of(callee, &call.types);
         let args = self.arguments(&params, call, cx);
         self.call_constraints_checked(call, args.as_ref(), &params, cx);
@@ -4009,7 +4173,12 @@ impl<'a> FunctionBuilder<'a> {
             // tuples or elements.
             hir::ReadOnlyBuiltin::Count | hir::ReadOnlyBuiltin::Length => {
                 let operand = call.args.values().next().expect("one argument");
-                let mut count = self.place(operand, cx);
+                let mut count = if builtin == hir::ReadOnlyBuiltin::Count {
+                    let inner = self.view_of(operand).inner;
+                    self.loose_place(inner, cx).0
+                } else {
+                    self.place(operand, cx)
+                };
                 count.path.push(1);
                 let dst = self.slot(lir::Layout::I64);
                 self.insts.push(lir::Inst::Unary {
@@ -4249,18 +4418,15 @@ impl<'a> FunctionBuilder<'a> {
         call: &hir::Call,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let r = &call.args["r"];
-        let ty = self.type_of(r);
-        let hir::Type::Relation(heading) = &ty else {
+        let r = self.view_of(&call.args["r"]);
+        let hir::Type::Relation(heading) = &r.named else {
             unreachable!("`sum` and `product` take relations");
         };
         let of = heading.get("of").expect("`of` is an attribute");
-        let index = attribute_names(&ty)
-            .position(|a| a == "of")
-            .expect("`of` is an attribute");
+        let index = r.shape.position("of").expect("`of` is an attribute");
         let dst = self.slot(cx.layout(of));
-        let src = self.place(r, cx);
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let (src, _) = self.loose_place(r.inner, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&r.ty)));
         let index = usize_constant(len(index), cx);
         self.insts.push(lir::Inst::CallRuntime {
             function,
@@ -4291,7 +4457,12 @@ impl<'a> FunctionBuilder<'a> {
             .expect("`of` is an attribute");
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         let value = cx.layout(&of_ty);
-        let src = self.place(r, cx);
+        // Two different values can tie in a type's own order, and the first is the one.
+        let src = if of_ty.orders_as_stored() {
+            self.loose_place(r, cx).0
+        } else {
+            self.place(r, cx)
+        };
         let mut count = src.clone();
         count.path.push(1);
         let zero = usize_constant(0, cx);
@@ -4377,7 +4548,7 @@ impl<'a> FunctionBuilder<'a> {
                 changed.push((assignment.target.clone(), computed));
                 continue;
             }
-            let value = self.place(&assignment.value, cx);
+            let value = self.assigned_value(assignment, cx);
             let ty = cx.layout(self.assigned(&assignment.target).0);
             let slot = self.slot(ty.clone());
             self.insts.push(lir::Inst::Copy {
@@ -4404,6 +4575,41 @@ impl<'a> FunctionBuilder<'a> {
             let holder = self.holder(&target, cx);
             for change in computed {
                 self.changed_at(holder.clone(), &ty, change, cx);
+            }
+        }
+    }
+
+    /// Where the value of `assignment` is: with its tuples in no particular order if it
+    /// is to a local variable that nothing reads otherwise, as it then says.
+    fn assigned_value(&mut self, assignment: &hir::Assignment, cx: &mut Lowering) -> lir::Place {
+        match &assignment.target {
+            hir::Target::Local(id) if self.may_be_loose.contains(id) => {
+                let (place, order) = self.loose_place(&assignment.value, cx);
+                if order == Order::Loose {
+                    self.loose_locals.push(*id);
+                }
+                place
+            }
+            _ => self.place(&assignment.value, cx),
+        }
+    }
+
+    /// Note which of `block`'s local variables can be left with their tuples in no
+    /// particular order: a relation with no key to check, assigned only where it is
+    /// declared, that the block, and `end`, its value if it has one, read only in a way
+    /// that makes order no use (see [`FunctionBuilder::reads_only_loosely`]). The last are
+    /// first, as whether one can be says what those it is computed from can be.
+    fn note_loose_locals(&mut self, block: &hir::Block, end: Option<&hir::Expr>) {
+        for id in block.locals.iter().rev() {
+            let mut searches = 0;
+            let only = self.is_relation_of_no_key_to_check(*id)
+                && block.times_assigned(*id) == 1
+                && self.block_reads_only_loosely(*id, block, false, &mut searches)
+                && end.is_none_or(|end| {
+                    self.reads_only_loosely(*id, end, Around::wanted_in_order(), &mut searches)
+                });
+            if only {
+                self.may_be_loose.push(*id);
             }
         }
     }
@@ -4714,6 +4920,375 @@ impl<'a> FunctionBuilder<'a> {
         in_data(constant.data)
     }
 
+    /// Where the local variable `id` is, and how its tuples are ordered, if it is a
+    /// relation.
+    fn local_place(&self, id: hir::LocalId) -> (lir::Place, Order) {
+        let place = self.local_places[id.0]
+            .as_ref()
+            .expect("a local variable is placed before it is used")
+            .value
+            .clone();
+        let order = if self.loose_locals.contains(&id) {
+            Order::Loose
+        } else {
+            Order::Canonical
+        };
+        (place, order)
+    }
+
+    /// The relation at `place`, of type `ty`, as `order` says, in canonical order: where it
+    /// is if it already is, and otherwise in a new slot, as what is there may be read again
+    /// as it is.
+    fn canonical(
+        &mut self,
+        place: lir::Place,
+        order: Order,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        if order == Order::Canonical {
+            return place;
+        }
+        let layout = cx.layout(ty);
+        let dst = self.slot(layout.clone());
+        self.insts.push(lir::Inst::Copy {
+            dst: dst.clone(),
+            src: place,
+            layout,
+        });
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::PutInOrder,
+            args: vec![dst.clone(), descriptor],
+        });
+        self.scoped = true;
+        dst
+    }
+
+    /// `expr` as `want` asks: in canonical order, computed all the way down as
+    /// [`FunctionBuilder::place`] does, or as it comes, if nothing above it depends on that.
+    /// Tuples in order cost nothing to keep so, through a join as through a restriction, where
+    /// leaving them out of order for a reader that wants them in order costs a sort of what
+    /// comes out, which is often much larger.
+    fn given(&mut self, expr: &hir::Expr, want: Order, cx: &mut Lowering) -> (lir::Place, Order) {
+        if want == Order::Canonical {
+            (self.place(expr, cx), Order::Canonical)
+        } else {
+            self.loose_place(expr, cx)
+        }
+    }
+
+    /// How a join or a semijoin reads its operand `expr`: through any renames around it, if
+    /// nothing above it depends on the order of what comes out, and otherwise as it is, so that
+    /// the operand is in the order that makes that cost nothing.
+    fn operand_view<'e>(&self, expr: &'e hir::Expr, want: Order) -> View<'e> {
+        if want == Order::Canonical {
+            self.view_as_it_is(expr)
+        } else {
+            self.view_of(expr)
+        }
+    }
+
+    /// Where the relation `expr` is, computed as [`FunctionBuilder::place`] does, but with
+    /// its tuples in no particular order, if that is less work, and how they are ordered.
+    /// They are always all different.
+    ///
+    /// Only what doesn't depend on the order of a relation may ask for one this way, and
+    /// it has to say so to [`lir::Function::loose_read`], as [`FunctionBuilder::place`]
+    /// always gives the canonical order, so that what doesn't ask needn't know of this.
+    /// What can fail for a tuple is computed in canonical order all the same, as its
+    /// failure says which, so that the first to fail is the same.
+    fn loose_place(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> (lir::Place, Order) {
+        match expr {
+            hir::Expr::Local(id) => self.local_place(*id),
+            hir::Expr::At(site, inner) => {
+                let outer = self.site;
+                self.at(Some(*site), cx);
+                let given = self.loose_place(inner, cx);
+                if outer.is_some() {
+                    self.at(outer, cx);
+                }
+                given
+            }
+            hir::Expr::Let(..) => self.let_chain(expr, Order::Loose, cx),
+            hir::Expr::Rename(..) => self.renamed(expr, Order::Loose, cx),
+            hir::Expr::Remove(operand, names) => self.removed(operand, names, Order::Loose, cx),
+            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Order::Loose, cx),
+            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, Order::Loose, cx),
+            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, Order::Loose, cx),
+            hir::Expr::Restrict(operand, condition) => {
+                self.restrict(operand, condition, Order::Loose, cx)
+            }
+            hir::Expr::Extend(operand, _, attributes) => {
+                self.extend(expr, operand, attributes, Order::Loose, cx)
+            }
+            _ => (self.place(expr, cx), Order::Canonical),
+        }
+    }
+
+    /// The operands of `expr` that it reads whatever order their tuples are in: which
+    /// [`FunctionBuilder::loose_place`] may give them to it. A lookup in a loop has its
+    /// tuples in canonical order, and its result is theirs; a closure is found from the
+    /// values of what it is matched with, in canonical order; and what can fail for a tuple
+    /// must come to the same one first.
+    fn reads_loosely<'e>(&self, expr: &'e hir::Expr) -> Vec<&'e hir::Expr> {
+        let is_key = |operand: &hir::Expr| matches!(operand, hir::Expr::Relation(_, tuples) if tuples.len() == 1);
+        let is_closure = |operand: &hir::Expr| arcs_of_closure(operand).is_some();
+        match expr {
+            hir::Expr::And(lhs, rhs)
+                if !is_key(lhs) && !is_key(rhs) && !is_closure(lhs) && !is_closure(rhs) =>
+            {
+                vec![lhs, rhs]
+            }
+            hir::Expr::Semijoin(lhs, rhs) if !is_closure(lhs) => vec![lhs, rhs],
+            hir::Expr::Antijoin(lhs, rhs) => vec![lhs, rhs],
+            hir::Expr::Remove(operand, _)
+            | hir::Expr::Rename(operand, _)
+            | hir::Expr::Only(operand) => vec![operand],
+            hir::Expr::Restrict(operand, condition) if !condition.can_fail() => vec![operand],
+            hir::Expr::Extend(operand, _, attributes)
+                if !attributes.values().any(hir::Expr::can_fail) =>
+            {
+                vec![operand]
+            }
+            hir::Expr::Call(call) => self
+                .counted(call)
+                .or(self.summed(call))
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The relation that `call` only counts, in the end: `count`'s, or that of an operator
+    /// that only asks if it has no tuples, as `is_empty` does.
+    fn counted<'e>(&self, call: &'e hir::Call) -> Option<&'e hir::Expr> {
+        use hir::ReadOnlyBuiltin::Count;
+        let is_count = |call: &hir::Call| {
+            matches!(
+                self.program.operator(call.operator).kind,
+                hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(Count))
+            )
+        };
+        if is_count(call) {
+            return call.args.values().next();
+        }
+        self.asks_if_empty(call)
+    }
+
+    /// The relation `call` asks if it has no tuples, if that is all its operator does.
+    fn asks_if_empty<'e>(&self, call: &'e hir::Call) -> Option<&'e hir::Expr> {
+        use hir::ReadOnlyBuiltin::Count;
+        let callee = self.program.operator(call.operator);
+        let hir::OperatorKind::ReadOnly { value, .. } = &callee.kind else {
+            return None;
+        };
+        if !callee.versions.is_empty() || !callee.constraints.is_empty() {
+            return None;
+        }
+        let hir::Expr::Binary(hir::BinaryOp::Compare(hir::Comparison::Equal, _), counted, zero) =
+            value
+        else {
+            return None;
+        };
+        let (hir::Expr::Call(counted), hir::Expr::Constant(hir::Value::Integer(0))) =
+            (&**counted, &**zero)
+        else {
+            return None;
+        };
+        let is_count = matches!(
+            self.program.operator(counted.operator).kind,
+            hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(Count))
+        );
+        let Some(hir::Expr::Parameter(name)) = counted.args.values().next() else {
+            return None;
+        };
+        is_count.then(|| call.args.get(name)).flatten()
+    }
+
+    /// The relation `call` reads only the numbers of, by a built-in that gives the same
+    /// whatever order they are in: `sum` and `product`, which are exact, and `min` and
+    /// `max` where no two different values can tie.
+    fn summed<'e>(&self, call: &'e hir::Call) -> Option<&'e hir::Expr> {
+        use hir::ReadOnlyBuiltin::{Max, Min, Product, Sum};
+        let hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(builtin)) =
+            self.program.operator(call.operator).kind
+        else {
+            return None;
+        };
+        let r = call.args.get("r")?;
+        match builtin {
+            Sum | Product => Some(r),
+            Min | Max => {
+                let hir::Type::Relation(heading) = self.type_of(r) else {
+                    return None;
+                };
+                heading.get("of")?.orders_as_stored().then_some(r)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the local variable `id` is a relation whose keys are all its
+    /// whole heading, as [`FunctionBuilder::key_checked`] checks nothing of,
+    /// and which any relation has: there is then nothing to check as it is
+    /// bound, which would have to be done in canonical order.
+    fn is_relation_of_no_key_to_check(&self, id: hir::LocalId) -> bool {
+        let local = &self.locals[id.0];
+        matches!(local.ty, hir::Type::Relation(_))
+            && local
+                .keys
+                .iter()
+                .all(|key| key.len() == attribute_names(&local.ty).count())
+    }
+
+    /// Whether everything in `expr` that reads the binding or local variable `id` reads it in
+    /// a way that makes it no use to have it in canonical order, around as `around` says, so
+    /// that its value is best not sorted. `searches` counts the joins and semijoins that read
+    /// it: what is searched more than once is better sorted once.
+    fn reads_only_loosely(
+        &self,
+        id: hir::LocalId,
+        expr: &hir::Expr,
+        around: Around,
+        searches: &mut usize,
+    ) -> bool {
+        match expr {
+            hir::Expr::Local(read) if *read == id => {
+                *searches += usize::from(around.searched);
+                !around.in_order && (!around.searched || !around.repeated) && *searches <= 1
+            }
+            hir::Expr::At(_, inner) => self.reads_only_loosely(id, inner, around, searches),
+            hir::Expr::Let(bound, ..) if *bound == id => false,
+            hir::Expr::Let(_, value, body) => {
+                let value_around = Around {
+                    in_order: true,
+                    ..around
+                };
+                self.reads_only_loosely(id, value, value_around, searches)
+                    && self.reads_only_loosely(id, body, around, searches)
+            }
+            _ => {
+                let loosely = self.reads_loosely(expr);
+                let passes_order_down = self.passes_order_down(expr);
+                let searches_it = matches!(
+                    expr,
+                    hir::Expr::And(..) | hir::Expr::Semijoin(..) | hir::Expr::Antijoin(..)
+                );
+                let mut only = true;
+                expr.for_each_child(|child, _| {
+                    let is_loose = loosely.iter().any(|operand| core::ptr::eq(*operand, child));
+                    let child_around = Around {
+                        in_order: !is_loose || (around.in_order && passes_order_down),
+                        searched: around.searched || searches_it,
+                        repeated: around.repeated || expr.computes_again(child),
+                    };
+                    only = only && self.reads_only_loosely(id, child, child_around, searches);
+                });
+                only
+            }
+        }
+    }
+
+    /// Whether what `expr` makes is in canonical order for nothing if what it reads is, so that
+    /// a reader wanting it so wants that too.
+    fn passes_order_down(&self, expr: &hir::Expr) -> bool {
+        match expr {
+            hir::Expr::Remove(operand, names) => keeps_tuples_apart(&self.view_of(operand), names),
+            hir::Expr::And(..)
+            | hir::Expr::Semijoin(..)
+            | hir::Expr::Antijoin(..)
+            | hir::Expr::Restrict(..)
+            | hir::Expr::Extend(..)
+            | hir::Expr::Rename(..) => true,
+            _ => false,
+        }
+    }
+
+    /// As [`FunctionBuilder::reads_only_loosely`], of what `block` reads, its statements run
+    /// again if `repeated`. What a declaration of a local variable that can be left as it
+    /// comes is computed from needn't be in order; `block`'s later ones are known by now.
+    fn block_reads_only_loosely(
+        &self,
+        id: hir::LocalId,
+        block: &hir::Block,
+        repeated: bool,
+        searches: &mut usize,
+    ) -> bool {
+        block.statements.iter().all(|(_, statement)| {
+            let again = repeated
+                || matches!(
+                    statement,
+                    hir::Statement::Loop(..) | hir::Statement::For(..)
+                );
+            let around = Around {
+                repeated,
+                ..Around::wanted_in_order()
+            };
+            let mut reads = |expr: &hir::Expr, around: Around| {
+                self.reads_only_loosely(id, expr, around, &mut *searches)
+            };
+            let own = match statement {
+                hir::Statement::Assign(assignments) => assignments.iter().all(|assignment| {
+                    let in_order = !matches!(
+                        &assignment.target,
+                        hir::Target::Local(target) if self.may_be_loose.contains(target)
+                    );
+                    reads(&assignment.value, Around { in_order, ..around })
+                }),
+                hir::Statement::Call(call) => call.args.values().all(|arg| reads(arg, around)),
+                hir::Statement::If(condition, ..)
+                | hir::Statement::For(_, condition, _)
+                | hir::Statement::Fail(condition)
+                | hir::Statement::Warn(condition) => reads(condition, around),
+                hir::Statement::Loop(condition, ..) => reads(
+                    condition,
+                    Around {
+                        repeated: true,
+                        ..around
+                    },
+                ),
+                hir::Statement::Transaction(..) => true,
+            };
+            own && statement
+                .blocks()
+                .iter()
+                .all(|inner| self.block_reads_only_loosely(id, inner, again, &mut *searches))
+        })
+    }
+
+    /// How `expr`, a relation or a tuple, is read through any renames around it.
+    fn view_of<'e>(&self, expr: &'e hir::Expr) -> View<'e> {
+        let named = self.type_of(expr);
+        let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = &named else {
+            unreachable!("only relations and tuples are renamed");
+        };
+        let mut underlying = Shape::plain(heading).names;
+        let mut inner = expr;
+        while let hir::Expr::Rename(operand, renamings) = inner {
+            for own in underlying.values_mut() {
+                if let Some((before, _)) = renamings.iter().find(|(_, after)| *after == own) {
+                    own.clone_from(before);
+                }
+            }
+            inner = operand;
+        }
+        let ty = self.type_of(inner);
+        let (hir::Type::Tuple(physical) | hir::Type::Relation(physical)) = &ty else {
+            unreachable!("only relations and tuples are renamed");
+        };
+        let shape = Shape {
+            physical: physical.clone(),
+            names: underlying,
+        };
+        View {
+            inner,
+            ty,
+            named,
+            shape,
+        }
+    }
+
     /// Where `expr`'s value is in memory: computed into a new stack slot, if
     /// it is computed.
     fn place(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
@@ -4724,13 +5299,13 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Variable(id) => in_data(self.variable_data[id.0]),
             hir::Expr::ComputedConstant(id, _) => self.constant_read(*id, cx),
-            hir::Expr::Local(id) => self.local_places[id.0]
-                .as_ref()
-                .expect("a local variable is placed before it is used")
-                .value
-                .clone(),
+            hir::Expr::Local(id) => {
+                let (place, order) = self.local_place(*id);
+                let ty = self.locals[id.0].ty.clone();
+                self.canonical(place, order, &ty, cx)
+            }
             hir::Expr::At(site, expr) => self.place_at(*site, expr, cx),
-            hir::Expr::Let(..) => self.let_chain(expr, cx),
+            hir::Expr::Let(..) => self.let_chain(expr, Order::Canonical, cx).0,
             hir::Expr::Run(block, value) => self.run(block, value, cx),
             hir::Expr::Parameter(name) if self.pointers.contains_key(name) => {
                 self.pointee(name, cx)
@@ -4768,9 +5343,11 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::If(condition, then, otherwise) => {
                 self.conditional(expr, condition, [then, otherwise], cx)
             }
-            hir::Expr::Remove(operand, names) => self.removed(operand, names, cx),
-            hir::Expr::Rename(operand, renamings) => self.renamed(operand, renamings, cx),
-            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, cx),
+            hir::Expr::Remove(operand, names) => {
+                self.removed(operand, names, Order::Canonical, cx).0
+            }
+            hir::Expr::Rename(..) => self.renamed(expr, Order::Canonical, cx).0,
+            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Order::Canonical, cx).0,
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Only(operand) => self.only(operand, cx),
             // A value of a type of the program's own is laid out as the tuple
@@ -4785,16 +5362,21 @@ impl<'a> FunctionBuilder<'a> {
                 self.fail_with(error, cx);
                 self.slot(cx.layout(ty))
             }
-            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
+            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, Order::Canonical, cx).0,
+            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, Order::Canonical, cx).0,
+            hir::Expr::Restrict(operand, condition) => {
+                self.restrict(operand, condition, Order::Canonical, cx).0
+            }
             hir::Expr::Tclose(operand) => self.closed(operand, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
-            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
-            hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
             hir::Expr::Current(depth, _) => {
                 self.tuples[self.tuples.len() - 1 - depth].place.clone()
             }
             hir::Expr::Call(call) => self.read_only_call(call, cx),
-            hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
+            hir::Expr::Extend(operand, _, attributes) => {
+                self.extend(expr, operand, attributes, Order::Canonical, cx)
+                    .0
+            }
             // Of the operands of `and` and `or`, those that can fail are
             // computed only when those that can't don't decide the result.
             hir::Expr::Connective(connective, operands)
@@ -4900,50 +5482,64 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         operand: &hir::Expr,
         names: &BTreeSet<String>,
+        want: Order,
         cx: &mut Lowering,
-    ) -> lir::Place {
-        let ty = self.type_of(operand);
-        let src = self.place(operand, cx);
-        // The kept attributes, in their own order, which is the result's
-        // too.
-        let sources: Vec<usize> = attribute_names(&ty)
-            .enumerate()
-            .filter(|(_, name)| !names.contains(*name))
-            .map(|(i, _)| i)
-            .collect();
-        let dst = self.reshape(&ty, &ty.without(names), &sources, src.clone(), cx);
-        self.operand_read(operand, &src, &ty, cx);
-        dst
-    }
-
-    /// `operand` with its attributes renamed as `renamings` says, each
-    /// `old` to `new`, reshaped.
-    fn renamed(
-        &mut self,
-        operand: &hir::Expr,
-        renamings: &BTreeMap<String, String>,
-        cx: &mut Lowering,
-    ) -> lir::Place {
-        let ty = self.type_of(operand);
-        let src = self.place(operand, cx);
-        let result_ty = ty.renamed(renamings);
-        // Each result attribute comes from the operand's attribute with its
-        // old name.
-        let old: Vec<&str> = attribute_names(&ty).collect();
-        let sources: Vec<usize> = attribute_names(&result_ty)
-            .map(|new| {
-                let before = renamings
-                    .iter()
-                    .find(|(_, after)| after.as_str() == new)
-                    .map_or(new, |(before, _)| before.as_str());
-                old.iter()
-                    .position(|name| *name == before)
-                    .expect("sema renames only attributes the operand has")
+    ) -> (lir::Place, Order) {
+        let view = self.view_of(operand);
+        // Only what can't make two tuples equal can be left as it comes: reshaping is what
+        // removes any that it does make, by sorting them, whatever order they are in. What
+        // can't, wanted in order, is in order for nothing if what it comes from is.
+        let (order, reads) = match (want, keeps_tuples_apart(&view, names)) {
+            (Order::Canonical, true) => (Order::Canonical, Order::Canonical),
+            (_, true) => (Order::Loose, Order::Loose),
+            (_, false) => (Order::Canonical, Order::Loose),
+        };
+        // A `replace` can make tuples equal, which this removes, so needn't be sorted first.
+        let (src, _) = match view.inner {
+            hir::Expr::Extend(extended, _, attributes)
+                if reads == Order::Loose && matches!(view.ty, hir::Type::Relation(_)) =>
+            {
+                self.extend(view.inner, extended, attributes, Order::Repeated, cx)
+            }
+            inner => self.given(inner, reads, cx),
+        };
+        // The kept attributes, in their own order, which is the result's too.
+        let sources: Vec<usize> = view
+            .shape
+            .names
+            .keys()
+            .filter(|name| !names.contains(*name))
+            .map(|name| {
+                view.shape
+                    .position(name)
+                    .expect("a rename reads only attributes the operand has")
             })
             .collect();
-        let dst = self.reshape(&ty, &result_ty, &sources, src.clone(), cx);
-        self.operand_read(operand, &src, &ty, cx);
-        dst
+        let result = view.named.without(names);
+        let dst = self.reshape(&view.ty, &result, &sources, src.clone(), order, cx);
+        self.operand_read(view.inner, &src, &view.ty, cx);
+        (dst, order)
+    }
+
+    /// `expr`, a rename, of whatever it renames, computed in any order. It is where that is,
+    /// if that has the same layout and the same order: otherwise it is reshaped, sorted
+    /// unless `want` needn't be.
+    fn renamed(&mut self, expr: &hir::Expr, want: Order, cx: &mut Lowering) -> (lir::Place, Order) {
+        let view = self.view_of(expr);
+        let (src, order) = self.given(view.inner, want, cx);
+        if view.shape.is_as_laid_out() {
+            return (src, order);
+        }
+        let dst = self.reshape(
+            &view.ty,
+            &view.named,
+            &view.shape.positions(),
+            src.clone(),
+            want,
+            cx,
+        );
+        self.operand_read(view.inner, &src, &view.ty, cx);
+        (dst, want)
     }
 
     /// Copy each of `attributes`, in name order, into a field of the tuple
@@ -5313,23 +5909,37 @@ impl<'a> FunctionBuilder<'a> {
         expr: &hir::Expr,
         operand: &hir::Expr,
         attributes: &BTreeMap<String, hir::Expr>,
+        want: Order,
         cx: &mut Lowering,
-    ) -> lir::Place {
+    ) -> (lir::Place, Order) {
         let ty = self.type_of(operand);
         let result_ty = self.type_of(expr);
-        let src = self.place(operand, cx);
         match (&ty, &result_ty) {
             (hir::Type::Tuple(heading), hir::Type::Tuple(result)) => {
+                let src = self.place(operand, cx);
                 let dst = self.slot(cx.layout(&result_ty));
                 self.tuples.push(AtHand::one(src.clone()));
                 self.extended(heading, &src, attributes, result, &dst, cx);
                 self.tuples.pop();
-                dst
+                (dst, Order::Canonical)
             }
             (hir::Type::Relation(heading), hir::Type::Relation(result)) => {
-                let dst = self.extend_relation(heading, &src, attributes, result, cx);
+                let src =
+                    if want == Order::Canonical || attributes.values().any(hir::Expr::can_fail) {
+                        self.place(operand, cx)
+                    } else {
+                        self.loose_place(operand, cx).0
+                    };
+                // A new attribute can't make two tuples equal, as replacing one can.
+                let adds = attributes.keys().all(|name| heading.get(name).is_none());
+                let order = if adds || want == Order::Repeated {
+                    want
+                } else {
+                    Order::Canonical
+                };
+                let dst = self.extend_relation(heading, &src, attributes, result, order, cx);
                 self.operand_read(operand, &src, &ty, cx);
-                dst
+                (dst, order)
             }
             _ => unreachable!("sema extends only tuples and relations"),
         }
@@ -5374,13 +5984,15 @@ impl<'a> FunctionBuilder<'a> {
     /// replaced in each tuple, making one with the attributes of `result`: a
     /// loop over the tuples, building each new tuple in a new relation,
     /// which the runtime allocates and then sorts into the canonical order,
-    /// without the duplicates a `replace` can make.
+    /// without the duplicates a `replace` can make, or leaves in the order they
+    /// come, as `order` says.
     fn extend_relation(
         &mut self,
         heading: &hir::Heading,
         src: &lir::Place,
         attributes: &BTreeMap<String, hir::Expr>,
         result: &hir::Heading,
+        order: Order,
         cx: &mut Lowering,
     ) -> lir::Place {
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
@@ -5399,6 +6011,10 @@ impl<'a> FunctionBuilder<'a> {
                 vec![(to.clone(), built.clone())]
             });
         });
+        if order != Order::Canonical {
+            self.adopt(&dst, &result_ty, cx);
+            return dst;
+        }
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Sort,
@@ -5408,28 +6024,43 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The tuples of the relation `operand` for which `condition`, computed
-    /// with each as the tuple at hand, is true, copied into a new relation.
-    /// They stay in the canonical order, so need no sorting; the relation's
-    /// count is then the number copied.
+    /// with each as the tuple at hand, is true, copied into a new relation, and how they are
+    /// ordered: as they are in `operand`, so they need no sorting; the relation's
+    /// count is then the number copied. A condition that can fail has `operand` in canonical
+    /// order, so that the same tuple is the first it fails for.
     fn restrict(
         &mut self,
         operand: &hir::Expr,
         condition: &hir::Expr,
+        want: Order,
         cx: &mut Lowering,
-    ) -> lir::Place {
+    ) -> (lir::Place, Order) {
         let ty = self.type_of(operand);
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("sema restricts only relations");
         };
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         let narrowed = self.closure_narrowed(operand, heading, condition, cx);
-        let (whole, rest) = match narrowed {
-            Some((closure, rest)) if rest.is_empty() => return closure,
-            Some((closure, rest)) => (closure, Some(hir::Connective::And.of(rest))),
-            None => (self.place(operand, cx), None),
+        let (whole, order, rest) = match narrowed {
+            Some((closure, rest)) if rest.is_empty() => return (closure, Order::Canonical),
+            Some((closure, rest)) => (
+                closure,
+                Order::Canonical,
+                Some(hir::Connective::And.of(rest)),
+            ),
+            None if condition.can_fail() => (self.place(operand, cx), Order::Canonical, None),
+            None => {
+                let (place, order) = self.given(operand, want, cx);
+                (place, order, None)
+            }
         };
         let condition = rest.as_ref().unwrap_or(condition);
-        let (src, condition) = self.equal_runs(whole.clone(), &ty, heading, condition, cx);
+        // Tuples that agree are together only in canonical order.
+        let (src, condition) = if order == Order::Canonical {
+            self.equal_runs(whole.clone(), &ty, heading, condition, cx)
+        } else {
+            (whole.clone(), condition.clone())
+        };
         let mut count = src.clone();
         count.path.push(1);
         let dst = self.allocated(&ty, count, cx);
@@ -5481,8 +6112,12 @@ impl<'a> FunctionBuilder<'a> {
             layout: lir::Layout::Usize,
         });
         self.adopt(&dst, &ty, cx);
+        self.insts.push(lir::Inst::InOrderOf {
+            dst: dst.clone(),
+            src: whole.clone(),
+        });
         self.operand_read(operand, &whole, &ty, cx);
-        dst
+        (dst, order)
     }
 
     /// If `operand` is a transitive closure, and `condition` says one of its
@@ -5565,7 +6200,7 @@ impl<'a> FunctionBuilder<'a> {
         else {
             return None;
         };
-        let common = common_attributes(heading, other_heading, cx);
+        let common = common_attributes(&Shape::plain(heading), &Shape::plain(other_heading), cx);
         if common.is_empty() {
             return None;
         }
@@ -5794,6 +6429,10 @@ impl<'a> FunctionBuilder<'a> {
             function: lir::RuntimeFn::Allocate,
             args: vec![dst.clone(), count, descriptor],
         });
+        // What fills it has to say what order its tuples are in.
+        if let hir::Type::Relation(_) = ty {
+            self.insts.push(lir::Inst::InAnyOrder(dst.clone()));
+        }
         self.scoped = true;
         dst
     }
@@ -6441,7 +7080,7 @@ impl<'a> FunctionBuilder<'a> {
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("sema takes the only tuple of relations only");
         };
-        let src = self.place(operand, cx);
+        let (src, _) = self.loose_place(operand, cx);
         let mut count = src.clone();
         count.path.push(1);
         let is_one = self.slot(lir::Layout::U8);
@@ -6490,6 +7129,7 @@ impl<'a> FunctionBuilder<'a> {
         result_ty: &hir::Type,
         sources: &[usize],
         src: lir::Place,
+        want: Order,
         cx: &mut Lowering,
     ) -> lir::Place {
         let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
@@ -6529,6 +7169,7 @@ impl<'a> FunctionBuilder<'a> {
                 result_desc,
                 source_desc,
                 lir::Place::whole(lir::Base::Data(offsets)),
+                orders_constant(Order::Canonical, Order::Canonical, want, cx),
             ],
         });
         self.scoped = true;
@@ -6543,38 +7184,37 @@ impl<'a> FunctionBuilder<'a> {
     /// each common attribute, its offset in each operand and its type.
     fn and(
         &mut self,
-        lhs_ty: &hir::Type,
-        rhs_ty: &hir::Type,
-        lhs: lir::Place,
-        rhs: lir::Place,
+        lhs: &View,
+        rhs: &View,
+        (lhs_place, lhs_order): (lir::Place, Order),
+        (rhs_place, rhs_order): (lir::Place, Order),
+        want: Order,
         cx: &mut Lowering,
-    ) -> lir::Place {
-        let (hir::Type::Relation(lhs_heading), hir::Type::Relation(rhs_heading)) = (lhs_ty, rhs_ty)
-        else {
-            unreachable!("sema joins only relations");
-        };
-        let result_ty = lhs_ty.and(rhs_ty);
-        let joining = Joining::of(lhs_heading, rhs_heading, &result_ty, cx);
+    ) -> (lir::Place, Order) {
+        let result_ty = lhs.named.and(&rhs.named);
+        let joining = Joining::of(&lhs.shape, &rhs.shape, &result_ty, cx);
         let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
             lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
         };
+        let dst = self.slot(cx.layout(&result_ty));
         let args = vec![
-            lhs,
-            rhs,
+            dst.clone(),
+            lhs_place,
+            rhs_place,
             descriptor(&result_ty, cx),
-            descriptor(lhs_ty, cx),
-            descriptor(rhs_ty, cx),
+            descriptor(&lhs.ty, cx),
+            descriptor(&rhs.ty, cx),
             joining.sources,
             joining.common,
             joining.common_count,
+            orders_constant(lhs_order, rhs_order, want, cx),
         ];
-        let dst = self.slot(cx.layout(&result_ty));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::And,
-            args: [vec![dst.clone()], args].concat(),
+            args,
         });
         self.scoped = true;
-        dst
+        (dst, want)
     }
 
     /// `expr`, the array of the tuples of `relation`, in the order of the
@@ -6771,60 +7411,84 @@ impl<'a> FunctionBuilder<'a> {
 
     /// The tuples of the relation `lhs` that have a match in `rhs`, or, if
     /// `negated`, those that have none, computed by the runtime into a new
-    /// stack slot. A transitive closure's are found without making the rest of it.
+    /// stack slot, in the order they are in `lhs`, and how that is. A transitive closure's
+    /// are found without making the rest of it. Through a rename of `lhs`, they are found
+    /// in what it renames, and then reshaped, sorted unless `want` needn't be.
     fn matching(
         &mut self,
         lhs: &hir::Expr,
         rhs: &hir::Expr,
         negated: bool,
+        want: Order,
         cx: &mut Lowering,
-    ) -> lir::Place {
-        let lhs_ty = self.type_of(lhs);
-        let rhs_ty = self.type_of(rhs);
-        let (hir::Type::Relation(lhs_heading), hir::Type::Relation(rhs_heading)) =
-            (&lhs_ty, &rhs_ty)
-        else {
-            unreachable!("sema matches only relations");
-        };
-        let common = common_attributes(lhs_heading, rhs_heading, cx);
-        let common_count = usize_constant(len(common.len()), cx);
+    ) -> (lir::Place, Order) {
         let narrowed = if negated {
             None
         } else {
             self.closure_matched(lhs, rhs, cx)
         };
-        let (lhs_place, rhs_place) = match narrowed {
-            // On one attribute, those are the tuples that have a match.
-            Some((closure, other)) if common.len() == 1 => {
-                self.operand_read(rhs, &other, &rhs_ty, cx);
-                return closure;
-            }
-            Some(places) => places,
-            None => (self.place(lhs, cx), self.place(rhs, cx)),
-        };
+        let (left, right, (lhs_place, lhs_order), (rhs_place, rhs_order)) =
+            if let Some((closure, other)) = narrowed {
+                let (left, right) = (self.view_as_it_is(lhs), self.view_as_it_is(rhs));
+                // On one attribute, those are the tuples that have a match.
+                if common_attributes(&left.shape, &right.shape, cx).len() == 1 {
+                    self.operand_read(rhs, &other, &right.ty, cx);
+                    return (closure, Order::Canonical);
+                }
+                (
+                    left,
+                    right,
+                    (closure, Order::Canonical),
+                    (other, Order::Canonical),
+                )
+            } else {
+                let (left, right) = (self.operand_view(lhs, want), self.operand_view(rhs, want));
+                let lhs_given = self.given(left.inner, want, cx);
+                let rhs_given = self.given(right.inner, want, cx);
+                (left, right, lhs_given, rhs_given)
+            };
+        let common = common_attributes(&left.shape, &right.shape, cx);
+        let common_count = usize_constant(len(common.len()), cx);
         let negated = usize_constant(u64::from(negated), cx);
         let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
             lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
         };
-        let dst = self.slot(cx.layout(&lhs_ty));
+        let dst = self.slot(cx.layout(&left.ty));
         let args = vec![
             dst.clone(),
             lhs_place.clone(),
             rhs_place.clone(),
-            descriptor(&lhs_ty, cx),
-            descriptor(&rhs_ty, cx),
+            descriptor(&left.ty, cx),
+            descriptor(&right.ty, cx),
             lir::Place::whole(lir::Base::Data(cx.constant(common))),
             common_count,
             negated,
+            orders_constant(lhs_order, rhs_order, Order::Canonical, cx),
         ];
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Matching,
             args,
         });
         self.scoped = true;
-        self.operand_read(lhs, &lhs_place, &lhs_ty, cx);
-        self.operand_read(rhs, &rhs_place, &rhs_ty, cx);
-        dst
+        self.operand_read(left.inner, &lhs_place, &left.ty, cx);
+        self.operand_read(right.inner, &rhs_place, &right.ty, cx);
+        if left.shape.is_as_laid_out() {
+            return (dst, lhs_order);
+        }
+        let reshaped = self.reshape(
+            &left.ty,
+            &left.named,
+            &left.shape.positions(),
+            dst.clone(),
+            want,
+            cx,
+        );
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&left.ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::DropOperand,
+            args: vec![dst, descriptor],
+        });
+        (reshaped, want)
     }
 
     /// The relations `lhs` and `rhs`, of the same attributes, combined as
@@ -6958,42 +7622,74 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// `lhs` and `rhs` joined, computed into a new stack slot: the AND of
-    /// relations, by the runtime, or the join of tuples.
-    fn joined(&mut self, lhs: &hir::Expr, rhs: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+    /// relations, by the runtime, or the join of tuples, and how its tuples are ordered, as
+    /// `want` says, unless they are in canonical order all the same. An operand is read
+    /// through any renames around it, so that none of its tuples move, and in any order.
+    fn joined(
+        &mut self,
+        lhs: &hir::Expr,
+        rhs: &hir::Expr,
+        want: Order,
+        cx: &mut Lowering,
+    ) -> (lir::Place, Order) {
         if let Some((operand, key)) = self
             .lookup_in(lhs, rhs)
             .or_else(|| self.lookup_in(rhs, lhs))
         {
-            return self.looked_up(operand, key, cx);
+            return (self.looked_up(operand, key, cx), Order::Canonical);
         }
         let lhs_ty = self.type_of(lhs);
         let rhs_ty = self.type_of(rhs);
+        if let hir::Type::Tuple(_) = lhs_ty {
+            let (lhs_place, rhs_place) = (self.place(lhs, cx), self.place(rhs, cx));
+            let dst = self.tuple_join(&lhs_ty, &rhs_ty, &lhs_place, &rhs_place, cx);
+            return (dst, Order::Canonical);
+        }
         // A relation of only the attribute a closure's tuples were found by adds
         // nothing to them, and keeps no others.
         let is_one_attribute = |ty: &hir::Type| matches!(ty, hir::Type::Relation(heading) if heading.attributes().count() == 1);
-        let (lhs_place, rhs_place) =
+        let canonical = |place: lir::Place| (place, Order::Canonical);
+        let (left, right, lhs_given, rhs_given) =
             if let Some((closure, other)) = self.closure_matched(lhs, rhs, cx) {
                 if is_one_attribute(&rhs_ty) {
                     self.operand_read(rhs, &other, &rhs_ty, cx);
-                    return closure;
+                    return (closure, Order::Canonical);
                 }
-                (closure, other)
+                let (left, right) = (self.view_as_it_is(lhs), self.view_as_it_is(rhs));
+                (left, right, canonical(closure), canonical(other))
             } else if let Some((closure, other)) = self.closure_matched(rhs, lhs, cx) {
                 if is_one_attribute(&lhs_ty) {
                     self.operand_read(lhs, &other, &lhs_ty, cx);
-                    return closure;
+                    return (closure, Order::Canonical);
                 }
-                (other, closure)
+                let (left, right) = (self.view_as_it_is(lhs), self.view_as_it_is(rhs));
+                (left, right, canonical(other), canonical(closure))
             } else {
-                (self.place(lhs, cx), self.place(rhs, cx))
+                let (left, right) = (self.operand_view(lhs, want), self.operand_view(rhs, want));
+                let lhs_given = self.given(left.inner, want, cx);
+                let rhs_given = self.given(right.inner, want, cx);
+                (left, right, lhs_given, rhs_given)
             };
-        if let hir::Type::Tuple(_) = lhs_ty {
-            return self.tuple_join(&lhs_ty, &rhs_ty, &lhs_place, &rhs_place, cx);
+        let (lhs_place, rhs_place) = (lhs_given.0.clone(), rhs_given.0.clone());
+        let joined = self.and(&left, &right, lhs_given, rhs_given, want, cx);
+        self.operand_read(left.inner, &lhs_place, &left.ty, cx);
+        self.operand_read(right.inner, &rhs_place, &right.ty, cx);
+        joined
+    }
+
+    /// `expr`, computed as it is, with nothing read through a rename.
+    fn view_as_it_is<'e>(&self, expr: &'e hir::Expr) -> View<'e> {
+        let ty = self.type_of(expr);
+        let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = &ty else {
+            unreachable!("only relations and tuples are joined");
+        };
+        let shape = Shape::plain(heading);
+        View {
+            inner: expr,
+            named: ty.clone(),
+            ty,
+            shape,
         }
-        let dst = self.and(&lhs_ty, &rhs_ty, lhs_place.clone(), rhs_place.clone(), cx);
-        self.operand_read(lhs, &lhs_place, &lhs_ty, cx);
-        self.operand_read(rhs, &rhs_place, &rhs_ty, cx);
-        dst
     }
 
     /// Whether the AND of `operand` and `other` is a lookup in `operand` (see
@@ -7046,7 +7742,12 @@ impl<'a> FunctionBuilder<'a> {
         };
         let key_ty = hir::Type::Relation(key_heading.clone());
         let result_ty = rel_ty.and(&key_ty);
-        let joining = Joining::of(rel_heading, &key_heading, &result_ty, cx);
+        let joining = Joining::of(
+            &Shape::plain(rel_heading),
+            &Shape::plain(&key_heading),
+            &result_ty,
+            cx,
+        );
         let on: Vec<String> = rel_heading.common(&key_heading).into_iter().collect();
         let (kept, index) = self.lookup(operand, on, &rel_ty, &joining, cx);
         let key = self.place(key, cx);
@@ -7637,21 +8338,15 @@ struct Joining {
 }
 
 impl Joining {
-    fn of(
-        lhs: &hir::Heading,
-        rhs: &hir::Heading,
-        result: &hir::Type,
-        cx: &mut Lowering,
-    ) -> Joining {
-        let lhs_tuple = cx.layout(&hir::Type::Tuple(lhs.clone()));
-        let rhs_tuple = cx.layout(&hir::Type::Tuple(rhs.clone()));
-        let position =
-            |heading: &hir::Heading, name: &str| heading.attributes().position(|(a, _)| a == name);
+    fn of(lhs: &Shape, rhs: &Shape, result: &hir::Type, cx: &mut Lowering) -> Joining {
+        let lhs_tuple = cx.layout(&hir::Type::Tuple(lhs.physical.clone()));
+        let rhs_tuple = cx.layout(&hir::Type::Tuple(rhs.physical.clone()));
         let sources = attribute_names(result)
             .map(|name| {
-                let (from_rhs, offset) = position(lhs, name).map_or_else(
+                let (from_rhs, offset) = lhs.position(name).map_or_else(
                     || {
-                        let i = position(rhs, name)
+                        let i = rhs
+                            .position(name)
                             .expect("each attribute of the result is an operand's");
                         (1, lir::Field::Offset(rhs_tuple.clone(), vec![i]))
                     },
@@ -7673,23 +8368,33 @@ impl Joining {
     }
 }
 
-/// For each attribute the relations with `lhs` and `rhs` have in common, a
-/// struct of its offset in a tuple of each and the address of its type's
+/// For each attribute the relations read as `lhs` and `rhs` have in common, by the name
+/// it is read by, a struct of its offset in a tuple of each and the address of its type's
 /// descriptor, as the runtime's joins take them.
-fn common_attributes(lhs: &hir::Heading, rhs: &hir::Heading, cx: &mut Lowering) -> Vec<lir::Field> {
-    let lhs_tuple = cx.layout(&hir::Type::Tuple(lhs.clone()));
-    let rhs_tuple = cx.layout(&hir::Type::Tuple(rhs.clone()));
-    lhs.attributes()
-        .enumerate()
-        .filter_map(|(i, (name, ty))| {
-            let j = rhs.attributes().position(|(a, _)| a == name)?;
+fn common_attributes(lhs: &Shape, rhs: &Shape, cx: &mut Lowering) -> Vec<lir::Field> {
+    let lhs_tuple = cx.layout(&hir::Type::Tuple(lhs.physical.clone()));
+    let rhs_tuple = cx.layout(&hir::Type::Tuple(rhs.physical.clone()));
+    let types: Vec<&hir::Type> = lhs.physical.attributes().map(|(_, ty)| ty).collect();
+    lhs.names
+        .keys()
+        .filter_map(|name| {
+            let (i, j) = (lhs.position(name)?, rhs.position(name)?);
             Some(lir::Field::Struct(vec![
                 lir::Field::Offset(lhs_tuple.clone(), vec![i]),
                 lir::Field::Offset(rhs_tuple.clone(), vec![j]),
-                lir::Field::Address(cx.descriptor(ty)),
+                lir::Field::Address(cx.descriptor(types[i])),
             ]))
         })
         .collect()
+}
+
+/// The constant of the runtime's `LOOSE_` bits for an operation of operands in the orders
+/// `lhs` and `rhs`, whose result is to be in the order `result`.
+fn orders_constant(lhs: Order, rhs: Order, result: Order, cx: &mut Lowering) -> lir::Place {
+    let bit = |order: Order, bit: u64| if order == Order::Loose { bit } else { 0 };
+    let orders =
+        bit(lhs, lir::LOOSE_LHS) | bit(rhs, lir::LOOSE_RHS) | bit(result, lir::LOOSE_RESULT);
+    usize_constant(orders, cx)
 }
 
 /// The relation whose transitive closure `expr` is, if it is one.
@@ -7701,6 +8406,24 @@ fn arcs_of_closure(mut expr: &hir::Expr) -> Option<&hir::Expr> {
         hir::Expr::Tclose(arcs) => Some(arcs),
         _ => None,
     }
+}
+
+/// Whether removing `names` from the relation `view` reads can't make two of its tuples
+/// equal: it is an `extend` that wraps each tuple whole in an attribute that stays, as the
+/// argument of a `per` parameter is (see [`hir::wrapped`]).
+fn keeps_tuples_apart(view: &View<'_>, names: &BTreeSet<String>) -> bool {
+    let mut inner = view.inner;
+    while let hir::Expr::At(_, within) = inner {
+        inner = within;
+    }
+    let hir::Expr::Extend(_, _, attributes) = inner else {
+        return false;
+    };
+    attributes.iter().any(|(name, value)| {
+        hir::is_wrapped(name)
+            && !names.contains(name)
+            && matches!(value, hir::Expr::Tuple(_) | hir::Expr::Constant(_))
+    })
 }
 
 /// A constant of `layout` with every byte zero, as a place: a value whose
@@ -9706,8 +10429,8 @@ mod tests {
         assert_eq!(args[0], slot);
         assert_eq!(
             args.len(),
-            9,
-            "dst, the operands, three descriptors, the sources and the common attributes"
+            10,
+            "dst, the operands, three descriptors, the sources, the common attributes and the orders"
         );
         let descriptors: Vec<_> = args[3..6].iter().map(|a| &a.base).collect();
         assert!(

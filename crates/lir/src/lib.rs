@@ -105,6 +105,30 @@ pub struct Program {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionId(pub usize);
 
+impl Program {
+    /// Whether it puts a relation it left in no particular order into canonical order
+    /// ([`RuntimeFn::PutInOrder`]). That gives the right answer, so [`Function::loose_read`]
+    /// allows it, but it is a mistake: lowering leaves a relation so only if nothing goes on to
+    /// want it in order, as it costs a sort that keeping it in order would have saved, each time
+    /// it is read.
+    #[must_use]
+    pub fn sorts_what_it_left_unsorted(&self) -> bool {
+        self.functions
+            .iter()
+            .flat_map(|function| &function.blocks)
+            .flat_map(|block| &block.insts)
+            .any(|inst| {
+                matches!(
+                    inst,
+                    Inst::CallRuntime {
+                        function: RuntimeFn::PutInOrder,
+                        ..
+                    }
+                )
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     /// Unique within the program; codegen derives the symbol from it.
@@ -148,22 +172,56 @@ impl Function {
                 derived.push((*address, *of));
             }
         }
+        self.first_found(
+            |inst, released, found| inst.released(released, &derived, found),
+            |place, released, found| read_of(place, released, found),
+        )
+    }
+
+    /// A slot holding a loose relation, one whose tuples are in no particular order, given
+    /// to something that could depend on their being in canonical order, on some way through
+    /// the function, and the block that does so. Of equal relations, only arrays in canonical
+    /// order are equal, and merges, binary searches and what depends on them are wrong of
+    /// anything else, with nothing to say so.
+    ///
+    /// So a loose relation can only be read by what says it can read one: compiled code
+    /// going through its tuples or reading its count, what just holds it, and what
+    /// `Inst::loosely` lists. Anything else fails this, so a new reader of relations can't
+    /// be given one by mistake. Tuples compiled code fills are loose unless it says
+    /// otherwise, so one that forgets to say fails this, rather than being trusted. `data` is
+    /// the program's, for the flags a call has been given.
+    #[must_use]
+    pub fn loose_read(&self, data: &[Data]) -> Option<(BlockId, SlotId)> {
+        self.first_found(
+            |inst, loose, found| inst.loosely(loose, data, found),
+            |place, loose, found| read_loosely(place, loose, found),
+        )
+    }
+
+    /// The first slot `step` or `end` finds, going through each way through the function
+    /// with a set of slots that `step` keeps as each instruction goes by, and `end` reads
+    /// for each place the block's terminator reads, and the block that is in.
+    fn first_found(
+        &self,
+        step: impl Fn(&Inst, &mut BTreeSet<SlotId>, &mut dyn FnMut(SlotId)),
+        end: impl Fn(&Place, &BTreeSet<SlotId>, &mut dyn FnMut(SlotId)),
+    ) -> Option<(BlockId, SlotId)> {
         let mut entering: Vec<Option<BTreeSet<SlotId>>> = vec![None; self.blocks.len()];
         entering[0] = Some(BTreeSet::new());
         let mut waiting = vec![BlockId(0)];
         while let Some(at) = waiting.pop() {
             let block = &self.blocks[at.0];
-            let mut released = entering[at.0].clone().unwrap_or_default();
+            let mut slots = entering[at.0].clone().unwrap_or_default();
             // What fails can do so anywhere in the block.
-            let mut ever = released.clone();
+            let mut ever = slots.clone();
             let mut found = None;
             for inst in &block.insts {
-                inst.released(&mut released, &derived, &mut |slot| found = Some(slot));
-                ever.extend(released.iter().copied());
+                step(inst, &mut slots, &mut |slot| found = Some(slot));
+                ever.extend(slots.iter().copied());
             }
             block
                 .terminator
-                .each_read(&mut |place| read_of(place, &released, &mut |slot| found = Some(slot)));
+                .each_read(&mut |place| end(place, &slots, &mut |slot| found = Some(slot)));
             if let Some(slot) = found {
                 return Some((at, slot));
             }
@@ -171,7 +229,7 @@ impl Function {
                 .terminator
                 .successors()
                 .into_iter()
-                .map(|next| (next, &released))
+                .map(|next| (next, &slots))
                 .chain(block.failure.map(|next| (next, &ever)))
             {
                 let known = &mut entering[next.0];
@@ -189,8 +247,39 @@ impl Function {
     }
 }
 
+/// `found` with the slot `place` reads, if it holds a loose relation among `loose`, and
+/// this is anything but its count, which is true of it in any order.
+fn read_loosely(place: &Place, loose: &BTreeSet<SlotId>, found: &mut dyn FnMut(SlotId)) {
+    if let Base::Slot(slot) = &place.base
+        && loose.contains(slot)
+        && place.path != [1]
+    {
+        found(*slot);
+    }
+}
+
+/// The flags in the [`Field::Usize`] constant at `place`, or none if it isn't one.
+fn flags_at(place: Option<&Place>, data: &[Data]) -> u64 {
+    if let Some(Place {
+        base: Base::Data(id),
+        ..
+    }) = place
+        && let Some(Field::Usize(flags)) = data.get(id.0).and_then(|data| data.fields.first())
+    {
+        return *flags;
+    }
+    0
+}
+
+/// As for `trendy_runtime::LOOSE_LHS`.
+pub const LOOSE_LHS: u64 = 1;
+/// As for `trendy_runtime::LOOSE_RHS`.
+pub const LOOSE_RHS: u64 = 2;
+/// As for `trendy_runtime::LOOSE_RESULT`.
+pub const LOOSE_RESULT: u64 = 4;
+
 /// `found` with the slot `place` reads, if it is among `released`.
-fn read_of(place: &Place, released: &BTreeSet<SlotId>, found: &mut impl FnMut(SlotId)) {
+fn read_of(place: &Place, released: &BTreeSet<SlotId>, found: &mut dyn FnMut(SlotId)) {
     let slot = match &place.base {
         Base::Slot(slot) | Base::Indirect { slot, .. } => *slot,
         Base::Data(_) | Base::Params | Base::Result => return,
@@ -645,7 +734,7 @@ pub enum RuntimeFn {
     /// reference to what each of its tuples or elements points to, which
     /// it then holds.
     Adopt,
-    /// `trendy_rt_reshape(dst, src, result, source, offsets)`: store at
+    /// `trendy_rt_reshape(dst, src, result, source, offsets, orders)`: store at
     /// `dst` the relation `src` with its tuples reshaped into the
     /// attributes the descriptor `result` describes, sorted canonically and
     /// without duplicates, in memory the statement owns. `source` is the descriptor of `src`, and
@@ -660,7 +749,7 @@ pub enum RuntimeFn {
     /// owns.
     Relation,
     /// `trendy_rt_and(dst, lhs, rhs, result, lhs_desc, rhs_desc, sources,
-    /// common, common_count)`: store at `dst` the relation, of the type the
+    /// common, common_count, orders)`: store at `dst` the relation, of the type the
     /// descriptor `result` describes, of every tuple made of a tuple of
     /// `lhs` and one of `rhs` that agree on their common attributes
     /// (Algebra A's AND), sorted canonically, in memory the statement owns. `lhs_desc` and `rhs_desc`
@@ -712,10 +801,10 @@ pub enum RuntimeFn {
     /// [`Field::Size`] of its relation's tuples.
     Ungroup,
     /// `trendy_rt_matching(dst, lhs, rhs, lhs_desc, rhs_desc, common,
-    /// common_count, negated)`: store at `dst` the relation of the tuples
+    /// common_count, negated, orders)`: store at `dst` the relation of the tuples
     /// of `lhs` that have a match in `rhs` on their common attributes, or,
-    /// if `negated` (a [`Field::Usize`]) is 1, those that have none, sorted
-    /// canonically, in memory the statement owns. The other arguments are
+    /// if `negated` (a [`Field::Usize`]) is 1, those that have none, in the order they
+    /// are in `lhs`, in memory the statement owns. The other arguments are
     /// as for [`RuntimeFn::And`]'s.
     Matching,
     /// `trendy_rt_tclose(dst, src, descriptor)`: store at `dst` the
@@ -755,6 +844,11 @@ pub enum RuntimeFn {
     /// buffer that only the statement holds, whose elements can be changed
     /// in place.
     Duplicate,
+    /// `trendy_rt_put_in_order(relation, descriptor)`: put the loose relation at
+    /// `relation`, whose tuples hold references to what they point to, in canonical
+    /// order, in its own buffer if only the statement's scope holds that, and otherwise
+    /// in a copy (see [`Function::loose_read`]).
+    PutInOrder,
     /// `trendy_rt_sort(relation, descriptor)`: replace the relation at
     /// `relation`, of the type the descriptor describes, with one of its
     /// tuples in the canonical order, without duplicates, in memory the
@@ -818,7 +912,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 93] = [
+    pub const ALL: [RuntimeFn; 94] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -905,6 +999,7 @@ impl RuntimeFn {
         RuntimeFn::Unique,
         RuntimeFn::Duplicate,
         RuntimeFn::Sort,
+        RuntimeFn::PutInOrder,
         RuntimeFn::Load,
         RuntimeFn::Unload,
         RuntimeFn::CompareText,
@@ -969,6 +1064,7 @@ impl RuntimeFn {
             | RuntimeFn::Unique
             | RuntimeFn::Duplicate
             | RuntimeFn::Sort
+            | RuntimeFn::PutInOrder
             | RuntimeFn::Load
             | RuntimeFn::Unload
             | RuntimeFn::Assign => true,
@@ -1112,6 +1208,7 @@ impl RuntimeFn {
             RuntimeFn::Unique => "trendy_rt_unique",
             RuntimeFn::Duplicate => "trendy_rt_duplicate",
             RuntimeFn::Sort => "trendy_rt_sort",
+            RuntimeFn::PutInOrder => "trendy_rt_put_in_order",
             RuntimeFn::Load => "trendy_rt_load",
             RuntimeFn::Unload => "trendy_rt_unload",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
@@ -1177,6 +1274,14 @@ pub enum Inst {
         index: Place,
         element: Layout,
     },
+    /// The relation in the slot `relation`, just given room for tuples compiled code
+    /// fills, is in no particular order. No code: this says so for
+    /// [`Function::loose_read`], for which only [`RuntimeFn::Sort`] or
+    /// [`Inst::InOrderOf`] can then say otherwise.
+    InAnyOrder(Place),
+    /// The tuples of the relation `dst` are in the order they are in the relation `src`,
+    /// which compiled code has read them from. No code, as for [`Inst::InAnyOrder`].
+    InOrderOf { dst: Place, src: Place },
     /// Whether the address at `src` is null, as a slot's is once
     /// [`RuntimeFn::Release`] has made it zero, or before anything has been made for
     /// it: the one read of such a slot that means what it says.
@@ -1707,7 +1812,7 @@ impl Inst {
         &self,
         released: &mut BTreeSet<SlotId>,
         derived: &[(SlotId, SlotId)],
-        found: &mut impl FnMut(SlotId),
+        found: &mut dyn FnMut(SlotId),
     ) {
         if let Inst::CallRuntime {
             function: RuntimeFn::Release,
@@ -1745,10 +1850,121 @@ impl Inst {
         }
     }
 
+    /// What the instruction does to `loose`, the slots holding loose relations, as
+    /// [`Function::loose_read`] says: `found` with each it reads in a way that could depend
+    /// on their order. `data` is the program's.
+    fn loosely(&self, loose: &mut BTreeSet<SlotId>, data: &[Data], found: &mut dyn FnMut(SlotId)) {
+        let whole_slot = |place: &Place| match (&place.base, place.path.is_empty()) {
+            (Base::Slot(slot), true) => Some(*slot),
+            _ => None,
+        };
+        let says = |loose: &mut BTreeSet<SlotId>, place: Option<&Place>, is_loose: bool| {
+            if let Some(slot) = place.and_then(whole_slot) {
+                if is_loose {
+                    loose.insert(slot);
+                } else {
+                    loose.remove(&slot);
+                }
+            }
+        };
+        match self {
+            Inst::InAnyOrder(relation) => says(loose, Some(relation), true),
+            Inst::InOrderOf { dst, src } => {
+                let is_loose = whole_slot(src).is_some_and(|slot| loose.contains(&slot));
+                says(loose, Some(dst), is_loose);
+            }
+            Inst::Copy { dst, src, .. } => {
+                let is_loose = whole_slot(src).is_some_and(|slot| loose.contains(&slot));
+                // Into a tuple, an argument or a result, where nothing says what it is.
+                if !is_loose || whole_slot(dst).is_none() {
+                    read_loosely(src, loose, found);
+                }
+                says(loose, Some(dst), is_loose);
+            }
+            // Going through its tuples, in the order they are in.
+            Inst::Element { dst, index, .. } => {
+                read_loosely(index, loose, found);
+                says(loose, Some(dst), false);
+            }
+            Inst::CallRuntime { function, args } => match function {
+                // They hold it and give it up, or are exact, and so the same in any order
+                // (`trendy_numeric`).
+                RuntimeFn::Retain
+                | RuntimeFn::Keep
+                | RuntimeFn::DropOperand
+                | RuntimeFn::Adopt
+                | RuntimeFn::Sum
+                | RuntimeFn::Product => {}
+                RuntimeFn::Release | RuntimeFn::Sort | RuntimeFn::PutInOrder => {
+                    says(loose, args.first(), false);
+                }
+                RuntimeFn::And | RuntimeFn::Matching => {
+                    let orders = flags_at(args.last(), data);
+                    for (arg, flag) in [(args.get(1), LOOSE_LHS), (args.get(2), LOOSE_RHS)] {
+                        if orders & flag == 0
+                            && let Some(arg) = arg
+                        {
+                            read_loosely(arg, loose, found);
+                        }
+                    }
+                    // A semijoin's tuples are in the order they are in its left operand.
+                    let result = if *function == RuntimeFn::And {
+                        LOOSE_RESULT
+                    } else {
+                        LOOSE_LHS
+                    };
+                    says(loose, args.first(), orders & result != 0);
+                }
+                // It takes a reference to the tuples, in the order they are in: only a local
+                // variable's slot can say that of them, not a variable of the program.
+                RuntimeFn::Assign => {
+                    let (dst, src) = (args.first(), args.get(1));
+                    let is_loose = src
+                        .and_then(whole_slot)
+                        .is_some_and(|slot| loose.contains(&slot));
+                    if let Some(src) = src.filter(|_| dst.and_then(whole_slot).is_none()) {
+                        read_loosely(src, loose, found);
+                    }
+                    says(loose, dst, is_loose);
+                }
+                // It gives its first argument new memory, whatever was there before: the
+                // last time round a loop.
+                RuntimeFn::Allocate => {
+                    for arg in args.iter().skip(1) {
+                        read_loosely(arg, loose, found);
+                    }
+                    says(loose, args.first(), false);
+                }
+                // It makes its tuples anew: sorting them, or leaving them as they come.
+                RuntimeFn::Reshape => {
+                    says(
+                        loose,
+                        args.first(),
+                        flags_at(args.last(), data) & LOOSE_RESULT != 0,
+                    );
+                }
+                _ => {
+                    for arg in args {
+                        read_loosely(arg, loose, found);
+                    }
+                }
+            },
+            _ => {
+                let (reads, written) = self.reads_and_write();
+                for place in reads {
+                    read_loosely(place, loose, found);
+                }
+                says(loose, written, false);
+            }
+        }
+    }
+
     /// The places the instruction reads, and the one it writes, if it does.
     fn reads_and_write(&self) -> (Vec<&Place>, Option<&Place>) {
         match self {
-            Inst::CheckStack | Inst::Site(_) => (Vec::new(), None),
+            Inst::CheckStack | Inst::Site(_) | Inst::InAnyOrder(_) | Inst::InOrderOf { .. } => {
+                (Vec::new(), None)
+            }
             Inst::Copy { dst, src, .. }
             | Inst::Unary { dst, src, .. }
             | Inst::Widen { dst, src, .. }
@@ -2159,6 +2375,283 @@ mod tests {
                 block(vec![copy(slot(2), slot(0))], Terminator::Failed),
             ]),
             Some((1, 0))
+        );
+    }
+
+    /// The constant of `flags` at data 0, for what gives a loose relation or takes one.
+    fn flagged(flags: u64) -> Vec<Data> {
+        vec![Data {
+            kind: DataKind::Constant,
+            writable: false,
+            fields: vec![Field::Usize(flags)],
+        }]
+    }
+
+    /// A call of `function` with `dst` and `operands`, ending in the flags at data 0.
+    fn with_flags(function: RuntimeFn, dst: usize, lhs: usize, rhs: usize) -> Inst {
+        Inst::CallRuntime {
+            function,
+            args: vec![
+                slot(dst),
+                slot(lhs),
+                slot(rhs),
+                Place {
+                    base: Base::Data(DataId(0)),
+                    path: vec![0],
+                },
+            ],
+        }
+    }
+
+    fn runtime(function: RuntimeFn, args: Vec<Place>) -> Inst {
+        Inst::CallRuntime { function, args }
+    }
+
+    fn loose_in(insts: Vec<Inst>, flags: u64) -> Option<(usize, usize)> {
+        function(vec![block(insts, Terminator::Return)])
+            .loose_read(&flagged(flags))
+            .map(|(block, slot)| (block.0, slot.0))
+    }
+
+    #[test]
+    fn what_depends_on_order_is_not_given_a_loose_relation() {
+        let made = || with_flags(RuntimeFn::And, 0, 1, 2);
+        let found = Some((0, 0));
+        // By anything not known to take one, whatever it is.
+        for function in [
+            RuntimeFn::Combine,
+            RuntimeFn::EqualRun,
+            RuntimeFn::Index,
+            RuntimeFn::Tclose,
+            RuntimeFn::DebugValue,
+        ] {
+            let read = runtime(function, vec![slot(3), slot(0)]);
+            assert_eq!(
+                loose_in(vec![made(), read], LOOSE_RESULT),
+                found,
+                "{function:?}"
+            );
+        }
+        // Assigned to what isn't a local variable's slot, as a variable of the program is.
+        let assigned = runtime(RuntimeFn::Assign, vec![part(3), slot(0)]);
+        assert_eq!(loose_in(vec![made(), assigned], LOOSE_RESULT), found);
+        // Read in order once it is assigned to a local variable, which goes on being loose.
+        let assigned = runtime(RuntimeFn::Assign, vec![slot(3), slot(0)]);
+        let read = runtime(RuntimeFn::Combine, vec![slot(4), slot(3)]);
+        assert_eq!(
+            loose_in(vec![made(), assigned, read], LOOSE_RESULT),
+            Some((0, 3))
+        );
+        // As an operand it doesn't say it takes in any order.
+        let joined = with_flags(RuntimeFn::And, 3, 0, 4);
+        assert_eq!(loose_in(vec![made(), joined], LOOSE_RESULT), found);
+        let semi = with_flags(RuntimeFn::Matching, 3, 4, 0);
+        assert_eq!(loose_in(vec![made(), semi], LOOSE_RESULT), found);
+        // Into what nothing says the order of.
+        let into_field = copy(part(3), slot(0));
+        assert_eq!(loose_in(vec![made(), into_field], LOOSE_RESULT), found);
+        let into_result = copy(Place::whole(Base::Result), slot(0));
+        assert_eq!(loose_in(vec![made(), into_result], LOOSE_RESULT), found);
+        // Its pointer, and its address, as what could go on to read it in order.
+        let pointer = Place {
+            base: Base::Slot(SlotId(0)),
+            path: vec![0],
+        };
+        assert_eq!(
+            loose_in(vec![made(), copy(slot(3), pointer)], LOOSE_RESULT),
+            found
+        );
+        let address = Inst::Address {
+            dst: slot(3),
+            src: slot(0),
+        };
+        assert_eq!(loose_in(vec![made(), address], LOOSE_RESULT), found);
+        // Through another slot, as it is still what it was.
+        let read = runtime(RuntimeFn::Combine, vec![slot(4), slot(3)]);
+        assert_eq!(
+            loose_in(vec![made(), copy(slot(3), slot(0)), read], LOOSE_RESULT),
+            Some((0, 3))
+        );
+        // By a call, or what the function ends with.
+        let call = Inst::Call {
+            function: FunctionId(0),
+            args: Some(slot(0)),
+            result: None,
+        };
+        assert_eq!(loose_in(vec![made(), call], LOOSE_RESULT), found);
+        let tail = Terminator::TailCall {
+            function: FunctionId(0),
+            args: Some(slot(0)),
+        };
+        assert_eq!(
+            function(vec![block(vec![made()], tail)])
+                .loose_read(&flagged(LOOSE_RESULT))
+                .map(|(block, slot)| (block.0, slot.0)),
+            found
+        );
+    }
+
+    #[test]
+    fn what_takes_a_loose_relation_says_so() {
+        let made = || with_flags(RuntimeFn::And, 0, 1, 2);
+        let flags = LOOSE_RESULT | LOOSE_LHS | LOOSE_RHS;
+        // Joins and semijoins, of what they are told is loose, either way round.
+        for reader in [
+            with_flags(RuntimeFn::And, 3, 0, 4),
+            with_flags(RuntimeFn::And, 3, 4, 0),
+            with_flags(RuntimeFn::Matching, 3, 0, 4),
+            with_flags(RuntimeFn::Matching, 3, 4, 0),
+            // What makes its tuples anew, sorted or not, and what is true in any order.
+            runtime(
+                RuntimeFn::Reshape,
+                vec![
+                    slot(3),
+                    slot(0),
+                    Place {
+                        base: Base::Data(DataId(0)),
+                        path: vec![0],
+                    },
+                ],
+            ),
+            runtime(RuntimeFn::Sum, vec![slot(3), slot(0)]),
+            runtime(RuntimeFn::Product, vec![slot(3), slot(0)]),
+            // What only holds it.
+            runtime(RuntimeFn::Retain, vec![slot(0)]),
+            runtime(RuntimeFn::Keep, vec![slot(0)]),
+            runtime(RuntimeFn::DropOperand, vec![slot(0)]),
+            runtime(RuntimeFn::Adopt, vec![slot(0)]),
+            // Going through its tuples, and its count.
+            Inst::Element {
+                dst: slot(3),
+                array: slot(0),
+                index: slot(4),
+                element: Layout::I64,
+            },
+            copy(slot(3), part(0)),
+            copy(slot(3), slot(0)),
+        ] {
+            assert_eq!(
+                loose_in(vec![made(), reader.clone()], flags),
+                None,
+                "{reader:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_what_puts_a_relation_in_order_says_it_is() {
+        let made = || with_flags(RuntimeFn::And, 0, 1, 2);
+        let read = || runtime(RuntimeFn::Combine, vec![slot(4), slot(0)]);
+        // A join told to sort, or not.
+        assert_eq!(loose_in(vec![made(), read()], 0), None);
+        assert_eq!(loose_in(vec![made(), read()], LOOSE_RESULT), Some((0, 0)));
+        // A semijoin's result is as its left operand is.
+        let semi = || with_flags(RuntimeFn::Matching, 0, 1, 2);
+        assert_eq!(loose_in(vec![semi(), read()], LOOSE_RHS), None);
+        assert_eq!(loose_in(vec![semi(), read()], LOOSE_LHS), Some((0, 0)));
+        // A reshape told not to sort.
+        let reshape = |flags_at_end: bool| {
+            let mut args = vec![slot(0), slot(1)];
+            if flags_at_end {
+                args.push(Place {
+                    base: Base::Data(DataId(0)),
+                    path: vec![0],
+                });
+            }
+            runtime(RuntimeFn::Reshape, args)
+        };
+        assert_eq!(loose_in(vec![reshape(true), read()], 0), None);
+        assert_eq!(
+            loose_in(vec![reshape(true), read()], LOOSE_RESULT),
+            Some((0, 0))
+        );
+        // Sorted, or sorted again, or released, or written with what isn't.
+        for fixed in [
+            runtime(RuntimeFn::Sort, vec![slot(0)]),
+            runtime(RuntimeFn::PutInOrder, vec![slot(0)]),
+            release(0),
+            copy(slot(0), slot(7)),
+        ] {
+            assert_eq!(
+                loose_in(vec![made(), fixed.clone(), read()], LOOSE_RESULT),
+                None,
+                "{fixed:?}"
+            );
+        }
+        // What compiled code fills is loose until it says otherwise, or it is sorted.
+        let filled = || Inst::InAnyOrder(slot(0));
+        assert_eq!(loose_in(vec![filled(), read()], 0), Some((0, 0)));
+        let kept = |src| Inst::InOrderOf { dst: slot(0), src };
+        assert_eq!(loose_in(vec![filled(), kept(slot(5)), read()], 0), None);
+        assert_eq!(
+            loose_in(
+                vec![
+                    with_flags(RuntimeFn::And, 5, 1, 2),
+                    filled(),
+                    kept(slot(5)),
+                    read()
+                ],
+                LOOSE_RESULT
+            ),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn a_loose_relation_is_followed_along_every_way_through_the_function() {
+        let made = || with_flags(RuntimeFn::And, 0, 1, 2);
+        let read = || runtime(RuntimeFn::Combine, vec![slot(4), slot(0)]);
+        let jump = |to| Terminator::Jump(BlockId(to));
+        let branch = |then, otherwise| Terminator::Branch {
+            condition: slot(7),
+            then: BlockId(then),
+            otherwise: BlockId(otherwise),
+        };
+        let found_in = |blocks: Vec<Block>| {
+            function(blocks)
+                .loose_read(&flagged(LOOSE_RESULT))
+                .map(|(block, slot)| (block.0, slot.0))
+        };
+        // On one way of two.
+        assert_eq!(
+            found_in(vec![
+                block(vec![], branch(2, 1)),
+                block(vec![made()], jump(3)),
+                block(vec![], jump(3)),
+                block(vec![read()], Terminator::Return),
+            ]),
+            Some((3, 0))
+        );
+        // Round a loop.
+        assert_eq!(
+            found_in(vec![
+                block(vec![], jump(1)),
+                block(vec![read(), made()], branch(1, 2)),
+                block(vec![], Terminator::Return),
+            ]),
+            Some((1, 0))
+        );
+        // Given new memory each time round, it is read as it is then.
+        let allocated = runtime(RuntimeFn::Allocate, vec![slot(0), part(5), slot(6)]);
+        assert_eq!(
+            found_in(vec![
+                block(vec![], jump(1)),
+                block(
+                    vec![
+                        allocated,
+                        Inst::InAnyOrder(slot(0)),
+                        Inst::InOrderOf {
+                            dst: slot(0),
+                            src: slot(8)
+                        },
+                        read(),
+                        Inst::InAnyOrder(slot(0)),
+                    ],
+                    branch(1, 2)
+                ),
+                block(vec![], Terminator::Return),
+            ]),
+            None
         );
     }
 

@@ -1742,6 +1742,25 @@ impl Statement {
         }
     }
 
+    /// The statement with each block in it, not those within them, replaced
+    /// by what `f` makes of it.
+    #[must_use]
+    pub fn map_blocks(self, f: &mut dyn FnMut(Block) -> Block) -> Statement {
+        match self {
+            Statement::If(condition, then, otherwise) => {
+                let then = f(then);
+                Statement::If(condition, then, f(otherwise))
+            }
+            Statement::Loop(condition, body, check) => Statement::Loop(condition, f(body), check),
+            Statement::For(local, array, body) => Statement::For(local, array, f(body)),
+            Statement::Transaction(collecting, body) => Statement::Transaction(collecting, f(body)),
+            statement @ (Statement::Call(_)
+            | Statement::Assign(_)
+            | Statement::Fail(_)
+            | Statement::Warn(_)) => statement,
+        }
+    }
+
     /// What the statement assigns itself, not in the blocks within it or
     /// the operators it calls: each assignment's target, each variable a
     /// call passes to a `var` or `out` parameter, and the variable a
@@ -1929,6 +1948,22 @@ impl Block {
                 block.each_statement(f);
             }
         }
+    }
+
+    /// How many of the block's statements, and those in the blocks within them,
+    /// assign the local variable `id`, however many times they run. One declared
+    /// in the block is assigned where it is declared, so one is the fewest.
+    #[must_use]
+    pub fn times_assigned(&self, id: LocalId) -> usize {
+        let mut times = 0;
+        self.each_statement(&mut |statement| {
+            times += statement
+                .assigns()
+                .iter()
+                .filter(|target| ***target == Target::Local(id))
+                .count();
+        });
+        times
     }
 
     /// What the block's statements assign, in the blocks within them too,
@@ -2941,6 +2976,19 @@ impl Expr {
                 self.for_each_child(|child, _| reads |= child.reads_local(id));
                 reads
             }
+        }
+    }
+
+    /// Whether `child`, one of the expression's, is computed again for each of its tuples, or
+    /// by statements that can run again, rather than once for each time the expression is.
+    #[must_use]
+    pub fn computes_again(&self, child: &Expr) -> bool {
+        match self {
+            Expr::Restrict(operand, _) | Expr::Extend(operand, ..) => {
+                !core::ptr::eq(operand.as_ref(), child)
+            }
+            Expr::Run(..) => true,
+            _ => false,
         }
     }
 

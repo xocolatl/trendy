@@ -124,6 +124,15 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
             ));
         }
     }
+    // Of a relation in no particular order, a merge or a comparison would be wrong, as silently.
+    for function in &lir.functions {
+        if let Some((block, slot)) = function.loose_read(&lir.data) {
+            return Err(format!(
+                "error[X0000]: internal compiler error: `{}` gives a relation in no particular order to what depends on it (slot {}, block {})",
+                function.name, slot.0, block.0
+            ));
+        }
+    }
     let object = trendy_codegen::compile(&lir)
         .map_err(|e| format!("error[X0000]: internal compiler error: {e}"))?;
     link(&object, output)
