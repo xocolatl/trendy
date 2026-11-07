@@ -11718,3 +11718,516 @@ operator main{} [
     assert!(!stderr.contains("amount: -9"), "{stderr}");
     assert!(!stderr.contains("not here"), "{stderr}");
 }
+
+/// Operands for [`joined_as_it_runs`]: `a` is large enough for the order of joining to be chosen
+/// as the program runs, and `one` isn't known when compiling. `keyed` is too large, and not in
+/// order on `z`, to be searched: it is read as it is, so its join with `labels` is in `o`'s order
+/// and left so, with `l` first in its name order, and what takes that to be in order on `l` finds
+/// few of what it should. `of_some` has few of `a`'s tuples, and each of its tuples many of
+/// `fans_out`'s, so `a` is joined first, and then isn't needed, unless what it points to is.
+const SEVERAL_OPERANDS: &str = "
+    var one := 1;
+    const of_some := series{from: 1, to: 20} extend { p := value * 10 * one, fan := value mod 3 } remove {value};
+    const fans_out := series{from: 1, to: 2000} extend { fan := value mod 3 * one, spread := value } remove {value};
+    const keyed := series{from: 1, to: 50000} extend { z := value * one, o := value } remove {value};
+    const labels := series{from: 1, to: 5000} extend { z := value * 3 * one, l := (value * 37) mod 97 } remove {value};
+    const by_label := series{from: 0, to: 96} extend { l := value * one, m := value mod 7 } remove {value};
+    const by_m := series{from: 0, to: 6} extend { m := value * one, n := value } remove {value};
+    const a := series{from: 1, to: 5000} extend { k := value mod 50 * one, p := value } remove {value};
+    const b := series{from: 1, to: 300} extend { k := value mod 50 * one, q := value mod 70 } remove {value};
+    const c := series{from: 1, to: 400} extend { q := value mod 70 * one, s := value } remove {value};
+    const d := series{from: 1, to: 9} extend { s := value * 7 * one, t := to_text{from: value} } remove {value};
+    const e := series{from: 1, to: 3} extend { u := value * one } remove {value};
+    const f := series{from: 1, to: 2} extend { v := value * one } remove {value};
+";
+
+/// Whether lowering `source` leaves the order of joining to be chosen as the program runs.
+fn joined_as_it_runs(source: &str) -> bool {
+    let lowered = trendy_lower::lower(&trendy_opt::optimized(analyze(source)));
+    format!("{lowered:?}").contains("function: Join")
+}
+
+/// Joins of several from [`SEVERAL_OPERANDS`], each with its name, the same operands joined two
+/// at a time, each pair by a `const`, in an order written by hand, which never chooses, and
+/// whether it comes to no tuples.
+const JOINS_OF_SEVERAL: [(&str, &str, &str, bool); 23] = [
+    (
+        "text_only_a_binding_holds",
+        "[ const x := a extend { w := to_text{from: p} }; const y := x; join{y, of_some, fans_out} ]",
+        "const x := a extend { w := to_text{from: p} };
+        const y := x join of_some;
+        y join fans_out",
+        false,
+    ),
+    (
+        "an_operand_left_as_it_comes",
+        "((keyed join labels) rename {o as w}) join by_label join by_m",
+        "const x := (keyed join labels) rename {o as w};
+        const y := by_label join by_m;
+        y join x",
+        false,
+    ),
+    (
+        "text_only_its_operand_holds",
+        "join{with_text{r: a}, of_some, fans_out}",
+        "const x := with_text{r: a};
+        const y := x join of_some;
+        y join fans_out",
+        false,
+    ),
+    (
+        "attributes_of_every_width",
+        "join{a extend { f := k mod 2 = 0, g := x'7f', h := 'x' }, b extend { f := k mod 2 = 0, g := x'7f', i := to_approximate{from: k} }, c}",
+        "const x := a extend { f := k mod 2 = 0, g := x'7f', h := 'x' };
+        const y := b extend { f := k mod 2 = 0, g := x'7f', i := to_approximate{from: k} };
+        const z := x join y;
+        z join c",
+        false,
+    ),
+    (
+        "relation_valued",
+        "join{b group { g := {q} }, a, a rename {p as r}}",
+        "const x := b group { g := {q} };
+        const y := x join a;
+        y join (a rename {p as r})",
+        false,
+    ),
+    (
+        "an_operand_as_it_comes",
+        "((a join b) rename {p as o}) join ((c join d) rename {t as w}) join (e extend { q := u * 7 })",
+        "const x := (a join b) rename {p as o};
+        const y := (c join d) rename {t as w};
+        const z := x join y;
+        z join (e extend { q := u * 7 })",
+        false,
+    ),
+    (
+        "three",
+        "join{a, b, c}",
+        "const x := a join b; x join c",
+        false,
+    ),
+    (
+        "three_from_the_other_end",
+        "join{c, b, a}",
+        "const x := c join b; x join a",
+        false,
+    ),
+    (
+        "four_with_text",
+        "join{a, b, c, d}",
+        "const x := c join d; const y := x join b; y join a",
+        false,
+    ),
+    (
+        "common_text",
+        "join{a extend { w := to_text{from: k} }, b extend { w := to_text{from: k} }, c}",
+        "const x := a extend { w := to_text{from: k} };
+        const y := b extend { w := to_text{from: k} };
+        const z := x join y;
+        z join c",
+        false,
+    ),
+    (
+        "text_carried",
+        "join{a extend { w := to_text{from: p} }, b, c}",
+        "const x := a extend { w := to_text{from: p} };
+        const y := x join b;
+        y join c",
+        false,
+    ),
+    (
+        "renamed",
+        "join{a rename {k as j, p as z}, b rename {k as j}, c rename {s as z}}",
+        "const x := a rename {k as j, p as z};
+        const y := b rename {k as j};
+        const n := x join y;
+        n join (c rename {s as z})",
+        false,
+    ),
+    (
+        "swapped_by_rename",
+        "join{a rename {k as p, p as k}, b rename {k as p, q as w}, c rename {q as w}}",
+        "const x := a rename {k as p, p as k};
+        const y := b rename {k as p, q as w};
+        const n := x join y;
+        n join (c rename {q as w})",
+        false,
+    ),
+    (
+        "same_heading",
+        "(a where p > 10) join a join (a where p < 3000)",
+        "const x := a where p > 10;
+        const y := x join a;
+        y join (a where p < 3000)",
+        false,
+    ),
+    (
+        "one_times_the_rest",
+        "join{a, b, c} times e",
+        "const x := a join b; const y := x join c; y times e",
+        false,
+    ),
+    (
+        "all_times",
+        "times{a, e, f}",
+        "const x := a times e; x times f",
+        false,
+    ),
+    (
+        "two_parts_times",
+        "(a join (b where q = 3)) times ((c join (d where s < 22)) rename {q as w})",
+        "const x := a join (b where q = 3);
+        const y := c join (d where s < 22);
+        x times (y rename {q as w})",
+        false,
+    ),
+    (
+        "guarded_operands",
+        "join{a, b, c} where p > 100 and s < 200",
+        "const x := a where p > 100;
+        const y := x join b;
+        y join (c where s < 200)",
+        false,
+    ),
+    (
+        "guard_across_two_of_four",
+        "join{a, b, c, d} where p < q",
+        "const x := a join b;
+        const y := x where p < q;
+        const z := y join c;
+        z join d",
+        false,
+    ),
+    (
+        "guard_over_the_whole",
+        "join{a, b, c} where p > s",
+        "const x := a join b;
+        const y := x join c;
+        y where p > s",
+        false,
+    ),
+    (
+        "one_empty",
+        "join{a, b where q < 0, c}",
+        "const x := a join (b where q < 0); x join c",
+        true,
+    ),
+    (
+        "none_from_a_join_on_the_way",
+        "join{a, b where q = 1, c where q = 2}",
+        "const x := a join (b where q = 1); x join (c where q = 2)",
+        true,
+    ),
+    (
+        "empty_and_times",
+        "times{a, e where u < 0, f}",
+        "const x := a times (e where u < 0); x times f",
+        true,
+    ),
+];
+
+/// The order of joining several, chosen as the program runs, changes nothing a program can see,
+/// wanted in order or not, and neither does the fixed plan it falls back on with fewer tuples.
+#[test]
+fn a_join_of_several_gives_what_joining_them_by_hand_does() {
+    for (name, several, by_hand, none) in JOINS_OF_SEVERAL {
+        for tuples in ["5000", "1000"] {
+            let source = format!(
+            "operator with_text{{r: relation {{ k: integer, p: integer }}}}: relation {{ k: integer, p: integer, w: text }} [
+    var made := r extend {{ w := to_text{{from: p}} }};
+    made
+];
+
+operator main{{}} [{SEVERAL_OPERANDS}
+    call debug_value{{v: count{{r: {several}}}}};
+    call debug_value{{v: ({several}) = [ {by_hand} ]}};
+    call debug_value{{v: [ {by_hand} ] = ({several})}};
+    call debug_value{{v: count{{r: [ {by_hand} ]}}}};
+];
+"
+        );
+            let source = source.replace("to: 5000", &format!("to: {tuples}"));
+            assert!(joined_as_it_runs(&source), "{name}");
+            let (code, stderr) = run_source(&format!("several_{name}_{tuples}"), &source);
+            assert_eq!(code, 0, "{name}: {stderr}");
+            let lines: Vec<&str> = stderr.lines().collect();
+            assert_eq!(lines.len(), 4, "{name}: {stderr}");
+            assert_eq!(lines[0], lines[3], "{name}");
+            assert_eq!(lines[1..3], ["true", "true"], "{name}");
+            assert_eq!(lines[0] == "0", none, "{name}: {stderr}");
+        }
+    }
+}
+
+/// What a join of several gives is written in canonical order, and each tuple's attributes
+/// where its type has them.
+#[test]
+fn a_join_of_several_writes_what_it_makes() {
+    let (code, stderr) = run_source(
+        "several_written",
+        &format!(
+            "operator main{{}} [{SEVERAL_OPERANDS}
+    call debug_value{{v: join{{a, (b where q = 21) extend {{ p := k }}, c where s = 21, d}}}};
+];
+"
+        ),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr,
+        "relation { k: integer, p: integer, q: integer, s: integer, t: text } { \
+         { k: 11, p: 11, q: 21, s: 21, t: \"3\" }, \
+         { k: 21, p: 21, q: 21, s: 21, t: \"3\" }, \
+         { k: 31, p: 31, q: 21, s: 21, t: \"3\" }, \
+         { k: 41, p: 41, q: 21, s: 21, t: \"3\" } }\n"
+    );
+}
+
+/// A `per` parameter's attributes are read through what wraps each tuple whole, whose names
+/// aren't what the runtime could go by.
+#[test]
+fn a_join_of_several_carries_what_a_per_parameter_wraps() {
+    let (code, stderr) = run_source(
+        "several_per",
+        "operator through{
+            r: any relation,
+            of: integer per r,
+            s: relation { n: integer, x: integer },
+            t: relation { n: integer, y: integer },
+        }: integer [
+            sum{r: join{r extend { n := of }, s, t}, of: of + x + y}
+        ];
+
+        operator on_its_own{
+            r: any relation,
+            of: integer per r,
+            s: relation { n: integer, x: integer },
+            t: relation { n: integer, y: integer },
+        }: relation { n: integer, x: integer, y: integer } [
+            join{r{of} rename {of as n}, s, t}
+        ];
+
+        operator main{} [
+            var one := 1;
+            const a := series{from: 1, to: 6000} extend { p := value * one, q := value mod 7 } remove {value};
+            const s := series{from: 1, to: 6000} extend { n := value * one, x := value mod 3 } remove {value};
+            const t := series{from: 1, to: 20} extend { n := value * 2 * one, y := value } remove {value};
+            call debug_value{v: through{r: a, of: p + q, s, t}};
+            const m := a extend { n := p + q };
+            const j := m join s;
+            const by_hand := j join t;
+            call debug_value{v: sum{r: by_hand, of: n + x + y}};
+            call debug_value{v: on_its_own{r: a, of: p + q, s, t} = by_hand{n, x, y}};
+        ];
+",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 3, "{stderr}");
+    assert_eq!(lines[0], lines[1], "{stderr}");
+    assert_ne!(lines[0], "0", "{stderr}");
+    assert_eq!(lines[2], "true", "{stderr}");
+}
+
+/// An operand a join of several can give up early is no use to anything after it, and one that
+/// goes on being read isn't given up: whichever way it comes to be the last read, and with the
+/// join in a loop, so that a slot is used again.
+#[test]
+fn a_join_of_several_leaves_what_is_read_after_it() {
+    let (code, stderr) = run_source(
+        "several_read_after",
+        &format!(
+            "operator main{{}} [{SEVERAL_OPERANDS}
+    const once := a extend {{ w := p + 1 }};
+    call debug_value{{v: count{{r: join{{once, b, c}}}}}};
+    const kept := a extend {{ w := p + 2 }};
+    call debug_value{{v: count{{r: join{{kept, b, c}}}}}};
+    call debug_value{{v: count{{r: kept}}}};
+    call debug_value{{v: count{{r: join{{kept, kept rename {{ w as y }}, b}}}}}};
+    var i := 0;
+    var total := 0;
+    while i < 3 loop [
+        const each := a extend {{ w := p + i }};
+        total := total + count{{r: join{{each, b, c}}}};
+        i := i + 1;
+    ];
+    call debug_value{{v: total}};
+];
+"
+        ),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 5, "{stderr}");
+    assert_eq!(lines[0], lines[1], "{stderr}");
+    assert_eq!(lines[2], "5000", "{stderr}");
+    let once: u64 = lines[0].parse().unwrap();
+    assert!(once > 0, "{stderr}");
+    assert_eq!(lines[4], (once * 3).to_string(), "{stderr}");
+}
+
+/// Computing the operands first, in the plan's order, leaves the same failure first, however
+/// the join goes on to be ordered.
+#[test]
+fn a_join_of_several_fails_as_the_plan_would() {
+    let (code, stderr) = run_source(
+        "several_fails",
+        &format!(
+            "operator main{{}} [{SEVERAL_OPERANDS}
+    const n := count{{r: e}} - 3;
+    call debug_value{{v: count{{r: join{{a extend {{ w := 1 div n }}, b extend {{ y := 2 div n }}, c}}}}}};
+];
+"
+        ),
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("1 div 0"), "{stderr}");
+    assert!(!stderr.contains("2 div 0"), "{stderr}");
+}
+
+/// A guard across operands comes between two of them, at a place fixed when compiling, and what
+/// it is compiled for has the attributes of those under it, so it stays there, and what it
+/// restricts is one operand of the rest, if any. A condition that reads the whole AND, as one
+/// that can fail does, reads what any order gives. A closure is found from what it is matched with, and a relation of one tuple
+/// can be a lookup. Everything else chooses.
+#[test]
+fn what_cant_be_reordered_keeps_the_plan_fixed_when_compiling() {
+    let program = |several: &str| {
+        format!(
+            "operator main{{}} [{SEVERAL_OPERANDS}
+    call debug_value{{v: count{{r: {several}}}}};
+];
+"
+        )
+    };
+    // The test can fail: each of these is the same but for what the name says.
+    for several in [
+        "join{a, b, c}",
+        "join{a, b, c} where p > 1",
+        "join{a, b, c} where s > 1 and p > 1",
+        "join{a, b, c} where p < s",
+        "join{a, b, c} where p + q < k",
+        "join{a, b, c, d} where p < q",
+    ] {
+        assert!(joined_as_it_runs(&program(several)), "{several}");
+    }
+    for several in [
+        "a join b",
+        "join{a, b, c} where p < q",
+        "join{a, b, c} where p < q and q > k",
+        "join{a, b, relation { { q: one } }}",
+        "join{a, c, (b{k, q}) tclose}",
+    ] {
+        assert!(!joined_as_it_runs(&program(several)), "{several}");
+    }
+}
+
+/// `join{few, big, keys}` and its reverse, for `big` of `LEFT` tuples: joining `big` with `few`
+/// first makes nearly all of them again, and with `keys` first, hardly any. Which is which is
+/// only known as the program runs. What is held at the peak is what the operands hold, either
+/// way round.
+const JOIN_OPERANDS_FOR_MEMORY: &str = "
+    var one := 1;
+    const few := series{from: 1, to: 100} extend { s := value mod 5 * one } remove {value};
+    const big := series{from: 1, to: LEFT} extend { s := value mod 5 * one, k := value * one } remove {value};
+    const keys := series{from: 1, to: 2000} extend { k := value * 150 * one } remove {value};
+";
+
+#[test]
+fn a_join_of_several_starts_from_what_makes_least() {
+    let operators = |body: &str| {
+        format!(
+            "operator main{{}} [{JOIN_OPERANDS_FOR_MEMORY}\n    call debug_value{{v: {body}}};\n];\n"
+        )
+    };
+    let left = 300_000;
+    let holding = peak_memory_of(
+        "several_holding",
+        &operators("count{r: few} + count{r: big} + count{r: keys}"),
+        left,
+    );
+    let source = operators("count{r: join{few, big, keys}}").replace("LEFT", &left.to_string());
+    assert!(joined_as_it_runs(&source));
+    for (name, body) in [
+        ("several_few_first", "count{r: join{few, big, keys}}"),
+        ("several_keys_first", "count{r: join{keys, big, few}}"),
+    ] {
+        let joined = peak_memory_of(name, &operators(body), left);
+        assert!(
+            joined < holding + holding / 8,
+            "{name}: {joined} bytes at the peak, with the operands {holding}"
+        );
+    }
+}
+
+/// What is made on the way goes as soon as it has been joined in its turn. Here, each join makes
+/// as many tuples as any operand has, with an attribute more, so at the worst, the last but one
+/// and what is made of it are held with the last operand, and what it takes to find the matches:
+/// which came to 158 bytes for each tuple of `big` when this was written, and 24 more if what
+/// is made lasts until the end.
+#[test]
+fn a_join_of_several_gives_up_what_it_makes_on_the_way() {
+    let program = "operator main{} [
+    var one := 1;
+    call debug_value{v: count{r: join{
+        series{from: 1, to: LEFT} extend { k := value * one, a := value } remove {value},
+        series{from: 1, to: LEFT} extend { k := value * one, b := value } remove {value},
+        series{from: 1, to: LEFT} extend { k := value * one, c := value } remove {value},
+        series{from: 1, to: LEFT} extend { k := value * one, d := value } remove {value},
+    }}};
+];
+";
+    let big = 400_000;
+    let held = peak_memory_of("several_on_the_way", program, big)
+        - peak_memory_of("several_on_the_way", program, 1);
+    assert!(
+        held < u64::from(big) * 170,
+        "{} bytes for each tuple",
+        held / u64::from(big)
+    );
+}
+
+/// Operands that nothing else reads are given up as soon as they are joined, before what they
+/// make is joined with the rest, which is what takes most of the memory here. A `const` read
+/// again later can't be, which is what the two are compared with.
+#[test]
+fn a_join_of_several_gives_up_what_it_has_joined() {
+    let wide = "series{from: 1, to: LEFT} extend { k := value * one, a1 := value, a2 := value, a3 := value } remove {value}";
+    let rest = "const keys := series{from: 1, to: 1000} extend { k := value * one, b := value } remove {value};
+    const many := series{from: 1, to: LEFT} extend { k := value mod 1000 + 1, c := value * one } remove {value};";
+    let left = 400_000;
+    let program =
+        |body: String| format!("operator main{{}} [\n    var one := 1;\n    {rest}\n{body}\n];\n");
+    let read_later = peak_memory_of(
+        "several_read_later",
+        &program(format!(
+            "    const wide := {wide};
+    call debug_value{{v: count{{r: join{{wide, keys, many}}}}}};
+    call debug_value{{v: count{{r: wide}}}};"
+        )),
+        left,
+    );
+    for (name, body) in [
+        (
+            "several_made_for_it",
+            format!("    call debug_value{{v: count{{r: join{{{wide}, keys, many}}}}}};"),
+        ),
+        (
+            "several_bound_once",
+            format!(
+                "    call debug_value{{v: count{{r: [
+        const wide := {wide};
+        const other := wide;
+        join{{other, keys, many}}
+    ]}}}};"
+            ),
+        ),
+    ] {
+        let peak = peak_memory_of(name, &program(body), left);
+        assert!(
+            peak < read_later - read_later / 8,
+            "{name}: {peak} bytes at the peak, and {read_later} with the operand kept"
+        );
+    }
+}

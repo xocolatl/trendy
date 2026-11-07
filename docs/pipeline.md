@@ -1994,7 +1994,9 @@ however it is grouped:
   at hand an attribute at a time (`hir::Expr::tuple_read`), restricts the
   AND as soon as it has every attribute the conjunct reads, and one that
   reads none, the first operand: that only drops tuples the whole
-  restriction would, and it can't fail on the others. Its tuple at hand
+  restriction would, and it can't fail on the others. One that reads only
+  what a single operand has restricts that operand, before it is joined,
+  so only a conjunct across operands comes between joins. Its tuple at hand
   then has the heading of what it restricts (`at_hand`). The rest restrict
   the whole AND, as they did: one that can fail is computed only for the
   tuples of the whole AND that every one that can't is true of, so it
@@ -2015,7 +2017,9 @@ So of `a`, `b` and `c`, of the attributes `x`, `y` and `z`,
 `times{a, b, c} where x = z and y > 1` is
 `((a times c) where x = z) times (b where y > 1)`, and `join{a, b, d}`,
 with `d` of `x` and `y`, is `(a join d) join b`, so that it makes no
-product. Each is lowered as written.
+product. Each is lowered as written, unless its size makes it worth choosing
+the order as the program runs (see lower), which this plan is then what
+that falls back on.
 
 ### lir (`trendy_lir`)
 
@@ -2023,8 +2027,9 @@ product. Each is lowered as written.
 blocks: each block is a list of instructions (`Copy`, `Call`,
 `CallRuntime`, the boolean and integer `Unary` and `Binary`, `Unary`'s
 conversions of a count to an integer and of an array's position less 1 to
-an index, `Element` and `Increment` for loops and indexes, `IsNull`, and `Address`
-for a variable passed to a `var` or `out` parameter) ending in a
+an index, `Element` and `Increment` for loops and indexes, `IsNull`, `Address`
+for a variable passed to a `var` or `out` parameter, and `RelationAddress` for an
+operand of a join of several) ending in a
 terminator: `Return`, `Jump`, `Branch`, `Fail`, `Raise`, `Failed` or
 `TailCall`, which goes to a function in place of this one, its result where
 this one's goes, and whose arguments must outlive its frame. A `CheckStack`
@@ -2043,10 +2048,12 @@ be zero, a wrong number with nothing to say so. `Function::read_after_release`
 finds any way through a function that reads a slot, or an address into it, after
 that, with nothing having written all of it since, and the driver reports it as an
 internal error (X0000) before compiling, for every program. `IsNull` means to read
-that zero, a `trendy_rt_lookup` reads only what it guards, and `trendy_rt_assign`
-and `trendy_rt_index` only store. It sees slots, not buffers: what
-`trendy_rt_drop_operand` frees is left to the rule above, that only the operation
-reads the operand.
+that zero, a `trendy_rt_lookup` reads only what it guards, and what stores at its
+first argument (`RuntimeFn::stores_at_first`) only stores. `trendy_rt_drop_operand` can
+free what a slot points to, so that counts as well, and so does a second one of a slot,
+which can free whatever has since been given that memory, and only sometimes shows. It
+sees slots, not buffers: what another slot, a copy of it, reads is left to the rule
+above, that only the operation reads the operand.
 
 It also describes static data (`Data`) field by field, rather than as bytes,
 so the description doesn't depend on the target. Values are represented like
@@ -2450,6 +2457,37 @@ the address and number of the tuples, so it must go when those stop meaning the 
 tuples: `release_buffer` when the buffer is freed, and `with_room` and `removed_from`,
 the only things that change a relation's tuples where they are.
 
+The plan fixed when compiling (see opt) knows nothing of how big anything is, and what
+it makes on the way can be far larger than another order would. So an AND of at least
+three operands with nothing between them (`several_joined`) can choose
+as it runs. Its operands are computed first, in the plan's order, so that the same
+failure comes first, and all of them exist, so their sizes are exact: this takes no
+statistics, and nothing in the language could ask for any (RM Proscription 6).
+`trendy_rt_join` then looks at the largest. Below `JOIN_PLANNED_FROM` tuples, choosing
+costs about what the join can, so it says so and does nothing else, and the fixed plan,
+which is lowered too, runs. Otherwise it joins the two that make fewest tuples, what they
+make being one of the operands, with its size known exactly, until one is left. Sizes alone
+can be fooled, as the smallest operand can be the one that multiplies most, so
+`join_estimate` looks up `JOIN_SAMPLED_LARGER` tuples of the larger of each two with an
+attribute in common in `JOIN_SAMPLED_SMALLER` of the smaller, and scales that up. The
+positions depend only on the sizes, so the same operands take the same steps. Operands with
+nothing in common are multiplied last, the smallest first. A join gives the same tuples in
+any order, so a wrong estimate costs only time, and the result is put in the order wanted,
+as any join's is.
+
+The runtime knows an attribute by its position among the result's, from what lowering lays
+out (`JoinOperand`, `JoinAttribute`), and not by name, as a wrapped attribute has none. What
+is made on the way is laid out here (`made_desc`), in no particular order, and read only
+here. It holds no references, so an operand that points to anything lasts until the end; one
+that doesn't, and that nothing else reads, goes as soon as it has been joined
+(`JOIN_DROPS`, `JOIN_RELEASES`).
+
+Three things keep their place in the plan. A conjunct across operands is compiled for what
+is under it, so it stays where the plan puts it, and what it restricts is one operand of the
+rest, if there are enough; one that reads the whole AND reads what any order gives. A
+closure is found from what it is matched with, and a relation of one tuple can be a lookup,
+so neither is computed first.
+
 A relation's array is kept in canonical order so that equal relations have equal arrays,
 but only what depends on that needs it. So what a relation is wanted for flows down from its
 reader. `FunctionBuilder::place` gives a relation in canonical order, computing everything
@@ -2500,8 +2538,8 @@ as an internal error (X0000), as for `read_after_release`. A runtime function ca
 given one if the check lists it: anything new is assumed to depend on the order. What
 compiled code fills is loose until it says otherwise (`lir::Inst::InAnyOrder`,
 `InOrderOf`), so forgetting to say so fails, rather than being trusted. And a flag says what
-each operand of `trendy_rt_and` and `trendy_rt_matching` is, which the check compares with
-what it knows. Each operand's `in_order` then says what is true of what it is given, and a
+each operand of `trendy_rt_and` and `trendy_rt_matching` is, and `lir::Inst::RelationAddress`
+what one of `trendy_rt_join` is, which the check compares with what it knows. Each operand's `in_order` then says what is true of what it is given, and a
 loose one of integers that only the statement holds, with the common attributes first, is
 sorted where it is, rather than through pointers to it (`Operand::sorts_here`).
 

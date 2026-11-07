@@ -556,16 +556,29 @@ fn order(names: &[BTreeSet<String>], reads: &[&BTreeSet<String>]) -> Vec<Vec<usi
     parts
 }
 
-/// The AND of `so_far`, if anything, and `next`, restricted by each of
-/// `guards` that reads only attributes it has, each taken out of `guards`.
+/// The AND of `so_far`, if anything, and `next`: `next` restricted first by each of
+/// `guards` that reads only attributes it has, and then the AND by each that now can be,
+/// each taken out of `guards`. So only a guard across operands comes between joins, which
+/// are otherwise a chain of them, whose order can be chosen as the program runs.
 fn and_guarded(so_far: Option<Joined>, next: Joined, guards: &mut Vec<Guard>) -> Joined {
-    let (expr, heading) = match so_far {
-        None => (next.expr, next.heading),
-        Some(so_far) => (
-            hir::Expr::And(Box::new(so_far.expr), Box::new(next.expr)),
-            so_far.heading.and(&next.heading),
-        ),
+    let next = guarded(next, guards);
+    let Some(so_far) = so_far else {
+        return next;
     };
+    let heading = so_far.heading.and(&next.heading);
+    guarded(
+        Joined {
+            expr: hir::Expr::And(Box::new(so_far.expr), Box::new(next.expr)),
+            heading,
+        },
+        guards,
+    )
+}
+
+/// `joined`, restricted by each of `guards` that reads only attributes it has, each taken
+/// out of `guards`.
+fn guarded(joined: Joined, guards: &mut Vec<Guard>) -> Joined {
+    let Joined { expr, heading } = joined;
     let (now, later): (Vec<Guard>, Vec<Guard>) = std::mem::take(guards)
         .into_iter()
         .partition(|guard| guard.reads.iter().all(|n| heading.get(n).is_some()));
@@ -798,7 +811,7 @@ mod tests {
         ));
         assert_eq!(
             condition,
-            "((((orders where amount < 0) and customers) and regions) where size = 1)"
+            "(((orders where amount < 0) and customers) and (regions where size = 1))"
         );
         assert_eq!(breaking, condition);
     }

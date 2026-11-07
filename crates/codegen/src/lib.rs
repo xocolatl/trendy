@@ -405,7 +405,7 @@ impl Functions {
                 let next = b.ins().iadd_imm_s(value, 1);
                 self.store(place, next, frame, b)?;
             }
-            lir::Inst::Address { dst, src } => {
+            lir::Inst::Address { dst, src } | lir::Inst::RelationAddress { dst, src, .. } => {
                 let address = self.address(src, frame, b)?;
                 self.store(dst, address, frame, b)?;
             }

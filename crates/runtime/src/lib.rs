@@ -1549,6 +1549,39 @@ pub unsafe extern "C" fn trendy_rt_and(
                 orders & LOOSE_RHS != 0,
             ),
         );
+        let size = result.element().size;
+        let (bytes, len) = with_matches(common, lhs, rhs, |matches, groups, total| {
+            let write = |joined: *mut u8| {
+                write_matches(matches, groups, result_attrs, sources, size, joined);
+            };
+            if orders & LOOSE_RESULT == 0 {
+                made_canonical(total, result, write)
+            } else {
+                made_loose(total, result, write)
+            }
+        })?;
+        dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
+/// What `body` makes of the tuples of `lhs` and `rhs` that agree on `common`: how to find them,
+/// the groups of those that agree, and how many tuples they make between them. Fails if there
+/// is no memory.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must be operands on `common`.
+#[cfg(not(test))]
+#[inline]
+unsafe fn with_matches<T>(
+    common: &[Common],
+    lhs: Operand,
+    rhs: Operand,
+    body: impl FnOnce(&Matches<'_>, &Growing<Group>, usize) -> Fallible<T>,
+) -> Fallible<T> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
         let (mut lhs_pointers, mut rhs_pointers) = (None, None);
         let matches = Matches::of(common, lhs, rhs, &mut lhs_pointers, &mut rhs_pointers)?;
         let mut groups = Growing::<Group>::with_room(lhs.count.min(rhs.count))?;
@@ -1563,38 +1596,717 @@ pub unsafe extern "C" fn trendy_rt_and(
             total = sum;
             groups.push(group)
         })?;
+        body(&matches, &groups, total)
+    }
+}
 
-        let size = result.element().size;
-        let write = |joined: *mut u8| {
-            let mut k = 0;
-            for at in 0..groups.len {
-                let group = groups.at(at);
-                for i in group.lhs_start..group.lhs_end {
-                    let l = matches.lhs.at(i);
-                    for j in group.rhs_start..group.rhs_end {
-                        let r = matches.rhs.at(j);
-                        let to = joined.add(k * size);
-                        for (attr, source) in result_attrs.iter().zip(sources) {
-                            let from = if source.from == 1 { r } else { l };
-                            core::ptr::copy_nonoverlapping(
-                                from.add(source.offset),
-                                to.add(attr.offset),
-                                (*attr.desc).size,
-                            );
-                        }
-                        k += 1;
+/// Write at `joined` the tuples each of `groups` makes, one after another, in tuples of `size`
+/// bytes, as `sources` says of each of `attrs`.
+///
+/// # Safety
+///
+/// `joined` must have room for them, and `attrs` and `sources` be their layout.
+#[cfg(not(test))]
+#[inline]
+unsafe fn write_matches(
+    matches: &Matches<'_>,
+    groups: &Growing<Group>,
+    attrs: &[Attr],
+    sources: &[Source],
+    size: usize,
+    joined: *mut u8,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let mut k = 0;
+        for at in 0..groups.len {
+            let group = groups.at(at);
+            for i in group.lhs_start..group.lhs_end {
+                let l = matches.lhs.at(i);
+                for j in group.rhs_start..group.rhs_end {
+                    let r = matches.rhs.at(j);
+                    let to = joined.add(k * size);
+                    for (attr, source) in attrs.iter().zip(sources) {
+                        let from = if source.from == 1 { r } else { l };
+                        core::ptr::copy_nonoverlapping(
+                            from.add(source.offset),
+                            to.add(attr.offset),
+                            (*attr.desc).size,
+                        );
                     }
+                    k += 1;
                 }
             }
-        };
-        let (bytes, len) = if orders & LOOSE_RESULT == 0 {
-            made_canonical(total, result, write)?
-        } else {
-            made_loose(total, result, write)?
-        };
+        }
+    }
+}
+
+/// How many tuples the largest operand of a join of several must have for the order of joining
+/// to be chosen as the program runs. Below that, the plan fixed when compiling runs, as what
+/// choosing takes comes to about as much as the join can.
+#[cfg(not(test))]
+const JOIN_PLANNED_FROM: usize = 4096;
+
+/// How many tuples of the larger of two operands an estimate of their join looks up.
+#[cfg(not(test))]
+const JOIN_SAMPLED_LARGER: usize = 64;
+
+/// How many tuples of the smaller of two operands an estimate of their join looks for.
+#[cfg(not(test))]
+const JOIN_SAMPLED_SMALLER: usize = 256;
+
+/// In a [`JoinOperand`]'s flags: its tuples are in no particular order. As for [`LOOSE_LHS`].
+pub const JOIN_LOOSE: usize = 1;
+/// In a [`JoinOperand`]'s flags: it is made for this join alone and points to nothing else,
+/// so [`trendy_rt_join`] gives it up as soon as it has been joined, as
+/// [`trendy_rt_drop_operand`] does.
+pub const JOIN_DROPS: usize = 2;
+/// In a [`JoinOperand`]'s flags: it is a binding that this is the last read of, and points to
+/// nothing else, so [`trendy_rt_join`] gives it up as soon as it has been joined, as
+/// [`trendy_rt_release`] does.
+pub const JOIN_RELEASES: usize = 4;
+
+/// One of the operands of a join of several, as the compiler lays it out: the descriptor of the
+/// relation as it is laid out, each of its attributes, and what its `JOIN_` flags say of it.
+#[repr(C)]
+pub struct JoinOperand {
+    pub desc: *const TypeDesc,
+    pub attributes: *const JoinAttribute,
+    pub count: usize,
+    pub flags: usize,
+}
+
+/// An attribute of an operand of a join of several, as the compiler lays it out: its position
+/// among the result's attributes, by which those of two operands are known to be one, rather
+/// than by name, which some have none of, and where it is in a tuple of the operand.
+#[repr(C)]
+pub struct JoinAttribute {
+    pub position: usize,
+    pub offset: usize,
+}
+
+/// An operand of a join of several, or what joining some of them has made so far.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct JoinPart {
+    tuples: Tuples,
+    /// The relation's descriptor, of the operand's own, or one made here.
+    desc: *const TypeDesc,
+    /// By the position of each of the result's attributes, where it is in a tuple of this,
+    /// or [`NOT_JOINED`] if this hasn't it.
+    offsets: *const usize,
+    loose: bool,
+    /// Which operand it is, if it is one, and else the buffer made here.
+    operand: Option<usize>,
+    made: *mut u8,
+}
+
+/// In a [`JoinPart`]'s offsets, of an attribute it hasn't.
+#[cfg(not(test))]
+const NOT_JOINED: usize = usize::MAX;
+
+/// Store at `dst` the join of the `*count` relations whose addresses are at `relations`, of the
+/// type `result` describes, and 1 at `joined`, if the largest has at least `JOIN_PLANNED_FROM`
+/// tuples, and otherwise only 0 at `joined`, for the plan fixed when compiling to run.
+///
+/// All the operands exist, so their sizes are exact. Of each two that have an attribute in
+/// common, `join_estimate` says how many tuples joining them makes, and the two that make
+/// fewest are joined; what that makes is then one of the operands, with its size known exactly,
+/// until one is left. Those with nothing in common are multiplied last, the smallest first. A
+/// join gives the same tuples in any order, so a wrong estimate costs only time. It makes no use
+/// of where any attribute's name sorts, nor of what is random: the same operands take the same
+/// steps.
+///
+/// What is made on the way is in no particular order, and is never read but here. It holds no
+/// references to what it points to, so an operand that points to anything lasts until the end.
+///
+/// # Safety
+///
+/// `relations` must point to `*count` addresses of valid relations, in the `operands`' layouts,
+/// whose attributes together are `result`'s, of the same types. The statement must have begun a
+/// scope. `joined` must point to a byte.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_join(
+    dst: *mut Text,
+    relations: *const *mut u8,
+    operands: *const JoinOperand,
+    count: *const usize,
+    result: *const TypeDesc,
+    joined: *mut u8,
+    orders: *const usize,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let n = count.read_unaligned();
+        let operands = array(operands, n);
+        let relation = |i: usize| relations.add(i).read_unaligned();
+        let largest = (0..n).map(|i| read_slice(relation(i)).1).max().unwrap_or(0);
+        if largest < JOIN_PLANNED_FROM {
+            joined.write(0);
+            return Ok(());
+        }
+        joined.write(1);
+        let (bytes, len) = planned_join(&relation, operands, &*result, orders.read_unaligned())?;
         dst.write_unaligned(Text { bytes, len });
         Ok(())
     })
+}
+
+/// What [`trendy_rt_join`] stores at `dst`, once it is to run.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_join`].
+#[cfg(not(test))]
+unsafe fn planned_join(
+    relation: &dyn Fn(usize) -> *mut u8,
+    operands: &[JoinOperand],
+    result: &TypeDesc,
+    orders: usize,
+) -> Fallible<(*mut u8, usize)> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let mut run = JoinRun::new(relation, operands, result, orders)?;
+        let empty = (0..operands.len()).any(|i| run.part(i).tuples.count == 0);
+        if empty {
+            return run.nothing_comes_of_the_rest();
+        }
+        while run.left > 2 {
+            let (first, second) = run.next_pair();
+            let made = run.made_of(first, second)?;
+            if made == 0 {
+                return run.nothing_comes_of_the_rest();
+            }
+        }
+        let (x, y) = (run.part(run.live_at(0)), run.part(run.live_at(1)));
+        let made = run.joined(
+            &x,
+            &y,
+            attributes(result),
+            result.element().size,
+            |total, write| run.finished(total, write),
+        )?;
+        run.give_up(&x);
+        run.give_up(&y);
+        Ok(made)
+    }
+}
+
+/// A join of several as it runs: its operands, and what has been made of them so far, of which
+/// `left` are still to be joined. Each `Temp` has room for a part for each operand and each join,
+/// with its offsets, and for what describes what is made on the way.
+#[cfg(not(test))]
+struct JoinRun<'a> {
+    relation: &'a dyn Fn(usize) -> *mut u8,
+    operands: &'a [JoinOperand],
+    result: &'a TypeDesc,
+    attrs: &'a [Attr],
+    orders: usize,
+    offsets: Temp<usize>,
+    parts: Temp<JoinPart>,
+    live: Temp<usize>,
+    descs: Temp<TypeDesc>,
+    made_attrs: Temp<Attr>,
+    common: Temp<Common>,
+    sources: Temp<Source>,
+    left: usize,
+    made: usize,
+}
+
+#[cfg(not(test))]
+impl<'a> JoinRun<'a> {
+    /// The operands, each a part, none of them joined.
+    ///
+    /// # Safety
+    ///
+    /// As for [`trendy_rt_join`].
+    unsafe fn new(
+        relation: &'a dyn Fn(usize) -> *mut u8,
+        operands: &'a [JoinOperand],
+        result: &'a TypeDesc,
+        orders: usize,
+    ) -> Fallible<Self> {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let attrs = attributes(result);
+            let (n, width) = (operands.len(), attrs.len());
+            let run = JoinRun {
+                relation,
+                operands,
+                result,
+                attrs,
+                orders,
+                offsets: Temp::new((n * 2 * width).max(1))?,
+                parts: Temp::new(n * 2)?,
+                live: Temp::new(n)?,
+                descs: Temp::new(n * 2)?,
+                made_attrs: Temp::new((n * width).max(1))?,
+                common: Temp::new(width.max(1))?,
+                sources: Temp::new(width.max(1))?,
+                left: n,
+                made: 0,
+            };
+            for (i, operand) in operands.iter().enumerate() {
+                let desc = &*operand.desc;
+                let (at, count) = read_slice(relation(i));
+                for position in 0..width {
+                    run.row(i).add(position).write(NOT_JOINED);
+                }
+                for attribute in array(operand.attributes, operand.count) {
+                    run.row(i).add(attribute.position).write(attribute.offset);
+                }
+                run.parts.ptr().add(i).write(JoinPart {
+                    tuples: Tuples {
+                        at,
+                        count,
+                        size: desc.element().size,
+                    },
+                    desc,
+                    offsets: run.row(i),
+                    loose: operand.flags & JOIN_LOOSE != 0,
+                    operand: Some(i),
+                    made: core::ptr::null_mut(),
+                });
+                run.live.ptr().add(i).write(i);
+            }
+            Ok(run)
+        }
+    }
+
+    /// The offsets of the part at `slot`.
+    fn row(&self, slot: usize) -> *mut usize {
+        // SAFETY: there are as many rows as parts, each of an entry for each attribute.
+        unsafe { self.offsets.ptr().add(slot * self.attrs.len()) }
+    }
+
+    /// The part at `slot`.
+    ///
+    /// # Safety
+    ///
+    /// It must have been written.
+    unsafe fn part(&self, slot: usize) -> JoinPart {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.parts.ptr().add(slot).read() }
+    }
+
+    /// Where the part at `at` among those left is.
+    ///
+    /// # Safety
+    ///
+    /// `at` must be below `left`.
+    unsafe fn live_at(&self, at: usize) -> usize {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.live.ptr().add(at).read() }
+    }
+
+    /// Which two of those left to join next, by where they are among them.
+    ///
+    /// # Safety
+    ///
+    /// Each must have been written.
+    unsafe fn next_pair(&self) -> (usize, usize) {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let live = core::slice::from_raw_parts(self.live.ptr(), self.left);
+            let parts = core::slice::from_raw_parts(self.parts.ptr(), self.operands.len() * 2);
+            join_next(parts, live, self.attrs, self.common.ptr())
+        }
+    }
+
+    /// Give up what the part `part` is, now that it has been joined, as far as anything can.
+    ///
+    /// # Safety
+    ///
+    /// Nothing may go on to read it.
+    unsafe fn give_up(&self, part: &JoinPart) {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            match part.operand {
+                Some(i) if self.operands[i].flags & JOIN_DROPS != 0 => {
+                    trendy_rt_drop_operand((self.relation)(i).cast_const(), self.operands[i].desc);
+                }
+                Some(i) if self.operands[i].flags & JOIN_RELEASES != 0 => {
+                    trendy_rt_release((self.relation)(i), self.operands[i].desc);
+                }
+                Some(_) => {}
+                None => release_replaced(part.made),
+            }
+        }
+    }
+
+    /// The result, of `total` tuples, that `write` writes, in the order it is wanted in.
+    ///
+    /// # Safety
+    ///
+    /// `write` must write that many valid tuples, all different.
+    unsafe fn finished(&self, total: usize, write: &dyn Fn(*mut u8)) -> Fallible<(*mut u8, usize)> {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            if self.orders & LOOSE_RESULT == 0 {
+                made_canonical(total, self.result, write)
+            } else {
+                made_loose(total, self.result, write)
+            }
+        }
+    }
+
+    /// With some operand of no tuples, or a join that made none, the result, of none, each part
+    /// left given up. All the operands have been computed, so nothing is left to fail.
+    ///
+    /// # Safety
+    ///
+    /// As for [`JoinRun::give_up`], of each of them.
+    unsafe fn nothing_comes_of_the_rest(&self) -> Fallible<(*mut u8, usize)> {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            for at in 0..self.left {
+                self.give_up(&self.part(self.live_at(at)));
+            }
+            self.finished(0, &|_| {})
+        }
+    }
+
+    /// The tuples of `x` and `y` joined, each of `size` bytes with the attributes `attrs`, those
+    /// of the two it has in the order of the result's, as `finish` makes them.
+    ///
+    /// # Safety
+    ///
+    /// `x` and `y` must be parts of this join, and `attrs` and `size` the layout of tuples with
+    /// room for what they have.
+    unsafe fn joined(
+        &self,
+        x: &JoinPart,
+        y: &JoinPart,
+        attrs: &[Attr],
+        size: usize,
+        finish: impl FnOnce(usize, &dyn Fn(*mut u8)) -> Fallible<(*mut u8, usize)>,
+    ) -> Fallible<(*mut u8, usize)> {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let mut made = 0;
+            for position in 0..self.attrs.len() {
+                let (in_x, in_y) = (
+                    x.offsets.add(position).read(),
+                    y.offsets.add(position).read(),
+                );
+                if in_x == NOT_JOINED && in_y == NOT_JOINED {
+                    continue;
+                }
+                self.sources.ptr().add(made).write(if in_x == NOT_JOINED {
+                    Source {
+                        from: 1,
+                        offset: in_y,
+                    }
+                } else {
+                    Source {
+                        from: 0,
+                        offset: in_x,
+                    }
+                });
+                made += 1;
+            }
+            let sources = core::slice::from_raw_parts(self.sources.ptr(), made);
+            let shared = common_of(x, y, self.attrs, self.common.ptr());
+            if shared == 0 {
+                let Some(total) = x.tuples.count.checked_mul(y.tuples.count) else {
+                    return Err(out_of_memory());
+                };
+                return finish(total, &|to: *mut u8| {
+                    write_product(x.tuples, y.tuples, attrs, size, sources, to);
+                });
+            }
+            let common = core::slice::from_raw_parts(self.common.ptr(), shared);
+            with_matches(
+                common,
+                Operand::of(common, x.tuples.at, x.tuples.count, &*x.desc, true, x.loose),
+                Operand::of(
+                    common,
+                    y.tuples.at,
+                    y.tuples.count,
+                    &*y.desc,
+                    false,
+                    y.loose,
+                ),
+                |matches, groups, total| {
+                    finish(total, &|joined: *mut u8| {
+                        write_matches(matches, groups, attrs, sources, size, joined);
+                    })
+                },
+            )
+        }
+    }
+
+    /// Join the parts at `first` and `second` among those left, what that makes taking their
+    /// place, and give them up. How many tuples it made.
+    ///
+    /// # Safety
+    ///
+    /// Both must be below `left`, and it must be more than 2, so that this isn't the result.
+    unsafe fn made_of(&mut self, first: usize, second: usize) -> Fallible<usize> {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let (x, y) = (
+                self.part(self.live_at(first)),
+                self.part(self.live_at(second)),
+            );
+            let width = self.attrs.len();
+            let attrs = self.made_attrs.ptr().add(self.made * width);
+            let (desc, count, size) = made_desc(
+                &x,
+                &y,
+                self.attrs,
+                attrs,
+                self.descs.ptr().add(self.made * 2),
+            );
+            let own = core::slice::from_raw_parts(attrs, count);
+            let (bytes, total) = self.joined(&x, &y, own, size, |total, write| {
+                let Some(bytes) = total.checked_mul(size) else {
+                    return Err(out_of_memory());
+                };
+                // It holds no references, so needs nothing of what describes it.
+                let out = allocate_buffer(bytes, core::ptr::null())?;
+                write(out);
+                Ok((out, total))
+            })?;
+            self.give_up(&x);
+            self.give_up(&y);
+            let slot = self.operands.len() + self.made;
+            let mut at = 0;
+            for position in 0..width {
+                let has = x.offsets.add(position).read() != NOT_JOINED
+                    || y.offsets.add(position).read() != NOT_JOINED;
+                let offset = if has {
+                    at += 1;
+                    own[at - 1].offset
+                } else {
+                    NOT_JOINED
+                };
+                self.row(slot).add(position).write(offset);
+            }
+            self.parts.ptr().add(slot).write(JoinPart {
+                tuples: Tuples {
+                    at: bytes,
+                    count: total,
+                    size,
+                },
+                desc,
+                offsets: self.row(slot),
+                loose: true,
+                operand: None,
+                made: bytes,
+            });
+            self.live.ptr().add(first).write(slot);
+            self.live
+                .ptr()
+                .add(second)
+                .write(self.live_at(self.left - 1));
+            self.left -= 1;
+            self.made += 1;
+            Ok(total)
+        }
+    }
+}
+
+/// Which two of the parts `live` lists, by where they are among it, to join next: of those with
+/// an attribute in common, the two [`join_estimate`] says make fewest tuples, and those whose
+/// sizes multiply to least if it says the same; of those with none, the two smallest.
+///
+/// # Safety
+///
+/// `parts` and `attrs` must be as for [`common_of`], and `common` have room.
+#[cfg(not(test))]
+unsafe fn join_next(
+    parts: &[JoinPart],
+    live: &[usize],
+    attrs: &[Attr],
+    common: *mut Common,
+) -> (usize, usize) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let mut best: Option<((usize, usize), (usize, usize))> = None;
+        for first in 0..live.len() {
+            for second in first + 1..live.len() {
+                let (x, y) = (&parts[live[first]], &parts[live[second]]);
+                let shared = common_of(x, y, attrs, common);
+                if shared == 0 {
+                    continue;
+                }
+                let on = core::slice::from_raw_parts(common, shared);
+                let sizes = x.tuples.count.saturating_mul(y.tuples.count);
+                let score = (join_estimate(x, y, on), sizes);
+                if best.is_none_or(|(known, _)| score < known) {
+                    best = Some((score, (first, second)));
+                }
+            }
+        }
+        if let Some((_, pair)) = best {
+            return pair;
+        }
+        let by_size = |at: usize| parts[live[at]].tuples.count;
+        let smallest = (0..live.len()).min_by_key(|at| by_size(*at)).unwrap_or(0);
+        let next = (0..live.len())
+            .filter(|at| *at != smallest)
+            .min_by_key(|at| by_size(*at))
+            .unwrap_or(1);
+        (smallest.min(next), smallest.max(next))
+    }
+}
+
+/// The attributes `x` and `y` have in common, written at `common`, by their positions among
+/// `attrs`, and how many there are, as a join of `x` on the left and `y` on the right takes them.
+///
+/// # Safety
+///
+/// Their offsets must have an entry for each of `attrs`, and `common` room for as many.
+#[cfg(not(test))]
+unsafe fn common_of(x: &JoinPart, y: &JoinPart, attrs: &[Attr], common: *mut Common) -> usize {
+    let mut shared = 0;
+    for (position, attr) in attrs.iter().enumerate() {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let (lhs, rhs) = (
+                x.offsets.add(position).read(),
+                y.offsets.add(position).read(),
+            );
+            if lhs != NOT_JOINED && rhs != NOT_JOINED {
+                common.add(shared).write(Common {
+                    lhs,
+                    rhs,
+                    desc: attr.desc,
+                });
+                shared += 1;
+            }
+        }
+    }
+    shared
+}
+
+/// About how many tuples the join of `x` and `y` on `common` makes: of up to
+/// [`JOIN_SAMPLED_LARGER`] tuples of the larger, how many agree with up to
+/// [`JOIN_SAMPLED_SMALLER`] of the smaller, for all of each. It needs no index, and sorts only
+/// the tuples it samples. The positions come from a sequence that depends only on the sizes, so
+/// the same operands get the same estimate, and aren't evenly spaced, which what is periodic
+/// would fool. A join that keeps few tuples can be estimated at none, which is near enough.
+///
+/// # Safety
+///
+/// Their tuples must be valid, and `common` the attributes they have in common.
+#[cfg(not(test))]
+unsafe fn join_estimate(x: &JoinPart, y: &JoinPart, common: &[Common]) -> usize {
+    let x_larger = x.tuples.count >= y.tuples.count;
+    let (larger, smaller) = if x_larger { (x, y) } else { (y, x) };
+    let wide = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    let mut state = (wide(larger.tuples.count) << 32) ^ wide(smaller.tuples.count) | 1;
+    let mut next = |below: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        usize::try_from(state % wide(below)).unwrap_or(0)
+    };
+    let picks = JOIN_SAMPLED_LARGER.min(larger.tuples.count);
+    let mut sample = [core::ptr::null::<u8>(); JOIN_SAMPLED_LARGER];
+    // SAFETY: guaranteed by the caller; every position is below the count.
+    unsafe {
+        for (i, tuple) in sample.iter_mut().enumerate().take(picks) {
+            let at = if larger.tuples.count <= JOIN_SAMPLED_LARGER {
+                i
+            } else {
+                next(larger.tuples.count)
+            };
+            *tuple = larger.tuples.tuple(at);
+        }
+        let sample = &mut sample[..picks];
+        sample.sort_unstable_by(|a, b| on_common(common, (*a, x_larger), (*b, x_larger)));
+        let looked_for = JOIN_SAMPLED_SMALLER.min(smaller.tuples.count);
+        let mut hits = 0_usize;
+        for i in 0..looked_for {
+            let at = if smaller.tuples.count <= JOIN_SAMPLED_SMALLER {
+                i
+            } else {
+                next(smaller.tuples.count)
+            };
+            let tuple = (smaller.tuples.tuple(at), !x_larger);
+            let order_of = |sampled: &*const u8| on_common(common, (*sampled, x_larger), tuple);
+            let start = sample.partition_point(|sampled| order_of(sampled).is_lt());
+            let end = sample.partition_point(|sampled| order_of(sampled).is_le());
+            hits += end - start;
+        }
+        // Saturating, as it only has to compare: what is that large is no place to start.
+        (larger.tuples.count / picks.max(1))
+            .saturating_mul(smaller.tuples.count / looked_for.max(1))
+            .saturating_mul(hits)
+    }
+}
+
+/// A descriptor, at `descs`, of a relation of the attributes `x` and `y` have between them, in
+/// the order they have in `attrs`, each with an entry at `made`: in tuples only this function's
+/// caller reads, in no particular order. How many there are, and the tuples' size.
+///
+/// # Safety
+///
+/// As for [`common_of`], and `made` must have room for each of `attrs`, and `descs` for two.
+#[cfg(not(test))]
+unsafe fn made_desc(
+    x: &JoinPart,
+    y: &JoinPart,
+    attrs: &[Attr],
+    made: *mut Attr,
+    descs: *mut TypeDesc,
+) -> (*const TypeDesc, usize, usize) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (mut count, mut size, mut points, mut only_integers) = (0, 0_usize, false, true);
+        for (position, attr) in attrs.iter().enumerate() {
+            let has = x.offsets.add(position).read() != NOT_JOINED
+                || y.offsets.add(position).read() != NOT_JOINED;
+            if !has {
+                continue;
+            }
+            let own = &*attr.desc;
+            // Any alignment does, as these are read as they are made, and only what could be
+            // sorted as integers has to be at multiples of them.
+            let align = if matches!(own.size, 1 | 2 | 4) {
+                own.size
+            } else {
+                8
+            };
+            let offset = size.next_multiple_of(align);
+            made.add(count).write(Attr {
+                name: attr.name,
+                name_len: attr.name_len,
+                offset,
+                desc: attr.desc,
+            });
+            count += 1;
+            size = offset + own.size;
+            points |= own.points;
+            only_integers &= own.kind == KIND_INTEGER;
+        }
+        let size = size.next_multiple_of(8);
+        let integers = if only_integers { count } else { 0 };
+        let described = |kind, points, size, element| TypeDesc {
+            kind,
+            points,
+            integers,
+            size,
+            attributes: made,
+            count,
+            element,
+            name: core::ptr::NonNull::dangling().as_ptr(),
+            name_len: 0,
+            written: core::ptr::NonNull::dangling().as_ptr(),
+            written_len: 0,
+        };
+        descs.write(described(KIND_TUPLE, points, size, core::ptr::null()));
+        descs.add(1).write(described(
+            KIND_RELATION,
+            true,
+            size_of::<Text>(),
+            descs.cast_const(),
+        ));
+        (descs.add(1).cast_const(), count, size)
+    }
 }
 
 /// A relation's tuples, or some of them: `count` of them from `at`, each
@@ -1649,25 +2361,8 @@ unsafe fn product(
         let Some(total) = lhs.count.checked_mul(rhs.count) else {
             return Err(out_of_memory());
         };
-        let rhs_first = sources.first().is_some_and(|source| source.from == 1);
         let write = |to: *mut u8| {
-            let (outer, inner) = if rhs_first { (rhs, lhs) } else { (lhs, rhs) };
-            let attributes = attributes(result);
-            for i in 0..outer.count {
-                for j in 0..inner.count {
-                    let (a, b) = (outer.tuple(i), inner.tuple(j));
-                    let (l, r) = if rhs_first { (b, a) } else { (a, b) };
-                    let made = to.add((i * inner.count + j) * element.size);
-                    for (attr, source) in attributes.iter().zip(sources) {
-                        let from = if source.from == 1 { r } else { l };
-                        core::ptr::copy_nonoverlapping(
-                            from.add(source.offset),
-                            made.add(attr.offset),
-                            (*attr.desc).size,
-                        );
-                    }
-                }
-            }
+            write_product(lhs, rhs, attributes(result), element.size, sources, to);
         };
         // The attributes change operand at most once if they don't interleave.
         let changes = sources
@@ -1681,6 +2376,44 @@ unsafe fn product(
             return made_canonical(total, result, write);
         }
         made_in_order(total, result, write)
+    }
+}
+
+/// Write at `to` every tuple made of a tuple of `lhs` and one of `rhs`, in tuples of `size`
+/// bytes, as `sources` says of each of `attrs`: each of the operand the first attribute comes
+/// from, in its order, with each of the other's, in its order.
+///
+/// # Safety
+///
+/// `to` must have room for them, and `attrs` and `sources` be their layout.
+#[cfg(not(test))]
+unsafe fn write_product(
+    lhs: Tuples,
+    rhs: Tuples,
+    attrs: &[Attr],
+    size: usize,
+    sources: &[Source],
+    to: *mut u8,
+) {
+    let rhs_first = sources.first().is_some_and(|source| source.from == 1);
+    let (outer, inner) = if rhs_first { (rhs, lhs) } else { (lhs, rhs) };
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        for i in 0..outer.count {
+            for j in 0..inner.count {
+                let (a, b) = (outer.tuple(i), inner.tuple(j));
+                let (l, r) = if rhs_first { (b, a) } else { (a, b) };
+                let made = to.add((i * inner.count + j) * size);
+                for (attr, source) in attrs.iter().zip(sources) {
+                    let from = if source.from == 1 { r } else { l };
+                    core::ptr::copy_nonoverlapping(
+                        from.add(source.offset),
+                        made.add(attr.offset),
+                        (*attr.desc).size,
+                    );
+                }
+            }
+        }
     }
 }
 

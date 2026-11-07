@@ -1384,6 +1384,7 @@ enum Order {
 /// How a relation is read through a rename, which needs none of its tuples moved, as what
 /// reads it reads attributes by where they are: its heading, and the name each attribute
 /// is read by and has there.
+#[derive(Clone)]
 struct Shape {
     physical: hir::Heading,
     /// By the name it is read by, in name order, as the result has them.
@@ -1427,6 +1428,7 @@ impl Shape {
 }
 
 /// `inner`, of type `ty`, read as `named` through the renames around it, as `shape` says.
+#[derive(Clone)]
 struct View<'e> {
     inner: &'e hir::Expr,
     ty: hir::Type,
@@ -2261,6 +2263,9 @@ impl<'a> FunctionBuilder<'a> {
             | hir::Expr::Parameter(_)
             | hir::Expr::Constant(_)
             | hir::Expr::Current(..) => {}
+            // A rename that keeps the order is a view of what it renames: a binding, if this
+            // is where one is, which goes on holding it.
+            _ if self.is_a_bindings(place) => {}
             _ => {
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
                 self.insts.push(lir::Inst::CallRuntime {
@@ -2269,6 +2274,14 @@ impl<'a> FunctionBuilder<'a> {
                 });
             }
         }
+    }
+
+    /// Whether `place` is where a local variable is.
+    fn is_a_bindings(&self, place: &lir::Place) -> bool {
+        self.local_places
+            .iter()
+            .flatten()
+            .any(|local| local.value == *place)
     }
 
     /// The bindings of `expr`, a chain of `Let`s, in order, each given up once
@@ -7687,6 +7700,9 @@ impl<'a> FunctionBuilder<'a> {
             let dst = self.tuple_join(&lhs_ty, &rhs_ty, &lhs_place, &rhs_place, cx);
             return (dst, Order::Canonical);
         }
+        if let Some(leaves) = several_joined(lhs, rhs) {
+            return self.joined_as_it_runs(lhs, rhs, &leaves, want, cx);
+        }
         // A relation of only the attribute a closure's tuples were found by adds
         // nothing to them, and keeps no others.
         let is_one_attribute = |ty: &hir::Type| matches!(ty, hir::Type::Relation(heading) if heading.attributes().count() == 1);
@@ -7717,6 +7733,210 @@ impl<'a> FunctionBuilder<'a> {
         self.operand_read(left.inner, &lhs_place, &left.ty, cx);
         self.operand_read(right.inner, &rhs_place, &right.ty, cx);
         joined
+    }
+
+    /// The AND of `lhs` and `rhs`, of the operands `leaves`, which are all computed first, in
+    /// the order written: their sizes then choose the order of joining, as the program runs,
+    /// if the largest is large enough for that to matter ([`lir::RuntimeFn::Join`]), and
+    /// otherwise the plan fixed when compiling runs. The two give the same tuples, in the
+    /// order `want` asks. What is made of them is given up as soon as it has been used.
+    fn joined_as_it_runs(
+        &mut self,
+        lhs: &hir::Expr,
+        rhs: &hir::Expr,
+        leaves: &[&hir::Expr],
+        want: Order,
+        cx: &mut Lowering,
+    ) -> (lir::Place, Order) {
+        let views: Vec<View> = leaves
+            .iter()
+            .map(|leaf| self.operand_view(leaf, want))
+            .collect();
+        let given: Vec<(lir::Place, Order)> = views
+            .iter()
+            .map(|view| self.given(view.inner, want, cx))
+            .collect();
+        let result_ty = views
+            .iter()
+            .skip(1)
+            .fold(views[0].named.clone(), |so_far, view| {
+                so_far.and(&view.named)
+            });
+        let names: Vec<String> = attribute_names(&result_ty).map(str::to_string).collect();
+        let flags: Vec<u64> = views
+            .iter()
+            .zip(&given)
+            .map(|(view, (place, _))| self.given_up_by_a_join(view, place, cx))
+            .collect();
+        let operands: Vec<lir::Field> = views
+            .iter()
+            .zip(&given)
+            .zip(&flags)
+            .map(|((view, (_, order)), flags)| join_operand(view, *order, *flags, &names, cx))
+            .collect();
+        let relations = self.slot(lir::Layout::Struct(vec![lir::Layout::Address; given.len()]));
+        for (i, (place, order)) in given.iter().enumerate() {
+            self.insts.push(lir::Inst::RelationAddress {
+                dst: lir::Place {
+                    path: [relations.path.clone(), vec![i]].concat(),
+                    ..relations.clone()
+                },
+                src: place.clone(),
+                loose: *order == Order::Loose,
+            });
+        }
+        let dst = self.slot(cx.layout(&result_ty));
+        let joined = self.slot(lir::Layout::U8);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
+        let orders = orders_constant(Order::Canonical, Order::Canonical, want, cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Join,
+            args: vec![
+                dst.clone(),
+                relations,
+                lir::Place::whole(lir::Base::Data(cx.constant(operands))),
+                usize_constant(len(given.len()), cx),
+                descriptor,
+                joined.clone(),
+                orders,
+            ],
+        });
+        self.scoped = true;
+        let (chosen, fixed, after) = (self.new_block(), self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: joined,
+                then: chosen,
+                otherwise: fixed,
+            },
+            chosen,
+        );
+        // What the runtime dropped it has. Each other operand is given up here, as whatever it
+        // made may point to it. A binding it has released is zero by now, and releasing that
+        // does nothing, but says so here, for what checks that nothing reads it after that.
+        for ((view, (place, _)), flags) in views.iter().zip(&given).zip(&flags) {
+            if flags & lir::JOIN_DROPS == 0 {
+                self.operand_read(view.inner, place, &view.ty, cx);
+            }
+        }
+        self.end_block(lir::Terminator::Jump(after), fixed);
+        let planned = self.joined_by_the_fixed_plan(lhs, rhs, &views, &given, want, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: dst.clone(),
+            src: planned,
+            layout: cx.layout(&result_ty),
+        });
+        self.end_block(lir::Terminator::Jump(after), after);
+        (dst, want)
+    }
+
+    /// The AND of `lhs` and `rhs`, of the operands `views`, computed at `given`, by the plan
+    /// fixed when compiling, each operand given up after it.
+    fn joined_by_the_fixed_plan(
+        &mut self,
+        lhs: &hir::Expr,
+        rhs: &hir::Expr,
+        views: &[View],
+        given: &[(lir::Place, Order)],
+        want: Order,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let mut operands = PlannedOperands {
+            views,
+            given,
+            next: 0,
+        };
+        let (planned, _) = self.planned_and(lhs, rhs, &mut operands, want, cx);
+        for (view, (place, _)) in views.iter().zip(given) {
+            self.operand_read(view.inner, place, &view.ty, cx);
+        }
+        planned
+    }
+
+    /// The AND of `lhs` and `rhs`, the operands in it the next of `operands`, by the plan fixed
+    /// when compiling, and each AND it reads given up. An operand isn't one of those, even if
+    /// it is an AND under a rename: all of them are given up after everything.
+    fn planned_and<'e>(
+        &mut self,
+        lhs: &'e hir::Expr,
+        rhs: &'e hir::Expr,
+        operands: &mut PlannedOperands<'_, 'e>,
+        want: Order,
+        cx: &mut Lowering,
+    ) -> (lir::Place, Order) {
+        let (left, lhs_place, lhs_order) = self.planned_part(lhs, operands, want, cx);
+        let (right, rhs_place, rhs_order) = self.planned_part(rhs, operands, want, cx);
+        let planned = self.and(
+            &left,
+            &right,
+            (lhs_place.clone(), lhs_order),
+            (rhs_place.clone(), rhs_order),
+            want,
+            cx,
+        );
+        for (part, view, made) in [(lhs, &left, &lhs_place), (rhs, &right, &rhs_place)] {
+            if is_and(part) {
+                self.operand_read(view.inner, made, &view.ty, cx);
+            }
+        }
+        planned
+    }
+
+    /// The part of an AND `expr`, the operands in it the next of `operands`, by the plan fixed
+    /// when compiling: how it is read, where it is, and how it is ordered.
+    fn planned_part<'e>(
+        &mut self,
+        expr: &'e hir::Expr,
+        operands: &mut PlannedOperands<'_, 'e>,
+        want: Order,
+        cx: &mut Lowering,
+    ) -> (View<'e>, lir::Place, Order) {
+        let mut inner = expr;
+        while let hir::Expr::At(_, within) = inner {
+            inner = within;
+        }
+        let hir::Expr::And(lhs, rhs) = inner else {
+            let at = operands.next;
+            operands.next += 1;
+            let (place, order) = &operands.given[at];
+            return (operands.views[at].clone(), place.clone(), *order);
+        };
+        let (place, order) = self.planned_and(lhs, rhs, operands, want, cx);
+        (self.view_as_it_is(expr), place, order)
+    }
+
+    /// How a join of several gives up the operand `view` at `place`, as
+    /// [`FunctionBuilder::operand_read`] would after it, as soon as it has been joined: its
+    /// `JOIN_` flag, if what is made of it holds no pointer into it, and nothing else can read
+    /// it.
+    fn given_up_by_a_join(&self, view: &View, place: &lir::Place, cx: &mut Lowering) -> u64 {
+        let hir::Type::Relation(heading) = &view.ty else {
+            return 0;
+        };
+        if cx.points(&hir::Type::Tuple(heading.clone())) {
+            return 0;
+        }
+        let mut operand = view.inner;
+        while let hir::Expr::At(_, inner) | hir::Expr::Treat(_, inner) = operand {
+            operand = inner;
+        }
+        match operand {
+            hir::Expr::Local(id) if self.last_read.contains(id) => {
+                if self.local_place(*id).0 == *place {
+                    lir::JOIN_RELEASES
+                } else {
+                    0
+                }
+            }
+            hir::Expr::Local(_)
+            | hir::Expr::Variable(_)
+            | hir::Expr::ComputedConstant(..)
+            | hir::Expr::Parameter(_)
+            | hir::Expr::Constant(_)
+            | hir::Expr::Current(..) => 0,
+            _ if self.is_a_bindings(place) => 0,
+            _ => lir::JOIN_DROPS,
+        }
     }
 
     /// `expr`, computed as it is, with nothing read through a rename.
@@ -8466,6 +8686,98 @@ fn last_mentioned(block: &hir::Block, end: Option<&hir::Expr>) -> Vec<(hir::Loca
             Some((*id, last))
         })
         .collect()
+}
+
+/// The operands of the AND of `lhs` and `rhs`, if it is one of at least three with nothing
+/// between them, and each computed on its own and read as it is. A restriction between
+/// them is a guard across operands, compiled for the tuples of the ones under it, so it stays
+/// where the plan fixed when compiling puts it, and what it restricts is one operand. A closure
+/// is found from what it is matched with, and a relation of one tuple can be a lookup, so what
+/// has either keeps that plan.
+fn several_joined<'e>(lhs: &'e hir::Expr, rhs: &'e hir::Expr) -> Option<Vec<&'e hir::Expr>> {
+    let mut leaves = Vec::new();
+    and_leaves(lhs, &mut leaves);
+    and_leaves(rhs, &mut leaves);
+    let plain = |leaf: &hir::Expr| {
+        arcs_of_closure(leaf).is_none()
+            && !matches!(leaf, hir::Expr::Relation(_, tuples) if tuples.len() == 1)
+    };
+    (leaves.len() >= 3 && leaves.iter().all(|leaf| plain(leaf))).then_some(leaves)
+}
+
+/// The operands of a join of several, each read as it is and computed at the place given, as
+/// the plan fixed when compiling reads them, in turn, the next of them being at `next`.
+struct PlannedOperands<'a, 'e> {
+    views: &'a [View<'e>],
+    given: &'a [(lir::Place, Order)],
+    next: usize,
+}
+
+/// What the runtime's `JoinOperand` says of the operand `view`, in order `order`, among the
+/// attributes `names` of the join's result, as they come in a tuple of it: the `JOIN_` flags
+/// `flags` too.
+fn join_operand(
+    view: &View,
+    order: Order,
+    flags: u64,
+    names: &[String],
+    cx: &mut Lowering,
+) -> lir::Field {
+    let tuple = cx.layout(&hir::Type::Tuple(view.shape.physical.clone()));
+    let attributes: Vec<lir::Field> = view
+        .shape
+        .names
+        .keys()
+        .map(|name| {
+            let position = names
+                .iter()
+                .position(|own| own == name)
+                .expect("each attribute of an operand is the result's");
+            let at = view
+                .shape
+                .position(name)
+                .expect("a rename reads only attributes the operand has");
+            lir::Field::Struct(vec![
+                lir::Field::Usize(len(position)),
+                lir::Field::Offset(tuple.clone(), vec![at]),
+            ])
+        })
+        .collect();
+    let loose = if order == Order::Loose {
+        lir::JOIN_LOOSE
+    } else {
+        0
+    };
+    lir::Field::Struct(vec![
+        lir::Field::Address(cx.descriptor(&view.ty)),
+        lir::Field::Address(cx.constant(attributes)),
+        lir::Field::Usize(len(view.shape.names.len())),
+        lir::Field::Usize(loose | flags),
+    ])
+}
+
+/// The operands of `expr`, in the order written, if it is an AND, and of each AND among them,
+/// and otherwise `expr` itself.
+fn and_leaves<'e>(expr: &'e hir::Expr, leaves: &mut Vec<&'e hir::Expr>) {
+    let mut inner = expr;
+    while let hir::Expr::At(_, within) = inner {
+        inner = within;
+    }
+    if let hir::Expr::And(lhs, rhs) = inner {
+        and_leaves(lhs, leaves);
+        and_leaves(rhs, leaves);
+    } else {
+        leaves.push(expr);
+    }
+}
+
+/// Whether `expr` is an AND, at a site of its own or not.
+fn is_and(expr: &hir::Expr) -> bool {
+    let mut inner = expr;
+    while let hir::Expr::At(_, within) = inner {
+        inner = within;
+    }
+    matches!(inner, hir::Expr::And(..))
 }
 
 /// Whether removing `names` from the relation `view` reads can't make two of its tuples

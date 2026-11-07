@@ -154,11 +154,13 @@ pub struct Function {
 pub struct SlotId(pub usize);
 
 impl Function {
-    /// A slot that something reads after [`RuntimeFn::Release`] has made it zero, with
-    /// nothing having written all of it since, on some way through the function, and the
-    /// block that reads it. An address taken of a slot or into its value is given up with
-    /// it. A value read from there has lost all it held, so lowering must have copied it
-    /// out first.
+    /// A slot that something reads after [`RuntimeFn::Release`] has made it zero, or
+    /// [`RuntimeFn::DropOperand`] may have freed what it points to, with nothing having
+    /// written all of it since, on some way through the function, and the block that reads
+    /// it. An address taken of a slot or into its value is given up with it. A value read
+    /// from there has lost all it held, so lowering must have copied it out first. What
+    /// frees a value twice is found too, as the second may free whatever has since been
+    /// given the same memory, which only sometimes shows.
     #[must_use]
     pub fn read_after_release(&self) -> Option<(BlockId, SlotId)> {
         let mut derived: Vec<(SlotId, SlotId)> = Vec::new();
@@ -270,6 +272,13 @@ fn flags_at(place: Option<&Place>, data: &[Data]) -> u64 {
     }
     0
 }
+
+/// As for `trendy_runtime::JOIN_LOOSE`.
+pub const JOIN_LOOSE: u64 = 1;
+/// As for `trendy_runtime::JOIN_DROPS`.
+pub const JOIN_DROPS: u64 = 2;
+/// As for `trendy_runtime::JOIN_RELEASES`.
+pub const JOIN_RELEASES: u64 = 4;
 
 /// As for `trendy_runtime::LOOSE_LHS`.
 pub const LOOSE_LHS: u64 = 1;
@@ -435,6 +444,14 @@ pub enum RuntimeFn {
     /// from the positive x axis to the point (`x`, `y`), as `atan2`
     /// computes it.
     Atan2,
+    /// `trendy_rt_join(dst, relations, operands, count, result, joined, orders)`: if the
+    /// largest of the `count` relations whose addresses are at `relations` is large enough
+    /// for it to matter, store at `dst` their join, of the type `result` describes, in an
+    /// order of joining chosen from their sizes and samples of them, and store 1 at
+    /// `joined`, and otherwise store 0 there, and do nothing else. `operands` says of each
+    /// what the runtime's `JoinOperand` does; `orders` has [`LOOSE_RESULT`] if the result
+    /// can be left as it comes. It fails if the memory can't be allocated.
+    Join,
     /// `trendy_rt_load_text_file(dst, path, descriptor)`: store at `dst` the
     /// array of the lines of the text file at `path`, a text, in order, of
     /// the type the descriptor describes, `array text`, in memory the
@@ -921,8 +938,60 @@ pub enum RuntimeFn {
 }
 
 impl RuntimeFn {
+    /// Whether its first argument is only where it stores what it makes, which it doesn't
+    /// read, and which can hold anything before.
+    #[must_use]
+    pub fn stores_at_first(self) -> bool {
+        matches!(
+            self,
+            RuntimeFn::ToText
+                | RuntimeFn::ParseInteger
+                | RuntimeFn::ParseApproximate
+                | RuntimeFn::ParseBoolean
+                | RuntimeFn::ToCodePoints
+                | RuntimeFn::FromCodePoints
+                | RuntimeFn::ToCharacters
+                | RuntimeFn::FromCharacters
+                | RuntimeFn::Sqrt
+                | RuntimeFn::Sin
+                | RuntimeFn::Cos
+                | RuntimeFn::Atan2
+                | RuntimeFn::Join
+                | RuntimeFn::LoadTextFile
+                | RuntimeFn::LoadTextFileWithErrors
+                | RuntimeFn::LoadCsv
+                | RuntimeFn::LoadCsvWithErrors
+                | RuntimeFn::Sum
+                | RuntimeFn::Product
+                | RuntimeFn::TcloseOf
+                | RuntimeFn::TcloseOfEach
+                | RuntimeFn::Concat
+                | RuntimeFn::Innermost
+                | RuntimeFn::Traced
+                | RuntimeFn::Reshape
+                | RuntimeFn::Relation
+                | RuntimeFn::And
+                | RuntimeFn::Index
+                | RuntimeFn::EqualRun
+                | RuntimeFn::Ungroup
+                | RuntimeFn::Matching
+                | RuntimeFn::Tclose
+                | RuntimeFn::Subset
+                | RuntimeFn::Combine
+                | RuntimeFn::Allocate
+                | RuntimeFn::Duplicate
+                | RuntimeFn::Load
+                | RuntimeFn::Unload
+                | RuntimeFn::CompareText
+                | RuntimeFn::Compare
+                | RuntimeFn::ConcatArrays
+                | RuntimeFn::Equal
+                | RuntimeFn::Assign
+        )
+    }
+
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 96] = [
+    pub const ALL: [RuntimeFn; 97] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -943,6 +1012,7 @@ impl RuntimeFn {
         RuntimeFn::LoadCsvWithErrors,
         RuntimeFn::SaveTextFile,
         RuntimeFn::SaveTextFileWithErrors,
+        RuntimeFn::Join,
         RuntimeFn::BrokenConstraintError,
         RuntimeFn::ComponentKeyError,
         RuntimeFn::OverlappingSubtypesError,
@@ -1047,6 +1117,7 @@ impl RuntimeFn {
             | RuntimeFn::LoadCsvWithErrors
             | RuntimeFn::SaveTextFile
             | RuntimeFn::SaveTextFileWithErrors
+            | RuntimeFn::Join
             | RuntimeFn::BrokenConstraintError
             | RuntimeFn::ComponentKeyError
             | RuntimeFn::OverlappingSubtypesError
@@ -1148,6 +1219,7 @@ impl RuntimeFn {
             RuntimeFn::Sin => "trendy_rt_sin",
             RuntimeFn::Cos => "trendy_rt_cos",
             RuntimeFn::Atan2 => "trendy_rt_atan2",
+            RuntimeFn::Join => "trendy_rt_join",
             RuntimeFn::SaveTextFile => "trendy_rt_save_text_file",
             RuntimeFn::SaveTextFileWithErrors => "trendy_rt_save_text_file_with_errors",
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
@@ -1321,6 +1393,11 @@ pub enum Inst {
     /// Store at `dst`, a [`Layout::Address`], the address of `src`: a
     /// variable passed to a `var` or `out` parameter.
     Address { dst: Place, src: Place },
+    /// As [`Inst::Address`], of a relation given to [`RuntimeFn::Join`], which says if it
+    /// is `loose`, in no particular order, as anything that goes on to read one has to
+    /// ([`Function::loose_read`]). Only the join reads it, before it gives anything up, so
+    /// it isn't among what [`Function::read_after_release`] says goes with `src`.
+    RelationAddress { dst: Place, src: Place, loose: bool },
 }
 
 /// The type an arithmetic operator works on.
@@ -1822,8 +1899,8 @@ pub struct Block {
 
 impl Inst {
     /// What the instruction does to `released`, the slots [`RuntimeFn::Release`] has made
-    /// zero, with `derived` the addresses taken of each, as
-    /// [`Function::read_after_release`] says: `found` with each of them it reads.
+    /// zero or [`RuntimeFn::DropOperand`] has given up, with `derived` the addresses taken of
+    /// each, as [`Function::read_after_release`] says: `found` with each of them it reads.
     fn released(
         &self,
         released: &mut BTreeSet<SlotId>,
@@ -1831,14 +1908,26 @@ impl Inst {
         found: &mut dyn FnMut(SlotId),
     ) {
         if let Inst::CallRuntime {
-            function: RuntimeFn::Release,
+            function: function @ (RuntimeFn::Release | RuntimeFn::DropOperand),
             args,
         } = self
         {
+            // Releasing what is zero does nothing, and one attribute of a tuple can be given
+            // up with the others still to be read.
+            let goes = if *function == RuntimeFn::Release {
+                args.first()
+            } else {
+                args.first().filter(|place| place.path.is_empty())
+            };
+            if *function == RuntimeFn::DropOperand
+                && let Some(place) = args.first()
+            {
+                read_of(place, released, found);
+            }
             if let Some(Place {
                 base: Base::Slot(slot),
                 ..
-            }) = args.first()
+            }) = goes
             {
                 released.insert(*slot);
                 let mut more = vec![*slot];
@@ -1897,6 +1986,10 @@ impl Inst {
                 }
                 says(loose, Some(dst), is_loose);
             }
+            // Given to a join that says it takes it so.
+            Inst::RelationAddress {
+                dst, loose: true, ..
+            } => says(loose, Some(dst), false),
             // Going through its tuples, in the order they are in.
             Inst::Element { dst, index, .. } => {
                 read_loosely(index, loose, found);
@@ -1951,8 +2044,9 @@ impl Inst {
                     }
                     says(loose, args.first(), false);
                 }
-                // It makes its tuples anew: sorting them, or leaving them as they come.
-                RuntimeFn::Reshape => {
+                // It makes its tuples anew: sorting them, or leaving them as they come. A
+                // join of several is told what each operand is as it is given it.
+                RuntimeFn::Reshape | RuntimeFn::Join => {
                     says(
                         loose,
                         args.first(),
@@ -1985,16 +2079,13 @@ impl Inst {
             | Inst::Unary { dst, src, .. }
             | Inst::Widen { dst, src, .. }
             | Inst::Narrow { dst, src, .. }
-            | Inst::Address { dst, src } => (vec![src], Some(dst)),
+            | Inst::Address { dst, src }
+            | Inst::RelationAddress { dst, src, .. } => (vec![src], Some(dst)),
             Inst::Call { args, result, .. } => (args.iter().collect(), result.as_ref()),
             Inst::SaveSite { dst } | Inst::IsNull { dst, .. } => (Vec::new(), Some(dst)),
             Inst::RestoreSite { src } => (vec![src], None),
             // They store a value there, whatever was: a variable's old one, or the
             // index of a loop that has ended.
-            Inst::CallRuntime {
-                function: RuntimeFn::Assign | RuntimeFn::Index,
-                args,
-            } => (args.iter().skip(1).collect(), args.first()),
             // What it looks up in is made first, if `IsNull` says it hasn't been.
             Inst::CallRuntime {
                 function: RuntimeFn::Lookup,
@@ -2002,11 +2093,14 @@ impl Inst {
             } => (
                 args.iter()
                     .enumerate()
-                    .filter(|(i, _)| !matches!(i, 1 | 2))
+                    .filter(|(i, _)| !matches!(i, 0..=2))
                     .map(|(_, arg)| arg)
                     .collect(),
-                None,
+                args.first(),
             ),
+            Inst::CallRuntime { function, args } if function.stores_at_first() => {
+                (args.iter().skip(1).collect(), args.first())
+            }
             Inst::CallRuntime { args, .. } => (args.iter().collect(), None),
             Inst::Binary { dst, lhs, rhs, .. } => (vec![lhs, rhs], Some(dst)),
             Inst::Element {
@@ -2254,6 +2348,47 @@ mod tests {
 
     fn one(insts: Vec<Inst>) -> Option<(usize, usize)> {
         found(vec![block(insts, Terminator::Return)])
+    }
+
+    /// Going through what has been given up reads freed memory, and giving it up again can
+    /// free what has been given that memory since.
+    #[test]
+    fn what_has_been_dropped_is_read_no_more() {
+        let drop_at = |place: Place| Inst::CallRuntime {
+            function: RuntimeFn::DropOperand,
+            args: vec![place, descriptor()],
+        };
+        assert_eq!(one(vec![drop_at(slot(0)), drop_at(slot(0))]), Some((0, 0)));
+        assert_eq!(
+            one(vec![drop_at(slot(0)), copy(slot(1), part(0))]),
+            Some((0, 0))
+        );
+        assert_eq!(one(vec![release(0), drop_at(slot(0))]), Some((0, 0)));
+        // Not once it holds something else.
+        assert_eq!(
+            one(vec![
+                drop_at(slot(0)),
+                copy(slot(0), slot(1)),
+                drop_at(slot(0))
+            ]),
+            None
+        );
+        // One attribute of a tuple goes, and the others are read.
+        assert_eq!(one(vec![drop_at(part(0)), copy(slot(1), slot(0))]), None);
+        // On one way of two.
+        let branch = Terminator::Branch {
+            condition: slot(7),
+            then: BlockId(1),
+            otherwise: BlockId(2),
+        };
+        assert_eq!(
+            found(vec![
+                block(vec![], branch),
+                block(vec![drop_at(slot(0))], Terminator::Jump(BlockId(2))),
+                block(vec![drop_at(slot(0))], Terminator::Return),
+            ]),
+            Some((2, 0))
+        );
     }
 
     #[test]
@@ -2611,6 +2746,47 @@ mod tests {
             ),
             Some((0, 0))
         );
+    }
+
+    /// A join of several: what it says of its result is in the flags at data 0, and those of
+    /// its operands are told by how their addresses were taken.
+    #[test]
+    fn a_join_of_several_says_what_it_reads_and_what_it_makes() {
+        let join = runtime(
+            RuntimeFn::Join,
+            vec![
+                slot(3),
+                slot(4),
+                slot(5),
+                slot(6),
+                descriptor(),
+                slot(7),
+                Place {
+                    base: Base::Data(DataId(0)),
+                    path: vec![0],
+                },
+            ],
+        );
+        let made = || with_flags(RuntimeFn::And, 0, 1, 2);
+        let address = |loose| Inst::RelationAddress {
+            dst: slot(4),
+            src: slot(0),
+            loose,
+        };
+        // A loose relation it isn't told is loose.
+        assert_eq!(
+            loose_in(vec![made(), address(false)], LOOSE_RESULT),
+            Some((0, 0))
+        );
+        // Or one it is.
+        assert_eq!(loose_in(vec![made(), address(true)], LOOSE_RESULT), None);
+        // Its result, only if it is told it can leave it so.
+        let read = runtime(RuntimeFn::Combine, vec![slot(8), slot(3)]);
+        assert_eq!(
+            loose_in(vec![join.clone(), read.clone()], LOOSE_RESULT),
+            Some((0, 3))
+        );
+        assert_eq!(loose_in(vec![join, read], 0), None);
     }
 
     #[test]
