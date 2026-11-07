@@ -33,6 +33,10 @@ pub(crate) struct Units {
     all: Vec<Unit>,
     /// The prelude's.
     prelude: hir::FileId,
+    /// Whether each unit is of the program, by its [`hir::FileId`]: one of `roots` to
+    /// [`Units::new`], or used by one, directly or through others. What else comes with the
+    /// compiler is there all the same, but nothing sees it.
+    in_program: Vec<bool>,
     /// Each unit's, by its name.
     ids: HashMap<String, hir::FileId>,
 }
@@ -80,7 +84,11 @@ pub(crate) struct Viewer {
 impl Units {
     /// The units of `files`, each with its name, as the trees of one
     /// program, one after another, of which `prelude` is the prelude's.
-    pub(crate) fn new(files: &[(&str, &SourceFile)], prelude: hir::FileId) -> Self {
+    pub(crate) fn new(
+        files: &[(&str, &SourceFile)],
+        prelude: hir::FileId,
+        roots: impl Iterator<Item = hir::FileId>,
+    ) -> Self {
         let ids: HashMap<String, hir::FileId> = files
             .iter()
             .enumerate()
@@ -116,11 +124,46 @@ impl Units {
                 }
             })
             .collect();
-        Units {
+        let mut units = Units {
             all: units,
             prelude,
+            in_program: vec![false; files.len()],
             ids,
+        };
+        units.in_program = units.reached_from(roots);
+        units
+    }
+
+    /// Whether each unit is one of `roots`, or used by one, directly or through others.
+    fn reached_from(&self, roots: impl Iterator<Item = hir::FileId>) -> Vec<bool> {
+        let mut reached = vec![false; self.all.len()];
+        let mut pending: Vec<hir::FileId> = roots.collect();
+        while let Some(unit) = pending.pop() {
+            if !std::mem::replace(&mut reached[unit.0], true) {
+                pending.extend(self.all[unit.0].uses.values().flatten());
+            }
         }
+        reached
+    }
+
+    /// Whether the unit is of the program, rather than something that comes with the compiler
+    /// that nothing uses.
+    pub(crate) fn in_program(&self, unit: hir::FileId) -> bool {
+        self.in_program[unit.0]
+    }
+
+    /// Whether a name `unit` declares is ambiguous, declared in each of `declaring` too: in
+    /// more than one unit of the program, the prelude among them. A unit nothing uses has no
+    /// say in what the program's are called, so that what comes with the compiler doesn't
+    /// change a program's names, and what is printed with them; its own name gives way to
+    /// theirs.
+    pub(crate) fn ambiguous(
+        &self,
+        declaring: impl Iterator<Item = hir::FileId>,
+        unit: hir::FileId,
+    ) -> bool {
+        let counts = |other: &hir::FileId| !self.in_program(unit) || self.in_program(*other);
+        ambiguous(declaring.filter(counts))
     }
 
     /// The unit a qualifier written `name`, at `viewer`, names, as
@@ -363,7 +406,7 @@ impl<T> Candidates<T> {
 
 /// Whether a name is ambiguous, declared in each of `declaring`: in more
 /// than one unit, the prelude among them.
-pub(crate) fn ambiguous(declaring: impl Iterator<Item = hir::FileId>) -> bool {
+fn ambiguous(declaring: impl Iterator<Item = hir::FileId>) -> bool {
     let mut first = None;
     let mut several = false;
     for unit in declaring {

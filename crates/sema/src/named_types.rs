@@ -807,6 +807,7 @@ fn specialization(
     representations.extend(converted.iter().map(|c| representation(c, &mut numbered)));
     let defined = hir::Defined {
         name: placed.name.to_string(),
+        unit: unit_of(decl, namespaces),
         components: supertype.components.clone(),
         representations,
         constraints,
@@ -937,6 +938,7 @@ fn defined(
     let keys = crate::keys::components(decl, name, &resolved, errors);
     let mut defined = hir::Defined {
         name: name.to_string(),
+        unit: unit_of(decl, namespaces),
         components,
         representations,
         constraints,
@@ -949,6 +951,12 @@ fn defined(
     defined.order = type_order(decl, &defined, errors);
     namespaces.defined.insert(name.to_string(), defined);
     namespaces.converted.insert(name.to_string(), converted);
+}
+
+/// The name of the unit `decl` is in.
+fn unit_of(decl: &ast::TypeDecl, namespaces: &Namespaces) -> String {
+    let unit = namespaces.unit_at(decl.span());
+    namespaces.units().name(unit).to_string()
 }
 
 /// The order `decl` gives its type, `defined`, if it gives it one, or

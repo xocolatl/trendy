@@ -1202,6 +1202,7 @@ impl Lowering {
     ) -> lir::DataId {
         let given = hir::Defined {
             name: defined.written().to_string(),
+            unit: defined.unit.clone(),
             components: representation.components.clone(),
             representations: Vec::new(),
             constraints: Vec::new(),
@@ -9877,6 +9878,7 @@ mod tests {
     fn number_type(name: &str) -> hir::Defined {
         hir::Defined {
             name: name.to_string(),
+            unit: String::new(),
             components: hir::Library::number_components(),
             representations: Vec::new(),
             constraints: Vec::new(),
@@ -9901,6 +9903,7 @@ mod tests {
             .map(|error| {
                 hir::Type::Defined(Box::new(hir::Defined {
                     name: error.name().to_string(),
+                    unit: String::new(),
                     components: error.components(),
                     representations: Vec::new(),
                     constraints: Vec::new(),
@@ -12599,6 +12602,7 @@ mod tests {
         bounded_by(condition, &mut bounds);
         let defined = hir::Defined {
             name: "t".to_string(),
+            unit: String::new(),
             components: hir::Heading::new(BTreeMap::from([(
                 "v".to_string(),
                 hir::Type::Scalar(hir::Scalar::Integer),

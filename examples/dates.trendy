@@ -1,9 +1,9 @@
 uses { trendy.time };
 
-/* Dates and times: a date, a time of day, an instant, and an instant with the offset
-   it was written at. Nowruz starts at one instant, the equinox, and each city's clock
-   shows it differently, on another date in Lima. Each city's name is in its own
-   language too. */
+/* Dates and times: a date, a time of day, an instant, an instant with the offset it was
+   written at, and how long something takes. Nowruz starts at one instant, the equinox,
+   and each city's clock shows it differently, on another date in Lima. Each city's name
+   is in its own language too. */
 const nowruz := date{year: 2024, month: 3, day: 20};
 const equinox := timestamp{date: nowruz, time: time{hour: 3, minute: 6, second: 26, nanosecond: 0}};
 
@@ -80,4 +80,45 @@ operator main{} [
         },
         of: at,
     }.time.nanosecond};
+
+    /* How long a flight takes, by the two cities' clocks, which differ: exactly, as a
+       duration is, whichever way it is written. */
+    var leaves := offset_timestamp{
+        year: 2024,
+        month: 3,
+        day: 20,
+        hour: 9,
+        minute: 0,
+        second: 0,
+        nanosecond: 0,
+        utc_offset: 3_600,
+    };
+    var lands := offset_timestamp{
+        year: 2024,
+        month: 3,
+        day: 20,
+        hour: 15,
+        minute: 25,
+        second: 0,
+        nanosecond: 0,
+        utc_offset: 10_800,
+    };
+    var flight := elapsed{from: leaves.timestamp, to: lands.timestamp};
+    call debug_value{v: flight = minutes{n: 265}};
+    call debug_value{v: after{t: leaves.timestamp, by: flight} = lands.timestamp};
+    call debug_value{v: before{t: lands.timestamp, by: flight} = leaves.timestamp};
+    call debug_value{v: elapsed{from: lands.timestamp, to: leaves.timestamp} < seconds{n: 0}};
+
+    /* From one equinox to the next, more than a year of whole days. */
+    var next := timestamp{
+        date: date{year: 2025, month: 3, day: 20},
+        time: time{hour: 9, minute: 1, second: 25, nanosecond: 0},
+    };
+    call debug_value{v: elapsed{from: equinox, to: next}.seconds div 3_600};
+
+    /* The same day of another month, if it has that day: rent paid on the 31st falls
+       due in March, and February hasn't one. */
+    var rent_paid := date{year: 2024, month: 1, day: 31};
+    call debug_value{v: add_months{d: rent_paid, months: 2}.day};
+    call debug_value{v: has_day_after_months{d: rent_paid, months: 1}};
 ];

@@ -1,9 +1,13 @@
-//! Dates and times written as text, as SQL and most other languages write them,
-//! where a value of a type of `trendy.time` is expected: for the fix that selects
-//! it. The text only has to have the shape: whether it is a value is the selector's
-//! to say, and it says so of the fix as of anything else.
+//! Dates and times written as other languages write them: as text, where a value of a
+//! type of `trendy.time` is expected, for the fix that selects it, and with `+` and `-`,
+//! for the fix that calls its operators. Text only has to have the shape: whether it is a
+//! value is the selector's to say, and it says so of the fix as of anything else.
 
+use trendy_diag::Edit;
 use trendy_hir as hir;
+use trendy_syntax::ast::Expr;
+
+use crate::ops::{OnTheirOwn, Operator};
 
 /// The unit that declares the types.
 const UNIT: &str = "trendy.time";
@@ -14,7 +18,7 @@ pub(crate) fn selection(ty: &hir::Type, text: &str) -> Option<String> {
     let hir::Type::Defined(defined) = ty else {
         return None;
     };
-    let is = |name| hir::Library::is_type_of(&defined.name, UNIT, name);
+    let is = |name| defined.is_type_of(UNIT, name);
     // As the type's own name is qualified, so are the others'.
     let qualified = defined
         .name
@@ -28,6 +32,12 @@ pub(crate) fn selection(ty: &hir::Type, text: &str) -> Option<String> {
     }
     if is("time") {
         return clock(text).map(|clock| clock_selection(qualified, clock));
+    }
+    if is("duration") {
+        let (seconds, subsec_nanos) = duration(text)?;
+        return Some(format!(
+            "{qualified}duration{{seconds: {seconds}, subsec_nanos: {subsec_nanos}}}"
+        ));
     }
     let (on, at) = text.split_once(['T', ' '])?;
     let (year, month, day) = date(on)?;
@@ -47,6 +57,78 @@ pub(crate) fn selection(ty: &hir::Type, text: &str) -> Option<String> {
         ));
     }
     None
+}
+
+/// What `operands`, each as `own` has it, of `op`, mean if they are `t - s` of two
+/// instants, or `t + d` or `t - d` of an instant and a duration: what to say of the fix, and
+/// the fix, calling the operator that has that value.
+pub(crate) fn arithmetic(
+    op: Operator,
+    operands: &[Option<Expr>],
+    own: &OnTheirOwn,
+) -> Option<(String, Edit)> {
+    let [Some(lhs), Some(rhs)] = operands else {
+        return None;
+    };
+    let types: Vec<&hir::Type> = own.types().collect();
+    let [hir::Type::Defined(left), hir::Type::Defined(right)] = types.as_slice() else {
+        return None;
+    };
+    let is = |defined: &hir::Defined, name| defined.is_type_of(UNIT, name);
+    let call = match (
+        op,
+        is(left, "timestamp"),
+        is(right, "timestamp"),
+        is(left, "duration"),
+        is(right, "duration"),
+    ) {
+        (Operator::Subtract, true, true, ..) => {
+            format!("elapsed{{from: {}, to: {}}}", text(rhs), text(lhs))
+        }
+        (Operator::Add, true, _, _, true) => {
+            format!("after{{t: {}, by: {}}}", text(lhs), text(rhs))
+        }
+        (Operator::Add, _, true, true, _) => {
+            format!("after{{t: {}, by: {}}}", text(rhs), text(lhs))
+        }
+        (Operator::Subtract, true, _, _, true) => {
+            format!("before{{t: {}, by: {}}}", text(lhs), text(rhs))
+        }
+        _ => return None,
+    };
+    let replacement = match left.name.rsplit_once("::") {
+        Some(_) => format!("{UNIT}::{call}"),
+        None => call,
+    };
+    let span = trendy_diag::Span {
+        start: lhs.span().start,
+        end: rhs.span().end,
+    };
+    Some((
+        format!("`trendy.time` has no `+` or `-`: write `{replacement}`"),
+        Edit { span, replacement },
+    ))
+}
+
+/// How to do what arithmetic on `defined` would, if it is a type of `trendy.time` with no
+/// one number to compute with.
+pub(crate) fn arithmetic_help(defined: &hir::Defined) -> Option<String> {
+    let is = |name| defined.is_type_of(UNIT, name);
+    if is("timestamp") {
+        return Some(
+            "`after{t, by: seconds{n: 1}}` and `before{t, by: …}` move a `timestamp` by a `duration`, and `elapsed{from, to}` is the `duration` between two"
+                .to_string(),
+        );
+    }
+    is("duration").then(|| {
+        "a `duration` has no arithmetic yet: `elapsed{from, to}` gives one, `after{t, by}` and `before{t, by}` move a `timestamp` by one, and its `seconds` and `subsec_nanos` can be computed with"
+            .to_string()
+    })
+}
+
+/// The text of `expr`, as it is written.
+fn text(expr: &Expr) -> String {
+    expr.syntax().text().to_string()
 }
 
 /// The selection of the time `clock`.
@@ -95,6 +177,70 @@ fn clock(text: &str) -> Option<(u32, u32, u32, u32)> {
     Some((hour, minute, second, nanosecond))
 }
 
+/// The seconds, rounded down, and the nanoseconds past them, of ISO 8601's `PnDTnHnMnS`,
+/// each part optional, as long as there is one, and with `-` before it for that long back.
+/// Its years and months have no fixed length, so a duration has none.
+fn duration(text: &str) -> Option<(i64, u32)> {
+    let (sign, written) = match text.strip_prefix('-') {
+        Some(written) => (-1, written),
+        None => (1, text),
+    };
+    let written = written.strip_prefix('P')?;
+    let (date_part, clock) = written.split_once('T').unwrap_or((written, ""));
+    let (days, rest) = part(date_part, 'D');
+    if !rest.is_empty() || written.ends_with('T') {
+        return None;
+    }
+    let (hours, clock) = part(clock, 'H');
+    let (minutes, clock) = part(clock, 'M');
+    let (seconds, rest) = part(clock, 'S');
+    if !rest.is_empty() {
+        return None;
+    }
+    let (seconds, fraction) = match seconds.map(|s| s.split_once('.').unwrap_or((s, "0"))) {
+        Some((seconds, fraction)) => (Some(seconds), fraction),
+        None => (None, "0"),
+    };
+    let width = u32::try_from(fraction.len())
+        .ok()
+        .filter(|w| (1..=9).contains(w))?;
+    if days.is_none() && hours.is_none() && minutes.is_none() && seconds.is_none() {
+        return None;
+    }
+    let total = sign
+        * ((whole_or_zero(days)? * 86_400
+            + whole_or_zero(hours)? * 3_600
+            + whole_or_zero(minutes)? * 60
+            + whole_or_zero(seconds)?)
+            * 1_000_000_000
+            + whole(fraction)? * 10_i128.pow(9 - width));
+    Some((
+        i64::try_from(total.div_euclid(1_000_000_000)).ok()?,
+        u32::try_from(total.rem_euclid(1_000_000_000)).ok()?,
+    ))
+}
+
+/// The number before `unit` at the start of `text`, as it was written, if `unit` is there,
+/// and what comes after it.
+fn part(text: &str, unit: char) -> (Option<&str>, &str) {
+    match text.split_once(unit) {
+        Some((number, rest)) => (Some(number), rest),
+        None => (None, text),
+    }
+}
+
+/// `written` as a number, if it is one, or 0 if nothing is written.
+fn whole_or_zero(written: Option<&str>) -> Option<i128> {
+    written.map_or(Some(0), whole)
+}
+
+/// `digits` as a number, of not so many digits that it can overflow.
+fn whole(digits: &str) -> Option<i128> {
+    (!digits.is_empty() && digits.len() <= 20 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
 /// What is before the offset at the end of `text`, and the offset, in seconds: `Z`,
 /// `+05:45` or `-05:00`.
 fn offset(text: &str) -> Option<(&str, i32)> {
@@ -112,6 +258,45 @@ fn offset(text: &str) -> Option<(&str, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso_8601_durations_are_read_by_their_shape() {
+        for (written, right) in [
+            ("PT5M", (300, 0)),
+            ("P1D", (86_400, 0)),
+            ("P1DT1H", (90_000, 0)),
+            ("PT1H30M5S", (5_405, 0)),
+            ("PT0.5S", (0, 500_000_000)),
+            ("PT1.000000001S", (1, 1)),
+            // Rounded down, as a `duration` is.
+            ("-PT0.5S", (-1, 500_000_000)),
+            ("-PT5M", (-300, 0)),
+            ("PT0S", (0, 0)),
+        ] {
+            assert_eq!(duration(written), Some(right), "{written}");
+        }
+        // Years and months have no fixed length, and nothing else is one.
+        for wrong in [
+            "P1Y",
+            "P1M",
+            "P1Y2M3D",
+            "P",
+            "PT",
+            "5M",
+            "PT5",
+            "PTS",
+            "PT1.S",
+            "PT0.1234567891S",
+            "PT5S5M",
+            "P1DT",
+            "5 minutes",
+            "",
+        ] {
+            assert_eq!(duration(wrong), None, "{wrong}");
+        }
+        // What can't be a number of seconds is no value.
+        assert_eq!(duration("PT99999999999999999999S"), None);
+    }
 
     #[test]
     fn iso_8601_is_read_by_its_shape() {

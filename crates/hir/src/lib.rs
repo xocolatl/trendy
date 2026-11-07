@@ -4332,6 +4332,8 @@ pub struct Constraint {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Defined {
     pub name: String,
+    /// The name of the unit that declares it.
+    pub unit: String,
     pub components: Heading,
     pub representations: Vec<Representation>,
     pub constraints: Vec<Constraint>,
@@ -4436,6 +4438,13 @@ impl Defined {
     #[must_use]
     pub fn written(&self) -> &str {
         &self.stored_as().name
+    }
+
+    /// Whether it is the type `name` that the unit `unit` declares, whatever else in the
+    /// program has that name, and however that leaves its own written.
+    #[must_use]
+    pub fn is_type_of(&self, unit: &str, name: &str) -> bool {
+        self.unit == unit && self.name.rsplit("::").next() == Some(name)
     }
 
     /// Its order, if it has one, and the components of the possible
@@ -5867,6 +5876,7 @@ mod tests {
             Heading::new([("degrees".to_string(), Type::Scalar(Scalar::Approximate))].into());
         let celsius = Defined {
             name: "celsius".to_string(),
+            unit: String::new(),
             components,
             representations: Vec::new(),
             constraints: Vec::new(),
@@ -5929,6 +5939,7 @@ mod tests {
         let defined = |name: &str, supertypes: &[&str]| {
             Type::Defined(Box::new(Defined {
                 name: name.to_string(),
+                unit: String::new(),
                 components: Heading::default(),
                 representations: Vec::new(),
                 constraints: Vec::new(),
@@ -6043,6 +6054,7 @@ mod tests {
         // figure > ellipse > circle, ellipse stored, circle by constraint.
         let ellipse = Defined {
             name: "ellipse".to_string(),
+            unit: String::new(),
             components: Heading::new([("a".to_string(), Type::Scalar(Scalar::Integer))].into()),
             representations: Vec::new(),
             constraints: vec![constraint(0)],
@@ -6054,6 +6066,7 @@ mod tests {
         };
         let subtype = |name: &str, n: usize| Defined {
             name: name.to_string(),
+            unit: String::new(),
             constraints: vec![constraint(0), constraint(n)],
             supertypes: vec!["ellipse".to_string(), "figure".to_string()],
             specialized: false,
@@ -6083,6 +6096,7 @@ mod tests {
         }));
         let polygon = Type::Defined(Box::new(Defined {
             name: "polygon".to_string(),
+            unit: String::new(),
             supertypes: vec!["figure".to_string()],
             specialized: false,
             ..ellipse.clone()

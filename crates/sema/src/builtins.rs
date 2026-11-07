@@ -419,6 +419,7 @@ fn made_by_the_compiler(
     }
     declared.unwrap_or_else(|| hir::Defined {
         name: identity,
+        unit: trendy_prelude::PRELUDE.name.to_string(),
         components,
         representations: Vec::new(),
         constraints: Vec::new(),

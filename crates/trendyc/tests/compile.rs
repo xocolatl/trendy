@@ -11423,7 +11423,150 @@ fn dates() {
             "true",
             "true",
             "1",
+            "true",
+            "true",
+            "true",
+            "true",
+            "8765",
+            "31",
+            "false",
         ]
+    );
+}
+
+/// Exact lengths of time, and months, with nothing known when compiling.
+#[test]
+fn durations_when_the_program_runs() {
+    let (code, stderr) = run_source(
+        "durations_running",
+        r#"
+uses { trendy.time };
+
+operator main{} [
+    var one := parse_integer{from: "1"};
+    const first := timestamp{date: date{days: -10_000_000_000_000 * one}, time: time{nanos_of_day: 0}};
+    const last := timestamp{date: date{days: 10_000_000_000_000 * one}, time: time{nanos_of_day: 86_399_999_999_999}};
+    const whole := elapsed{from: first, to: last};
+    call debug_value{v: whole};
+    call debug_value{v: elapsed{from: last, to: first}};
+    call debug_value{v: tuple { there: after{t: first, by: whole} = last, back: before{t: last, by: whole} = first }};
+
+    /* Written any way, one value: a relation holds it once, and a key sees it as one. */
+    const half_back := milliseconds{n: -500 * one};
+    call debug_value{v: half_back};
+    var rows := relation {
+        { d: seconds{n: one} },
+        { d: milliseconds{n: 1_000 * one} },
+        { d: nanoseconds{n: 1_000_000_000 * one} },
+        { d: half_back },
+    };
+    call debug_value{v: count{r: rows}};
+
+    /* Ordered by how long it is: as it is stored, for what goes by that. */
+    call debug_value{v: min{r: rows, of: d}};
+    call debug_value{v: max{r: rows, of: d}};
+    var sorted: array duration;
+    load sorted value from rows order [desc d];
+    call debug_value{v: sorted[1] = seconds{n: one}};
+    call debug_value{v: array [half_back] < array [seconds{n: one}]};
+
+    /* The same day of another month. */
+    var paid := date{year: 2024, month: 1, day: 31 * one};
+    const march := add_months{d: paid, months: 2 * one};
+    call debug_value{v: tuple { y: march.year, m: march.month, d: march.day }};
+    call debug_value{v: has_day_after_months{d: paid, months: one}};
+
+    /* Which fails where the call is, not in the unit. */
+    call debug_value{v: "not yet"};
+    call debug_value{v: add_months{d: paid, months: one}};
+    call debug_value{v: "not here"};
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines[..12],
+        [
+            "duration{seconds: 1728000000000086399, subsec_nanos: 999999999}",
+            "duration{seconds: -1728000000000086400, subsec_nanos: 1}",
+            "tuple { back: true, there: true }",
+            "duration{seconds: -1, subsec_nanos: 500000000}",
+            "2",
+            "duration{seconds: -1, subsec_nanos: 500000000}",
+            "duration{seconds: 1, subsec_nanos: 0}",
+            "true",
+            "true",
+            "tuple { d: 31, m: 3, y: 2024 }",
+            "false",
+            "\"not yet\"",
+        ],
+        "{stderr}"
+    );
+    assert!(
+        lines[12].starts_with("error[R0024]: add_months{"),
+        "{stderr}"
+    );
+    assert!(
+        lines[12].contains("it breaks the constraint `has_day_after_months{d, months}`"),
+        "{stderr}"
+    );
+    assert!(lines[13].contains("durations_running.trendy:"), "{stderr}");
+    assert!(!stderr.contains("not here"), "{stderr}");
+}
+
+/// Past the end of a `date`'s range there is no instant, and the failure leads to the call.
+#[test]
+fn an_instant_past_the_end_of_time_fails() {
+    let (code, stderr) = run_source(
+        "durations_past_the_end",
+        r#"
+uses { trendy.time };
+
+operator main{} [
+    var one := parse_integer{from: "1"};
+    const last := timestamp{date: date{days: 10_000_000_000_000 * one}, time: time{nanos_of_day: 0}};
+    call debug_value{v: after{t: last, by: days{n: one}}};
+];
+"#,
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    assert!(
+        stderr.starts_with(&format!("error[{broken}]: date{{days: 10000000000001}}")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("durations_past_the_end.trendy:7"),
+        "{stderr}"
+    );
+}
+
+/// What comes with the compiler and isn't used doesn't change a program's names, or what
+/// they print as. Used, there are two of the name, and it says which.
+#[test]
+fn a_programs_own_type_is_not_renamed_by_a_unit_it_does_not_use() {
+    let program = |uses: &str| {
+        format!(
+            r#"{uses}type duration {{ {{ seconds: integer, label: text }} }};
+operator days{{n: integer}}: integer [ n * 2 ];
+
+operator main{{}} [
+    var one := parse_integer{{from: "1"}};
+    call debug_value{{v: duration{{seconds: one, label: "ours"}}}};
+    call debug_value{{v: days{{n: one}}}};
+];
+"#
+        )
+    };
+    let (code, stderr) = run_source("own_duration", &program(""));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr, "duration{label: \"ours\", seconds: 1}\n2\n");
+    let (code, stderr) = run_source("own_duration_used", &program("uses { trendy.time };\n"));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr,
+        "own_duration_used::duration{label: \"ours\", seconds: 1}\n2\n"
     );
 }
 

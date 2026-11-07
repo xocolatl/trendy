@@ -8,9 +8,9 @@ use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Expr, Literal, LiteralError};
 use trendy_syntax::{SyntaxKind, SyntaxToken, literal};
 
-use crate::errors;
 use crate::operators::Operators;
 use crate::types::{self, Expected, Origin};
+use crate::{errors, written_times};
 
 /// What an operator token denotes, before its operand type is known. Sema
 /// sees only trees without syntax errors, so foreign spellings such as `&&`
@@ -479,13 +479,17 @@ pub(crate) fn check_operands(
         if let Some(met) = &own.met
             && op.resolve(&met.ty).is_none()
         {
-            errors.push(errors::wrong_operand_type(
-                op,
-                token,
-                &met.ty,
-                own.first.as_ref(),
-                kinds,
-            ));
+            let mut wrong =
+                errors::wrong_operand_type(op, token, &met.ty, own.first.as_ref(), kinds);
+            // `t - s` of two instants: what was meant replaces all of it, so the operand
+            // that doesn't fit with the other is nothing to report, and neither is what
+            // else there is to write.
+            if let Some((message, edit)) = written_times::arithmetic(op, &operands, &own) {
+                wrong.help.clear();
+                errors.push(wrong.with_suggestion(message, vec![edit]));
+                return None;
+            }
+            errors.push(wrong);
             wrong_type = true;
         }
         expectation = own.met;

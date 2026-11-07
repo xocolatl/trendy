@@ -221,7 +221,14 @@ impl Files {
             .zip(&files)
             .map(|(file, tree)| (file.name, tree))
             .collect();
-        let names = scope::Units::new(&unit_files, prelude);
+        // The library alone, as it is checked, has nothing to be used by.
+        let roots = if units.is_empty() {
+            0..all.len()
+        } else {
+            0..units.len()
+        };
+        let roots = roots.map(hir::FileId).chain([prelude, catalog]);
+        let names = scope::Units::new(&unit_files, prelude, roots);
         let units: Vec<(Source, SourceFile)> = files
             .into_iter()
             .enumerate()
@@ -1189,7 +1196,7 @@ impl Namespaces {
             .map(|(u, _)| u)
             .chain(self.constants.declaring(name).map(|(u, _)| u))
             .chain(self.databases.declaring(name).map(|(u, _)| u));
-        let ambiguous = scope::ambiguous(declaring);
+        let ambiguous = self.units.ambiguous(declaring, unit);
         self.units.identity(name, unit, ambiguous)
     }
 
@@ -1228,7 +1235,8 @@ impl Namespaces {
     /// What the constraint named `name`, declared in `unit`, is called in
     /// the program.
     pub(crate) fn constraint_identity(&self, name: &str, unit: hir::FileId) -> String {
-        let ambiguous = scope::ambiguous(self.constraints.declaring(name).map(|(u, _)| u));
+        let declaring = self.constraints.declaring(name).map(|(u, _)| u);
+        let ambiguous = self.units.ambiguous(declaring, unit);
         self.units.identity(name, unit, ambiguous)
     }
 
@@ -1267,7 +1275,7 @@ impl Namespaces {
             .declaring(name)
             .map(|(u, _)| u)
             .chain(self.headings.declaring(name).map(|(u, _)| u));
-        let ambiguous = scope::ambiguous(declaring);
+        let ambiguous = self.units.ambiguous(declaring, unit);
         self.units.identity(name, unit, ambiguous)
     }
 
@@ -4712,18 +4720,15 @@ operator main{} [
         let typed = "var e: relation { error: error } := relation { { error: not_utf8{path: \"a\", line: 1} } };\noperator main{} [];";
         assert_eq!(codes(typed), [Code::UnknownName]);
         // A unit can declare a type of one of its names, which a unit that
-        // doesn't use it means, called by its unit's name, as the error
-        // the language makes is.
+        // doesn't use it means, called by its own name, as what nothing uses has
+        // no say in that, and the error the language makes by its unit's.
         let own = "type malformed_csv { { why: text } };\nvar m := malformed_csv{why: \"no header\"};\noperator main{} [];";
         let program = analyze_str(own).unwrap();
         assert_eq!(
             program.language_errors[&hir::LanguageError::MalformedCsv],
             "trendy.files::malformed_csv"
         );
-        assert_eq!(
-            program.variables[0].ty.to_string(),
-            "program::malformed_csv"
-        );
+        assert_eq!(program.variables[0].ty.to_string(), "malformed_csv");
         let made = program.language_error(hir::LanguageError::MalformedCsv);
         assert_eq!(made.name, "trendy.files::malformed_csv");
     }
@@ -13961,6 +13966,7 @@ type position { { latitude: approximate, longitude: approximate } };
         let approximate = || hir::Type::Scalar(hir::Scalar::Approximate);
         let position = hir::Defined {
             name: "position".to_string(),
+            unit: "program".to_string(),
             components: hir::Heading::new(
                 [
                     ("latitude".to_string(), approximate()),
@@ -13978,6 +13984,7 @@ type position { { latitude: approximate, longitude: approximate } };
         };
         let place = hir::Defined {
             name: "place".to_string(),
+            unit: "program".to_string(),
             components: hir::Heading::new(
                 [
                     (
@@ -15312,6 +15319,18 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
                 "var a: OffsetDateTime := 1;",
                 "var a: offset_timestamp := 1;",
             ),
+            ("var a: interval := 1;", "var a: duration := 1;"),
+            ("var a: INTERVAL := 1;", "var a: duration := 1;"),
+            ("var a: timedelta := 1;", "var a: duration := 1;"),
+            ("var a: TimeSpan := 1;", "var a: duration := 1;"),
+            (
+                "var a: duration := \"PT1H30M\";",
+                "var a: duration := duration{seconds: 5400, subsec_nanos: 0};",
+            ),
+            (
+                "var a: duration := \"-PT0.5S\";",
+                "var a: duration := duration{seconds: -1, subsec_nanos: 500000000};",
+            ),
             (
                 "var a: date := \"2024-03-05\";",
                 "var a: date := date{year: 2024, month: 3, day: 5};",
@@ -15351,6 +15370,8 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             "var a: date := \"2024-3-5\";",
             "var a: integer := \"2024-03-05\";",
             "var a: timestamp := \"2024-03-05\";",
+            "var a: duration := \"P1M\";",
+            "var a: duration := \"5 minutes\";",
         ] {
             let source = format!("{start}{written}{MAIN}");
             assert!(
@@ -15374,7 +15395,355 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         );
         let found = self::errors(&source);
         assert_eq!(found[0].code, Code::WrongOperandType);
+        assert!(found[0].help[0].contains("`after{t, by:"), "{found:#?}");
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+    }
+
+    /// Instants and durations, as other languages add and subtract them.
+    const INSTANTS: &str = "uses { trendy.time };
+const a := timestamp{date: date{days: 1}, time: time{nanos_of_day: 0}};
+const b := timestamp{date: date{days: 0}, time: time{nanos_of_day: 0}};
+const d := seconds{n: 5};
+";
+
+    #[test]
+    fn arithmetic_on_instants_is_fixed_to_what_it_means() {
+        for (written, right, seconds) in [
+            (
+                "var x := a - b;",
+                "var x := elapsed{from: b, to: a};",
+                Some(86_400),
+            ),
+            (
+                "var x := b - a;",
+                "var x := elapsed{from: a, to: b};",
+                Some(-86_400),
+            ),
+            ("var x := a + d;", "var x := after{t: a, by: d};", None),
+            ("var x := d + a;", "var x := after{t: a, by: d};", None),
+            ("var x := a - d;", "var x := before{t: a, by: d};", None),
+            (
+                "var x := after{t: a, by: d} - before{t: b, by: d};",
+                "var x := elapsed{from: before{t: b, by: d}, to: after{t: a, by: d}};",
+                Some(86_410),
+            ),
+        ] {
+            let fixed = fix(&format!("{INSTANTS}{written}{MAIN}"));
+            assert_eq!(fixed, format!("{INSTANTS}{right}{MAIN}"), "{written}");
+            // One error, with no other way, for one fix that compiles.
+            let source = format!("{INSTANTS}{written}{MAIN}");
+            let found = errors(&source);
+            assert_eq!(found.len(), 1, "{written}: {found:#?}");
+            assert!(found[0].help.is_empty(), "{found:#?}");
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+            if let Some(seconds) = seconds {
+                let vars = variables(&format!("{INSTANTS}{right}\nvar y := x.seconds;"));
+                assert_eq!(vars.last().unwrap().init.to_string(), seconds.to_string());
+            }
+        }
+        // What has no such meaning says what there is.
+        for (written, help) in [
+            ("var x := d + d;", "no arithmetic yet"),
+            ("var x := d * 2;", "no arithmetic yet"),
+            ("var x := a + 1;", "`after{t, by:"),
+            ("var x := a * 2;", "`after{t, by:"),
+        ] {
+            let found = errors(&format!("{INSTANTS}{written}{MAIN}"));
+            assert_eq!(found[0].code, Code::WrongOperandType, "{written}");
+            assert!(found[0].help[0].contains(help), "{written}: {found:#?}");
+            assert!(found[0].suggestions.is_empty(), "{written}: {found:#?}");
+        }
+        // A program's own types of those names are its own.
+        let own = "type timestamp { { a: integer, b: integer } };
+var one := timestamp{a: 1, b: 2};
+var two := timestamp{a: 3, b: 4};
+var x := one - two;";
+        let found = errors(&format!("{own}{MAIN}"));
+        assert_eq!(found[0].code, Code::WrongOperandType, "{found:#?}");
         assert!(found[0].help.is_empty(), "{found:#?}");
+        assert!(found[0].suggestions.is_empty(), "{found:#?}");
+    }
+
+    #[test]
+    fn what_nothing_uses_has_no_say_in_a_programs_names() {
+        let own = "type duration { { n: integer } };
+operator days{n: integer}: integer [ n ];
+var a := duration{n: days{n: 1}};
+";
+        let names = |source: String| {
+            let program = analyze_str(&source).unwrap();
+            let days: Vec<String> = program
+                .operators
+                .iter()
+                .map(|operator| operator.name.clone())
+                .filter(|name| name.ends_with("days"))
+                .collect();
+            (program.variables[0].ty.to_string(), days)
+        };
+        let (ty, days) = names(format!("{own}{MAIN}"));
+        assert_eq!(ty, "duration");
+        assert!(days.contains(&"days".to_string()), "{days:?}");
+        // Its own give way, so that each still has one name of its own.
+        assert!(days.contains(&"trendy.time::days".to_string()), "{days:?}");
+        // Used, each is as ambiguous as any other unit's, and a used unit's uses count.
+        let (ty, days) = names(format!("uses {{ trendy.time }};\n{own}{MAIN}"));
+        assert_eq!(ty, "program::duration");
+        assert!(days.contains(&"program::days".to_string()), "{days:?}");
+        assert!(days.contains(&"trendy.time::days".to_string()), "{days:?}");
+    }
+
+    #[test]
+    fn months_and_years_are_no_durations() {
+        for name in ["months", "years", "Months"] {
+            let source = format!("uses {{ trendy.time }};\nvar a := {name}{{n: 1}};{MAIN}");
+            let found = errors(&source);
+            assert_eq!(found[0].code, Code::UnknownName, "{found:#?}");
+            assert!(found[0].help[0].contains("`add_months"), "{found:#?}");
+        }
+    }
+
+    /// The seconds and nanoseconds of the duration `expression`.
+    fn duration_parts(expression: &str) -> (String, String) {
+        (
+            time_value(&format!("{expression}.seconds")),
+            time_value(&format!("{expression}.subsec_nanos")),
+        )
+    }
+
+    #[test]
+    fn a_duration_is_exact_and_has_one_form() {
+        for (expression, seconds, nanos) in [
+            ("nanoseconds{n: 1}", 0_i64, 1),
+            ("nanoseconds{n: -1}", -1, 999_999_999),
+            ("nanoseconds{n: 1_500_000_000}", 1, 500_000_000),
+            ("microseconds{n: -1}", -1, 999_999_000),
+            ("microseconds{n: 2_000_001}", 2, 1_000),
+            ("milliseconds{n: -1_500}", -2, 500_000_000),
+            ("milliseconds{n: 1}", 0, 1_000_000),
+            ("seconds{n: -5}", -5, 0),
+            ("minutes{n: 2}", 120, 0),
+            ("hours{n: -1}", -3_600, 0),
+            ("days{n: 2}", 172_800, 0),
+            // The smallest of them, which counting down from it would overflow.
+            (
+                "nanoseconds{n: -9_223_372_036_854_775_807 - 1}",
+                -9_223_372_037,
+                145_224_192,
+            ),
+        ] {
+            assert_eq!(
+                duration_parts(expression),
+                (seconds.to_string(), nanos.to_string()),
+                "{expression}"
+            );
+        }
+        // However it is written, it is the same value (RM Prescription 8).
+        for (a, b, equal) in [
+            ("days{n: 1}", "hours{n: 24}", true),
+            ("hours{n: 1}", "minutes{n: 60}", true),
+            ("minutes{n: 1}", "seconds{n: 60}", true),
+            ("seconds{n: 1}", "milliseconds{n: 1_000}", true),
+            ("milliseconds{n: 1}", "microseconds{n: 1_000}", true),
+            ("microseconds{n: -1}", "nanoseconds{n: -1_000}", true),
+            ("seconds{n: 1}", "nanoseconds{n: 1_000_000_001}", false),
+            ("seconds{n: 1}", "seconds{n: -1}", false),
+        ] {
+            assert_eq!(time_value(&format!("{a} = {b}")), equal.to_string(), "{a}");
+        }
+        // Ordered by how long it is, as it is stored, negative ones too.
+        for (a, b) in [
+            ("seconds{n: -2}", "seconds{n: -1}"),
+            ("seconds{n: -1}", "milliseconds{n: -1}"),
+            ("milliseconds{n: -2}", "milliseconds{n: -1}"),
+            ("nanoseconds{n: -1}", "nanoseconds{n: 0}"),
+            ("nanoseconds{n: 999_999_999}", "seconds{n: 1}"),
+            ("seconds{n: 1}", "nanoseconds{n: 1_000_000_001}"),
+        ] {
+            assert_eq!(time_value(&format!("{a} < {b}")), "true", "{a} < {b}");
+            assert_eq!(time_value(&format!("{b} < {a}")), "false", "{b} < {a}");
+            assert_eq!(
+                time_value(&format!("array [{a}] < array [{b}]")),
+                "true",
+                "arrays of {a} and {b}"
+            );
+        }
+        // Its limits, and each unit's, which are the same.
+        for good in [
+            "seconds{n: 2_000_000_000_000_000_000}",
+            "seconds{n: -2_000_000_000_000_000_000}",
+            "minutes{n: 33_333_333_333_333_333}",
+            "hours{n: -555_555_555_555_555}",
+            "days{n: 23_148_148_148_148}",
+        ] {
+            let source = format!("uses {{ trendy.time }};\nvar a := {good};{MAIN}");
+            assert!(analyze_str(&source).is_ok(), "{good}");
+        }
+        for broken in [
+            "seconds{n: 2_000_000_000_000_000_001}",
+            "seconds{n: -2_000_000_000_000_000_001}",
+            "minutes{n: 33_333_333_333_333_334}",
+            "hours{n: -555_555_555_555_556}",
+            "days{n: 23_148_148_148_149}",
+        ] {
+            let source = format!("uses {{ trendy.time }};\nvar a := {broken};{MAIN}");
+            assert_eq!(codes(&source), [Code::BrokenCallConstraint], "{broken}");
+        }
+        for broken in [
+            "duration{seconds: 0, subsec_nanos: 1_000_000_000}",
+            "duration{seconds: 0, subsec_nanos: -1}",
+            "duration{seconds: 2_000_000_000_000_000_001, subsec_nanos: 0}",
+        ] {
+            let source = format!("uses {{ trendy.time }};\nvar a := {broken};{MAIN}");
+            assert_eq!(codes(&source), [Code::BrokenConstraint], "{broken}");
+        }
+    }
+
+    /// The instant `nanos` into the `days`th day after 1970-01-01.
+    fn instant(days: i64, nanos: i64) -> String {
+        format!("timestamp{{date: date{{days: {days}}}, time: time{{nanos_of_day: {nanos}}}}}")
+    }
+
+    #[test]
+    fn the_time_between_two_instants_is_elapsed() {
+        const LAST_NANO: i64 = 86_399_999_999_999;
+        const END: i64 = 10_000_000_000_000;
+        for ((from_day, from_nanos), (to_day, to_nanos), seconds, nanos) in [
+            ((0, 0), (0, 0), 0_i64, 0),
+            ((0, 0), (0, 1), 0, 1),
+            ((0, 1), (0, 0), -1, 999_999_999),
+            ((0, LAST_NANO), (1, 0), 0, 1),
+            ((1, 0), (0, LAST_NANO), -1, 999_999_999),
+            ((0, 0), (1, 0), 86_400, 0),
+            ((-1, 0), (1, 0), 172_800, 0),
+            ((1, 0), (-1, 0), -172_800, 0),
+            // Between the ends, which is why this can't fail.
+            (
+                (-END, 0),
+                (END, LAST_NANO),
+                1_728_000_000_000_086_399,
+                999_999_999,
+            ),
+            ((END, LAST_NANO), (-END, 0), -1_728_000_000_000_086_400, 1),
+        ] {
+            let call = format!(
+                "elapsed{{from: {}, to: {}}}",
+                instant(from_day, from_nanos),
+                instant(to_day, to_nanos)
+            );
+            assert_eq!(
+                duration_parts(&call),
+                (seconds.to_string(), nanos.to_string()),
+                "{call}"
+            );
+        }
+        // Going by what is between two instants gets from one to the other, either way.
+        let instants = [
+            (0, 0),
+            (0, 1),
+            (0, LAST_NANO),
+            (1, 0),
+            (-1, 0),
+            (-1, LAST_NANO),
+            (19_802, 11_186_000_000_000),
+            (-719_162, 5),
+            (-END, 0),
+            (END, LAST_NANO),
+        ];
+        for &(a_day, a_nanos) in &instants {
+            for &(b_day, b_nanos) in &instants {
+                let (a, b) = (instant(a_day, a_nanos), instant(b_day, b_nanos));
+                let between = format!("elapsed{{from: {a}, to: {b}}}");
+                for check in [
+                    format!("after{{t: {a}, by: {between}}} = {b}"),
+                    format!("before{{t: {b}, by: {between}}} = {a}"),
+                ] {
+                    assert_eq!(time_value(&check), "true", "{check}");
+                }
+            }
+        }
+        // Past either end there is no such instant.
+        for call in [
+            format!(
+                "after{{t: {}, by: nanoseconds{{n: 1}}}}",
+                instant(END, LAST_NANO)
+            ),
+            format!("before{{t: {}, by: nanoseconds{{n: 1}}}}", instant(-END, 0)),
+            format!("after{{t: {}, by: nanoseconds{{n: -1}}}}", instant(-END, 0)),
+            format!("before{{t: {}, by: days{{n: -1}}}}", instant(END, 0)),
+        ] {
+            let source = format!("uses {{ trendy.time }};\nvar a := {call};{MAIN}");
+            assert_eq!(codes(&source), [Code::BrokenConstraint], "{call}");
+        }
+    }
+
+    #[test]
+    fn a_month_on_is_the_same_day_or_a_broken_constraint() {
+        let on = |year: i64, month: i64, day: i64| {
+            format!("date{{year: {year}, month: {month}, day: {day}}}")
+        };
+        for ((year, month, day), months, right) in [
+            ((2024, 1, 15), 1, (2024, 2, 15)),
+            ((2024, 1, 15), 0, (2024, 1, 15)),
+            ((2024, 12, 31), 1, (2025, 1, 31)),
+            ((2024, 1, 31), 2, (2024, 3, 31)),
+            ((2024, 3, 15), -3, (2023, 12, 15)),
+            ((2024, 1, 15), -25, (2021, 12, 15)),
+            ((2024, 1, 15), 24, (2026, 1, 15)),
+            ((2024, 2, 29), 48, (2028, 2, 29)),
+            ((2023, 1, 29), 13, (2024, 2, 29)),
+            ((0, 1, 15), -1, (-1, 12, 15)),
+            ((-1, 12, 15), 1, (0, 1, 15)),
+        ] {
+            let call = format!(
+                "add_months{{d: {}, months: {months}}}",
+                on(year, month, day)
+            );
+            assert_eq!(
+                time_value(&format!("{call} = {}", on(right.0, right.1, right.2))),
+                "true",
+                "{call}"
+            );
+            let check = format!(
+                "has_day_after_months{{d: {}, months: {months}}}",
+                on(year, month, day)
+            );
+            assert_eq!(time_value(&check), "true", "{check}");
+        }
+        for ((year, month, day), months) in [
+            ((2024, 1, 31), 1_i64),
+            ((2024, 1, 30), 1),
+            ((2023, 1, 29), 1),
+            ((2024, 1, 31), 3),
+            ((2024, 3, 31), -1),
+            ((2024, 2, 29), 12),
+            ((2024, 2, 29), -12),
+            // Beyond a date's range, and where counting them could overflow.
+            ((2024, 1, 15), 9_223_372_036_854_775_807),
+            ((2024, 1, 15), -9_223_372_036_854_775_807),
+            ((2024, 1, 15), 720_000_000_000),
+        ] {
+            let check = format!(
+                "has_day_after_months{{d: {}, months: {months}}}",
+                on(year, month, day)
+            );
+            assert_eq!(time_value(&check), "false", "{check}");
+            let source = format!(
+                "uses {{ trendy.time }};\nvar a := add_months{{d: {}, months: {months}}};{MAIN}",
+                on(year, month, day)
+            );
+            assert_eq!(codes(&source), [Code::BrokenCallConstraint], "{source}");
+        }
+        // At the ends of a date's range, a month further is no date.
+        for (days, months, is) in [
+            (10_000_000_000_000_i64, 1, false),
+            (10_000_000_000_000, -1, true),
+            (-10_000_000_000_000, -1, false),
+            (-10_000_000_000_000, 1, true),
+        ] {
+            let check =
+                format!("has_day_after_months{{d: date{{days: {days}}}, months: {months}}}");
+            assert_eq!(time_value(&check), is.to_string(), "{check}");
+        }
     }
 
     /// The program of `interface` and `implementation`, with a `main`.

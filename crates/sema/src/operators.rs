@@ -449,16 +449,17 @@ impl Operators {
                     || s.builtin.is_some()
                     || s.from_type.as_ref().is_some_and(|f| f.selects().is_some()))
         };
+        // As for `scope::Units::ambiguous`: a unit nothing uses has no say in the program's names.
+        let units = namespaces.units();
         let families: BTreeSet<hir::OperatorId> = self
             .list
             .iter()
             .filter(named)
+            .filter(|s| !units.in_program(family.unit) || units.in_program(s.unit))
             .map(|s| self.family_of(s.id))
             .collect();
         let ambiguous = families.len() > 1;
-        namespaces
-            .units()
-            .identity(&family.name, family.unit, ambiguous)
+        units.identity(&family.name, family.unit, ambiguous)
     }
 
     /// The selectors of the type of the program's own `defined`, in the

@@ -1,6 +1,6 @@
-/* Dates and times: a day of the calendar, a time of day, an instant, and an
-   instant with the UTC offset it was written at. A unit that has them uses this
-   one, `uses { trendy.time };`. */
+/* Dates and times: a day of the calendar, a time of day, an instant, an instant with
+   the UTC offset it was written at, and how long something takes. A unit that has them
+   uses this one, `uses { trendy.time };`. */
 interface
 
 /* A date: how many days it is after 1970-01-01, negative before it, or its year,
@@ -83,19 +83,85 @@ type offset_timestamp {
     order [asc timestamp, asc utc_offset],
 };
 
+/* How long something takes, exactly: its whole seconds, rounded down, and the
+   nanoseconds past them, so half a second back is `seconds: -1`, `subsec_nanos:
+   500_000_000`. Every day has 86,400 seconds, so a day and 24 hours are one value. A
+   month has no fixed length, so it isn't a duration: see `add_months`. It is within
+   2,000,000,000,000,000,000 seconds, about 63 billion years, either way, which holds
+   the time between any two `timestamp`s, and ordered by how long it is. */
+type duration {
+    {
+        seconds: integer,
+        subsec_nanos: integer,
+        constraint seconds >= -2_000_000_000_000_000_000 and seconds <= 2_000_000_000_000_000_000,
+        constraint subsec_nanos >= 0 and subsec_nanos < 1_000_000_000,
+    },
+    order [asc seconds, asc subsec_nanos],
+};
+
+/* `n` of a unit as a duration, negative for that long back. */
+operator nanoseconds{n: integer}: duration;
+
+operator microseconds{n: integer}: duration;
+
+operator milliseconds{n: integer}: duration;
+
+operator seconds{
+    n: integer,
+    constraint n >= -2_000_000_000_000_000_000 and n <= 2_000_000_000_000_000_000,
+}: duration;
+
+operator minutes{
+    n: integer,
+    constraint n >= -33_333_333_333_333_333 and n <= 33_333_333_333_333_333,
+}: duration;
+
+operator hours{
+    n: integer,
+    constraint n >= -555_555_555_555_555 and n <= 555_555_555_555_555,
+}: duration;
+
+operator days{
+    n: integer,
+    constraint n >= -23_148_148_148_148 and n <= 23_148_148_148_148,
+}: duration;
+
+/* How long after `from` it is `to`, negative if `to` comes first. Every two instants
+   have one, so this can't fail. */
+operator elapsed{from: timestamp, to: timestamp}: duration;
+
+/* The instant `by` after `t`. It fails past the end of a `date`'s range. */
+operator after{t: timestamp, by: duration}: timestamp;
+
+/* The instant `by` before `t`. It fails past the end of a `date`'s range. */
+operator before{t: timestamp, by: duration}: timestamp;
+
+/* Whether the month `months` after `d`'s has `d`'s day, within a `date`'s range, so
+   that `add_months` can be called. */
+operator has_day_after_months{d: date, months: integer}: boolean;
+
+/* The same day of the month `months` after `d`'s, or before it if negative. A month
+   that hasn't that day, as February hasn't a 31st, is a broken constraint: nothing
+   says which other day was meant. */
+operator add_months{d: date, months: integer, constraint has_day_after_months{d, months}}: date;
+
 implementation
 
 const nanos_per_day := 86_400_000_000_000;
 const nanos_per_second := 1_000_000_000;
+const seconds_per_day := 86_400;
+
+/* More months than there are between a `date`'s first and last years. */
+const months_in_range := 720_000_000_000;
 
 /* `a` divided by `b`, which is positive, rounded down, as `div` rounds towards zero. */
 operator floor_div{a: integer, b: integer}: integer [
-    if a >= 0 then a div b else (a - b + 1) div b
+    if a mod b < 0 then a div b - 1 else a div b
 ];
 
 /* What is left of `a` after `floor_div`, from 0 up to `b`. */
 operator floor_mod{a: integer, b: integer}: integer [
-    a - floor_div{a, b} * b
+    if a mod b < 0 then a mod b + b else a mod b
 ];
 
 operator is_leap_year{year: integer}: boolean [
@@ -247,3 +313,97 @@ type offset_timestamp {
             utc_offset := utc_offset,
         },
 };
+
+operator nanoseconds{n: integer}: duration [
+    duration{
+        seconds: floor_div{a: n, b: nanos_per_second},
+        subsec_nanos: floor_mod{a: n, b: nanos_per_second},
+    }
+];
+
+operator microseconds{n: integer}: duration [
+    duration{
+        seconds: floor_div{a: n, b: 1_000_000},
+        subsec_nanos: floor_mod{a: n, b: 1_000_000} * 1_000,
+    }
+];
+
+operator milliseconds{n: integer}: duration [
+    duration{
+        seconds: floor_div{a: n, b: 1_000},
+        subsec_nanos: floor_mod{a: n, b: 1_000} * 1_000_000,
+    }
+];
+
+operator seconds{n: integer}: duration [
+    duration{seconds: n, subsec_nanos: 0}
+];
+
+operator minutes{n: integer}: duration [
+    duration{seconds: n * 60, subsec_nanos: 0}
+];
+
+operator hours{n: integer}: duration [
+    duration{seconds: n * 3_600, subsec_nanos: 0}
+];
+
+operator days{n: integer}: duration [
+    duration{seconds: n * seconds_per_day, subsec_nanos: 0}
+];
+
+operator elapsed{from: timestamp, to: timestamp}: duration [
+    var nanos := to.time.nanos_of_day - from.time.nanos_of_day;
+    duration{
+        seconds: (to.date.days - from.date.days) * seconds_per_day
+            + floor_div{a: nanos, b: nanos_per_second},
+        subsec_nanos: floor_mod{a: nanos, b: nanos_per_second},
+    }
+];
+
+/* The instant `seconds` and `nanos` after `t`, each of them negative for back. */
+operator shifted{t: timestamp, seconds: integer, nanos: integer}: timestamp [
+    var of_day := t.time.nanos_of_day
+        + floor_mod{a: seconds, b: seconds_per_day} * nanos_per_second
+        + nanos;
+    timestamp{
+        date: date{
+            days: t.date.days
+                + floor_div{a: seconds, b: seconds_per_day}
+                + floor_div{a: of_day, b: nanos_per_day},
+        },
+        time: time{nanos_of_day: floor_mod{a: of_day, b: nanos_per_day}},
+    }
+];
+
+operator after{t: timestamp, by: duration}: timestamp [
+    shifted{t, seconds: by.seconds, nanos: by.subsec_nanos}
+];
+
+operator before{t: timestamp, by: duration}: timestamp [
+    shifted{t, seconds: -by.seconds, nanos: -by.subsec_nanos}
+];
+
+/* The year and month `months` after those of `d`, which is at most `months_in_range`
+   either way, so that counting them can't overflow. */
+operator month_after{d: date, months: integer}: tuple { year: integer, month: integer } [
+    var counted := d.year * 12 + d.month - 1 + months;
+    tuple { year: floor_div{a: counted, b: 12}, month: floor_mod{a: counted, b: 12} + 1 }
+];
+
+operator has_day_after_months{d: date, months: integer}: boolean [
+    if months < -months_in_range or months > months_in_range then false else [
+        var then_on := month_after{d, months};
+        then_on.year >= -30_000_000_000
+            and then_on.year <= 30_000_000_000
+            and d.day <= days_in_month{year: then_on.year, month: then_on.month}
+            and days_from_civil{year: then_on.year, month: then_on.month, day: d.day}
+                >= -10_000_000_000_000
+            and days_from_civil{year: then_on.year, month: then_on.month, day: d.day}
+                <= 10_000_000_000_000
+    ]
+];
+
+operator add_months{d: date, months: integer}: date [
+    var then_on := month_after{d, months};
+    date{year: then_on.year, month: then_on.month, day: d.day}
+];

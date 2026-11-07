@@ -25,7 +25,10 @@ const TYPE_ALIASES: &[(&str, &str)] = &[
     ("datetime", "timestamp"),
     ("datetimeoffset", "offset_timestamp"),
     ("instant", "timestamp"),
+    ("interval", "duration"),
     ("offsetdatetime", "offset_timestamp"),
+    ("timedelta", "duration"),
+    ("timespan", "duration"),
     ("timestamptz", "timestamp"),
     ("binary", "array byte"),
     ("bit", "boolean"),
@@ -2558,6 +2561,11 @@ pub(crate) fn unknown_operator(
 /// as it finds `min` for `avg` and `cos` for `log`: each with what the
 /// prelude has instead, and how to write the value with it.
 const ABSENT: &[(&[&str], &str, &str)] = &[
+    (
+        &["months", "years"],
+        "`trendy.time` has no `duration` of months or years, as neither has a fixed length: a month after January 31st is no number of seconds",
+        "`add_months{d, months: n}` is the same day of another month of a `date`, 12 of them a year on, and `has_day_after_months{d, months: n}` says if there is one",
+    ),
     (
         &["avg", "average", "mean"],
         "a mean is the sum divided by the count, which the prelude's `sum` and `count` give; it has no mean of its own yet, as the mean of integers isn't an integer",
@@ -6806,10 +6814,12 @@ pub(crate) fn no_stored_representation(name: &str, ident: &SyntaxToken) -> Diagn
 /// implementation doesn't declare again, to say which its values are stored
 /// as and how the others convert to it and from it.
 pub(crate) fn unimplemented_type(name: &str, decl: &trendy_syntax::ast::TypeDecl) -> Diagnostic {
-    let span = decl
-        .name()
-        .and_then(|n| n.ident())
+    let ident = decl.name().and_then(|n| n.ident());
+    let span = ident
+        .as_ref()
         .map_or_else(|| decl.span(), |i| trendy_syntax::span(i.text_range()));
+    // As its unit writes it, whatever else another unit declares of that name.
+    let name = ident.as_ref().map_or(name, SyntaxToken::text);
     Diagnostic::error(
         Code::Conversions,
         format!("the interface declares `{name}` with several possible representations, but the implementation doesn't say how they convert"),
@@ -7654,7 +7664,10 @@ pub(crate) fn wrong_operand_type(
                     defined.written(),
                     token.text()
                 )),
-                None => d,
+                None => match crate::written_times::arithmetic_help(defined) {
+                    Some(help) => d.with_help(help),
+                    None => d,
+                },
             },
             (Operator::Compare(_), hir::Type::Defined(defined)) => d
                 .with_note(format!(

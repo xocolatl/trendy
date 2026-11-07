@@ -220,7 +220,9 @@ operator main{} [
   name qualified by its unit's, `lakes::metres`, in every unit that
   declares it, `main`'s and the prelude's too, as errors, failures and
   `debug_value` write it: a program's own `count{r: …}` is
-  `main::count`, and the prelude's `trendy.prelude::count`. Only the
+  `main::count`, and the prelude's `trendy.prelude::count`. Another unit that
+  comes with the compiler counts only if a unit of the program uses it, so a
+  program's own `date` is `date`, unless it uses `trendy.time`. Only the
   built-in types' names are no unit's to declare.
 - **A unit has one interface and one implementation, the interface
   first** (P0053). `interface` and `implementation` are contextual
@@ -1990,8 +1992,9 @@ files, which the compiler implements, as the prelude's built-ins are, and the
 errors only a file gives, each a subtype of the prelude's `error`; its
 implementation gives their messages. It is a unit of every program, so
 its names are as any unit's: a unit can declare a `malformed_csv` of its
-own, and the program then calls each by its unit's name,
-`trendy.files::malformed_csv` (see [Units](#units)). Calling one of its
+own, and then the language's is `trendy.files::malformed_csv`, and its own
+is called by its unit's name too if another unit uses `trendy.files` (see
+[Units](#units)). Calling one of its
 operators, or naming one of its errors, in a unit that doesn't use it is
 an error whose fix uses it (A0015, A0003). Its interface, what a unit
 that uses it sees:
@@ -2510,13 +2513,13 @@ operator main{} [
 ### Dates and times
 
 `trendy.time`, a unit that comes with the compiler, which a unit uses with
-`uses { trendy.time };`, has `date`, `time`, `timestamp` and `offset_timestamp`. It
-is trendy, so nothing in it is built in. Its interface, what a unit that uses it sees:
+`uses { trendy.time };`, has `date`, `time`, `timestamp`, `offset_timestamp` and
+`duration`. It is trendy, so nothing in it is built in. Its interface, what a unit that uses it sees:
 
 ```
-/* Dates and times: a day of the calendar, a time of day, an instant, and an
-   instant with the UTC offset it was written at. A unit that has them uses this
-   one, `uses { trendy.time };`. */
+/* Dates and times: a day of the calendar, a time of day, an instant, an instant with
+   the UTC offset it was written at, and how long something takes. A unit that has them
+   uses this one, `uses { trendy.time };`. */
 interface
 
 /* A date: how many days it is after 1970-01-01, negative before it, or its year,
@@ -2598,6 +2601,68 @@ type offset_timestamp {
     },
     order [asc timestamp, asc utc_offset],
 };
+
+/* How long something takes, exactly: its whole seconds, rounded down, and the
+   nanoseconds past them, so half a second back is `seconds: -1`, `subsec_nanos:
+   500_000_000`. Every day has 86,400 seconds, so a day and 24 hours are one value. A
+   month has no fixed length, so it isn't a duration: see `add_months`. It is within
+   2,000,000,000,000,000,000 seconds, about 63 billion years, either way, which holds
+   the time between any two `timestamp`s, and ordered by how long it is. */
+type duration {
+    {
+        seconds: integer,
+        subsec_nanos: integer,
+        constraint seconds >= -2_000_000_000_000_000_000 and seconds <= 2_000_000_000_000_000_000,
+        constraint subsec_nanos >= 0 and subsec_nanos < 1_000_000_000,
+    },
+    order [asc seconds, asc subsec_nanos],
+};
+
+/* `n` of a unit as a duration, negative for that long back. */
+operator nanoseconds{n: integer}: duration;
+
+operator microseconds{n: integer}: duration;
+
+operator milliseconds{n: integer}: duration;
+
+operator seconds{
+    n: integer,
+    constraint n >= -2_000_000_000_000_000_000 and n <= 2_000_000_000_000_000_000,
+}: duration;
+
+operator minutes{
+    n: integer,
+    constraint n >= -33_333_333_333_333_333 and n <= 33_333_333_333_333_333,
+}: duration;
+
+operator hours{
+    n: integer,
+    constraint n >= -555_555_555_555_555 and n <= 555_555_555_555_555,
+}: duration;
+
+operator days{
+    n: integer,
+    constraint n >= -23_148_148_148_148 and n <= 23_148_148_148_148,
+}: duration;
+
+/* How long after `from` it is `to`, negative if `to` comes first. Every two instants
+   have one, so this can't fail. */
+operator elapsed{from: timestamp, to: timestamp}: duration;
+
+/* The instant `by` after `t`. It fails past the end of a `date`'s range. */
+operator after{t: timestamp, by: duration}: timestamp;
+
+/* The instant `by` before `t`. It fails past the end of a `date`'s range. */
+operator before{t: timestamp, by: duration}: timestamp;
+
+/* Whether the month `months` after `d`'s has `d`'s day, within a `date`'s range, so
+   that `add_months` can be called. */
+operator has_day_after_months{d: date, months: integer}: boolean;
+
+/* The same day of the month `months` after `d`'s, or before it if negative. A month
+   that hasn't that day, as February hasn't a 31st, is a broken constraint: nothing
+   says which other day was meant. */
+operator add_months{d: date, months: integer, constraint has_day_after_months{d, months}}: date;
 ```
 
 ```trendy
@@ -2640,15 +2705,81 @@ operator main{} [
 - **No leap seconds:** every day has 86,400 seconds, so `second: 60` fails (R0017).
 - **`days_in_month{year, month}`** is the rule a `date` is checked by, so a program can
   check a date before selecting one, which otherwise stops it.
-- **No arithmetic yet,** and no `+` between them. Compute with a component and select
-  the result, `date{days: d.days + 30}`, as the error on `d + 30` says (A0022). There
-  is no type of intervals yet, and nothing reads the clock.
+- **No `+` between them yet.** Compute with a component and select the result,
+  `date{days: d.days + 30}`, as the error on `d + 30` says (A0022), and use the
+  operators below on instants, which `t - s`, `t + d` and `t - d` are fixed to (A0022).
+  Nothing reads the clock yet.
 - **Text isn't a date,** but `"2024-03-05"` where a `date` is expected is fixed to
   `date{year: 2024, month: 3, day: 5}`, and so are ISO 8601's forms of the others
-  (A0004). `datetime` and `instant` are fixed to `timestamp`, and `datetimeoffset` to
-  `offset_timestamp` (A0003).
+  (A0004), a `duration`'s `"PT1H30M"` among them. `datetime` and `instant` are fixed to
+  `timestamp`, `datetimeoffset` to `offset_timestamp`, and `interval` and `timedelta`
+  to `duration` (A0003).
 - **Written in the stored representation,** as every value is, for now:
   `date{days: 19802}`.
+
+```trendy
+uses { trendy.time };
+
+/* A flight from Lagos to Nairobi, as each city's clock shows it. */
+const leaves := offset_timestamp{
+    year: 2024,
+    month: 3,
+    day: 20,
+    hour: 9,
+    minute: 0,
+    second: 0,
+    nanosecond: 0,
+    utc_offset: 3_600,
+};
+const lands := offset_timestamp{
+    year: 2024,
+    month: 3,
+    day: 20,
+    hour: 15,
+    minute: 25,
+    second: 0,
+    nanosecond: 0,
+    utc_offset: 10_800,
+};
+
+operator main{} [
+    const flight := elapsed{from: leaves.timestamp, to: lands.timestamp};
+    call debug_value{v: flight = minutes{n: 265}};
+    call debug_value{v: after{t: leaves.timestamp, by: flight} = lands.timestamp};
+    call debug_value{v: flight < hours{n: 5}};
+
+    const rent_paid := date{year: 2024, month: 1, day: 31};
+    call debug_value{v: add_months{d: rent_paid, months: 2}.month};
+    call debug_value{v: has_day_after_months{d: rent_paid, months: 1}};
+];
+```
+
+- **A `duration` is an exact length of time,** the one form of each: `hours{n: 24}` and
+  `days{n: 1}` are one value, as every day has 86,400 seconds, and two durations are
+  equal, or one less than the other, as long as they are. Its stored representation
+  rounds its seconds down, so half a second back is `seconds: -1`, `subsec_nanos:
+  500_000_000`: `.seconds` of a negative one isn't its whole seconds towards zero.
+- **`elapsed{from, to}` can't fail,** as the time between any two instants is one. A
+  single count of nanoseconds in an `integer` would reach only about 292 years, and a
+  `timestamp` reaches 27 billion, which is why it has two components.
+- **`after{t, by}` and `before{t, by}`** move an instant by a duration, either way, and
+  fail past the end of a `date`'s range (R0017).
+- **A month has no fixed length, so it isn't a `duration`,** as it would be equal to
+  some number of seconds, and adding the two would differ (RM Prescription 8).
+  `months{n: 1}` is an error that says so (A0015).
+- **`add_months{d, months}`** gives the same day of another month, and a month that
+  hasn't that day breaks its constraint, when compiling if the arguments are known
+  (R0024): nothing says which other day was meant. `has_day_after_months{d, months}`
+  says first whether it can be called. So January 31st plus two months is March 31st,
+  and plus one is an error.
+
+```trendy,error
+uses { trendy.time };
+
+var due := add_months{d: date{year: 2024, month: 1, day: 31}, months: 1};
+
+operator main{} [];
+```
 
 ## Variables
 
@@ -7083,6 +7214,10 @@ line after a comment on its own line, such as a file's header, is kept.
 | `u8`, `uint8`, `octet` | `byte` |
 | `datetime`, `Instant`, `timestamptz` | `timestamp`, of `trendy.time` |
 | `datetimeoffset`, `OffsetDateTime` | `offset_timestamp`, of `trendy.time` |
+| `interval`, `timedelta`, `TimeSpan` | `duration`, of `trendy.time` |
+| `t - s`, of two instants | `elapsed{from: s, to: t}` |
+| `t + d`, `t - d`, of an instant and a duration | `after{t, by: d}`, `before{t, by: d}` |
+| `d + interval '1 month'` | `add_months{d, months: 1}`, which fails if the month hasn't that day |
 | `'2024-03-05'::date`, `DATE '2024-03-05'` | `date{year: 2024, month: 3, day: 5}` |
 | `d + 30`, of a date | `date{days: d.days + 30}` |
 | `X'DEADBEEF'`, `'\xdeadbeef'::bytea` | `x"deadbeef"` |

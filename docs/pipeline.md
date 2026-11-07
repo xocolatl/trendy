@@ -995,7 +995,10 @@ mismatches at that declaration, which they see (`Signature::declared`,
 one name in the HIR, its identity: its name, if one unit of the program
 declares it in its namespace (an operator, with its parameters' names),
 and otherwise its name qualified by its unit's, `lakes::metres`, in every
-unit that declares it, main's and the prelude's included: the compiler
+unit that declares it, main's and the prelude's included. A unit that comes
+with the compiler and that nothing uses isn't of the program
+(`Units::in_program`), so it has no say in what the program's are called, and
+what they are printed as: its own name gives way to theirs. The compiler
 finds the prelude's declarations it needs by their identities
 (`Namespaces::prelude_identity`), and gives the union type `error` to
 the HIR with `code_point` (`hir::Library`), whatever a unit declares of

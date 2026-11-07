@@ -62,7 +62,7 @@ pub const UUID: Unit = Unit {
     source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/uuid.trendy"),
 };
 
-/// `trendy.time`, dates, times of day and instants.
+/// `trendy.time`, dates, times of day, instants and durations.
 pub const TIME: Unit = Unit {
     name: "trendy.time",
     path: "<time>",
