@@ -54,6 +54,25 @@ operator list_missing{} [
     call debug_value{v: errors};
 ];
 
+/* Lines written to a text file, each ending in a line feed, so that reading
+   it gives them back. A file is made if there is none, and what one holds is
+   replaced. This one goes in `target`, which the repository ignores. A file
+   that can't be written stops the program, unless the call names `out
+   errors`. */
+operator save_rivers{} [
+    var rivers: array text;
+    call load_text_file{path: "examples/rivers.txt", out lines: rivers};
+    call save_text_file{path: "target/saved_rivers.txt", lines: rivers};
+
+    var saved: array text;
+    call load_text_file{path: "target/saved_rivers.txt", out lines: saved};
+    call debug_value{v: saved = rivers};
+
+    var errors: relation { error: error };
+    call save_text_file{path: "target/no/such/directory.txt", lines: rivers, out errors: errors};
+    call debug_value{v: errors};
+];
+
 /* A depth, in metres, below the surface. */
 type metres {
     { m: integer },
@@ -152,6 +171,7 @@ operator main{out errors: relation transaction_collection} [
     call spell{word: "Parana\u{301}"};
     call list_rivers{};
     call list_missing{};
+    call save_rivers{};
     var skipped: relation { error: error };
     call lake_table{out skipped: skipped};
     call river_table{};

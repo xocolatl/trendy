@@ -1822,6 +1822,10 @@ fn text() {
             // error.
             "0",
             r#"relation { error: error } { { error: unreadable_file{path: "examples/lakes.txt", reason: "No such file or directory"} } }"#,
+            // The file's lines, saved and read back, and a file that can't
+            // be written, which gives its error.
+            "true",
+            r#"relation { error: error } { { error: unwritable_file{path: "target/no/such/directory.txt", reason: "No such file or directory"} } }"#,
             // A CSV file's records, two skipped, whose errors `main` gives
             // as warnings.
             "3",
@@ -4182,6 +4186,19 @@ fn run_source(name: &str, source: &str) -> (i32, String) {
     let input = dir.join(format!("{name}.trendy"));
     std::fs::write(&input, source).unwrap();
     build_and_run(&input, &dir.join(name), &workspace_root())
+}
+
+/// The file a test of `save_text_file` writes, in a directory of those tests',
+/// with what it holds to start with, if anything.
+fn saved_file(name: &str, holds: Option<&str>) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("saved");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    match holds {
+        Some(holds) => std::fs::write(&path, holds).unwrap(),
+        None => drop(std::fs::remove_file(&path)),
+    }
+    path
 }
 
 /// The error an overflow writes, of `operation`.
@@ -8973,6 +8990,228 @@ operator main{} [
     let (code, stderr) = run_source("closure_named_join", source);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stderr.trim(), "8195");
+}
+
+/// What `save_text_file` writes is what `load_text_file` reads back, line for line, each
+/// ending in a line feed, however few there are, and whatever a line holds that isn't a line
+/// end, and what the file held before is gone.
+#[test]
+fn saved_lines_read_back_as_they_were() {
+    for (name, lines, bytes) in [
+        ("none", "array text []", ""),
+        ("one_empty", r#"array [""]"#, "\n"),
+        ("empty_last", r#"array ["Nile", ""]"#, "Nile\n\n"),
+        ("empty_first", r#"array ["", "Nile"]"#, "\nNile\n"),
+        (
+            "of_the_world",
+            r#"array ["Paraná", "长江", "नर्मदा", "Волга", "ᎤᏔᎾ"]"#,
+            "Paraná\n长江\nनर्मदा\nВолга\nᎤᏔᎾ\n",
+        ),
+        (
+            "not_line_ends",
+            r#"array ["a\rb", "\ra", "\"quoted\"", " spaced "]"#,
+            "a\rb\n\ra\n\"quoted\"\n spaced \n",
+        ),
+    ] {
+        let path = saved_file(
+            &format!("{name}.txt"),
+            Some("what the file held, longer than anything written over it, which goes"),
+        );
+        let source = format!(
+            r#"uses {{ trendy.files }};
+
+operator main{{}} [
+    const lines := {lines};
+    call save_text_file{{path: "{path}", lines}};
+    var read: array text;
+    call load_text_file{{path: "{path}", out lines: read}};
+    call debug_value{{v: read = lines}};
+    call debug_value{{v: length{{a: read}}}};
+];
+"#,
+            path = path.display()
+        );
+        let (code, stderr) = run_source(&format!("saved_{name}"), &source);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let written: Vec<&str> = stderr.lines().collect();
+        assert_eq!(written[0], "true", "{name}: {stderr}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes, "{name}");
+    }
+}
+
+/// More than the buffer a file is written through holds, in lines that fit it, and one that
+/// doesn't, comes out whole.
+#[test]
+fn a_large_file_is_saved_whole() {
+    let path = saved_file("large.txt", None);
+    let source = format!(
+        r#"uses {{ trendy.files }};
+
+operator main{{}} [
+    const numbers := series{{from: 1, to: 50000}};
+    var lines: array text;
+    load lines value from (numbers extend {{ line := to_text{{from: value}} }}) order [asc value] remove {{value}};
+    var long := "";
+    var i := 0;
+    while i < 18 loop [
+        long := long || long || "river ";
+        i := i + 1;
+    ];
+    call save_text_file{{path: "{path}", lines: array [long] || lines || array [long]}};
+    var read: array text;
+    call load_text_file{{path: "{path}", out lines: read}};
+    call debug_value{{v: length{{a: read}}}};
+    call debug_value{{v: read[2] || read[50001]}};
+    call debug_value{{v: read[1] = long and read[50002] = long}};
+];
+"#,
+        path = path.display()
+    );
+    let (code, stderr) = run_source("saved_large", &source);
+    assert_eq!(code, 0, "{stderr}");
+    let written: Vec<&str> = stderr.lines().collect();
+    assert_eq!(written, ["50002", r#""150000""#, "true"], "{stderr}");
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.len() > 3_000_000, "{}", saved.len());
+    assert_eq!(saved.lines().count(), 50002);
+    assert!(saved.ends_with('\n'));
+}
+
+/// A file that can't be written stops the program, saying why, or gives its error if the call
+/// names `out errors`, as reading does.
+#[test]
+fn a_file_that_cant_be_written_says_why() {
+    use trendy_diag::Code;
+    let dir = saved_file("a_file", Some("in the way"));
+    let dir = dir.parent().unwrap().display().to_string();
+    for (name, path, reason) in [
+        (
+            "no_directory",
+            format!("{dir}/no/such/directory.txt"),
+            "No such file or directory",
+        ),
+        ("a_directory", dir.clone(), "Is a directory"),
+        (
+            "under_a_file",
+            format!("{dir}/a_file/below.txt"),
+            "Not a directory",
+        ),
+        (
+            "with_a_nul",
+            format!(r"{dir}/a\u{{0}}b.txt"),
+            "a path can't contain the character U+0000",
+        ),
+    ] {
+        let stops = format!(
+            r#"uses {{ trendy.files }};
+
+operator main{{}} [
+    call save_text_file{{path: "{path}", lines: array ["Nile"]}};
+    call debug_value{{v: "after"}};
+];
+"#
+        );
+        let (code, stderr) = run_source(&format!("unwritable_{name}"), &stops);
+        assert_eq!(code, 1, "{name}: {stderr}");
+        let id = Code::UnwritableFile.id();
+        assert!(
+            stderr.contains(&format!("error[{id}]: can't write ")),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.contains(reason), "{name}: {stderr}");
+        assert!(!stderr.contains("after"), "{name}: {stderr}");
+        let gives = format!(
+            r#"uses {{ trendy.files }};
+
+operator main{{}} [
+    var errors: relation {{ error: error }};
+    call save_text_file{{path: "{path}", lines: array ["Nile"], out errors}};
+    call debug_value{{v: count{{r: errors}}}};
+    call debug_value{{v: errors}};
+    call debug_value{{v: "after"}};
+];
+"#
+        );
+        let (code, stderr) = run_source(&format!("unwritable_gives_{name}"), &gives);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let written: Vec<&str> = stderr.lines().collect();
+        assert_eq!(written[0], "1", "{name}: {stderr}");
+        assert!(
+            written[1].contains("unwritable_file{path: "),
+            "{name}: {stderr}"
+        );
+        assert!(written[1].contains(reason), "{name}: {stderr}");
+        assert_eq!(written[2], r#""after""#, "{name}: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(format!("{dir}/a_file")).unwrap(),
+        "in the way"
+    );
+}
+
+/// With nothing wrong, `out errors` is empty, and the file written.
+#[test]
+fn a_file_written_gives_no_errors() {
+    let path = saved_file("no_errors.txt", None);
+    let source = format!(
+        r#"uses {{ trendy.files }};
+
+operator main{{}} [
+    var errors: relation {{ error: error }};
+    call save_text_file{{path: "{path}", lines: array ["Nile"], out errors}};
+    call debug_value{{v: count{{r: errors}}}};
+];
+"#,
+        path = path.display()
+    );
+    let (code, stderr) = run_source("saved_no_errors", &source);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.trim(), "0");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "Nile\n");
+}
+
+/// A line that wouldn't read back as one stops the program before anything is written, so a
+/// file already there is as it was, whether or not the call names `out errors`, as it is a
+/// mistake in the call. The check can tell: each of these reads back differently.
+#[test]
+fn a_line_that_wouldnt_read_back_as_one_writes_nothing() {
+    use trendy_diag::Code;
+    for (name, lines, at) in [
+        (
+            "line_feed",
+            r#"array ["Nile", "Amazon\nYangtze", "Volga"]"#,
+            2,
+        ),
+        ("carriage_return_at_its_end", r#"array ["Nile\r"]"#, 1),
+        (
+            "line_feed_at_its_end",
+            r#"array ["Nile", "Volga", "Mekong\n"]"#,
+            3,
+        ),
+        ("both", r#"array ["\r\n"]"#, 1),
+    ] {
+        for (form, errors) in [("stops", ""), ("with_errors", ", out errors")] {
+            let path = saved_file(&format!("{name}_{form}.txt"), Some("as it was"));
+            let source = format!(
+                r#"uses {{ trendy.files }};
+
+operator main{{}} [
+    var errors: relation {{ error: error }};
+    call save_text_file{{path: "{path}", lines: {lines}{errors}}};
+    call debug_value{{v: "after"}};
+];
+"#,
+                path = path.display()
+            );
+            let (code, stderr) = run_source(&format!("not_one_{name}_{form}"), &source);
+            assert_eq!(code, 1, "{name} {form}: {stderr}");
+            let id = Code::NotOneLine.id();
+            let expected = format!("error[{id}]: line {at} to write to ");
+            assert!(stderr.contains(&expected), "{name} {form}: {stderr}");
+            assert!(!stderr.contains("after"), "{name} {form}: {stderr}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "as it was");
+        }
+    }
 }
 
 /// Whether lowering `source` left a relation in no particular order and then sorted it, which

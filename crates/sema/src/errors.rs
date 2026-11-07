@@ -1089,6 +1089,42 @@ pub(crate) fn variable_subtype(
     ))
 }
 
+/// `d`, of a value written as `expr`, of type `found`, where `declared` is
+/// expected: if that is an array, with what to do if the value is one of its
+/// elements, as a line for a file's lines, or a relation, which has no order for
+/// an array to take.
+fn with_array_expected(
+    d: Diagnostic,
+    declared: &hir::Type,
+    found: &hir::Type,
+    expr: &Expr,
+) -> Diagnostic {
+    let hir::Type::Array(element) = declared else {
+        return d;
+    };
+    if **element == *found {
+        let one = format!("array [{}]", expr.syntax().text());
+        return d.with_suggestion(
+            format!("make it an array of one: `{one}`"),
+            vec![Edit {
+                span: expr.span(),
+                replacement: one,
+            }],
+        );
+    }
+    if !matches!(found, hir::Type::Relation(_)) {
+        return d;
+    }
+    let value = if matches!(**element, hir::Type::Tuple(_)) {
+        ""
+    } else {
+        " value"
+    };
+    d.with_note(LOAD).with_help(format!(
+        "a relation's tuples have no order, and an array's elements do: `load` an array from it first, in the order you want, as in `load a{value} from r order [asc x];`"
+    ))
+}
+
 /// A value written as `expr`, of type `found`, where `declared` is expected
 /// because of `origin`. `value` is the value, if it is a constant, for fixes
 /// that rewrite the literal.
@@ -1150,6 +1186,7 @@ pub(crate) fn type_mismatch(
         // above as the value's literal, or one it would fail for.
         d = with_conversion(d, "it", conversion, expr);
     }
+    d = with_array_expected(d, declared, found, expr);
     // `n * x`, of an integer and an approximate number: the first operand
     // set the type, and as an approximate number it takes the rest.
     if let Origin::Value(first) = origin
@@ -2716,8 +2753,10 @@ fn spelled_like(
 /// `parseBoolean` and Go's `ParseBool` booleans; Rust's `chars` and
 /// Java's `codePoints` give a text's code points, and JavaScript's
 /// `String.fromCodePoint` the text of some; `sine`, `cosine` and NumPy's
-/// `arctan2` are `sin`, `cos` and `atan2`; and Postgres's
-/// `generate_series` is `series`.
+/// `arctan2` are `sin`, `cos` and `atan2`; Postgres's `generate_series`
+/// is `series`; and R's and Kotlin's `writeLines` write a file's lines, as
+/// Python's `writelines` and .NET's `WriteAllLines` do, and Node's and Go's
+/// `writeFile` a file, as `save_text_file` does.
 const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("len", "count", Some("length")),
     ("size", "count", Some("length")),
@@ -2727,6 +2766,13 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("readalllines", "load_text_file", None),
     ("read_csv", "load_csv", None),
     ("readcsv", "load_csv", None),
+    ("writelines", "save_text_file", None),
+    ("write_lines", "save_text_file", None),
+    ("writealllines", "save_text_file", None),
+    ("write_text_file", "save_text_file", None),
+    ("writefile", "save_text_file", None),
+    ("write_file", "save_text_file", None),
+    ("save_file", "save_text_file", None),
     ("parseint", "parse_integer", None),
     ("atoi", "parse_integer", None),
     ("parsefloat", "parse_approximate", None),
@@ -4927,18 +4973,32 @@ pub(crate) fn io_in_transaction(
     span: Span,
     transaction: Span,
     steps: &[crate::body::IoStep],
+    writes: bool,
 ) -> Diagnostic {
+    let (does, doing, help) = if writes {
+        (
+            "writes",
+            "writing",
+            "keep what to write in a variable the transaction assigns, which its rollback undoes too, and write it after the transaction",
+        )
+    } else {
+        (
+            "reads",
+            "reading",
+            "read the file before the transaction, and pass what it gives to the statements in it",
+        )
+    };
     let (message, label) = match steps.last() {
         None => (
-            format!("`{callee}` reads a file, in a transaction"),
-            "reads a file".to_string(),
+            format!("`{callee}` {does} a file, in a transaction"),
+            format!("{does} a file"),
         ),
         Some(last) => (
             format!(
-                "`{callee}` reads a file, in a transaction, as `{}` calls `{}`",
+                "`{callee}` {does} a file, in a transaction, as `{}` calls `{}`",
                 last.caller, last.callee
             ),
-            "leads to reading a file".to_string(),
+            format!("leads to {doing} a file"),
         ),
     };
     let d = Diagnostic::error(Code::IoInTransaction, message, span, label)
@@ -4950,7 +5010,7 @@ pub(crate) fn io_in_transaction(
             None => d.with_note(format!("`{}` runs its version `{}`", step.caller, step.callee)),
         })
         .with_note("a transaction's statements read no input and write no output, at any depth of the calls they make: a transaction is undone, and can be run again, but nothing undoes a read or a write; `debug_value` and `debug_table` write for the programmer, so they are exempt")
-        .with_help("read the file before the transaction, and pass what it gives to the statements in it; to write, keep what to write in a variable the transaction assigns, which its rollback undoes too, and write it after")
+        .with_help(help)
 }
 
 /// `index`, `a[i]`, whose operand `a`, written `operand`, has type `ty`,

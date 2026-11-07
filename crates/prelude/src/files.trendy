@@ -1,7 +1,7 @@
-/* Reading files: the lines of a text file, and the records of a CSV
-   file, each read when the program runs, so by an update operator, with
-   the errors only reading a file gives. A unit that reads one uses it,
-   `uses { trendy.files };`. */
+/* Reading and writing files: the lines of a text file, and the records of
+   a CSV file, each read or written when the program runs, so by an update
+   operator, with the errors only a file gives. A unit that reads or writes
+   one uses it, `uses { trendy.files };`. */
 interface
 
 /* Read the lines of the text file at `path` into `lines`, in the file's
@@ -23,6 +23,29 @@ builtin operator load_text_file{path: text, out lines: array text};
 builtin operator load_text_file{
     path: text,
     out lines: array text,
+    out errors: relation { error: error },
+};
+
+/* Write `lines` to the text file at `path`, in order, each ending in a
+   line feed, so that `load_text_file` reads the same lines back. `path` is
+   relative to the directory the program runs in, unless it is absolute. A
+   file is made if there is none, in a directory that must exist, and what
+   one holds is replaced. Each call writes the file when the program runs,
+   so it is an update operator, which `call` invokes. A file that can't be
+   written fails (R0026), and can be left with part of `lines` if that
+   happens partway, as on a full disk. A line with a line feed in it, or
+   that ends in a carriage return, wouldn't read back as one line, and fails
+   before anything is written (R0027). */
+builtin operator save_text_file{path: text, lines: array text};
+
+/* Write `lines` to the text file at `path`, as the other `save_text_file`
+   does, but rather than stopping the program for a file that can't be
+   written, give its error, an `unwritable_file`, in `errors`, which is empty
+   when the file is written. A line that wouldn't read back as one still
+   stops the program, as that is a mistake in the call and not the file's. */
+builtin operator save_text_file{
+    path: text,
+    lines: array text,
     out errors: relation { error: error },
 };
 
@@ -74,6 +97,15 @@ builtin operator load_csv{
 /* The file at `path` can't be read, for `reason`, the system's words for
    why, as "No such file or directory" (R0012). */
 type unreadable_file is error { { path: text, reason: text } };
+
+/* The file at `path` can't be written, for `reason`, the system's words
+   for why, as "Permission denied" (R0026). */
+type unwritable_file is error { { path: text, reason: text } };
+
+/* The element `line`, counting from 1, of the lines to write to the file at
+   `path` has a line feed in it, or ends in a carriage return, so it wouldn't
+   read back as one line (R0027). */
+type not_one_line is error { { path: text, line: integer } };
 
 /* The file at `path` isn't UTF-8 text, from the line `line` on (R0013). */
 type not_utf8 is error { { path: text, line: integer } };
@@ -152,6 +184,18 @@ implementation
 
 operator message{error: unreadable_file}: text [
     "can't read " || to_text{from: error.path} || ": " || error.reason
+];
+
+operator message{error: unwritable_file}: text [
+    "can't write " || to_text{from: error.path} || ": " || error.reason
+];
+
+operator message{error: not_one_line}: text [
+    "line "
+        || to_text{from: error.line}
+        || " to write to "
+        || to_text{from: error.path}
+        || " wouldn't read back as one line: it has a line feed in it, or ends in a carriage return"
 ];
 
 operator message{error: not_utf8}: text [

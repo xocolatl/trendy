@@ -3296,72 +3296,9 @@ impl<'a> FunctionBuilder<'a> {
     fn call(&mut self, call: &hir::Call, cx: &mut Lowering) {
         let callee = self.program.operator(call.operator);
         match &callee.kind {
-            hir::OperatorKind::Builtin(hir::Builtin::Update(builtin)) => match builtin {
-                hir::UpdateBuiltin::DebugValue => {
-                    self.write(&call.args["v"], lir::RuntimeFn::DebugValue, cx);
-                }
-                hir::UpdateBuiltin::DebugTable => {
-                    self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
-                }
-                hir::UpdateBuiltin::LoadTextFile => {
-                    let target = &call.updated["lines"];
-                    let ty = self.assigned(target).0.clone();
-                    let (lines, _) =
-                        self.loaded(lir::RuntimeFn::LoadTextFile, call, &ty, Vec::new(), cx);
-                    self.store(target, lines, cx);
-                }
-                hir::UpdateBuiltin::LoadTextFileWithErrors => {
-                    let target = &call.updated["lines"];
-                    let ty = self.assigned(target).0.clone();
-                    let errors = self.errors(cx);
-                    let given = vec![errors.given.clone()];
-                    let function = lir::RuntimeFn::LoadTextFileWithErrors;
-                    let (lines, _) = self.loaded(function, call, &ty, given, cx);
-                    self.store(target, lines, cx);
-                    self.store(&call.updated["errors"], errors.value, cx);
-                }
-                hir::UpdateBuiltin::LoadCsv | hir::UpdateBuiltin::LoadCsvWithErrors => {
-                    // Whether the file has a header, and each attribute's
-                    // column, given their tuple's type's descriptor, and
-                    // where the line each record starts on goes.
-                    let header = self.place(&call.args["header"], cx);
-                    let columns = &call.args["columns"];
-                    let columns_ty = self.type_of(columns);
-                    let columns = self.columns(columns, &columns_ty, cx);
-                    let lines = self.slot(lir::Layout::Struct(vec![
-                        lir::Layout::Address,
-                        lir::Layout::Usize,
-                    ]));
-                    let mut given = vec![header, columns, lines.clone()];
-                    // And, with `errors`, where they go, and their types.
-                    let errors = (*builtin == hir::UpdateBuiltin::LoadCsvWithErrors)
-                        .then(|| self.errors(cx));
-                    let function = match &errors {
-                        Some(errors) => {
-                            given.push(errors.given.clone());
-                            lir::RuntimeFn::LoadCsvWithErrors
-                        }
-                        None => lir::RuntimeFn::LoadCsv,
-                    };
-                    let target = &call.updated["rows"];
-                    let ty = self.assigned(target).0.clone();
-                    // Read as the columns say, then converted, each value
-                    // of a type of the program's own read in another
-                    // representation than the stored one.
-                    let hir::Type::Array(record) = &ty else {
-                        unreachable!("`load_csv` loads an array");
-                    };
-                    let read = hir::Type::Array(Box::new(hir::read_as(record, &columns_ty)));
-                    let (records, path) = self.loaded(function, call, &read, given, cx);
-                    let file = InFile { path, lines };
-                    let errors_given = errors.as_ref().map(|errors| &errors.given);
-                    let rows = self.records_checked(&records, &read, &ty, &file, errors_given, cx);
-                    self.store(target, rows, cx);
-                    if let Some(errors) = errors {
-                        self.store(&call.updated["errors"], errors.value, cx);
-                    }
-                }
-            },
+            hir::OperatorKind::Builtin(hir::Builtin::Update(builtin)) => {
+                self.update_builtin(*builtin, call, cx);
+            }
             hir::OperatorKind::Update { .. } | hir::OperatorKind::Specification { .. } => {
                 let params = params_of(callee, &call.types);
                 let args = self.arguments(&params, call, cx);
@@ -3393,6 +3330,101 @@ impl<'a> FunctionBuilder<'a> {
             hir::OperatorKind::ReadOnly { .. }
             | hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(_)) => {
                 unreachable!("`call` invokes only update operators")
+            }
+        }
+    }
+
+    /// `call`, of the update operator the compiler implements, `builtin`.
+    fn update_builtin(&mut self, builtin: hir::UpdateBuiltin, call: &hir::Call, cx: &mut Lowering) {
+        match builtin {
+            hir::UpdateBuiltin::DebugValue => {
+                self.write(&call.args["v"], lir::RuntimeFn::DebugValue, cx);
+            }
+            hir::UpdateBuiltin::DebugTable => {
+                self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
+            }
+            hir::UpdateBuiltin::LoadTextFile => {
+                let target = &call.updated["lines"];
+                let ty = self.assigned(target).0.clone();
+                let (lines, _) =
+                    self.loaded(lir::RuntimeFn::LoadTextFile, call, &ty, Vec::new(), cx);
+                self.store(target, lines, cx);
+            }
+            hir::UpdateBuiltin::LoadTextFileWithErrors => {
+                let target = &call.updated["lines"];
+                let ty = self.assigned(target).0.clone();
+                let errors = self.errors(cx);
+                let given = vec![errors.given.clone()];
+                let function = lir::RuntimeFn::LoadTextFileWithErrors;
+                let (lines, _) = self.loaded(function, call, &ty, given, cx);
+                self.store(target, lines, cx);
+                self.store(&call.updated["errors"], errors.value, cx);
+            }
+            hir::UpdateBuiltin::SaveTextFile => {
+                let args = vec![
+                    self.place(&call.args["path"], cx),
+                    self.place(&call.args["lines"], cx),
+                ];
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::SaveTextFile,
+                    args,
+                });
+                self.scoped = true;
+            }
+            hir::UpdateBuiltin::SaveTextFileWithErrors => {
+                let errors = self.errors(cx);
+                let args = vec![
+                    self.place(&call.args["path"], cx),
+                    self.place(&call.args["lines"], cx),
+                    errors.given.clone(),
+                ];
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::SaveTextFileWithErrors,
+                    args,
+                });
+                self.scoped = true;
+                self.store(&call.updated["errors"], errors.value, cx);
+            }
+            hir::UpdateBuiltin::LoadCsv | hir::UpdateBuiltin::LoadCsvWithErrors => {
+                // Whether the file has a header, and each attribute's
+                // column, given their tuple's type's descriptor, and
+                // where the line each record starts on goes.
+                let header = self.place(&call.args["header"], cx);
+                let columns = &call.args["columns"];
+                let columns_ty = self.type_of(columns);
+                let columns = self.columns(columns, &columns_ty, cx);
+                let lines = self.slot(lir::Layout::Struct(vec![
+                    lir::Layout::Address,
+                    lir::Layout::Usize,
+                ]));
+                let mut given = vec![header, columns, lines.clone()];
+                // And, with `errors`, where they go, and their types.
+                let errors =
+                    (builtin == hir::UpdateBuiltin::LoadCsvWithErrors).then(|| self.errors(cx));
+                let function = match &errors {
+                    Some(errors) => {
+                        given.push(errors.given.clone());
+                        lir::RuntimeFn::LoadCsvWithErrors
+                    }
+                    None => lir::RuntimeFn::LoadCsv,
+                };
+                let target = &call.updated["rows"];
+                let ty = self.assigned(target).0.clone();
+                // Read as the columns say, then converted, each value
+                // of a type of the program's own read in another
+                // representation than the stored one.
+                let hir::Type::Array(record) = &ty else {
+                    unreachable!("`load_csv` loads an array");
+                };
+                let read = hir::Type::Array(Box::new(hir::read_as(record, &columns_ty)));
+                let (records, path) = self.loaded(function, call, &read, given, cx);
+                let file = InFile { path, lines };
+                let errors_given = errors.as_ref().map(|errors| &errors.given);
+                let rows = self.records_checked(&records, &read, &ty, &file, errors_given, cx);
+                self.store(target, rows, cx);
+                if let Some(errors) = errors {
+                    self.store(&call.updated["errors"], errors.value, cx);
+                }
             }
         }
     }

@@ -609,6 +609,12 @@ pub enum UpdateBuiltin {
     /// can't, which it skips, rather than stopping the program: the
     /// [`LanguageError`]s of reading a file.
     LoadCsvWithErrors,
+    /// Write the lines of an array to a text file, when the program runs.
+    SaveTextFile,
+    /// As [`UpdateBuiltin::SaveTextFile`], but a file it can't write gives
+    /// its error in the `out` parameter `errors` rather than stopping the
+    /// program: an `unwritable_file` ([`LanguageError`]).
+    SaveTextFileWithErrors,
 }
 
 impl UpdateBuiltin {
@@ -623,8 +629,19 @@ impl UpdateBuiltin {
             UpdateBuiltin::LoadTextFile
             | UpdateBuiltin::LoadTextFileWithErrors
             | UpdateBuiltin::LoadCsv
-            | UpdateBuiltin::LoadCsvWithErrors => true,
+            | UpdateBuiltin::LoadCsvWithErrors
+            | UpdateBuiltin::SaveTextFile
+            | UpdateBuiltin::SaveTextFileWithErrors => true,
         }
+    }
+
+    /// Whether it writes a file, rather than reading one.
+    #[must_use]
+    pub fn writes_a_file(self) -> bool {
+        matches!(
+            self,
+            UpdateBuiltin::SaveTextFile | UpdateBuiltin::SaveTextFileWithErrors
+        )
     }
 
     /// Whether it reads a CSV file, as `load_csv`, with its `columns`.
@@ -670,6 +687,10 @@ pub enum LanguageError {
     MalformedCsv,
     /// An attribute is read from a column a CSV file hasn't (R0016).
     MissingColumn,
+    /// A file can't be written, for the system's reason (R0026).
+    UnwritableFile,
+    /// A line to write wouldn't read back as one line (R0027).
+    NotOneLine,
     /// A CSV file's field isn't a value of its attribute's type (R0014).
     UnreadableField,
     /// A value a CSV file's record gives breaks its type's constraint
@@ -740,7 +761,7 @@ pub enum LanguageError {
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 31] = [
+    pub const ALL: [LanguageError; 33] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -772,6 +793,8 @@ impl LanguageError {
         LanguageError::ColumnBelowOne,
         LanguageError::ConstraintViolated,
         LanguageError::ConstraintViolatedBy,
+        LanguageError::UnwritableFile,
+        LanguageError::NotOneLine,
     ];
 
     /// The code a failure with it is written with, when nothing takes it.
@@ -780,6 +803,8 @@ impl LanguageError {
         match self {
             LanguageError::UnreadableFile => Code::UnreadableFile,
             LanguageError::NotUtf8 => Code::NotUtf8,
+            LanguageError::UnwritableFile => Code::UnwritableFile,
+            LanguageError::NotOneLine => Code::NotOneLine,
             LanguageError::MalformedCsv => Code::MalformedCsv,
             LanguageError::MissingColumn
             | LanguageError::ColumnShared
@@ -821,6 +846,8 @@ impl LanguageError {
         match self {
             LanguageError::UnreadableFile => "unreadable_file",
             LanguageError::NotUtf8 => "not_utf8",
+            LanguageError::UnwritableFile => "unwritable_file",
+            LanguageError::NotOneLine => "not_one_line",
             LanguageError::MalformedCsv => "malformed_csv",
             LanguageError::MissingColumn => "missing_column",
             LanguageError::UnreadableField => "unreadable_field",
@@ -870,8 +897,12 @@ impl LanguageError {
     pub fn components(self) -> Heading {
         let (text, integer) = (Scalar::Text, Scalar::Integer);
         let components: &[(&str, Scalar)] = match self {
-            LanguageError::UnreadableFile => &[("path", text), ("reason", text)],
-            LanguageError::NotUtf8 => &[("path", text), ("line", integer)],
+            LanguageError::UnreadableFile | LanguageError::UnwritableFile => {
+                &[("path", text), ("reason", text)]
+            }
+            LanguageError::NotUtf8 | LanguageError::NotOneLine => {
+                &[("path", text), ("line", integer)]
+            }
             LanguageError::MalformedCsv => &[("path", text), ("line", integer), ("problem", text)],
             LanguageError::MissingColumn => &[
                 ("path", text),
@@ -962,13 +993,18 @@ impl LanguageError {
                 &[("constraint", text), ("condition", text), ("tuples", text)]
             }
         };
-        Heading::new(
-            components
-                .iter()
-                .map(|&(name, scalar)| (name.to_string(), Type::Scalar(scalar)))
-                .collect(),
-        )
+        heading_of_scalars(components)
     }
+}
+
+/// The heading of `attributes`, each a name and a scalar type.
+fn heading_of_scalars(attributes: &[(&str, Scalar)]) -> Heading {
+    Heading::new(
+        attributes
+            .iter()
+            .map(|&(name, scalar)| (name.to_string(), Type::Scalar(scalar)))
+            .collect(),
+    )
 }
 
 /// The types the units that come with the compiler define in trendy that
@@ -1127,7 +1163,7 @@ impl Library {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 25] = [
+    pub const ALL: [Builtin; 27] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -1153,6 +1189,8 @@ impl Builtin {
         Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors),
         Builtin::Update(UpdateBuiltin::LoadCsv),
         Builtin::Update(UpdateBuiltin::LoadCsvWithErrors),
+        Builtin::Update(UpdateBuiltin::SaveTextFile),
+        Builtin::Update(UpdateBuiltin::SaveTextFileWithErrors),
     ];
 
     #[must_use]
@@ -1166,6 +1204,9 @@ impl Builtin {
             Builtin::Update(UpdateBuiltin::LoadCsv | UpdateBuiltin::LoadCsvWithErrors) => {
                 "load_csv"
             }
+            Builtin::Update(
+                UpdateBuiltin::SaveTextFile | UpdateBuiltin::SaveTextFileWithErrors,
+            ) => "save_text_file",
             Builtin::ReadOnly(builtin) => builtin.name(),
         }
     }
@@ -1229,7 +1270,10 @@ impl Builtin {
                 | ReadOnlyBuiltin::Atan2,
             )
             | Builtin::Update(
-                UpdateBuiltin::LoadTextFile | UpdateBuiltin::LoadTextFileWithErrors,
+                UpdateBuiltin::LoadTextFile
+                | UpdateBuiltin::LoadTextFileWithErrors
+                | UpdateBuiltin::SaveTextFile
+                | UpdateBuiltin::SaveTextFileWithErrors,
             ) => Vec::new(),
             Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
                 of_kind("ordered", &[Requirement::Order])
@@ -1299,6 +1343,17 @@ impl Builtin {
             Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors) => [
                 constant("path", Type::Scalar(Scalar::Text)),
                 out("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
+                out("errors", library.errors_type()),
+            ]
+            .into(),
+            Builtin::Update(UpdateBuiltin::SaveTextFile) => [
+                constant("path", Type::Scalar(Scalar::Text)),
+                constant("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
+            ]
+            .into(),
+            Builtin::Update(UpdateBuiltin::SaveTextFileWithErrors) => [
+                constant("path", Type::Scalar(Scalar::Text)),
+                constant("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
                 out("errors", library.errors_type()),
             ]
             .into(),

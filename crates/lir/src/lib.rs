@@ -450,6 +450,16 @@ pub enum RuntimeFn {
     /// descriptor's address; their types are in the table of errors
     /// ([`RuntimeFn::Failures`]).
     LoadTextFileWithErrors,
+    /// `trendy_rt_save_text_file(path, lines)`: write the array of texts
+    /// `lines` to the text file at `path`, a text, each ending in a line feed.
+    /// It fails if the file can't be written, or if a line wouldn't read back
+    /// as one, before anything is written, or if the memory can't be allocated.
+    SaveTextFile,
+    /// `trendy_rt_save_text_file_with_errors(path, lines, errors)`: as
+    /// [`RuntimeFn::SaveTextFile`], but a file that can't be written gives its
+    /// error at `errors`, an `unwritable_file`, rather than failing: `errors`
+    /// as for [`RuntimeFn::LoadTextFileWithErrors`].
+    SaveTextFileWithErrors,
     /// `trendy_rt_load_csv(dst, path, header, columns, lines, descriptor)`:
     /// store at `dst` the array of the records of the CSV file at `path`, a
     /// text, in order, after its first if `header`, a boolean, is true, of
@@ -912,7 +922,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 94] = [
+    pub const ALL: [RuntimeFn; 96] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -931,6 +941,8 @@ impl RuntimeFn {
         RuntimeFn::LoadTextFileWithErrors,
         RuntimeFn::LoadCsv,
         RuntimeFn::LoadCsvWithErrors,
+        RuntimeFn::SaveTextFile,
+        RuntimeFn::SaveTextFileWithErrors,
         RuntimeFn::BrokenConstraintError,
         RuntimeFn::ComponentKeyError,
         RuntimeFn::OverlappingSubtypesError,
@@ -1033,6 +1045,8 @@ impl RuntimeFn {
             | RuntimeFn::LoadTextFileWithErrors
             | RuntimeFn::LoadCsv
             | RuntimeFn::LoadCsvWithErrors
+            | RuntimeFn::SaveTextFile
+            | RuntimeFn::SaveTextFileWithErrors
             | RuntimeFn::BrokenConstraintError
             | RuntimeFn::ComponentKeyError
             | RuntimeFn::OverlappingSubtypesError
@@ -1134,6 +1148,8 @@ impl RuntimeFn {
             RuntimeFn::Sin => "trendy_rt_sin",
             RuntimeFn::Cos => "trendy_rt_cos",
             RuntimeFn::Atan2 => "trendy_rt_atan2",
+            RuntimeFn::SaveTextFile => "trendy_rt_save_text_file",
+            RuntimeFn::SaveTextFileWithErrors => "trendy_rt_save_text_file_with_errors",
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
             RuntimeFn::LoadTextFileWithErrors => "trendy_rt_load_text_file_with_errors",
             RuntimeFn::LoadCsvWithErrors => "trendy_rt_load_csv_with_errors",

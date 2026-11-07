@@ -3639,6 +3639,29 @@ operator twice{{out lines: array text}} [ call read{{out lines: lines}}; ];
 operator main{{}} [ var lines: array text; {main} ];"
             )
         };
+        // Writing is the same, and says so, with what to do instead.
+        let writes = errors(
+            "uses { trendy.files };
+
+operator write{} [ call save_text_file{path: \"notes.txt\", lines: array [\"Nile\"]}; ];
+operator main{} [
+    transaction [ call save_text_file{path: \"notes.txt\", lines: array [\"Nile\"]}; ];
+    transaction [ call write{}; ];
+];",
+        );
+        assert_eq!(writes.len(), 2, "{writes:#?}");
+        assert!(writes.iter().all(|e| e.code == Code::IoInTransaction));
+        let said: Vec<&str> = writes.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            said.contains(&"`save_text_file` writes a file, in a transaction"),
+            "{said:?}"
+        );
+        assert!(
+            said.contains(
+                &"`write` writes a file, in a transaction, as `write` calls `save_text_file`"
+            ),
+            "{said:?}"
+        );
         // At any depth of the calls, the chain labeled, each step where it
         // calls the next.
         let errors = errors(&program("transaction [ call twice{out lines: lines}; ];"));
@@ -9992,6 +10015,71 @@ operator main{{}} [ var lines: array text; {main} ];"
             "operator past{{n: integer}}: integer [ n ];\noperator last_step{{n: integer}}: integer [ n ];\nvar x := past{{n: 1}} + last_step{{n: 1}};\noperator f{{}}: relation {{ value: integer }} [ series{{from: 1, to: 2}} ];{MAIN}"
         );
         assert!(analyze_str(&own).is_ok(), "{:#?}", errors(&own));
+    }
+
+    #[test]
+    fn other_languages_names_for_writing_are_fixed() {
+        // R's and Kotlin's, Python's, .NET's, Node's and Go's, and the names
+        // that follow from `load_`'s being `read_` elsewhere, fixed to
+        // `save_text_file`, from `trendy.files`, which the unit then uses.
+        for written in [
+            "writeLines",
+            "writelines",
+            "WriteAllLines",
+            "writeFile",
+            "WriteFile",
+            "write_text_file",
+            "write_file",
+            "write_lines",
+            "save_file",
+        ] {
+            let source = format!(
+                "operator main{{}} [\n    call {written}{{path: \"a.txt\", lines: array [\"Nile\"]}};\n];\n"
+            );
+            let fixed = fix(&source);
+            assert_eq!(
+                fixed,
+                "uses { trendy.files };\n\noperator main{} [\n    call save_text_file{path: \"a.txt\", lines: array [\"Nile\"]};\n];\n",
+                "{written}"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
+    }
+
+    #[test]
+    fn one_value_where_an_array_goes_is_made_an_array_of_one() {
+        let source = "uses { trendy.files };\n\noperator main{} [\n    call save_text_file{path: \"a.txt\", lines: \"Nile\"};\n];\n";
+        let fixed = fix(source);
+        assert_eq!(
+            fixed,
+            source.replace("lines: \"Nile\"", "lines: array [\"Nile\"]")
+        );
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+    }
+
+    #[test]
+    fn a_relation_where_an_array_goes_says_how_to_load_one() {
+        // The elements' type says which load: of values, or of tuples.
+        for (element, load) in [
+            ("text", "`load a value from r order"),
+            ("tuple { line: text }", "`load a from r order"),
+        ] {
+            let source = format!(
+                "operator f{{a: array {element}}} [ call debug_value{{v: length{{a}}}}; ];
+operator main{{}} [
+    const r := relation {{ {{ line: \"Nile\" }} }};
+    call f{{a: r}};
+];
+"
+            );
+            let errors = errors(&source);
+            assert_eq!(errors.len(), 1, "{errors:#?}");
+            assert_eq!(errors[0].code, Code::TypeMismatch);
+            assert!(
+                errors[0].help.iter().any(|help| help.contains(load)),
+                "{errors:#?}"
+            );
+        }
     }
 
     #[test]

@@ -7184,6 +7184,105 @@ pub unsafe extern "C" fn trendy_rt_load_text_file_with_errors(
     })
 }
 
+/// Write the array of texts at `lines` to the text file at `path`, each ending
+/// in a line feed, so that [`trendy_rt_load_text_file`] reads them back. Fails
+/// if the file can't be written (R0026), if a line wouldn't read back as one
+/// (R0027), before anything is written, or if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `path` must point to a valid text value, and `lines` to a valid array of
+/// them. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_save_text_file(path: *const Text, lines: *const Text) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe { save_text_file(read_text(path.cast()), lines, None) })
+}
+
+/// As [`trendy_rt_save_text_file`], but rather than failing for a file that
+/// can't be written, store at `errors` its one error, an `unwritable_file`,
+/// and none if the file is written. A line that wouldn't read back as one
+/// still fails, as that is a mistake in the call.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_save_text_file`], and `errors` must point to a valid
+/// [`Errors`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_save_text_file_with_errors(
+    path: *const Text,
+    lines: *const Text,
+    errors: *mut Errors,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let mut found = Found::new((*errors).relation);
+        save_text_file(read_text(path.cast()), lines, Some(&mut found))?;
+        let found = found.finish()?;
+        (&raw mut (*errors).found).write_unaligned(found);
+        Ok(())
+    })
+}
+
+/// What [`trendy_rt_save_text_file`] and
+/// [`trendy_rt_save_text_file_with_errors`] do: with `found`, why the file can't
+/// be written goes there; without it, that fails.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_save_text_file`], and `found`'s descriptor must be valid.
+#[cfg(not(test))]
+unsafe fn save_text_file(path: &str, lines: *const Text, found: Option<&mut Found>) -> Fallible {
+    // SAFETY: guaranteed by the caller: an array of texts has them one after
+    // another, each a `Text`, as the compiler lays them out.
+    unsafe {
+        let (elements, count) = read_slice(lines.cast());
+        let line = |i: usize| read_text(elements.add(i * size_of::<Text>()));
+        if let Some(i) = (0..count).find(|&i| !reads_back_as_one_line(line(i))) {
+            let (path, position) = (
+                scope_text(path)?,
+                i64::try_from(i.saturating_add(1)).unwrap_or(i64::MAX),
+            );
+            return Err(fail_as(
+                NOT_ONE_LINE,
+                &[
+                    ("path", (&raw const path).cast()),
+                    ("line", (&raw const position).cast()),
+                ],
+            ));
+        }
+        let written = try_write_file(path, |out| {
+            for i in 0..count {
+                out.put(line(i).as_bytes())?;
+                out.put(b"\n")?;
+            }
+            Ok(())
+        })?;
+        if let Err(reason) = written {
+            let (path, reason) = (scope_text(path)?, scope_text(reason)?);
+            give(
+                found,
+                UNWRITABLE_FILE,
+                &[
+                    ("path", (&raw const path).cast()),
+                    ("reason", (&raw const reason).cast()),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether `line`, followed by a line feed, reads back as itself and no more,
+/// as [`lines_of`] reads a file: with no line feed in it, and no carriage
+/// return at its end, which would make those two one line end.
+#[cfg(not(test))]
+fn reads_back_as_one_line(line: &str) -> bool {
+    !line.contains('\n') && !line.ends_with('\r')
+}
+
 /// The text of the file at `path`, and the memory it is in, which it
 /// lasts as long as, or `None`, after giving `found` why the file can't be
 /// read, or isn't UTF-8 text: an `unreadable_file` (R0012) or a `not_utf8`
@@ -7407,7 +7506,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 31] = [
+pub const KINDS: [&str; 33] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -7439,6 +7538,8 @@ pub const KINDS: [&str; 31] = [
     "column_below_one",
     "constraint_violated",
     "constraint_violated_by",
+    "unwritable_file",
+    "not_one_line",
 ];
 
 /// The place in [`KINDS`] of the kind named `name`, found when the runtime
@@ -7474,6 +7575,10 @@ const fn same(a: &[u8], b: &[u8]) -> bool {
 pub const UNREADABLE_FILE: usize = place("unreadable_file");
 /// `not_utf8`'s, as [`UNREADABLE_FILE`] is.
 pub const NOT_UTF8: usize = place("not_utf8");
+/// `unwritable_file`'s, as [`UNREADABLE_FILE`] is.
+pub const UNWRITABLE_FILE: usize = place("unwritable_file");
+/// `not_one_line`'s, as [`UNREADABLE_FILE`] is.
+pub const NOT_ONE_LINE: usize = place("not_one_line");
 /// `malformed_csv`'s, as [`UNREADABLE_FILE`] is.
 pub const MALFORMED_CSV: usize = place("malformed_csv");
 /// `missing_column`'s, as [`UNREADABLE_FILE`] is.
@@ -8917,20 +9022,13 @@ unsafe fn try_read_field(
 /// Fails only if the memory can't be allocated.
 #[cfg(not(test))]
 fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
-    // `open` takes the path as a C string, which ends at the first NUL.
-    if path.contains('\0') {
-        return Ok(Err("a path can't contain the character U+0000"));
-    }
-    let Some(terminated) = path.len().checked_add(1) else {
-        return Err(out_of_memory());
+    let c_path = match c_string(path)? {
+        Ok(c_path) => c_path,
+        Err(reason) => return Ok(Err(reason)),
     };
-    // SAFETY: the memory is for the path's bytes and a NUL, read by `open`;
-    // the descriptor is read, then closed, and `read` writes at most the
-    // room left in the memory.
+    // SAFETY: the path ends in a NUL; the descriptor is read, then closed, and
+    // `read` writes at most the room left in the memory.
     unsafe {
-        let c_path = Temp::<u8>::new(terminated)?;
-        core::ptr::copy_nonoverlapping(path.as_ptr(), c_path.ptr(), path.len());
-        *c_path.ptr().add(path.len()) = 0;
         let fd = open(c_path.ptr(), O_RDONLY);
         if fd < 0 {
             return Ok(Err(reason()));
@@ -8962,6 +9060,110 @@ fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
         });
         close(fd);
         read
+    }
+}
+
+/// `path` as `open` takes it, a C string, which ends at the first NUL, so that
+/// one with a NUL in it is no path, for that reason. Fails if there is no memory
+/// for it.
+#[cfg(not(test))]
+fn c_string(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
+    if path.contains('\0') {
+        return Ok(Err("a path can't contain the character U+0000"));
+    }
+    let Some(terminated) = path.len().checked_add(1) else {
+        return Err(out_of_memory());
+    };
+    let c_path = Temp::<u8>::new(terminated)?;
+    // SAFETY: the memory is for the path's bytes and a NUL.
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr(), c_path.ptr(), path.len());
+        *c_path.ptr().add(path.len()) = 0;
+    }
+    Ok(Ok(c_path))
+}
+
+/// How much of a file [`FileOut`] holds before it writes it.
+#[cfg(not(test))]
+const FILE_BUFFER: usize = 64 * 1024;
+
+/// A file being written, with what hasn't been yet.
+#[cfg(not(test))]
+struct FileOut {
+    fd: i32,
+    buffer: Temp<u8>,
+    held: usize,
+}
+
+#[cfg(not(test))]
+impl FileOut {
+    /// Add `bytes` to what is written, or say why they can't be.
+    fn put(&mut self, mut bytes: &[u8]) -> Result<(), &'static str> {
+        while !bytes.is_empty() {
+            if self.held == self.buffer.len {
+                self.flush()?;
+            }
+            let taken = bytes.len().min(self.buffer.len - self.held);
+            // SAFETY: there is room for them after what the buffer holds.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    self.buffer.ptr().add(self.held),
+                    taken,
+                );
+            }
+            self.held += taken;
+            bytes = &bytes[taken..];
+        }
+        Ok(())
+    }
+
+    /// Write what the buffer holds, as many calls of `write` as it takes.
+    fn flush(&mut self) -> Result<(), &'static str> {
+        let mut written = 0;
+        while written < self.held {
+            // SAFETY: the buffer holds that many bytes after those written.
+            let n = unsafe { write(self.fd, self.buffer.ptr().add(written), self.held - written) };
+            match usize::try_from(n) {
+                Ok(0) => return Err("the system wrote nothing"),
+                Ok(n) => written += n,
+                Err(_) => return Err(reason()),
+            }
+        }
+        self.held = 0;
+        Ok(())
+    }
+}
+
+/// Write the file at `path`, made if there is none and emptied if there is,
+/// with what `fill` puts in it, or say why it can't be: as far as `fill` got,
+/// if it can't partway. Fails if there is no memory for that.
+#[cfg(not(test))]
+fn try_write_file(
+    path: &str,
+    fill: impl FnOnce(&mut FileOut) -> Result<(), &'static str>,
+) -> Fallible<Result<(), &'static str>> {
+    let c_path = match c_string(path)? {
+        Ok(c_path) => c_path,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let buffer = Temp::<u8>::new(FILE_BUFFER)?;
+    // SAFETY: the path ends in a NUL, and the descriptor is closed once.
+    unsafe {
+        let fd = open(c_path.ptr(), O_WRITE_ANEW, NEW_FILE_MODE);
+        if fd < 0 {
+            return Ok(Err(reason()));
+        }
+        let mut out = FileOut {
+            fd,
+            buffer,
+            held: 0,
+        };
+        let written = fill(&mut out).and_then(|()| out.flush());
+        // A system can say only now that it couldn't keep what was written,
+        // but that isn't the first reason, if there is one already.
+        let closed = close(fd);
+        Ok(written.and_then(|()| if closed < 0 { Err(reason()) } else { Ok(()) }))
     }
 }
 
@@ -9640,6 +9842,18 @@ impl Write for Stderr {
 /// `open`'s flag to open a file for reading only, 0 on every system.
 #[cfg(not(test))]
 const O_RDONLY: i32 = 0;
+
+/// `open`'s flags to write a file, made if there is none and emptied if there
+/// is: `O_WRONLY | O_CREAT | O_TRUNC`, which each system numbers its own way.
+#[cfg(all(not(test), target_vendor = "apple"))]
+const O_WRITE_ANEW: i32 = 0x0001 | 0x0200 | 0x0400;
+/// As for Apple's systems.
+#[cfg(all(not(test), target_os = "linux"))]
+const O_WRITE_ANEW: i32 = 0o1 | 0o100 | 0o1000;
+
+/// The permissions of a file made, which the process's umask narrows.
+#[cfg(not(test))]
+const NEW_FILE_MODE: u32 = 0o666;
 
 unsafe extern "C" {
     #[cfg(not(test))]

@@ -1306,7 +1306,7 @@ Some operators are part of every program, always in scope: the
 few the compiler implements itself, the *built-ins*, which the prelude
 declares with `builtin`, as it does the built-in types, and as the
 compiler's other units declare theirs, such as `trendy.files` (see
-[Reading files](#reading-files)); the rest its implementation defines in
+[Reading and writing files](#reading-and-writing-files)); the rest its implementation defines in
 trendy, as any unit's could, with its types' conversions and its
 errors' messages, which no other unit sees. The prelude is checked with
 every program, its
@@ -1981,13 +1981,13 @@ var people := parse_integer{from: "8.4e6"};
 operator main{} [];
 ```
 
-### Reading files
+### Reading and writing files
 
-Reading a file is the work of `trendy.files`, a unit that comes with the
-compiler, which a unit uses as it does any other, `uses { trendy.files
-};`. Its interface declares the operators that read files, which the
-compiler implements, as the prelude's built-ins are, and the errors only
-reading a file gives, each a subtype of the prelude's `error`; its
+Reading a file, and writing one, is the work of `trendy.files`, a unit that
+comes with the compiler, which a unit uses as it does any other, `uses {
+trendy.files };`. Its interface declares the operators that read and write
+files, which the compiler implements, as the prelude's built-ins are, and the
+errors only a file gives, each a subtype of the prelude's `error`; its
 implementation gives their messages. It is a unit of every program, so
 its names are as any unit's: a unit can declare a `malformed_csv` of its
 own, and the program then calls each by its unit's name,
@@ -1997,10 +1997,10 @@ an error whose fix uses it (A0015, A0003). Its interface, what a unit
 that uses it sees:
 
 ```
-/* Reading files: the lines of a text file, and the records of a CSV
-   file, each read when the program runs, so by an update operator, with
-   the errors only reading a file gives. A unit that reads one uses it,
-   `uses { trendy.files };`. */
+/* Reading and writing files: the lines of a text file, and the records of
+   a CSV file, each read or written when the program runs, so by an update
+   operator, with the errors only a file gives. A unit that reads or writes
+   one uses it, `uses { trendy.files };`. */
 interface
 
 /* Read the lines of the text file at `path` into `lines`, in the file's
@@ -2022,6 +2022,29 @@ builtin operator load_text_file{path: text, out lines: array text};
 builtin operator load_text_file{
     path: text,
     out lines: array text,
+    out errors: relation { error: error },
+};
+
+/* Write `lines` to the text file at `path`, in order, each ending in a
+   line feed, so that `load_text_file` reads the same lines back. `path` is
+   relative to the directory the program runs in, unless it is absolute. A
+   file is made if there is none, in a directory that must exist, and what
+   one holds is replaced. Each call writes the file when the program runs,
+   so it is an update operator, which `call` invokes. A file that can't be
+   written fails (R0026), and can be left with part of `lines` if that
+   happens partway, as on a full disk. A line with a line feed in it, or
+   that ends in a carriage return, wouldn't read back as one line, and fails
+   before anything is written (R0027). */
+builtin operator save_text_file{path: text, lines: array text};
+
+/* Write `lines` to the text file at `path`, as the other `save_text_file`
+   does, but rather than stopping the program for a file that can't be
+   written, give its error, an `unwritable_file`, in `errors`, which is empty
+   when the file is written. A line that wouldn't read back as one still
+   stops the program, as that is a mistake in the call and not the file's. */
+builtin operator save_text_file{
+    path: text,
+    lines: array text,
     out errors: relation { error: error },
 };
 
@@ -2073,6 +2096,15 @@ builtin operator load_csv{
 /* The file at `path` can't be read, for `reason`, the system's words for
    why, as "No such file or directory" (R0012). */
 type unreadable_file is error { { path: text, reason: text } };
+
+/* The file at `path` can't be written, for `reason`, the system's words
+   for why, as "Permission denied" (R0026). */
+type unwritable_file is error { { path: text, reason: text } };
+
+/* The element `line`, counting from 1, of the lines to write to the file at
+   `path` has a line feed in it, or ends in a carriage return, so it wouldn't
+   read back as one line (R0027). */
+type not_one_line is error { { path: text, line: integer } };
 
 /* The file at `path` isn't UTF-8 text, from the line `line` on (R0013). */
 type not_utf8 is error { { path: text, line: integer } };
@@ -2233,6 +2265,34 @@ var lines := load_text_file{path: "rivers.txt"};
 
 operator main{} [];
 ```
+
+**`save_text_file{path: text, lines: array text}`** writes output: the
+lines of an array to a text file, each ending in a line feed.
+
+```trendy
+uses { trendy.files };
+
+operator main{} [
+    var rivers: array text;
+    call load_text_file{path: "rivers.txt", out lines: rivers};
+    call save_text_file{path: "copy.txt", lines: rivers};
+];
+```
+
+- **It is an update operator,** which `call` invokes, as anything that changes
+  what is outside the program is (TTM RM Prescription 3), and a transaction's
+  statements call it at no depth (A0066): nothing undoes a write.
+- **What it writes reads back as it was.** `load_text_file` gives the same lines,
+  however few, so a line with a line feed in it, or that ends in a carriage
+  return, which wouldn't read back as one line, stops the program before anything
+  is written (R0027). `out errors` doesn't take that: it is a mistake in the call.
+- **A file is made if there is none, and what one holds is replaced.** The
+  directory it is in must exist. A relative path is from the directory the program
+  runs in.
+- **A file that can't be written stops the program** (R0026), unless the call
+  names `out errors`, which is then empty, or holds its `unwritable_file { path,
+  reason }`. A failure partway, as on a full disk, can leave part of the lines in
+  the file, and what it held before is gone.
 
 **`load_csv{path: text, header: boolean, columns: C, out rows: array T}`**,
 where `C` and `T` are any tuples, reads the records of a CSV file into the
@@ -6572,7 +6632,7 @@ operator main{} [
   a transaction takes, as it takes a `fail`'s, and the program writes
   with its message and code if nothing does. A built-in that reads input gives the world's errors as
   values instead, when its call names `out errors`, which `trendy.files`
-  declares with it (see [Reading files](#reading-files)): `unreadable_file {
+  declares with it (see [Reading and writing files](#reading-and-writing-files)): `unreadable_file {
   path, reason }` (R0012) and `not_utf8 { path, line }` (R0013), from
   `load_text_file` and `load_csv`, and from `load_csv` `malformed_csv {
   path, line, problem }` (R0015), `missing_column { path, attribute,
@@ -6582,8 +6642,11 @@ operator main{} [
   constraint }` (R0017), `component_key_violated_in_file { path, line,
   attribute, type, component, key, first, second }` (R0008) and
   `overlapping_subtypes_in_file { path, line, attribute, value, first,
-  second }` (R0020). Without `out errors`, it fails with them, and the
-  program writes them as it writes any failure's error.
+  second }` (R0020), and from `save_text_file` `unwritable_file { path,
+  reason }` (R0026). Without `out errors`, it fails with them, and the
+  program writes them as it writes any failure's error. `not_one_line {
+  path, line }` (R0027), a mistake in a call of `save_text_file`, it fails
+  with either way.
 
 ## Transactions
 
@@ -7063,6 +7126,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `float(s)`, `parseFloat(s)`, `atof(s)`, `CAST(s AS DOUBLE PRECISION)` | `parse_approximate{from: s}` |
 | `Boolean.parseBoolean(s)`, `strconv.ParseBool(s)`, `CAST(s AS BOOLEAN)` | `parse_boolean{from: s}` |
 | `lines = readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `call load_text_file{path: path, out lines: lines};`, an array of the lines |
+| `writeLines(lines, path)`, `f.writelines(lines)`, `File.WriteAllLines(path, lines)`, `fs.writeFile(path, text)` | `call save_text_file{path: path, lines: lines};`, of an array of the lines |
 | `rows = pd.read_csv(path, usecols=[0, 2])`, `read_csv(path)` | `call load_csv{path: path, header: true, columns: tuple { city: 1, people: 3 }, out rows: rows};`, an array of tuples whose columns the call names, from 1 |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |

@@ -211,6 +211,8 @@ codes! {
     ConstraintViolated => "R0023",
     BrokenCallConstraint => "R0024",
     TooDeep => "R0025",
+    UnwritableFile => "R0026",
+    NotOneLine => "R0027",
     Internal => "X0000",
 }
 
@@ -259,6 +261,8 @@ impl Code {
             Code::OutOfMemory
                 | Code::TooDeep
                 | Code::UnreadableFile
+                | Code::UnwritableFile
+                | Code::NotOneLine
                 | Code::NotUtf8
                 | Code::MalformedCsv
                 | Code::Warned

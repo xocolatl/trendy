@@ -1260,12 +1260,13 @@ pub(crate) fn deferred_checks(
         }
     }
     for call in &deferred.in_transactions {
-        if let Some(steps) = io_steps(call.callee, &deferred.calls, operators) {
+        if let Some((steps, writes)) = io_steps(call.callee, &deferred.calls, operators) {
             errors.push(errors::io_in_transaction(
                 &operators.get(call.callee).name,
                 call.span,
                 call.transaction,
                 &steps,
+                writes,
             ));
         }
     }
@@ -1276,12 +1277,13 @@ pub(crate) fn deferred_checks(
 /// through `calls`, every call statement, by the operator it is in, and
 /// the versions of a specification called: each step's caller's name,
 /// callee's, and where the call is, if it is one, the built-in's last;
-/// none if `callee` is one itself; `None` if it leads to none.
+/// none if `callee` is one itself; and whether the built-in writes a file,
+/// rather than reading one. `None` if it leads to none.
 fn io_steps(
     callee: hir::OperatorId,
     calls: &[(hir::OperatorId, hir::OperatorId, Span)],
     operators: &Operators,
-) -> Option<Vec<IoStep>> {
+) -> Option<(Vec<IoStep>, bool)> {
     let does_io = |id: hir::OperatorId| matches!(operators.get(id).builtin, Some(hir::Builtin::Update(b)) if b.does_io());
     // How each operator reached was first reached: from which, and where.
     let mut reached: HashMap<hir::OperatorId, Option<(hir::OperatorId, Option<Span>)>> =
@@ -1300,7 +1302,11 @@ fn io_steps(
                 at = from;
             }
             steps.reverse();
-            return Some(steps);
+            let writes = matches!(
+                operators.get(id).builtin,
+                Some(hir::Builtin::Update(builtin)) if builtin.writes_a_file()
+            );
+            return Some((steps, writes));
         }
         let onward = calls
             .iter()

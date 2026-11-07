@@ -170,6 +170,13 @@ few as possible: an operator that can be written in trendy is defined in
 the prelude instead, and each new language feature is a reason to look for
 a built-in it can replace.
 
+`save_text_file` is an update operator too (`trendy_rt_save_text_file`), with
+nothing to assign, and its overload with `out errors` gives an `unwritable_file`
+as a load gives its errors (`trendy_rt_save_text_file_with_errors`). A line that
+wouldn't read back as one fails first, so that nothing is written, and the rest
+goes through a buffer of its own (`FileOut`), with `open`'s flags as each system
+numbers them (`O_WRITE_ANEW`).
+
 **`trendy_runtime`** is a `no_std` library linked into every executable. It
 links only the C library, from which it reads files (`open`, `read`) and
 writes the system's reason one can't be (`strerror`, with `errno` under
