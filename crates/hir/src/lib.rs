@@ -747,6 +747,8 @@ pub enum LanguageError {
     UnwritableFile,
     /// A line to write wouldn't read back as one line (R0027).
     NotOneLine,
+    /// An argument the program was started with isn't UTF-8 text (R0028).
+    NotUtf8Argument,
     /// A CSV file's field isn't a value of its attribute's type (R0014).
     UnreadableField,
     /// A value a CSV file's record gives breaks its type's constraint
@@ -817,7 +819,7 @@ pub enum LanguageError {
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 33] = [
+    pub const ALL: [LanguageError; 34] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -851,6 +853,7 @@ impl LanguageError {
         LanguageError::ConstraintViolatedBy,
         LanguageError::UnwritableFile,
         LanguageError::NotOneLine,
+        LanguageError::NotUtf8Argument,
     ];
 
     /// The code a failure with it is written with, when nothing takes it.
@@ -861,6 +864,7 @@ impl LanguageError {
             LanguageError::NotUtf8 => Code::NotUtf8,
             LanguageError::UnwritableFile => Code::UnwritableFile,
             LanguageError::NotOneLine => Code::NotOneLine,
+            LanguageError::NotUtf8Argument => Code::NotUtf8Argument,
             LanguageError::MalformedCsv => Code::MalformedCsv,
             LanguageError::MissingColumn
             | LanguageError::ColumnShared
@@ -904,6 +908,7 @@ impl LanguageError {
             LanguageError::NotUtf8 => "not_utf8",
             LanguageError::UnwritableFile => "unwritable_file",
             LanguageError::NotOneLine => "not_one_line",
+            LanguageError::NotUtf8Argument => "not_utf8_argument",
             LanguageError::MalformedCsv => "malformed_csv",
             LanguageError::MissingColumn => "missing_column",
             LanguageError::UnreadableField => "unreadable_field",
@@ -1040,6 +1045,7 @@ impl LanguageError {
             }
             LanguageError::BrokenCallConstraint => &[("called", text), ("constraint", text)],
             LanguageError::TooDeep => &[("bytes", integer)],
+            LanguageError::NotUtf8Argument => &[("position", integer)],
             LanguageError::ColumnShared => {
                 &[("first", text), ("second", text), ("column", integer)]
             }

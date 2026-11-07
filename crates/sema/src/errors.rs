@@ -2336,6 +2336,11 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
     );
     // SQL writes what the clock shows as a value.
     let lowercase = name.to_lowercase();
+    if ARGUMENTS_ELSEWHERE[..3].contains(&lowercase.as_str()) || lowercase == "argc" {
+        return d
+            .with_note("the arguments a program is started with are what `main` is given, if it takes them: `operator main{arguments: array text} [ … ];`, without the program's path")
+            .with_help("take them in `main`, and give them to what needs them; `length{a: arguments}` is how many there are");
+    }
     if (lowercase == "transaction_timestamp" || CLOCK_NAMES.contains(&lowercase.as_str()))
         && let Some((note, help)) = absent(name)
     {
@@ -3948,24 +3953,111 @@ pub(crate) fn main_with_result(decl: &trendy_syntax::ast::Operator) -> Diagnosti
 }
 
 /// The rule of `main`'s parameters, which A0019 reports.
-const MAIN_PARAMETERS: &str = "execution starts in `main`, with no arguments; it can give the errors the program writes when it returns, and exits with 1 if one failed, as `out errors: relation transaction_collection`";
+const MAIN_PARAMETERS: &str = "execution starts in `main`, which can take the arguments the program is started with, but its path, as `arguments: array text`, and can give the errors the program writes when it returns, and exits with 1 if one failed, as `out errors: relation transaction_collection`";
 
-/// `operator main{…}`, whose parameters `params` must be empty, or only
-/// `out errors`.
-pub(crate) fn main_with_params(params: &trendy_syntax::ast::Heading) -> Diagnostic {
-    Diagnostic::error(
+/// Other languages' names, lowercase, for the arguments a program is started with,
+/// as `main`'s parameter, or as a value.
+const ARGUMENTS_ELSEWHERE: &[&str] = &[
+    "args",
+    "argv",
+    "arg",
+    "argument",
+    "params",
+    "parameters",
+    "cmdline",
+    "command_line",
+];
+
+/// `param`, of the parameters `params` of `operator main{…}`, which takes only its
+/// arguments and its errors: another language's name for its arguments, fixed to
+/// `arguments: array text`, or else removed.
+pub(crate) fn main_with_params(
+    params: &trendy_syntax::ast::Heading,
+    param: &trendy_syntax::ast::AttributeType,
+) -> Diagnostic {
+    let name = param
+        .name()
+        .and_then(|n| n.ident())
+        .map_or_else(String::new, |ident| ident.text().to_string());
+    let d = Diagnostic::error(
         Code::MainSignature,
-        "`main` can't take parameters",
-        params.span(),
-        "nothing passes arguments to `main`",
+        format!("`main` has no parameter `{name}`"),
+        param.span(),
+        "not one of `main`'s",
     )
-    .with_note(MAIN_PARAMETERS)
-    .with_suggestion(
-        "remove the parameters",
+    .with_note(MAIN_PARAMETERS);
+    if ARGUMENTS_ELSEWHERE.contains(&name.to_lowercase().as_str()) {
+        return d.with_suggestion(
+            "take the program's arguments as `arguments: array text`",
+            vec![Edit {
+                span: param.span(),
+                replacement: "arguments: array text".to_string(),
+            }],
+        );
+    }
+    let alone = params.attributes().count() == 1;
+    d.with_suggestion(
+        "remove the parameter",
         vec![Edit {
-            span: params.span(),
-            replacement: "{}".to_string(),
+            span: if alone {
+                params.span()
+            } else {
+                params.removal(param)
+            },
+            replacement: if alone { "{}" } else { "" }.to_string(),
         }],
+    )
+}
+
+/// `main`'s parameter `arguments`, written `param`, which sema made `given`: what is
+/// wrong with it, if anything, for the arguments `main` is given, an `array text`,
+/// whose fix is certain.
+pub(crate) fn main_arguments(
+    param: &trendy_syntax::ast::AttributeType,
+    given: &hir::Parameter,
+) -> Option<Diagnostic> {
+    let expected = hir::Type::Array(Box::new(hir::Type::Scalar(hir::Scalar::Text)));
+    if given.ty != expected {
+        let written = param.type_expr()?;
+        return Some(
+            Diagnostic::error(
+                Code::MainSignature,
+                format!("`main`'s arguments are an `array text`, not `{}`", given.ty),
+                written.span(),
+                format!("this is `{}`", given.ty),
+            )
+            .with_note(MAIN_PARAMETERS)
+            .with_suggestion(
+                "make it an `array text`",
+                vec![Edit {
+                    span: written.span(),
+                    replacement: "array text".to_string(),
+                }],
+            ),
+        );
+    }
+    let mode = param.mode().filter(|_| given.mode != hir::Mode::Const)?;
+    let removed = param.name().map_or(mode.span(), |name| {
+        Span::new(mode.span().start, name.span().start)
+    });
+    Some(
+        Diagnostic::error(
+            Code::MainSignature,
+            format!(
+                "`main` is given its arguments, so `arguments` isn't `{}`",
+                given.mode.word()
+            ),
+            mode.span(),
+            "nothing assigns it",
+        )
+        .with_note(MAIN_PARAMETERS)
+        .with_suggestion(
+            "take them as a value",
+            vec![Edit {
+                span: removed,
+                replacement: String::new(),
+            }],
+        ),
     )
 }
 

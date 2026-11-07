@@ -2622,7 +2622,9 @@ produced with Cranelift.
 - laying out data for the target's byte order and pointer size, where every
   object occupies at least one byte;
 - calling conventions, and the C-ABI `main`, which has `trendy_rt_run` run the
-  entry function on the program's stack (see [Recursion](#recursion));
+  entry function on the program's stack (see [Recursion](#recursion)), with the
+  arguments the system gave it, of which the entry function makes `main`'s
+  `arguments`, if it takes them (`trendy_rt_arguments`);
 - `shl` and `shr` (`Functions::shifted`): Cranelift's shifts take the
   count modulo 64, so a count is first clamped to 63, which gives a right
   shift's result beyond it, and a left shift lost a bit if shifting back

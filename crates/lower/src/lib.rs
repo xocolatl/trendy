@@ -41,7 +41,8 @@ pub fn lower(program: &hir::Program) -> lir::Program {
 }
 
 /// The function the executable starts in: it gives the runtime the table
-/// of the errors the language makes ([`Lowering::failures`]), calls
+/// of the errors the language makes ([`Lowering::failures`]), gives `main`
+/// the program's arguments, if it takes `arguments` ([`Arguments`]), calls
 /// `main`, and writes the errors it gives, if it takes `out errors`, and
 /// fails if one failed ([`Given`]); if `main` fails, it writes the calls
 /// the failure passed through (its trace), after its error, then fails. An error waiting, with
@@ -71,18 +72,33 @@ fn entry(
     let (handle, done) = (b.new_block(), b.new_block());
     let waiting = cx.waiting(program);
     let written = Written::new(&mut b, waiting, cx);
-    let given = Given::new(&mut b, cx);
+    let params = &program.operator(program.entry).params;
+    let args = params_layout(params, &cx.families).map(|layout| b.slot(layout));
+    let field = |name: &str| {
+        let at = params.keys().position(|param| param == name)?;
+        let mut field = args.clone()?;
+        field.path.push(at);
+        Some(field)
+    };
+    let given = field("errors").map(|at| Given::new(&mut b, at, cx));
+    let arguments = field("arguments").map(|at| Arguments::new(&mut b, at, cx));
     b.catching(handle, |b| {
+        if let Some(arguments) = &arguments {
+            arguments.read(b, cx);
+        }
         b.constraints_checked_at_start(cx);
         b.insts.push(lir::Inst::Call {
             function: main,
-            args: given.as_ref().map(|given| given.args.clone()),
+            args: args.clone(),
             result: None,
         });
         if let Some(given) = &given {
             given.write(b, cx);
         }
     });
+    if let Some(arguments) = &arguments {
+        arguments.release(&mut b, cx);
+    }
     if let Some(given) = &given {
         given.release(&mut b, cx);
         let (failing, returning) = (b.new_block(), b.new_block());
@@ -107,6 +123,9 @@ fn entry(
         args: Vec::new(),
     });
     written.release(&mut b, cx);
+    if let Some(arguments) = &arguments {
+        arguments.release(&mut b, cx);
+    }
     if let Some(given) = &given {
         given.release(&mut b, cx);
     }
@@ -124,8 +143,6 @@ fn entry(
 struct Given {
     /// The relation, which `main` assigns: null until it does.
     errors: lir::Place,
-    /// `main`'s arguments: the relation's address.
-    args: lir::Place,
     /// Its type.
     ty: hir::Type,
     /// Whether one failed, a byte, 0 until a failure is written.
@@ -133,11 +150,11 @@ struct Given {
 }
 
 impl Given {
-    /// Its slots, if `main` takes `out errors`, which the entry block of
-    /// `b` sets as it starts: no errors, and none failed.
-    fn new(b: &mut FunctionBuilder, cx: &mut Lowering) -> Option<Self> {
+    /// Its slots, which the entry block of `b` sets as it starts: no errors, and
+    /// none failed; and their address at `arg`, of `main`'s arguments.
+    fn new(b: &mut FunctionBuilder, arg: lir::Place, cx: &mut Lowering) -> Self {
         let main = b.program.operator(b.program.entry);
-        let ty = main.params.get("errors")?.ty.clone();
+        let ty = main.params["errors"].ty.clone();
         let layout = cx.layout(&ty);
         let errors = b.slot(layout.clone());
         let failed = b.slot(lir::Layout::U8);
@@ -147,20 +164,11 @@ impl Given {
         ] {
             b.insts.push(lir::Inst::Copy { dst, src, layout });
         }
-        let params = params_layout(&main.params, &cx.families).expect("`main` takes `errors`");
-        let args = b.slot(params);
-        let mut arg = args.clone();
-        arg.path.push(0);
         b.insts.push(lir::Inst::Address {
             dst: arg,
             src: errors.clone(),
         });
-        Some(Given {
-            errors,
-            args,
-            ty,
-            failed,
-        })
+        Given { errors, ty, failed }
     }
 
     /// Write the errors, with `b` building the code: the warnings, then
@@ -217,6 +225,55 @@ impl Given {
         b.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Release,
             args: vec![self.errors.clone(), descriptor],
+        });
+    }
+}
+
+/// The program's arguments, which the entry gives `main`, if it takes `arguments`,
+/// an `array text`: what the program was started with, but its path.
+struct Arguments {
+    /// Where `main`'s arguments have it: empty until it is read.
+    at: lir::Place,
+    ty: hir::Type,
+}
+
+impl Arguments {
+    /// Where it goes, `at`, which the entry block of `b` makes empty as it starts.
+    fn new(b: &mut FunctionBuilder, at: lir::Place, cx: &mut Lowering) -> Self {
+        let main = b.program.operator(b.program.entry);
+        let ty = main.params["arguments"].ty.clone();
+        let layout = cx.layout(&ty);
+        b.insts.push(lir::Inst::Copy {
+            dst: at.clone(),
+            src: zero_constant(&layout, cx),
+            layout,
+        });
+        Arguments { at, ty }
+    }
+
+    /// Read them, with `b` building the code, which fails if one isn't UTF-8 text:
+    /// in a scope of their own, which gives what holds them its own reference.
+    fn read(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.ty)));
+        b.scoped(|b| {
+            b.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Arguments,
+                args: vec![self.at.clone(), descriptor.clone()],
+            });
+            b.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Retain,
+                args: vec![self.at.clone(), descriptor],
+            });
+            b.scoped = true;
+        });
+    }
+
+    /// Give up the references they hold, with `b` building the code.
+    fn release(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.ty)));
+        b.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Release,
+            args: vec![self.at.clone(), descriptor],
         });
     }
 }

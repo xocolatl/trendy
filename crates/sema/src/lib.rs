@@ -608,17 +608,18 @@ fn entry(
     };
     let mut valid = true;
     if let Some(params) = decl.params() {
-        let given: Vec<_> = params.attributes().collect();
-        let error = match given.as_slice() {
-            [] => None,
-            [param] if param.is_named("errors") => {
-                errors::main_errors(param, &signature.params["errors"], namespaces)
+        for param in params.attributes() {
+            let error = if param.is_named("errors") {
+                errors::main_errors(&param, &signature.params["errors"], namespaces)
+            } else if param.is_named("arguments") {
+                errors::main_arguments(&param, &signature.params["arguments"])
+            } else {
+                Some(errors::main_with_params(&params, &param))
+            };
+            if let Some(error) = error {
+                errors.push(error);
+                valid = false;
             }
-            _ => Some(errors::main_with_params(&params)),
-        };
-        if let Some(error) = error {
-            errors.push(error);
-            valid = false;
         }
     }
     if decl.result().is_some() {
@@ -5551,10 +5552,54 @@ operator main{} [
     }
 
     #[test]
-    fn main_takes_no_parameters_but_its_errors() {
-        let source = "operator main{args: text} [];";
-        assert_eq!(codes(source), [Code::MainSignature]);
-        assert_eq!(fix(source), "operator main{} [];");
+    fn main_takes_its_arguments_and_its_errors() {
+        // Other languages' names for the arguments are fixed to them.
+        for written in [
+            "args: text",
+            "argv: array text",
+            "ARGV: array text",
+            "params: integer",
+        ] {
+            let source = format!("operator main{{{written}}} [];");
+            assert_eq!(codes(&source), [Code::MainSignature], "{written}");
+            assert_eq!(fix(&source), "operator main{arguments: array text} [];");
+        }
+        for (written, fixed) in [
+            ("arguments: text", "arguments: array text"),
+            ("var arguments: array text", "arguments: array text"),
+            ("out arguments: array text", "arguments: array text"),
+            ("depth: integer", ""),
+            (
+                "arguments: array text, depth: integer",
+                "arguments: array text",
+            ),
+        ] {
+            let source = format!("operator main{{{written}}} [];");
+            // An `out` one isn't assigned either, which the same fix mends.
+            assert_eq!(codes(&source)[0], Code::MainSignature, "{written}");
+            let right = format!("operator main{{{fixed}}} [];");
+            assert_eq!(fix(&source), right, "{written}");
+            assert!(analyze_str(&right).is_ok(), "{right}");
+        }
+        // The two, in either order.
+        for written in [
+            "arguments: array text, out errors: relation transaction_collection",
+            "out errors: relation transaction_collection, arguments: array text",
+        ] {
+            let source = format!("operator main{{{written}}} [ errors := relation {{}}; ];");
+            assert!(analyze_str(&source).is_ok(), "{written}");
+        }
+        // Read elsewhere, they say where they are.
+        for name in ["argv", "args", "argc", "ARGV"] {
+            let found = errors(&format!(
+                "operator main{{}} [ call debug_value{{v: {name}}}; ];"
+            ));
+            assert_eq!(found[0].code, Code::UnknownName, "{name}");
+            assert!(
+                found[0].notes[0].contains("`operator main{arguments: array text}"),
+                "{name}"
+            );
+        }
         let given = "operator main{out errors: relation transaction_collection} [ errors := relation {}; ];";
         assert!(analyze_str(given).is_ok());
         // An `out` parameter, of a `relation transaction_collection`,

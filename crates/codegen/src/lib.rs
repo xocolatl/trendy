@@ -123,12 +123,14 @@ fn define_main(
     let shim = module
         .declare_function("trendy_entry", Linkage::Local, &shim_signature)
         .map_err(|e| e.to_string())?;
-    define_returning(module, shim, shim_signature, ctx, fctx, |module, b| {
+    define_returning(module, shim, shim_signature, ctx, fctx, |module, b, _| {
         let entry = module.declare_func_in_func(entry, b.func);
         let call = b.ins().call(entry, &[]);
         b.inst_results(call)[0]
     })?;
     let mut run_signature = module.make_signature();
+    run_signature.params.push(AbiParam::new(pointer));
+    run_signature.params.push(AbiParam::new(types::I32));
     run_signature.params.push(AbiParam::new(pointer));
     run_signature.returns.push(AbiParam::new(types::I32));
     let run = module
@@ -138,37 +140,50 @@ fn define_main(
             &run_signature,
         )
         .map_err(|e| e.to_string())?;
+    // `int main(int argc, char **argv)`.
     let mut main_signature = module.make_signature();
+    main_signature.params.push(AbiParam::new(types::I32));
+    main_signature.params.push(AbiParam::new(pointer));
     main_signature.returns.push(AbiParam::new(types::I32));
     let main = module
         .declare_function("main", Linkage::Export, &main_signature)
         .map_err(|e| e.to_string())?;
-    define_returning(module, main, main_signature, ctx, fctx, |module, b| {
-        let shim = module.declare_func_in_func(shim, b.func);
-        let run = module.declare_func_in_func(run, b.func);
-        let address = b.ins().func_addr(pointer, shim);
-        let call = b.ins().call(run, &[address]);
-        b.inst_results(call)[0]
-    })
+    define_returning(
+        module,
+        main,
+        main_signature,
+        ctx,
+        fctx,
+        |module, b, given| {
+            let shim = module.declare_func_in_func(shim, b.func);
+            let run = module.declare_func_in_func(run, b.func);
+            let address = b.ins().func_addr(pointer, shim);
+            let call = b.ins().call(run, &[address, given[0], given[1]]);
+            b.inst_results(call)[0]
+        },
+    )
 }
 
-/// Define the function `id`, of one block, which returns the value `body` adds.
+/// Define the function `id`, of one block, which returns the value `body` adds,
+/// given the function's parameters.
 fn define_returning(
     module: &mut ObjectModule,
     id: FuncId,
     signature: Signature,
     ctx: &mut Context,
     fctx: &mut FunctionBuilderContext,
-    body: impl FnOnce(&mut ObjectModule, &mut FunctionBuilder) -> Value,
+    body: impl FnOnce(&mut ObjectModule, &mut FunctionBuilder, &[Value]) -> Value,
 ) -> Result<(), String> {
     let config = module.target_config();
     ctx.func.signature = signature;
     {
         let mut b = FunctionBuilder::new(&mut ctx.func, fctx);
         let start = b.create_block();
+        b.append_block_params_for_function_params(start);
         b.switch_to_block(start);
         b.seal_block(start);
-        let value = body(module, &mut b);
+        let given = b.block_params(start).to_vec();
+        let value = body(module, &mut b, &given);
         b.ins().return_(&[value]);
         b.finalize(config);
     }

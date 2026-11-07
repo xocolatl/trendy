@@ -68,6 +68,16 @@ fn called(name: &str, operator: &str, line: usize) -> String {
 /// whose buffer was freed writes garbage, rather than, by luck, what it
 /// should.
 fn build_and_run(input: &Path, output: &Path, dir: &Path) -> (i32, String) {
+    build_and_run_with(input, output, dir, &[])
+}
+
+/// As [`build_and_run`], with the program started with `arguments`.
+fn build_and_run_with(
+    input: &Path,
+    output: &Path,
+    dir: &Path,
+    arguments: &[&std::ffi::OsStr],
+) -> (i32, String) {
     let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
         .arg(input)
         .arg("-o")
@@ -81,6 +91,7 @@ fn build_and_run(input: &Path, output: &Path, dir: &Path) -> (i32, String) {
     );
 
     let run = Command::new(output)
+        .args(arguments)
         .current_dir(dir)
         .env("MallocScribble", "1")
         .env("MallocPreScribble", "1")
@@ -100,6 +111,92 @@ fn build_and_run(input: &Path, output: &Path, dir: &Path) -> (i32, String) {
 #[test]
 fn empty_main() {
     assert_eq!(compile_and_run("empty_main"), 0);
+}
+
+/// The example of the arguments a program is started with, started with none and with
+/// some.
+#[test]
+fn arguments() {
+    let (code, stderr) = run_example("arguments");
+    assert_eq!((code, stderr.as_str()), (0, "\"Karibu, kila mtu!\"\n"));
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let given = ["Amani", "Mei Ling", "Oluwaseun"].map(std::ffi::OsStr::new);
+    let (code, stderr) = build_and_run_with(
+        &workspace_root().join("examples/arguments.trendy"),
+        &dir.join("arguments_given"),
+        &workspace_root(),
+        &given,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "\"Karibu, Amani!\"",
+            "\"Karibu, Mei Ling!\"",
+            "\"Karibu, Oluwaseun!\"",
+        ]
+    );
+}
+
+/// What `main` is given of the arguments: each, as it was written, but the program's path,
+/// with its errors too; and none of it if one isn't UTF-8 text, which stops the program
+/// before `main` runs.
+#[test]
+fn main_is_given_the_arguments() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let run = |name: &str, source: &str, arguments: &[&std::ffi::OsStr]| {
+        let input = dir.join(format!("{name}.trendy"));
+        std::fs::write(&input, source).unwrap();
+        build_and_run_with(&input, &dir.join(name), &workspace_root(), arguments)
+    };
+    let shown = "operator main{arguments: array text} [
+    call debug_value{v: \"started\"};
+    call debug_value{v: arguments};
+];
+";
+    let given = ["", "two words", "Tōkyō", "नमस्ते", "--flag=1"].map(std::ffi::OsStr::new);
+    let (code, stderr) = run("arguments_shown", shown, &given);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr,
+        "\"started\"\narray [\"\", \"two words\", \"Tōkyō\", \"नमस्ते\", \"--flag=1\"]\n"
+    );
+    let (code, stderr) = run("arguments_none", shown, &[]);
+    assert_eq!((code, stderr.as_str()), (0, "\"started\"\narray text []\n"));
+    // Latin-1's é is no UTF-8.
+    let latin1 = std::ffi::OsStr::from_bytes(b"caf\xe9");
+    let bad = [
+        std::ffi::OsStr::new("ok"),
+        latin1,
+        std::ffi::OsStr::new("ok too"),
+    ];
+    let (code, stderr) = run("arguments_bad", shown, &bad);
+    let code_r = trendy_diag::Code::NotUtf8Argument.id();
+    assert_eq!(
+        (code, stderr.as_str()),
+        (
+            1,
+            format!("error[{code_r}]: argument 2 isn't UTF-8 text\n").as_str()
+        )
+    );
+    // With its errors, in either order, which are written as it returns.
+    let both = "operator main{out errors: relation transaction_collection, arguments: array text} [
+    errors := relation { { error: failure{message: \"given \" || to_text{from: length{a: arguments}}}, failed: false } };
+];
+";
+    let (code, stderr) = run("arguments_and_errors", both, &given[..2]);
+    let failure = trendy_diag::Code::Failed.id();
+    assert_eq!(
+        (code, stderr.as_str()),
+        (0, format!("warning[{failure}]: given 2\n").as_str())
+    );
+    let (code, stderr) = run("arguments_and_errors_bad", both, &bad);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with(&format!("error[{code_r}]: argument 2")),
+        "{stderr}"
+    );
 }
 
 #[test]

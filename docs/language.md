@@ -44,7 +44,30 @@ The calls aren't part of the error: an error is what went wrong, a value
 the program can test (see [Failures](#failures)), and the calls are
 where its failure went.
 
-`main` can give errors, its one parameter, `out errors`, of the type a
+`main` can take the arguments the program is started with, but its path, as
+`arguments: array text`, in the order given, each as it was written:
+
+```trendy
+operator main{arguments: array text} [
+    for each in arguments loop [
+        call debug_value{v: each};
+    ];
+];
+```
+
+- **They are a value `main` is given,** read once, before it runs, as they
+  can't change while the program does. What needs them is given them, a
+  read-only operator too, and a transaction's statements read them as they
+  read any value. `length{a: arguments}` is how many there are.
+- **An argument that isn't UTF-8 text stops the program before `main` runs**
+  (R0028), saying which, from 1, as it can't be text, and dropping it or
+  changing its bytes would have the program act on what it wasn't given.
+- **Other languages' names are fixed:** `main{args: …}`, `argv` and Java's
+  `String[] args` to `arguments: array text`, and their names elsewhere say
+  where the arguments are (A0019, A0015).
+
+`main` can give errors, as its parameter `out errors`, beside its arguments or
+alone, of the type a
 transaction collects into, `relation transaction_collection` (see
 [Transactions](#transactions)), which it assigns, as any `out`
 parameter (A0054). When it returns, the program writes them: the
@@ -1608,6 +1631,11 @@ type broken_call_constraint is error { { called: text, constraint: text } };
 /* Calls, each with work left when it returns, have used up the `bytes` of
    the stack (R0025). */
 type too_deep is error { { bytes: integer } };
+
+/* An argument the program was started with, at `position`, from 1, isn't UTF-8
+   text, so `main`'s `arguments` can't have it: the program stops before `main`
+   runs (R0028). */
+type not_utf8_argument is error { { position: integer } };
 
 /* A statement left the variables so that the constraint named
    `constraint` is false: its condition, or the operand of its `and` that
@@ -7287,6 +7315,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `x += 1`, `x++`, `++x` | `x := x + 1;` |
 | `BLOB`, `bytea`, `VARBINARY`, `bytes`, `byte[]` | `array byte` |
 | `u8`, `uint8`, `octet` | `byte` |
+| `sys.argv`, `process.argv`, `os.Args`, `std::env::args()`, `String[] args` | `operator main{arguments: array text}`, without the program's path |
+| `argc`, `len(sys.argv)` | `length{a: arguments}` |
 | `datetime`, `Instant`, `timestamptz` | `timestamp`, of `trendy.time` |
 | `datetimeoffset`, `OffsetDateTime` | `offset_timestamp`, of `trendy.time` |
 | `interval`, `timedelta`, `TimeSpan` | `duration`, of `trendy.time` |

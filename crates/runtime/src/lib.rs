@@ -7131,10 +7131,19 @@ extern "C" fn run_on_stack(entry: *mut core::ffi::c_void) -> *mut core::ffi::c_v
 ///
 /// # Safety
 ///
-/// `entry` must be a function that takes nothing and returns whether it failed.
+/// `entry` must be a function that takes nothing and returns whether it failed,
+/// and `strings` point to `count` C strings, the program's path and then its
+/// arguments, as C's `main` is given them, which last as long as the program.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_run(entry: extern "C" fn() -> u8) -> i32 {
+pub unsafe extern "C" fn trendy_rt_run(
+    entry: extern "C" fn() -> u8,
+    count: i32,
+    strings: *const *const core::ffi::c_char,
+) -> i32 {
+    use core::sync::atomic::Ordering::Relaxed;
+    ARGUMENT_COUNT.store(usize::try_from(count).unwrap_or(0), Relaxed);
+    ARGUMENT_VALUES.store(strings.cast_mut(), Relaxed);
     // SAFETY: each is given what it asks for, of memory that outlives it.
     unsafe {
         let mut attr = core::mem::MaybeUninit::<PthreadAttr>::uninit();
@@ -7158,6 +7167,68 @@ pub unsafe extern "C" fn trendy_rt_run(entry: extern "C" fn() -> u8) -> i32 {
         pthread_join(thread, &raw mut failed);
         i32::from(!failed.is_null())
     }
+}
+
+/// How many C strings C's `main` was given: the program's path, then its arguments.
+#[cfg(not(test))]
+static ARGUMENT_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Where they are.
+#[cfg(not(test))]
+static ARGUMENT_VALUES: core::sync::atomic::AtomicPtr<*const core::ffi::c_char> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Store at `dst` the array of the program's arguments, of the type `desc` describes,
+/// `array text`, without its path, in memory the statement owns. Fails, with a
+/// `not_utf8_argument`, before anything is made, if one isn't UTF-8 text, or if the
+/// memory can't be allocated.
+///
+/// # Safety
+///
+/// `dst` must have room for an array, and the program must have been run by
+/// [`trendy_rt_run`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_arguments(dst: *mut Text, desc: *const TypeDesc) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller: `trendy_rt_run` stored what C's `main` was
+    // given, which lasts as long as the program.
+    status(|| unsafe {
+        let (count, values) = (ARGUMENT_COUNT.load(Relaxed), ARGUMENT_VALUES.load(Relaxed));
+        let argument = |i: usize| core::ffi::CStr::from_ptr(*values.add(i + 1)).to_bytes();
+        let given = count.saturating_sub(1);
+        let texts = Temp::<&str>::new(given.max(1))?;
+        for i in 0..given {
+            let Ok(text) = core::str::from_utf8(argument(i)) else {
+                let position = i64::try_from(i + 1).unwrap_or(i64::MAX);
+                return Err(fail_as(
+                    NOT_UTF8_ARGUMENT,
+                    &[("position", (&raw const position).cast())],
+                ));
+            };
+            texts.ptr().add(i).write(text);
+        }
+        let desc = &*desc;
+        let element = desc.element();
+        let Some(size) = given.checked_mul(element.size) else {
+            return Err(out_of_memory());
+        };
+        let array = allocate_buffer(size, desc)?;
+        for i in 0..given {
+            let value = scope_text(texts.ptr().add(i).read())?;
+            copy_element(
+                array,
+                array.add(i * element.size),
+                (&raw const value).cast(),
+                element,
+            );
+        }
+        dst.write_unaligned(Text {
+            bytes: array,
+            len: given,
+        });
+        Ok(())
+    })
 }
 
 /// Fail with the error of calls that have used up the stack, a `too_deep`
@@ -8445,7 +8516,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 33] = [
+pub const KINDS: [&str; 34] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -8479,6 +8550,7 @@ pub const KINDS: [&str; 33] = [
     "constraint_violated_by",
     "unwritable_file",
     "not_one_line",
+    "not_utf8_argument",
 ];
 
 /// The place in [`KINDS`] of the kind named `name`, found when the runtime
@@ -8518,6 +8590,8 @@ pub const NOT_UTF8: usize = place("not_utf8");
 pub const UNWRITABLE_FILE: usize = place("unwritable_file");
 /// `not_one_line`'s, as [`UNREADABLE_FILE`] is.
 pub const NOT_ONE_LINE: usize = place("not_one_line");
+/// `not_utf8_argument`'s, as [`UNREADABLE_FILE`] is.
+pub const NOT_UTF8_ARGUMENT: usize = place("not_utf8_argument");
 /// `malformed_csv`'s, as [`UNREADABLE_FILE`] is.
 pub const MALFORMED_CSV: usize = place("malformed_csv");
 /// `missing_column`'s, as [`UNREADABLE_FILE`] is.

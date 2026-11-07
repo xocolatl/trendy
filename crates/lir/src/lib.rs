@@ -481,6 +481,11 @@ runtime_functions! {
     /// from the positive x axis to the point (`x`, `y`), as `atan2`
     /// computes it.
     Atan2 => "trendy_rt_atan2", false;
+    /// `trendy_rt_arguments(dst, descriptor)`: store at `dst` the array of the program's
+    /// arguments, of the type the descriptor describes, `array text`, but its path, in
+    /// memory the statement owns. It fails, with a `not_utf8_argument`, if one isn't
+    /// UTF-8 text, or if the memory can't be allocated.
+    Arguments => "trendy_rt_arguments", true;
     /// `trendy_rt_read_clock(seconds, nanos)`: store at `seconds` the seconds since
     /// 1970-01-01 in UTC the system's clock shows, rounded down, and at `nanos` the
     /// nanoseconds past them.
@@ -688,9 +693,9 @@ runtime_functions! {
     /// `trendy_rt_too_deep()`: write the error of calls that have used up
     /// the stack, each with work left when it returns.
     TooDeep => "trendy_rt_too_deep", true;
-    /// `trendy_rt_run(entry)`: run the program, whose entry function is `entry`,
-    /// on the stack it needs, giving the status to exit with, which only `main`
-    /// calls.
+    /// `trendy_rt_run(entry, count, strings)`: run the program, whose entry function is
+    /// `entry`, on the stack it needs, with the arguments C's `main` is given, giving
+    /// the status to exit with, which only `main` calls.
     Run => "trendy_rt_run", false;
     /// `trendy_rt_remove(relation, tuples, descriptor, combination)`: take
     /// the tuples of the relation `tuples` from the relation variable at
@@ -1043,6 +1048,7 @@ impl RuntimeFn {
                 | RuntimeFn::ReadClock
                 | RuntimeFn::ReadTransactionStart
                 | RuntimeFn::RandomBits
+                | RuntimeFn::Arguments
         )
     }
 }
