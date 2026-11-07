@@ -3,6 +3,8 @@
    A unit that has them uses this one, `uses { trendy.uuid };`. */
 interface
 
+uses { trendy.time };
+
 /* A UUID: its 16 bytes, or its text, as RFC 9562 writes it, lowercase, each byte
    two hexadecimal digits, with dashes after the 4th, 6th, 8th and 10th, as
    `"00112233-4455-6677-8899-aabbccddeeff"`. Ordered by its bytes. */
@@ -23,21 +25,28 @@ type uuid_v4 is uuid { constraint (bytes[7] and x'f0') = x'40' and (bytes[9] and
    RFC 9562's variant. Every UUID whose bytes do is one. */
 type uuid_v7 is uuid { constraint (bytes[7] and x'f0') = x'70' and (bytes[9] and x'c0') = x'80' };
 
-/* Give `uuid` a UUID. Nothing generates a random one until trendy has a source
-   of random numbers, so for now it is always the nil UUID, all zeros. */
-operator generate{out uuid: uuid};
-
-/* Give `v4` a version 4 UUID. Nothing generates a random one until trendy has a
-   source of random numbers, so for now only its version and variant bits are
-   set. */
+/* Give `v4` a new version 4 UUID: 122 random bits. A transaction's statements can
+   call it, as they are computed from what was read once, before anything else. Its
+   argument can be a `uuid` variable, as any `out` parameter's can be of a supertype. */
 operator generate{out v4: uuid_v4};
 
-/* Give `v7` a version 7 UUID. Nothing generates one from the time and random
-   numbers until trendy has a source of them, so for now only its version and
-   variant bits are set. */
+/* Give `v7` a new version 7 UUID, which sorts by when it was made: the time by the
+   system's clock, to the millisecond, and 74 random bits. It reads the clock, so a
+   transaction's statements give it the time, as the next says (A0066). */
 operator generate{out v7: uuid_v7};
 
+/* Give `v7` a new version 7 UUID for the instant `at`, on or after 1970-01-01 and
+   before the year 10889, as its 48 bits of milliseconds hold no other. In a
+   transaction, `at` is what `transaction_start` gives. */
+operator generate{
+    at: timestamp,
+    out v7: uuid_v7,
+    constraint at.date.days >= 0 and at.date.days < 3_257_812,
+};
+
 implementation
+
+builtin operator random_bits{out bits: integer};
 
 const hex_digits := to_characters{from: "0123456789abcdef"};
 
@@ -141,14 +150,69 @@ type uuid {
         },
 };
 
-operator generate{out uuid: uuid} [
-    uuid := uuid{bytes: x"00000000_0000_0000_0000_000000000000"};
+/* The byte of `n` that is `shift` bits up. */
+operator byte_of{n: integer, shift: integer}: byte [
+    byte{value: (n shr shift) and 0xff}
 ];
 
+/* Give `v4` a new version 4 UUID. */
 operator generate{out v4: uuid_v4} [
-    v4 := treat uuid{bytes: x"00000000_0000_4000_8000_000000000000"} as uuid_v4;
+    var high: integer;
+    var low: integer;
+    call random_bits{out bits: high};
+    call random_bits{out bits: low};
+    v4 := treat uuid{
+        bytes: array [
+            byte_of{n: high, shift: 56},
+            byte_of{n: high, shift: 48},
+            byte_of{n: high, shift: 40},
+            byte_of{n: high, shift: 32},
+            byte_of{n: high, shift: 24},
+            byte_of{n: high, shift: 16},
+            byte_of{n: high, shift: 8} and x'0f' or x'40',
+            byte_of{n: high, shift: 0},
+            byte_of{n: low, shift: 56} and x'3f' or x'80',
+            byte_of{n: low, shift: 48},
+            byte_of{n: low, shift: 40},
+            byte_of{n: low, shift: 32},
+            byte_of{n: low, shift: 24},
+            byte_of{n: low, shift: 16},
+            byte_of{n: low, shift: 8},
+            byte_of{n: low, shift: 0},
+        ],
+    } as uuid_v4;
+];
+
+operator generate{at: timestamp, out v7: uuid_v7} [
+    var high: integer;
+    var low: integer;
+    call random_bits{out bits: high};
+    call random_bits{out bits: low};
+    var millis := at.date.days * 86_400_000 + at.time.nanos_of_day div 1_000_000;
+    v7 := treat uuid{
+        bytes: array [
+            byte_of{n: millis, shift: 40},
+            byte_of{n: millis, shift: 32},
+            byte_of{n: millis, shift: 24},
+            byte_of{n: millis, shift: 16},
+            byte_of{n: millis, shift: 8},
+            byte_of{n: millis, shift: 0},
+            byte_of{n: high, shift: 8} and x'0f' or x'70',
+            byte_of{n: high, shift: 0},
+            byte_of{n: low, shift: 56} and x'3f' or x'80',
+            byte_of{n: low, shift: 48},
+            byte_of{n: low, shift: 40},
+            byte_of{n: low, shift: 32},
+            byte_of{n: low, shift: 24},
+            byte_of{n: low, shift: 16},
+            byte_of{n: low, shift: 8},
+            byte_of{n: low, shift: 0},
+        ],
+    } as uuid_v7;
 ];
 
 operator generate{out v7: uuid_v7} [
-    v7 := treat uuid{bytes: x"00000000_0000_7000_8000_000000000000"} as uuid_v7;
+    var at: timestamp;
+    call now{out at};
+    call generate{at, out v7};
 ];

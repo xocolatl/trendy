@@ -145,7 +145,22 @@ operator has_day_after_months{d: date, months: integer}: boolean;
    says which other day was meant. */
 operator add_months{d: date, months: integer, constraint has_day_after_months{d, months}}: date;
 
+/* Give `at` the instant it is, by the system's clock, which can be set back, so a
+   later read can give an earlier instant. It reads the world, so a transaction's
+   statements can't call it, at any depth (A0066): they have `transaction_start`. */
+operator now{out at: timestamp};
+
+/* Give `at` the instant the outermost transaction running began: the same however
+   often it is read, in whatever is nested in it, and a new one if it is run again.
+   Every call of it runs in a transaction, so one that can run in none is an error
+   (A0082). It is when the transaction began, not when what it does takes effect. */
+operator transaction_start{out at: timestamp};
+
 implementation
+
+builtin operator read_clock{out seconds: integer, out nanos: integer};
+
+builtin operator read_transaction_start{out seconds: integer, out nanos: integer};
 
 const nanos_per_day := 86_400_000_000_000;
 const nanos_per_second := 1_000_000_000;
@@ -406,4 +421,28 @@ operator has_day_after_months{d: date, months: integer}: boolean [
 operator add_months{d: date, months: integer}: date [
     var then_on := month_after{d, months};
     date{year: then_on.year, month: then_on.month, day: d.day}
+];
+
+/* The instant of `seconds` since 1970-01-01 in UTC, and `nanos` past them. */
+operator instant_of{seconds: integer, nanos: integer}: timestamp [
+    timestamp{
+        date: date{days: floor_div{a: seconds, b: seconds_per_day}},
+        time: time{
+            nanos_of_day: floor_mod{a: seconds, b: seconds_per_day} * nanos_per_second + nanos,
+        },
+    }
+];
+
+operator now{out at: timestamp} [
+    var seconds: integer;
+    var nanos: integer;
+    call read_clock{out seconds, out nanos};
+    at := instant_of{seconds, nanos};
+];
+
+operator transaction_start{out at: timestamp} [
+    var seconds: integer;
+    var nanos: integer;
+    call read_transaction_start{out seconds, out nanos};
+    at := instant_of{seconds, nanos};
 ];

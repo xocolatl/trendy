@@ -132,6 +132,9 @@ pub(crate) struct Deferred {
     /// Each call statement in a transaction, which mustn't read input or
     /// write output, at any depth of the calls it makes.
     in_transactions: Vec<TransactionCall>,
+    /// Each call statement in no transaction of its operator's, as for `calls`:
+    /// what it leads to may run with none.
+    outside_transactions: Vec<(hir::OperatorId, hir::OperatorId, Span)>,
 }
 
 /// A call, its callee's name written at `span`, of the operator `callee`,
@@ -1022,6 +1025,11 @@ impl Statements<'_, '_> {
                 span,
                 transaction,
             });
+        } else {
+            update
+                .deferred
+                .outside_transactions
+                .push((within, signature.id, span));
         }
         update
             .deferred
@@ -1296,6 +1304,7 @@ pub(crate) fn deferred_checks(
     evaluated: &crate::globals::Evaluated,
     operators: &Operators,
     declared: &scope::Variables,
+    main: Option<hir::OperatorId>,
     errors: &mut Vec<Diagnostic>,
 ) {
     for passed in &deferred.passed {
@@ -1327,53 +1336,70 @@ pub(crate) fn deferred_checks(
         }
     }
     for call in &deferred.in_transactions {
-        if let Some((steps, writes)) = io_steps(call.callee, &deferred.calls, operators) {
+        let does_io = |builtin: hir::UpdateBuiltin| builtin.io().is_some();
+        if let Some((steps, builtin)) = steps_to(call.callee, &deferred.calls, operators, &does_io)
+            && let Some(io) = builtin.io()
+        {
             errors.push(errors::io_in_transaction(
                 &operators.get(call.callee).name,
                 call.span,
                 call.transaction,
                 &steps,
-                writes,
+                io,
+            ));
+        }
+    }
+    // What runs in a transaction can read when it began. What `main` calls in none
+    // has none running, however far down it reads it.
+    let outside = &deferred.outside_transactions;
+    let reads_start =
+        |builtin: hir::UpdateBuiltin| builtin == hir::UpdateBuiltin::ReadTransactionStart;
+    for &(_, callee, span) in outside.iter().filter(|(caller, ..)| Some(*caller) == main) {
+        if let Some((steps, _)) = steps_to(callee, outside, operators, &reads_start) {
+            errors.push(errors::outside_any_transaction(
+                &operators.get(callee).name,
+                span,
+                &steps,
             ));
         }
     }
 }
 
-/// The calls that lead from the update operator `callee` to a built-in
-/// that reads input or writes output ([`hir::UpdateBuiltin::does_io`]),
-/// through `calls`, every call statement, by the operator it is in, and
-/// the versions of a specification called: each step's caller's name,
-/// callee's, and where the call is, if it is one, the built-in's last;
-/// none if `callee` is one itself; and whether the built-in writes a file,
-/// rather than reading one. `None` if it leads to none.
-fn io_steps(
+/// The calls that lead from the update operator `callee` to a built-in that
+/// `wanted` says is wanted, through `calls`, call statements, by the operator
+/// each is in, and the versions of a specification called: each step's caller's
+/// name, callee's, and where the call is, if it is one, the built-in's last, but
+/// those that come with the compiler's own, which are nothing a program can
+/// change; none if `callee` is one itself; and the built-in. `None` if it leads
+/// to none.
+fn steps_to(
     callee: hir::OperatorId,
     calls: &[(hir::OperatorId, hir::OperatorId, Span)],
     operators: &Operators,
-) -> Option<(Vec<IoStep>, bool)> {
-    let does_io = |id: hir::OperatorId| matches!(operators.get(id).builtin, Some(hir::Builtin::Update(b)) if b.does_io());
+    wanted: &dyn Fn(hir::UpdateBuiltin) -> bool,
+) -> Option<(Vec<IoStep>, hir::UpdateBuiltin)> {
     // How each operator reached was first reached: from which, and where.
     let mut reached: HashMap<hir::OperatorId, Option<(hir::OperatorId, Option<Span>)>> =
         HashMap::from([(callee, None)]);
     let mut next = std::collections::VecDeque::from([callee]);
     while let Some(id) = next.pop_front() {
-        if does_io(id) {
+        if let Some(hir::Builtin::Update(builtin)) = operators.get(id).builtin
+            && wanted(builtin)
+        {
             let mut steps = Vec::new();
             let mut at = id;
             while let Some(&Some((from, span))) = reached.get(&at) {
-                steps.push(IoStep {
-                    caller: operators.get(from).name.clone(),
-                    callee: operators.get(at).name.clone(),
-                    span,
-                });
+                if operators.get(from).source == crate::Source::Program {
+                    steps.push(IoStep {
+                        caller: operators.get(from).name.clone(),
+                        callee: operators.get(at).name.clone(),
+                        span,
+                    });
+                }
                 at = from;
             }
             steps.reverse();
-            let writes = matches!(
-                operators.get(id).builtin,
-                Some(hir::Builtin::Update(builtin)) if builtin.writes_a_file()
-            );
-            return Some((steps, writes));
+            return Some((steps, builtin));
         }
         let onward = calls
             .iter()

@@ -2334,6 +2334,13 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
         span,
         "not defined",
     );
+    // SQL writes what the clock shows as a value.
+    let lowercase = name.to_lowercase();
+    if (lowercase == "transaction_timestamp" || CLOCK_NAMES.contains(&lowercase.as_str()))
+        && let Some((note, help)) = absent(name)
+    {
+        return d.with_note(note).with_help(help);
+    }
     spelled_like(
         d,
         name,
@@ -2564,6 +2571,16 @@ pub(crate) fn unknown_operator(
 /// prelude has instead, and how to write the value with it.
 const ABSENT: &[(&[&str], &str, &str)] = &[
     (
+        CLOCK_NAMES,
+        "the clock isn't a function of anything, so no read-only operator reads it: `now`, of `trendy.time`, is an update operator, which gives what it reads through an `out` parameter (RM Prescription 3)",
+        "`var at: timestamp; call now{out at};`, whose `.date` is today, and in a transaction, whose statements read nothing, `call transaction_start{out at};`",
+    ),
+    (
+        &["transaction_timestamp"],
+        "what the clock showed as a transaction began is what `transaction_start`, of `trendy.time`, gives, through an `out` parameter",
+        "`var at: timestamp; call transaction_start{out at};`, in a transaction",
+    ),
+    (
         &["months", "years"],
         "`trendy.time` has no `duration` of months or years, as neither has a fixed length: a month after January 31st is no number of seconds",
         "`add_months{d, months: n}` is the same day of another month of a `date`, 12 of them a year on, and `has_day_after_months{d, months: n}` says if there is one",
@@ -2681,6 +2698,24 @@ pub(crate) fn absent(name: &str) -> Option<(&'static str, &'static str)> {
         .find(|(names, ..)| names.contains(&&*lowercase))
         .map(|&(_, note, help)| (note, help))
 }
+
+/// Other languages' names, lowercase, for what the clock shows, which some write as
+/// values.
+const CLOCK_NAMES: &[&str] = &[
+    "clock_timestamp",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "getdate",
+    "getutcdate",
+    "localtime",
+    "localtimestamp",
+    "statement_timestamp",
+    "sysdate",
+    "systimestamp",
+    "unix_timestamp",
+    "utcnow",
+];
 
 /// What the prelude has of mathematics.
 const MATHEMATICAL: &str = "the prelude's mathematical operators are `+`, `-`, `*`, `/`, `div`, `mod`, `sqrt`, `sin`, `cos`, `atan2` and `pi`, and it has no others yet";
@@ -2827,6 +2862,8 @@ const PARAMETERS_ELSEWHERE: &[(&str, &str, &str)] = &[
     ("series", "start", "from"),
     ("series", "stop", "to"),
     ("series", "by", "step"),
+    // Which version is for the caller to say, and the first trendy had.
+    ("generate", "uuid", "v4"),
 ];
 
 /// The parameter of the operator `operator`, of those that come with the
@@ -4983,44 +5020,93 @@ pub(crate) fn io_in_transaction(
     span: Span,
     transaction: Span,
     steps: &[crate::body::IoStep],
-    writes: bool,
+    io: hir::Io,
 ) -> Diagnostic {
-    let (does, doing, help) = if writes {
-        (
-            "writes",
-            "writing",
+    let (does, doing, help) = match io {
+        hir::Io::WritesFile => (
+            "writes a file",
+            "writing a file",
             "keep what to write in a variable the transaction assigns, which its rollback undoes too, and write it after the transaction",
-        )
-    } else {
-        (
-            "reads",
-            "reading",
+        ),
+        hir::Io::ReadsFile => (
+            "reads a file",
+            "reading a file",
             "read the file before the transaction, and pass what it gives to the statements in it",
-        )
+        ),
+        hir::Io::ReadsClock => (
+            "reads the clock",
+            "reading the clock",
+            "`call transaction_start{out at};` gives the instant the transaction began, the same all through it; or read the clock before the transaction, and pass what it gives to the statements in it",
+        ),
     };
     let (message, label) = match steps.last() {
         None => (
-            format!("`{callee}` {does} a file, in a transaction"),
-            format!("{does} a file"),
+            format!("`{callee}` {does}, in a transaction"),
+            does.to_string(),
         ),
         Some(last) => (
             format!(
-                "`{callee}` {does} a file, in a transaction, as `{}` calls `{}`",
+                "`{callee}` {does}, in a transaction, as `{}` calls `{}`",
                 last.caller, last.callee
             ),
-            format!("leads to {doing} a file"),
+            format!("leads to {doing}"),
         ),
     };
     let d = Diagnostic::error(Code::IoInTransaction, message, span, label)
         .with_secondary(transaction, "in this transaction");
-    steps
-        .iter()
-        .fold(d, |d, step| match step.span {
-            Some(at) => d.with_secondary(at, format!("`{}` calls `{}` here", step.caller, step.callee)),
-            None => d.with_note(format!("`{}` runs its version `{}`", step.caller, step.callee)),
-        })
+    with_steps(d, steps)
         .with_note("a transaction's statements read no input and write no output, at any depth of the calls they make: a transaction is undone, and can be run again, but nothing undoes a read or a write; `debug_value` and `debug_table` write for the programmer, so they are exempt")
         .with_help(help)
+}
+
+/// `d`, with where each of `steps` is, or that it happens, if it is no call.
+fn with_steps(d: Diagnostic, steps: &[crate::body::IoStep]) -> Diagnostic {
+    steps.iter().fold(d, |d, step| match step.span {
+        Some(at) => d.with_secondary(
+            at,
+            format!("`{}` calls `{}` here", step.caller, step.callee),
+        ),
+        None => d.with_note(format!(
+            "`{}` runs its version `{}`",
+            step.caller, step.callee
+        )),
+    })
+}
+
+/// The call of `callee`, whose name is at `span`, in `main`, in no transaction,
+/// which reads when one began through `steps`, the calls that lead from it to
+/// what does, or itself, without any.
+pub(crate) fn outside_any_transaction(
+    callee: &str,
+    span: Span,
+    steps: &[crate::body::IoStep],
+) -> Diagnostic {
+    let message = match steps.last() {
+        None => format!("`{callee}` reads when a transaction began, and this call is in none"),
+        Some(last) => format!(
+            "`{callee}` reads when a transaction began, as `{}` calls `{}`, and this call is in none",
+            last.caller, last.callee
+        ),
+    };
+    let d = Diagnostic::error(
+        Code::OutsideAnyTransaction,
+        message,
+        span,
+        "no transaction is running here",
+    )
+    .with_note("a transaction's start is what the outermost transaction running has, so every call that reads it is in one, at some depth of the calls that lead to it");
+    let d = with_steps(d, steps);
+    if steps.is_empty() {
+        d.with_suggestion(
+            "read the clock instead",
+            vec![Edit {
+                span,
+                replacement: "now".to_string(),
+            }],
+        )
+    } else {
+        d.with_help("call it in a `transaction [ … ];`, or read the clock with `now` here, and pass what it gives down")
+    }
 }
 
 /// `index`, `a[i]`, whose operand `a`, written `operand`, has type `ty`,

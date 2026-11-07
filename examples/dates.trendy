@@ -116,6 +116,20 @@ operator main{} [
     };
     call debug_value{v: elapsed{from: equinox, to: next}.seconds div 3_600};
 
+    /* What the clock shows, which a transaction's statements can't read, as what they
+       read can't be undone. They have when it began: one instant, all through it. */
+    var checked: timestamp;
+    call now{out at: checked};
+    call debug_value{v: checked.date.year >= 2024};
+    var departure: timestamp;
+    var arrival: timestamp;
+    transaction [
+        call transaction_start{out at: departure};
+        call transaction_start{out at: arrival};
+    ];
+    call debug_value{v: departure = arrival};
+    call debug_value{v: checked <= departure};
+
     /* The same day of another month, if it has that day: rent paid on the 31st falls
        due in March, and February hasn't one. */
     var rent_paid := date{year: 2024, month: 1, day: 31};

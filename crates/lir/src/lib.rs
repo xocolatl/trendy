@@ -384,66 +384,119 @@ pub enum Base {
     },
 }
 
-/// A function in the runtime library. One that can fail
-/// ([`RuntimeFn::fails`]) returns whether it did, a boolean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeFn {
+/// Declare [`RuntimeFn`], from each function's documentation, its name, the symbol the runtime
+/// library exports, and whether it can fail, so that what is known of each is in one place.
+macro_rules! runtime_functions {
+    ($($(#[$doc:meta])* $name:ident => $symbol:literal, $fails:literal;)*) => {
+        /// A function in the runtime library. One that can fail
+        /// ([`RuntimeFn::fails`]) returns whether it did, a boolean.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum RuntimeFn {
+            $($(#[$doc])* $name,)*
+        }
+
+        impl RuntimeFn {
+            /// Every runtime function, for checking the runtime against them.
+            pub const ALL: &'static [RuntimeFn] = &[$(RuntimeFn::$name),*];
+
+        /// Whether it can fail: for memory it can't allocate, as any that
+        /// makes a text, relation or array, or holds a reference in a
+        /// statement's scope, can, or for a value it can't make, as a sum
+        /// beyond its type's range, a text that writes no number, or a file it
+        /// can't read is. It returns whether it failed, a boolean, which
+        /// compiled code checks as it does a call's. The runtime functions a
+        /// failure calls only write its error, and don't fail themselves.
+            #[must_use]
+            pub fn fails(self) -> bool {
+                match self {
+                    $(RuntimeFn::$name => $fails,)*
+                }
+            }
+
+            /// The symbol the runtime library exports.
+            #[must_use]
+            pub fn symbol(self) -> &'static str {
+                match self {
+                    $(RuntimeFn::$name => $symbol,)*
+                }
+            }
+        }
+    };
+}
+
+runtime_functions! {
     /// `trendy_rt_debug_value(value, descriptor)`.
-    DebugValue,
+    DebugValue => "trendy_rt_debug_value", false;
     /// `trendy_rt_debug_table(value, descriptor)`, of a relation. It fails
     /// if the memory for its columns' widths can't be allocated.
-    DebugTable,
+    DebugTable => "trendy_rt_debug_table", true;
     /// `trendy_rt_to_text(dst, value, descriptor)`: store at `dst` the
     /// text [`RuntimeFn::DebugValue`] writes for the value, of the type the
     /// descriptor describes, in memory the statement owns (see
     /// [`RuntimeFn::Begin`]). It fails if the memory can't be allocated.
-    ToText,
+    ToText => "trendy_rt_to_text", true;
     /// `trendy_rt_parse_integer(dst, text)`: store at `dst` the integer the
     /// text writes, as `parse_integer` reads one. It fails if the text
     /// writes none.
-    ParseInteger,
+    ParseInteger => "trendy_rt_parse_integer", true;
     /// `trendy_rt_parse_approximate(dst, text)`: store at `dst` the
     /// approximate number nearest the decimal number the text writes, as
     /// `parse_approximate` reads one. It fails if the text writes none.
-    ParseApproximate,
+    ParseApproximate => "trendy_rt_parse_approximate", true;
     /// `trendy_rt_parse_boolean(dst, text)`: store at `dst` the boolean the
     /// text writes, as `parse_boolean` reads one. It fails if the text
     /// writes none.
-    ParseBoolean,
+    ParseBoolean => "trendy_rt_parse_boolean", true;
     /// `trendy_rt_to_code_points(dst, text, descriptor)`: store at `dst`
     /// the array of the code points of the text, in order, of the type the
     /// descriptor describes, whose elements are a code point's stored
     /// components, `{ value: integer }`, in memory the statement owns. It
     /// fails if the memory can't be allocated.
-    ToCodePoints,
+    ToCodePoints => "trendy_rt_to_code_points", true;
     /// `trendy_rt_from_code_points(dst, array, descriptor)`: store at `dst`
     /// the text of the code points of the array, in order, of the type the
     /// descriptor describes, whose elements are a code point's stored
     /// components, in memory the statement owns. It fails if the memory
     /// can't be allocated.
-    FromCodePoints,
+    FromCodePoints => "trendy_rt_from_code_points", true;
     /// `trendy_rt_to_characters(dst, text, descriptor)`: store at `dst` the array of
     /// the characters of the text, in order, of the type the descriptor describes, in
     /// memory the statement owns. It fails if the memory can't be allocated.
-    ToCharacters,
+    ToCharacters => "trendy_rt_to_characters", true;
     /// `trendy_rt_from_characters(dst, array)`: store at `dst` the text of the
     /// characters of the array, in order, in memory the statement owns. It fails if
     /// the memory can't be allocated.
-    FromCharacters,
+    FromCharacters => "trendy_rt_from_characters", true;
     /// `trendy_rt_sqrt(dst, x)`: store at `dst` the square root of the
     /// approximate number `x`, as `sqrt` computes it. It fails if `x` is
     /// negative, which has none.
-    Sqrt,
+    Sqrt => "trendy_rt_sqrt", true;
     /// `trendy_rt_sin(dst, x)`: store at `dst` the sine of the angle `x`,
     /// in radians, as `sin` computes it.
-    Sin,
+    Sin => "trendy_rt_sin", false;
     /// `trendy_rt_cos(dst, x)`: store at `dst` the cosine of the angle
     /// `x`, in radians, as `cos` computes it.
-    Cos,
+    Cos => "trendy_rt_cos", false;
     /// `trendy_rt_atan2(dst, y, x)`: store at `dst` the angle, in radians,
     /// from the positive x axis to the point (`x`, `y`), as `atan2`
     /// computes it.
-    Atan2,
+    Atan2 => "trendy_rt_atan2", false;
+    /// `trendy_rt_read_clock(seconds, nanos)`: store at `seconds` the seconds since
+    /// 1970-01-01 in UTC the system's clock shows, rounded down, and at `nanos` the
+    /// nanoseconds past them.
+    ReadClock => "trendy_rt_read_clock", false;
+    /// `trendy_rt_read_transaction_start(seconds, nanos)`: store what the clock showed
+    /// as the outermost transaction running began, as [`RuntimeFn::ReadClock`] does.
+    ReadTransactionStart => "trendy_rt_read_transaction_start", false;
+    /// `trendy_rt_transaction_begins()`: a transaction that can read when it began
+    /// ([`RuntimeFn::ReadTransactionStart`]) begins. The outermost reads the clock.
+    TransactionBegins => "trendy_rt_transaction_begins", false;
+    /// `trendy_rt_transaction_ends()`: one that called
+    /// [`RuntimeFn::TransactionBegins`] ends, however it does.
+    TransactionEnds => "trendy_rt_transaction_ends", false;
+    /// `trendy_rt_random_bits(bits)`: store at `bits` the next 64 random bits, as an
+    /// integer.
+    RandomBits => "trendy_rt_random_bits", false;
     /// `trendy_rt_join(dst, relations, operands, count, result, joined, orders)`: if the
     /// largest of the `count` relations whose addresses are at `relations` is large enough
     /// for it to matter, store at `dst` their join, of the type `result` describes, in an
@@ -451,13 +504,13 @@ pub enum RuntimeFn {
     /// `joined`, and otherwise store 0 there, and do nothing else. `operands` says of each
     /// what the runtime's `JoinOperand` does; `orders` has [`LOOSE_RESULT`] if the result
     /// can be left as it comes. It fails if the memory can't be allocated.
-    Join,
+    Join => "trendy_rt_join", true;
     /// `trendy_rt_load_text_file(dst, path, descriptor)`: store at `dst` the
     /// array of the lines of the text file at `path`, a text, in order, of
     /// the type the descriptor describes, `array text`, in memory the
     /// statement owns. It fails if the file can't be read, or isn't UTF-8
     /// text, or if the memory can't be allocated.
-    LoadTextFile,
+    LoadTextFile => "trendy_rt_load_text_file", true;
     /// `trendy_rt_load_text_file_with_errors(dst, path, errors,
     /// descriptor)`: as [`RuntimeFn::LoadTextFile`], but a file that can't
     /// be read, or isn't UTF-8 text, gives no lines, and its error at
@@ -466,17 +519,17 @@ pub enum RuntimeFn {
     /// which it stores the errors in, none if the file is read, and its
     /// descriptor's address; their types are in the table of errors
     /// ([`RuntimeFn::Failures`]).
-    LoadTextFileWithErrors,
+    LoadTextFileWithErrors => "trendy_rt_load_text_file_with_errors", true;
     /// `trendy_rt_save_text_file(path, lines)`: write the array of texts
     /// `lines` to the text file at `path`, a text, each ending in a line feed.
     /// It fails if the file can't be written, or if a line wouldn't read back
     /// as one, before anything is written, or if the memory can't be allocated.
-    SaveTextFile,
+    SaveTextFile => "trendy_rt_save_text_file", true;
     /// `trendy_rt_save_text_file_with_errors(path, lines, errors)`: as
     /// [`RuntimeFn::SaveTextFile`], but a file that can't be written gives its
     /// error at `errors`, an `unwritable_file`, rather than failing: `errors`
     /// as for [`RuntimeFn::LoadTextFileWithErrors`].
-    SaveTextFileWithErrors,
+    SaveTextFileWithErrors => "trendy_rt_save_text_file_with_errors", true;
     /// `trendy_rt_load_csv(dst, path, header, columns, lines, descriptor)`:
     /// store at `dst` the array of the records of the CSV file at `path`, a
     /// text, in order, after its first if `header`, a boolean, is true, of
@@ -489,7 +542,7 @@ pub enum RuntimeFn {
     /// one, the file can't be read, isn't UTF-8 text or
     /// CSV, a field isn't a value of its attribute's type, or the memory
     /// can't be allocated.
-    LoadCsv,
+    LoadCsv => "trendy_rt_load_csv", true;
     /// `trendy_rt_load_csv_with_errors(dst, path, header, columns, lines,
     /// errors, descriptor)`: as [`RuntimeFn::LoadCsv`], with `errors` as
     /// [`RuntimeFn::LoadTextFileWithErrors`]'s, but rather than failing for
@@ -499,7 +552,7 @@ pub enum RuntimeFn {
     /// `unreadable_file`, a `not_utf8`, a `malformed_csv`, a
     /// `missing_column` or an `unreadable_field`. Two attributes of one
     /// column, or one of a column below 1, still fail it.
-    LoadCsvWithErrors,
+    LoadCsvWithErrors => "trendy_rt_load_csv_with_errors", true;
     /// `trendy_rt_broken_constraint_error(errors, value, descriptor, ty,
     /// constraint, record)`: add to the errors at `errors`, as
     /// [`RuntimeFn::LoadCsvWithErrors`] gives them, that `value`, whose
@@ -507,190 +560,190 @@ pub enum RuntimeFn {
     /// describes, laid out as [`Layout::record`], breaks the constraint of
     /// the type named `ty` written `constraint`, both texts: a
     /// `broken_constraint_in_file`.
-    BrokenConstraintError,
+    BrokenConstraintError => "trendy_rt_broken_constraint_error", true;
     /// `trendy_rt_component_key_error(errors, value, descriptor, key,
     /// pair, of, record)`: as [`RuntimeFn::BrokenConstraintError`] adds its
     /// error, that the tuples at `pair` of the relation `value`, the
     /// component of a value of a type `of` names, a struct of the type's
     /// name and the component's, texts, share their values for `key`, as
     /// [`RuntimeFn::KeyShared`] found: a `component_key_violated_in_file`.
-    ComponentKeyError,
+    ComponentKeyError => "trendy_rt_component_key_error", true;
     /// `trendy_rt_overlapping_subtypes_error(errors, value, descriptor,
     /// first, second, record)`: as [`RuntimeFn::BrokenConstraintError`]
     /// adds its error, that `value` is of both of the subtypes of its type
     /// named `first` and `second`, texts: an
     /// `overlapping_subtypes_in_file`.
-    OverlappingSubtypesError,
+    OverlappingSubtypesError => "trendy_rt_overlapping_subtypes_error", true;
     /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
     /// sum of the attribute `index` (a [`Field::Usize`], its position by
     /// name) of the tuples of the relation `src`, of the type the
     /// descriptor describes, whose type is integer or approximate: the
     /// exact sum, rounded once. It fails if the sum is beyond its type's
     /// range.
-    Sum,
+    Sum => "trendy_rt_sum", true;
     /// `trendy_rt_product(dst, src, descriptor, index)`: as
     /// [`RuntimeFn::Sum`], of the product.
-    Product,
+    Product => "trendy_rt_product", true;
     /// `trendy_rt_integer_failed(op, lhs, rhs)`: write the error of
     /// `lhs op rhs`, of integers, which has no result, with the operation:
     /// a division by zero, or an overflow. `op` is an [`Arithmetic::code`];
     /// a negation's `lhs` is 0. It takes them by value, not by place, so
     /// only codegen calls it.
-    IntegerFailed,
+    IntegerFailed => "trendy_rt_integer_failed", false;
     /// `trendy_rt_approximate_failed(op, lhs, rhs)`: as
     /// [`RuntimeFn::IntegerFailed`], of approximate numbers.
-    ApproximateFailed,
+    ApproximateFailed => "trendy_rt_approximate_failed", false;
     /// `trendy_rt_tuple_mismatch(attribute, lhs, rhs, descriptor)`: write
     /// the error of tuples being joined that disagree on the common
     /// attribute named `attribute`, a text, which is `lhs` in one and `rhs`
     /// in the other, of the type the descriptor describes, with them.
-    TupleMismatch,
+    TupleMismatch => "trendy_rt_tuple_mismatch", false;
     /// `trendy_rt_not_one_tuple(count)`: write the error of a relation
     /// that has `count` (a [`Layout::Usize`]) tuples, not one, where its
     /// only one is taken, with the count.
-    NotOneTuple,
+    NotOneTuple => "trendy_rt_not_one_tuple", false;
     /// `trendy_rt_no_min()`: write the error of a relation that has no
     /// tuples, where the least value of an attribute is taken.
-    NoMin,
+    NoMin => "trendy_rt_no_min", false;
     /// `trendy_rt_no_max()`: as [`RuntimeFn::NoMin`], of the greatest.
-    NoMax,
+    NoMax => "trendy_rt_no_max", false;
     /// `trendy_rt_index_out_of_range(position, length)`: write the error
     /// of an array of `length` elements that has none at `position`, both
     /// [`Layout::I64`], with them.
-    IndexOutOfRange,
+    IndexOutOfRange => "trendy_rt_index_out_of_range", false;
     /// `trendy_rt_element_conflict(positions, count, nested)`: write the
     /// error of two changes to an array in an `assign` block that set the
     /// element at `positions`, a struct of `count` (a [`Layout::Usize`])
     /// [`Layout::I64`]s, from the outermost array in, or, if `nested` (a
     /// [`Layout::U8`]) is 1, of one that sets it and another an element in
     /// it, with the positions.
-    ElementConflict,
+    ElementConflict => "trendy_rt_element_conflict", false;
     /// `trendy_rt_broken_constraint(value, descriptor, ty, constraint)`:
     /// write the error of `value`, components the descriptor describes,
     /// selected of the type named `ty`, a text, which break its constraint
     /// written `constraint`, a text, with them.
-    BrokenConstraint,
+    BrokenConstraint => "trendy_rt_broken_constraint", false;
     /// `trendy_rt_not_of_type(value, descriptor, ty)`: write the error of
     /// `value`, of the type in a hierarchy the descriptor describes, which
     /// isn't a value of the type named `ty`, a text, that it was treated
     /// as, with them.
-    NotOfType,
+    NotOfType => "trendy_rt_not_of_type", false;
     /// `trendy_rt_constraint_violated(constraint, condition)`: write the
     /// error of a statement that left the variables so that the constraint
     /// named `constraint`, a text, is false: its part written `condition`,
     /// a text.
-    ConstraintViolated,
+    ConstraintViolated => "trendy_rt_constraint_violated", false;
     /// `trendy_rt_constraint_violated_by(constraint, condition, tuples)`:
     /// as [`RuntimeFn::ConstraintViolated`], with the relation of the
     /// tuples that make it false, written as `debug_value` writes it,
     /// `tuples`, a text.
-    ConstraintViolatedBy,
+    ConstraintViolatedBy => "trendy_rt_constraint_violated_by", false;
     /// `trendy_rt_failed(message, error)`: write the error `error`, a
     /// value of the prelude's type `error`, that nothing took, whose
     /// message is `message`, a text, with its kind's code.
-    Failed,
+    Failed => "trendy_rt_failed", false;
     /// `trendy_rt_warned(message)`: write the warning of a `warn` outside
     /// any transaction, whose message is `message`, a text, and carry on.
-    Warned,
+    Warned => "trendy_rt_warned", false;
     /// `trendy_rt_report(message, error, failed)`: write an error `main`
     /// gives, a value of the prelude's type `error`, whose message is
     /// `message`, a text, as a failure, if `failed`, a boolean, or else as
     /// a warning, with its kind's code, and no site.
-    Report,
+    Report => "trendy_rt_report", false;
     /// `trendy_rt_broken_constraint_in_file(value, descriptor, ty,
     /// constraint, record)`: as [`RuntimeFn::BrokenConstraint`], of a
     /// value `load_csv` read from the record `record` describes, laid out
     /// as [`Layout::record`], with where too.
-    BrokenConstraintInFile,
+    BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file", false;
     /// `trendy_rt_overlapping_subtypes(value, descriptor, first, second)`:
     /// write the error of `value`, of the type of the program's own the
     /// descriptor describes, which is of both of its subtypes defined by
     /// constraints named `first` and `second`, texts, with them.
-    OverlappingSubtypes,
+    OverlappingSubtypes => "trendy_rt_overlapping_subtypes", false;
     /// `trendy_rt_broken_call_constraint(value, descriptor, operator,
     /// constraint)`: write the error of a call of the operator named
     /// `operator`, a text, with the arguments at `value`, a tuple the
     /// descriptor describes, which break the constraint written
     /// `constraint`, a text, with them.
-    BrokenCallConstraint,
+    BrokenCallConstraint => "trendy_rt_broken_call_constraint", false;
     /// `trendy_rt_insert(relation, tuples, descriptor, combination)`: add
     /// the tuples of the relation `tuples` to the relation variable at
     /// `relation`, both of the type the descriptor describes, in its own
     /// buffer if nothing else holds it, as `combination`, a
     /// [`Combination::code`] of a union or a disjoint union, says.
-    Insert,
+    Insert => "trendy_rt_insert", true;
     /// `trendy_rt_tclose_of(dst, relation, value, descriptor, attribute)`: the
     /// tuples of the relation's transitive closure whose attribute, 0 or 1 by
     /// name order, is `value`, searching only by paths from or to it.
-    TcloseOf,
+    TcloseOf => "trendy_rt_tclose_of", true;
     /// `trendy_rt_tclose_of_each(dst, relation, values, descriptor,
     /// values_descriptor, common)`: the tuples of the relation's transitive closure
     /// whose attribute `common` says, of those it describes in each, is a value in
     /// the relation `values`, searching only by paths from or to those.
-    TcloseOfEach,
+    TcloseOfEach => "trendy_rt_tclose_of_each", true;
     /// `trendy_rt_drop_operand(value, descriptor)`: give up the current scope's
     /// reference to what the operand at `value` points to, if it is the only
     /// one, as the operation that read it has its result.
-    DropOperand,
+    DropOperand => "trendy_rt_drop_operand", false;
     /// `trendy_rt_too_deep()`: write the error of calls that have used up
     /// the stack, each with work left when it returns.
-    TooDeep,
+    TooDeep => "trendy_rt_too_deep", true;
     /// `trendy_rt_run(entry)`: run the program, whose entry function is `entry`,
     /// on the stack it needs, giving the status to exit with, which only `main`
     /// calls.
-    Run,
+    Run => "trendy_rt_run", false;
     /// `trendy_rt_remove(relation, tuples, descriptor, combination)`: take
     /// the tuples of the relation `tuples` from the relation variable at
     /// `relation`, both of the type the descriptor describes, in its own
     /// buffer if nothing else holds it, as `combination`, a
     /// [`Combination::code`] of a minus or an included minus, says.
-    Remove,
+    Remove => "trendy_rt_remove", true;
     /// `trendy_rt_remove_run(relation, run, descriptor)`: take from the
     /// relation variable at `relation`, of the type the descriptor describes,
     /// the tuples of `run`, a run of its own, as [`RuntimeFn::EqualRun`]
     /// makes one, in its own buffer if nothing else holds it.
-    RemoveRun,
+    RemoveRun => "trendy_rt_remove_run", true;
     /// `trendy_rt_remove_marked(relation, run, marks, descriptor)`: as
     /// [`RuntimeFn::RemoveRun`], of those of the run with a non-zero byte at
     /// their position in `marks`, an array of bytes as long as it.
-    RemoveMarked,
+    RemoveMarked => "trendy_rt_remove_marked", true;
     /// `trendy_rt_key_added(shared, pair, src, descriptor, key, added)`: as
     /// [`RuntimeFn::KeyShared`], of a relation that was without two such
     /// tuples before the tuples of the relation `added` were added to it.
-    KeyAdded,
+    KeyAdded => "trendy_rt_key_added", true;
     /// `trendy_rt_key_shared(shared, pair, src, descriptor, key)`: store at
     /// `shared`, a [`Layout::U8`], 1 if the relation `src`, of the type the
     /// descriptor describes, has two tuples with the same values for the
     /// attributes of `key`, the descriptor of its projection on one of its
     /// keys, and their positions at `pair`, two [`Layout::Usize`]s; else 0.
-    KeyShared,
+    KeyShared => "trendy_rt_key_shared", true;
     /// `trendy_rt_key_violated(src, descriptor, key, pair, variable)`:
     /// write the error of the tuples at `pair` of the relation `src`, about
     /// to be assigned to the variable named `variable`, a text, which share
     /// their values for `key`, as [`RuntimeFn::KeyShared`] found, with the
     /// variable, the key and the tuples.
-    KeyViolated,
+    KeyViolated => "trendy_rt_key_violated", false;
     /// `trendy_rt_component_key_violated(src, descriptor, key, pair, ty,
     /// component)`: as [`RuntimeFn::KeyViolated`],
     /// of the relation that is the component named `component`, a text, of
     /// a value selected of the type named `ty`, a text.
-    ComponentKeyViolated,
+    ComponentKeyViolated => "trendy_rt_component_key_violated", false;
     /// `trendy_rt_component_key_violated_in_file(src, descriptor, key,
     /// pair, ty, component, record)`: as
     /// [`RuntimeFn::ComponentKeyViolated`], of a value `load_csv` read
     /// from the record `record` describes, laid out as
     /// [`Layout::record`], with where too.
-    ComponentKeyViolatedInFile,
+    ComponentKeyViolatedInFile => "trendy_rt_component_key_violated_in_file", false;
     /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
     /// texts at `dst`, in memory the statement owns (see
     /// [`RuntimeFn::Begin`]). It fails if the memory can't be allocated.
-    Concat,
+    Concat => "trendy_rt_concat", true;
     /// `trendy_rt_release(value, descriptor)`: give up the references
     /// that a local variable's value, of the type the descriptor
     /// describes, holds, at the end of its block, and make all of it zero, as
     /// its pointers are before its declaration: so nothing is to read it, or part
     /// of it, from then on ([`Function::read_after_release`]).
-    Release,
+    Release => "trendy_rt_release", false;
     /// `trendy_rt_begin(scope)`: begin a statement's scope, in a slot laid
     /// out as [`Layout::scope`]. Until [`RuntimeFn::End`], it holds a
     /// reference to each buffer that runtime functions make, so a value
@@ -698,69 +751,69 @@ pub enum RuntimeFn {
     /// longer. A statement needs a scope if it makes a text, relation or
     /// array, assigns a value that points to one, or passes one to an
     /// update operator.
-    Begin,
+    Begin => "trendy_rt_begin", false;
     /// `trendy_rt_end(scope)`: end the scope at `scope`, the innermost,
     /// giving up its references.
-    End,
+    End => "trendy_rt_end", false;
     /// `trendy_rt_innermost(dst)`: store at `dst`, a [`Layout::Address`],
     /// the address of the innermost scope, or null if there is none: as a
     /// function that begins scopes starts, for its failure exit to end
     /// those it began ([`RuntimeFn::EndSince`]).
-    Innermost,
+    Innermost => "trendy_rt_innermost", false;
     /// `trendy_rt_end_since(saved)`: end, innermost first, as
     /// [`RuntimeFn::End`] does, every scope begun since the one whose
     /// address `saved` holds, which [`RuntimeFn::Innermost`] stored, was
     /// the innermost: those a function that fails began.
-    EndSince,
+    EndSince => "trendy_rt_end_since", false;
     /// `trendy_rt_trace(site, function)`: record that the failure under
     /// way passes through a call of the function named `function`, a text,
     /// made at the site whose address `site` holds, which the function
     /// saved as it started: a function's failure exit does. A null site,
     /// the entry's, records nothing.
-    Trace,
+    Trace => "trendy_rt_trace", false;
     /// `trendy_rt_traced(dst)`: store at `dst`, a [`Layout::Usize`], how
     /// many calls the trace has recorded.
-    Traced,
+    Traced => "trendy_rt_traced", false;
     /// `trendy_rt_trace_since(since)`: forget the first `since` (a
     /// [`Layout::Usize`]) calls the trace recorded, which
     /// [`RuntimeFn::Traced`] counted: those of a failure another replaces.
-    TraceSince,
+    TraceSince => "trendy_rt_trace_since", false;
     /// `trendy_rt_untrace(since)`: forget the calls the trace recorded
     /// after the first `since` (a [`Layout::Usize`]), which
     /// [`RuntimeFn::Traced`] counted: those of a failure a transaction
     /// takes.
-    Untrace,
+    Untrace => "trendy_rt_untrace", false;
     /// `trendy_rt_write_trace()`: write the calls the trace recorded, as
     /// notes after the failure's error, and forget them.
-    WriteTrace,
+    WriteTrace => "trendy_rt_write_trace", false;
     /// `trendy_rt_failures(failures)`: give the runtime, once, as the
     /// program starts, the table at `failures` of the errors the language
     /// makes, as its `Failures` lays it out: where a failure's error
     /// waits, and each kind's type and code.
-    Failures,
+    Failures => "trendy_rt_failures", false;
     /// `trendy_rt_keep(value, descriptor)`: have the statement's scope hold
     /// a reference to each buffer a value, of the type the descriptor
     /// describes, points to: an update operator's argument, which a
     /// variable the operator assigns may hold the only other reference to.
-    Keep,
+    Keep => "trendy_rt_keep", true;
     /// `trendy_rt_hand_out(value, descriptor)`: have the scope the
     /// innermost one is in hold a reference to each buffer a value, of the
     /// type the descriptor describes, points to: what the work of a
     /// tuple, or of a read-only operator's call, made in a scope of its own
     /// that outlives it, its result, so that the scope's end frees the
     /// rest.
-    HandOut,
+    HandOut => "trendy_rt_hand_out", true;
     /// `trendy_rt_retain(value, descriptor)`: take a reference to each
     /// buffer that a value, of the type the descriptor describes, points
     /// to, for a copy of it that is to hold them: a `fail`'s error, which
     /// waits for what takes it.
-    Retain,
+    Retain => "trendy_rt_retain", false;
     /// `trendy_rt_adopt(value, descriptor)`: have the buffer of a relation
     /// or array, of the type the descriptor describes, that
     /// [`RuntimeFn::Allocate`] made and compiled code filled, take a
     /// reference to what each of its tuples or elements points to, which
     /// it then holds.
-    Adopt,
+    Adopt => "trendy_rt_adopt", false;
     /// `trendy_rt_reshape(dst, src, result, source, offsets, orders)`: store at
     /// `dst` the relation `src` with its tuples reshaped into the
     /// attributes the descriptor `result` describes, sorted canonically and
@@ -768,13 +821,13 @@ pub enum RuntimeFn {
     /// `offsets` an array of [`Field::Offset`]s: for each attribute of
     /// `result`, the offset in a tuple of `src` of the attribute it comes
     /// from. Removing and renaming attributes are both reshaping.
-    Reshape,
+    Reshape => "trendy_rt_reshape", true;
     /// `trendy_rt_relation(dst, tuples, count, descriptor)`: store at `dst`
     /// the relation, of the type the descriptor describes, whose tuples are
     /// the `count` (a [`Field::Usize`]) at `tuples`, one after another,
     /// sorted canonically and without duplicates, in memory the statement
     /// owns.
-    Relation,
+    Relation => "trendy_rt_relation", true;
     /// `trendy_rt_and(dst, lhs, rhs, result, lhs_desc, rhs_desc, sources,
     /// common, common_count, orders)`: store at `dst` the relation, of the type the
     /// descriptor `result` describes, of every tuple made of a tuple of
@@ -786,7 +839,7 @@ pub enum RuntimeFn {
     /// array of `common_count` (a [`Field::Usize`]) structs, one per common
     /// attribute: its offset in a tuple of `lhs`, its offset in one of
     /// `rhs`, and the [`Field::Address`] of its type's descriptor.
-    And,
+    And => "trendy_rt_and", true;
     /// `trendy_rt_index(dst, rel, rel_desc, index_desc, common,
     /// common_count)`: store at `dst` an index of the relation `rel`, which
     /// the descriptor `rel_desc` describes, on its attributes in `common`,
@@ -795,7 +848,7 @@ pub enum RuntimeFn {
     /// attributes, in memory the statement owns. `common` and
     /// `common_count` are as for [`RuntimeFn::And`]'s, `rel` its left
     /// operand.
-    Index,
+    Index => "trendy_rt_index", true;
     /// `trendy_rt_lookup(dst, rel, index, key, result, rel_desc, sources,
     /// common, common_count)`: store at `dst` the relation, of the type the
     /// descriptor `result` describes, of every tuple made of a tuple of
@@ -805,7 +858,7 @@ pub enum RuntimeFn {
     /// [`RuntimeFn::Index`]), in memory the statement owns. The other
     /// arguments are as for [`RuntimeFn::And`]'s, `key` its right operand's
     /// one tuple.
-    Lookup,
+    Lookup => "trendy_rt_lookup", true;
     /// `trendy_rt_equal_run(dst, src, value, descriptor, attribute)`: store
     /// at `dst` the run of tuples of the relation at `src`, of the type the
     /// descriptor describes, whose attribute `attribute` (a
@@ -813,7 +866,7 @@ pub enum RuntimeFn {
     /// which they are sorted by, as those before it are the same in all of
     /// them: the address of the first in `src`'s buffer, and their number,
     /// so only to be read while `src` holds them.
-    EqualRun,
+    EqualRun => "trendy_rt_equal_run", false;
     /// `trendy_rt_ungroup(dst, src, result, source, sources, ungrouped,
     /// ungrouped_count)`: store at `dst` the relation, of the type the
     /// descriptor `result` describes, of every tuple made of a tuple of
@@ -826,25 +879,25 @@ pub enum RuntimeFn {
     /// an array of `ungrouped_count` (a [`Field::Usize`]) structs, one per
     /// ungrouped attribute: its offset in a tuple of `src`, and the
     /// [`Field::Size`] of its relation's tuples.
-    Ungroup,
+    Ungroup => "trendy_rt_ungroup", true;
     /// `trendy_rt_matching(dst, lhs, rhs, lhs_desc, rhs_desc, common,
     /// common_count, negated, orders)`: store at `dst` the relation of the tuples
     /// of `lhs` that have a match in `rhs` on their common attributes, or,
     /// if `negated` (a [`Field::Usize`]) is 1, those that have none, in the order they
     /// are in `lhs`, in memory the statement owns. The other arguments are
     /// as for [`RuntimeFn::And`]'s.
-    Matching,
+    Matching => "trendy_rt_matching", true;
     /// `trendy_rt_tclose(dst, src, descriptor)`: store at `dst` the
     /// transitive closure of the relation at `src`, of two attributes of
     /// one type, of the type the descriptor describes, in memory the
     /// statement owns: a tuple for each path through its tuples. Fails if
     /// the memory can't be allocated.
-    Tclose,
+    Tclose => "trendy_rt_tclose", true;
     /// `trendy_rt_subset(dst, lhs, rhs, descriptor, proper)`: store at
     /// `dst`, a [`Layout::U8`], whether every tuple of the relation `lhs` is
     /// in the relation `rhs`, of the type the descriptor describes, and, if
     /// `proper` (a [`Field::Usize`]) is 1, `rhs` has more.
-    Subset,
+    Subset => "trendy_rt_subset", false;
     /// `trendy_rt_combine(dst, lhs, rhs, descriptor, combination)`: store
     /// at `dst` the relations `lhs` and `rhs`, of the type the descriptor
     /// describes, combined as `combination` (a [`Field::Usize`], a
@@ -852,36 +905,36 @@ pub enum RuntimeFn {
     /// memory the statement owns. It fails if a disjoint union's operands
     /// share a tuple, or an included minus's right operand has one the left
     /// lacks.
-    Combine,
+    Combine => "trendy_rt_combine", true;
     /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
     /// relation or an array, of the type the descriptor describes, of
     /// `count` (a [`Layout::Usize`]) tuples or elements, zeroed, in memory
     /// the statement owns, for compiled code to fill in. Then either
     /// [`RuntimeFn::Sort`] copies a relation's tuples, or
     /// [`RuntimeFn::Adopt`] has the buffer hold what they point to.
-    Allocate,
+    Allocate => "trendy_rt_allocate", true;
     /// `trendy_rt_unique(array, descriptor)`: make the array at `array`,
     /// of the type the descriptor describes, the only holder of its
     /// buffer, copying it if anything else holds it, so that its elements
     /// can be changed in place. The array is a variable's value, or an
     /// element of a buffer that only its holder holds.
-    Unique,
+    Unique => "trendy_rt_unique", true;
     /// `trendy_rt_duplicate(dst, src, descriptor)`: store at `dst` a copy
     /// of the array `src`, of the type the descriptor describes, in a new
     /// buffer that only the statement holds, whose elements can be changed
     /// in place.
-    Duplicate,
+    Duplicate => "trendy_rt_duplicate", true;
     /// `trendy_rt_put_in_order(relation, descriptor)`: put the loose relation at
     /// `relation`, whose tuples hold references to what they point to, in canonical
     /// order, in its own buffer if only the statement's scope holds that, and otherwise
     /// in a copy (see [`Function::loose_read`]).
-    PutInOrder,
+    PutInOrder => "trendy_rt_put_in_order", true;
     /// `trendy_rt_sort(relation, descriptor)`: replace the relation at
     /// `relation`, of the type the descriptor describes, with one of its
     /// tuples in the canonical order, without duplicates, in memory the
     /// statement owns, freeing the buffer it had if only the statement's
     /// scope holds it.
-    Sort,
+    Sort => "trendy_rt_sort", true;
     /// `trendy_rt_load(dst, src, source, result, items, count, parts,
     /// part_count)`: store at `dst` the array, of the type the descriptor
     /// `result` describes, of the tuples of the relation `src`, of the type
@@ -896,7 +949,7 @@ pub enum RuntimeFn {
     /// and its size, each a [`Field::Usize`]-sized field: the tuple without
     /// the attributes removed, or the value of the only one left. Tuples
     /// equal on every item are in canonical order.
-    Load,
+    Load => "trendy_rt_load", true;
     /// `trendy_rt_unload(dst, src, source, result, parts, part_count,
     /// numbers, number_count)`: store at `dst` the relation, of the type
     /// the descriptor `result` describes, of the elements of the array
@@ -909,24 +962,24 @@ pub enum RuntimeFn {
     /// offsets in a tuple at `numbers`, [`Field::Usize`]s, none or one, is
     /// the element's position, counting from 1, an integer. Tuples that
     /// turn out equal are one.
-    Unload,
+    Unload => "trendy_rt_unload", true;
     /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
-    CompareText,
+    CompareText => "trendy_rt_compare_text", false;
     /// `trendy_rt_compare(dst, lhs, rhs, descriptor)`: store -1, 0 or 1 at `dst`, an
     /// [`Layout::I64`], as `lhs` is before, equal to or after `rhs`, values of the type
     /// the descriptor describes, in the order the runtime sorts them by.
-    Compare,
+    Compare => "trendy_rt_compare", false;
     /// `trendy_rt_concat_arrays(dst, lhs, rhs, descriptor)`: store at `dst` the array
     /// of the elements of `lhs` then those of `rhs`, of the type the descriptor
     /// describes, in memory the statement owns. It fails if the memory can't be
     /// allocated.
-    ConcatArrays,
+    ConcatArrays => "trendy_rt_concat_arrays", true;
     /// `trendy_rt_equal(dst, lhs, rhs, descriptor)`: store at `dst`, a
     /// [`Layout::U8`], whether two values of the type the descriptor
     /// describes are equal. For tuples, relations and arrays.
-    Equal,
+    Equal => "trendy_rt_equal", false;
     /// `trendy_rt_assign(dst, src, descriptor)`: store at `dst`, a
     /// variable's value, the value at `src`, of the type the descriptor
     /// describes, taking a reference to each buffer it points to. The
@@ -934,7 +987,7 @@ pub enum RuntimeFn {
     /// buffers of its old value, which the statement may still point into.
     /// For values that point to texts, relations or arrays; others are
     /// copied.
-    Assign,
+    Assign => "trendy_rt_assign", true;
 }
 
 impl RuntimeFn {
@@ -987,322 +1040,10 @@ impl RuntimeFn {
                 | RuntimeFn::ConcatArrays
                 | RuntimeFn::Equal
                 | RuntimeFn::Assign
+                | RuntimeFn::ReadClock
+                | RuntimeFn::ReadTransactionStart
+                | RuntimeFn::RandomBits
         )
-    }
-
-    /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 97] = [
-        RuntimeFn::DebugValue,
-        RuntimeFn::DebugTable,
-        RuntimeFn::ToText,
-        RuntimeFn::ParseInteger,
-        RuntimeFn::ParseApproximate,
-        RuntimeFn::ParseBoolean,
-        RuntimeFn::ToCodePoints,
-        RuntimeFn::FromCodePoints,
-        RuntimeFn::ToCharacters,
-        RuntimeFn::FromCharacters,
-        RuntimeFn::Sqrt,
-        RuntimeFn::Sin,
-        RuntimeFn::Cos,
-        RuntimeFn::Atan2,
-        RuntimeFn::LoadTextFile,
-        RuntimeFn::LoadTextFileWithErrors,
-        RuntimeFn::LoadCsv,
-        RuntimeFn::LoadCsvWithErrors,
-        RuntimeFn::SaveTextFile,
-        RuntimeFn::SaveTextFileWithErrors,
-        RuntimeFn::Join,
-        RuntimeFn::BrokenConstraintError,
-        RuntimeFn::ComponentKeyError,
-        RuntimeFn::OverlappingSubtypesError,
-        RuntimeFn::Sum,
-        RuntimeFn::Product,
-        RuntimeFn::IntegerFailed,
-        RuntimeFn::ApproximateFailed,
-        RuntimeFn::TupleMismatch,
-        RuntimeFn::NotOneTuple,
-        RuntimeFn::NoMin,
-        RuntimeFn::NoMax,
-        RuntimeFn::IndexOutOfRange,
-        RuntimeFn::ElementConflict,
-        RuntimeFn::BrokenConstraint,
-        RuntimeFn::NotOfType,
-        RuntimeFn::ConstraintViolated,
-        RuntimeFn::ConstraintViolatedBy,
-        RuntimeFn::Failed,
-        RuntimeFn::Warned,
-        RuntimeFn::Report,
-        RuntimeFn::BrokenConstraintInFile,
-        RuntimeFn::OverlappingSubtypes,
-        RuntimeFn::BrokenCallConstraint,
-        RuntimeFn::TcloseOf,
-        RuntimeFn::TcloseOfEach,
-        RuntimeFn::DropOperand,
-        RuntimeFn::TooDeep,
-        RuntimeFn::Run,
-        RuntimeFn::Insert,
-        RuntimeFn::Remove,
-        RuntimeFn::RemoveRun,
-        RuntimeFn::RemoveMarked,
-        RuntimeFn::KeyAdded,
-        RuntimeFn::KeyShared,
-        RuntimeFn::KeyViolated,
-        RuntimeFn::ComponentKeyViolated,
-        RuntimeFn::ComponentKeyViolatedInFile,
-        RuntimeFn::Concat,
-        RuntimeFn::Release,
-        RuntimeFn::Begin,
-        RuntimeFn::End,
-        RuntimeFn::Innermost,
-        RuntimeFn::EndSince,
-        RuntimeFn::Trace,
-        RuntimeFn::Traced,
-        RuntimeFn::TraceSince,
-        RuntimeFn::Untrace,
-        RuntimeFn::WriteTrace,
-        RuntimeFn::Failures,
-        RuntimeFn::Keep,
-        RuntimeFn::HandOut,
-        RuntimeFn::Retain,
-        RuntimeFn::Adopt,
-        RuntimeFn::Reshape,
-        RuntimeFn::Relation,
-        RuntimeFn::And,
-        RuntimeFn::Index,
-        RuntimeFn::Lookup,
-        RuntimeFn::EqualRun,
-        RuntimeFn::Ungroup,
-        RuntimeFn::Matching,
-        RuntimeFn::Tclose,
-        RuntimeFn::Subset,
-        RuntimeFn::Combine,
-        RuntimeFn::Allocate,
-        RuntimeFn::Unique,
-        RuntimeFn::Duplicate,
-        RuntimeFn::Sort,
-        RuntimeFn::PutInOrder,
-        RuntimeFn::Load,
-        RuntimeFn::Unload,
-        RuntimeFn::CompareText,
-        RuntimeFn::Compare,
-        RuntimeFn::ConcatArrays,
-        RuntimeFn::Equal,
-        RuntimeFn::Assign,
-    ];
-
-    /// Whether it can fail: for memory it can't allocate, as any that
-    /// makes a text, relation or array, or holds a reference in a
-    /// statement's scope, can, or for a value it can't make, as a sum
-    /// beyond its type's range, a text that writes no number, or a file it
-    /// can't read is. It returns whether it failed, a boolean, which
-    /// compiled code checks as it does a call's. The runtime functions a
-    /// failure calls only write its error, and don't fail themselves.
-    #[must_use]
-    pub fn fails(self) -> bool {
-        match self {
-            RuntimeFn::DebugTable
-            | RuntimeFn::ToText
-            | RuntimeFn::ParseInteger
-            | RuntimeFn::ParseApproximate
-            | RuntimeFn::ParseBoolean
-            | RuntimeFn::ToCodePoints
-            | RuntimeFn::FromCodePoints
-            | RuntimeFn::ToCharacters
-            | RuntimeFn::FromCharacters
-            | RuntimeFn::Sqrt
-            | RuntimeFn::LoadTextFile
-            | RuntimeFn::LoadTextFileWithErrors
-            | RuntimeFn::LoadCsv
-            | RuntimeFn::LoadCsvWithErrors
-            | RuntimeFn::SaveTextFile
-            | RuntimeFn::SaveTextFileWithErrors
-            | RuntimeFn::Join
-            | RuntimeFn::BrokenConstraintError
-            | RuntimeFn::ComponentKeyError
-            | RuntimeFn::OverlappingSubtypesError
-            | RuntimeFn::Sum
-            | RuntimeFn::Product
-            | RuntimeFn::KeyShared
-            | RuntimeFn::KeyAdded
-            | RuntimeFn::TooDeep
-            | RuntimeFn::TcloseOf
-            | RuntimeFn::TcloseOfEach
-            | RuntimeFn::Insert
-            | RuntimeFn::Remove
-            | RuntimeFn::RemoveRun
-            | RuntimeFn::RemoveMarked
-            | RuntimeFn::Concat
-            | RuntimeFn::ConcatArrays
-            | RuntimeFn::Keep
-            | RuntimeFn::HandOut
-            | RuntimeFn::Reshape
-            | RuntimeFn::Relation
-            | RuntimeFn::And
-            | RuntimeFn::Index
-            | RuntimeFn::Lookup
-            | RuntimeFn::Ungroup
-            | RuntimeFn::Matching
-            | RuntimeFn::Tclose
-            | RuntimeFn::Combine
-            | RuntimeFn::Allocate
-            | RuntimeFn::Unique
-            | RuntimeFn::Duplicate
-            | RuntimeFn::Sort
-            | RuntimeFn::PutInOrder
-            | RuntimeFn::Load
-            | RuntimeFn::Unload
-            | RuntimeFn::Assign => true,
-            RuntimeFn::DebugValue
-            | RuntimeFn::Sin
-            | RuntimeFn::Cos
-            | RuntimeFn::Atan2
-            | RuntimeFn::IntegerFailed
-            | RuntimeFn::ApproximateFailed
-            | RuntimeFn::TupleMismatch
-            | RuntimeFn::NotOneTuple
-            | RuntimeFn::NoMin
-            | RuntimeFn::NoMax
-            | RuntimeFn::IndexOutOfRange
-            | RuntimeFn::ElementConflict
-            | RuntimeFn::BrokenConstraint
-            | RuntimeFn::NotOfType
-            | RuntimeFn::ConstraintViolated
-            | RuntimeFn::ConstraintViolatedBy
-            | RuntimeFn::Failed
-            | RuntimeFn::Warned
-            | RuntimeFn::Report
-            | RuntimeFn::BrokenConstraintInFile
-            | RuntimeFn::OverlappingSubtypes
-            | RuntimeFn::BrokenCallConstraint
-            | RuntimeFn::KeyViolated
-            | RuntimeFn::ComponentKeyViolated
-            | RuntimeFn::ComponentKeyViolatedInFile
-            | RuntimeFn::Release
-            | RuntimeFn::Begin
-            | RuntimeFn::End
-            | RuntimeFn::Innermost
-            | RuntimeFn::EndSince
-            | RuntimeFn::Trace
-            | RuntimeFn::Traced
-            | RuntimeFn::TraceSince
-            | RuntimeFn::Untrace
-            | RuntimeFn::WriteTrace
-            | RuntimeFn::Failures
-            | RuntimeFn::Retain
-            | RuntimeFn::Adopt
-            | RuntimeFn::Subset
-            | RuntimeFn::EqualRun
-            | RuntimeFn::CompareText
-            | RuntimeFn::Compare
-            | RuntimeFn::Run
-            | RuntimeFn::DropOperand
-            | RuntimeFn::Equal => false,
-        }
-    }
-
-    /// The symbol the runtime library exports.
-    #[must_use]
-    pub fn symbol(self) -> &'static str {
-        match self {
-            RuntimeFn::DebugValue => "trendy_rt_debug_value",
-            RuntimeFn::DebugTable => "trendy_rt_debug_table",
-            RuntimeFn::ToText => "trendy_rt_to_text",
-            RuntimeFn::ParseInteger => "trendy_rt_parse_integer",
-            RuntimeFn::ParseApproximate => "trendy_rt_parse_approximate",
-            RuntimeFn::ParseBoolean => "trendy_rt_parse_boolean",
-            RuntimeFn::ToCodePoints => "trendy_rt_to_code_points",
-            RuntimeFn::FromCodePoints => "trendy_rt_from_code_points",
-            RuntimeFn::ToCharacters => "trendy_rt_to_characters",
-            RuntimeFn::FromCharacters => "trendy_rt_from_characters",
-            RuntimeFn::Sqrt => "trendy_rt_sqrt",
-            RuntimeFn::Sin => "trendy_rt_sin",
-            RuntimeFn::Cos => "trendy_rt_cos",
-            RuntimeFn::Atan2 => "trendy_rt_atan2",
-            RuntimeFn::Join => "trendy_rt_join",
-            RuntimeFn::SaveTextFile => "trendy_rt_save_text_file",
-            RuntimeFn::SaveTextFileWithErrors => "trendy_rt_save_text_file_with_errors",
-            RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
-            RuntimeFn::LoadTextFileWithErrors => "trendy_rt_load_text_file_with_errors",
-            RuntimeFn::LoadCsvWithErrors => "trendy_rt_load_csv_with_errors",
-            RuntimeFn::BrokenConstraintError => "trendy_rt_broken_constraint_error",
-            RuntimeFn::ComponentKeyError => "trendy_rt_component_key_error",
-            RuntimeFn::OverlappingSubtypesError => "trendy_rt_overlapping_subtypes_error",
-            RuntimeFn::LoadCsv => "trendy_rt_load_csv",
-            RuntimeFn::Sum => "trendy_rt_sum",
-            RuntimeFn::Product => "trendy_rt_product",
-            RuntimeFn::IntegerFailed => "trendy_rt_integer_failed",
-            RuntimeFn::ApproximateFailed => "trendy_rt_approximate_failed",
-            RuntimeFn::TupleMismatch => "trendy_rt_tuple_mismatch",
-            RuntimeFn::NotOneTuple => "trendy_rt_not_one_tuple",
-            RuntimeFn::NoMin => "trendy_rt_no_min",
-            RuntimeFn::NoMax => "trendy_rt_no_max",
-            RuntimeFn::IndexOutOfRange => "trendy_rt_index_out_of_range",
-            RuntimeFn::ElementConflict => "trendy_rt_element_conflict",
-            RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
-            RuntimeFn::NotOfType => "trendy_rt_not_of_type",
-            RuntimeFn::ConstraintViolated => "trendy_rt_constraint_violated",
-            RuntimeFn::ConstraintViolatedBy => "trendy_rt_constraint_violated_by",
-            RuntimeFn::Failed => "trendy_rt_failed",
-            RuntimeFn::Warned => "trendy_rt_warned",
-            RuntimeFn::Report => "trendy_rt_report",
-            RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
-            RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
-            RuntimeFn::BrokenCallConstraint => "trendy_rt_broken_call_constraint",
-            RuntimeFn::TcloseOf => "trendy_rt_tclose_of",
-            RuntimeFn::TcloseOfEach => "trendy_rt_tclose_of_each",
-            RuntimeFn::DropOperand => "trendy_rt_drop_operand",
-            RuntimeFn::TooDeep => "trendy_rt_too_deep",
-            RuntimeFn::Run => "trendy_rt_run",
-            RuntimeFn::Insert => "trendy_rt_insert",
-            RuntimeFn::Remove => "trendy_rt_remove",
-            RuntimeFn::RemoveRun => "trendy_rt_remove_run",
-            RuntimeFn::RemoveMarked => "trendy_rt_remove_marked",
-            RuntimeFn::KeyAdded => "trendy_rt_key_added",
-            RuntimeFn::KeyShared => "trendy_rt_key_shared",
-            RuntimeFn::KeyViolated => "trendy_rt_key_violated",
-            RuntimeFn::ComponentKeyViolated => "trendy_rt_component_key_violated",
-            RuntimeFn::ComponentKeyViolatedInFile => "trendy_rt_component_key_violated_in_file",
-            RuntimeFn::Concat => "trendy_rt_concat",
-            RuntimeFn::ConcatArrays => "trendy_rt_concat_arrays",
-            RuntimeFn::Compare => "trendy_rt_compare",
-            RuntimeFn::Release => "trendy_rt_release",
-            RuntimeFn::Begin => "trendy_rt_begin",
-            RuntimeFn::End => "trendy_rt_end",
-            RuntimeFn::Innermost => "trendy_rt_innermost",
-            RuntimeFn::EndSince => "trendy_rt_end_since",
-            RuntimeFn::Trace => "trendy_rt_trace",
-            RuntimeFn::Traced => "trendy_rt_traced",
-            RuntimeFn::TraceSince => "trendy_rt_trace_since",
-            RuntimeFn::Untrace => "trendy_rt_untrace",
-            RuntimeFn::WriteTrace => "trendy_rt_write_trace",
-            RuntimeFn::Failures => "trendy_rt_failures",
-            RuntimeFn::Keep => "trendy_rt_keep",
-            RuntimeFn::HandOut => "trendy_rt_hand_out",
-            RuntimeFn::Retain => "trendy_rt_retain",
-            RuntimeFn::Adopt => "trendy_rt_adopt",
-            RuntimeFn::Reshape => "trendy_rt_reshape",
-            RuntimeFn::Relation => "trendy_rt_relation",
-            RuntimeFn::And => "trendy_rt_and",
-            RuntimeFn::Index => "trendy_rt_index",
-            RuntimeFn::Lookup => "trendy_rt_lookup",
-            RuntimeFn::EqualRun => "trendy_rt_equal_run",
-            RuntimeFn::Ungroup => "trendy_rt_ungroup",
-            RuntimeFn::Matching => "trendy_rt_matching",
-            RuntimeFn::Tclose => "trendy_rt_tclose",
-            RuntimeFn::Combine => "trendy_rt_combine",
-            RuntimeFn::Subset => "trendy_rt_subset",
-            RuntimeFn::Allocate => "trendy_rt_allocate",
-            RuntimeFn::Unique => "trendy_rt_unique",
-            RuntimeFn::Duplicate => "trendy_rt_duplicate",
-            RuntimeFn::Sort => "trendy_rt_sort",
-            RuntimeFn::PutInOrder => "trendy_rt_put_in_order",
-            RuntimeFn::Load => "trendy_rt_load",
-            RuntimeFn::Unload => "trendy_rt_unload",
-            RuntimeFn::CompareText => "trendy_rt_compare_text",
-            RuntimeFn::Equal => "trendy_rt_equal",
-            RuntimeFn::Assign => "trendy_rt_assign",
-        }
     }
 }
 

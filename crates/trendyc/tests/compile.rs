@@ -11071,9 +11071,8 @@ fn uuids() {
             "uuid{bytes: x\"017f22e279b07cc398c4dc0c0c07398f\"}",
             "true",
             "false",
-            "\"00000000-0000-0000-0000-000000000000\"",
-            "\"00000000-0000-4000-8000-000000000000\"",
-            "\"00000000-0000-7000-8000-000000000000\"",
+            "true",
+            "true",
         ]
     );
 }
@@ -11247,8 +11246,8 @@ operator main{} [
     var v4 := treat id as uuid_v4;
     call debug_value{v: v4.text};
     call generate{out v4: v4};
-    call debug_value{v: v4.bytes[7]};
-    call debug_value{v: v4.bytes[9]};
+    call debug_value{v: v4.bytes[7] and x'f0'};
+    call debug_value{v: v4.bytes[9] and x'c0'};
     var seven := uuid{bytes: x"017f22e2_79b0_7cc3_98c4_dc0c0c07398f"};
     call debug_value{v: seven is uuid_v7};
     call debug_value{v: is_uuid_text{text: written || "0"}};
@@ -11428,6 +11427,9 @@ fn dates() {
             "true",
             "true",
             "8765",
+            "true",
+            "true",
+            "true",
             "31",
             "false",
         ]
@@ -11698,6 +11700,205 @@ operator main{} [
             "circle{r: 1}",
             "'é'",
             "2",
+        ]
+    );
+}
+
+/// For [`reading_the_clock_and_a_transactions_start`].
+const CLOCK_AND_START: &str = r#"
+uses { trendy.time };
+
+type shape union;
+type circle is shape { { r: integer } };
+type square is shape { { side: integer } };
+operator stamp{s: shape, out at: timestamp};
+operator stamp{s: circle, out at: timestamp} [
+    call transaction_start{out at};
+];
+operator stamp{s: square, out at: timestamp} [
+    at := timestamp{date: date{days: s.side}, time: time{nanos_of_day: 0}};
+];
+
+operator deep{out at: timestamp} [
+    transaction [
+        call transaction_start{out at};
+    ];
+];
+
+/* Give `later` an instant the clock has passed `after`, so that what is read next is too. */
+operator wait_past{after: timestamp, out later: timestamp} [
+    call now{out at: later};
+    while later <= after loop [
+        call now{out at: later};
+    ];
+];
+
+operator main{} [
+    var before: timestamp;
+    call now{out at: before};
+    call debug_value{v: before.date.days};
+
+    /* Only a version of what is called reads it. */
+    var only_a_version: timestamp;
+    transaction [
+        call stamp{s: circle{r: 1}, out at: only_a_version};
+    ];
+    call debug_value{v: before <= only_a_version};
+
+    var first: timestamp;
+    var nested: timestamp;
+    var through_a_version: timestamp;
+    var still: timestamp;
+    var failures: relation transaction_collection;
+    transaction [
+        call transaction_start{out at: first};
+        /* Long enough for the clock to move on, which none of this can read. */
+        var spin := 0;
+        while spin < 2_000_000 loop [
+            spin := spin + 1;
+        ];
+        call deep{out at: nested};
+        call stamp{s: circle{r: 1}, out at: through_a_version};
+        transaction collecting failures [
+            call deep{out at: still};
+            fail failure{message: "no"};
+        ];
+        call transaction_start{out at: still};
+    ];
+    call debug_value{v: tuple {
+        nested: nested = first,
+        version: through_a_version = first,
+        after_a_failure: still = first,
+        not_before_the_clock: before <= first,
+    }};
+
+    /* Each transaction has its own, on from the last, after a commit. */
+    var past: timestamp;
+    call wait_past{after: first, out later: past};
+    var second: timestamp;
+    transaction [
+        call transaction_start{out at: second};
+    ];
+    call debug_value{v: second > first};
+
+    /* And after a rollback. */
+    var rolled: relation transaction_collection;
+    var kept := second;
+    transaction collecting rolled [
+        call transaction_start{out at: kept};
+        fail failure{message: "no"};
+    ];
+    call debug_value{v: kept = second};
+    call wait_past{after: second, out later: past};
+    var third: timestamp;
+    transaction [
+        call transaction_start{out at: third};
+    ];
+    call debug_value{v: third > second};
+];
+"#;
+
+/// What the clock shows, and what a transaction has of it: one instant, for all of it and all
+/// that is nested in it, and a new one for the next, however the last ended.
+#[test]
+fn reading_the_clock_and_a_transactions_start() {
+    let (code, stderr) = run_source("clock_and_start", CLOCK_AND_START);
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    // What the clock showed, as this one shows it.
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 86_400;
+    let shown: u64 = lines[0].parse().unwrap();
+    assert!(shown.abs_diff(days) <= 1, "{shown} against {days}");
+    assert_eq!(
+        lines[1..],
+        [
+            "true",
+            "tuple { after_a_failure: true, nested: true, not_before_the_clock: true, version: true }",
+            "true",
+            "true",
+            "true",
+        ]
+    );
+}
+
+/// New UUIDs, each with the bits of its version, none the same, in a transaction too, where one
+/// undone isn't given again, and a version 7 UUID's first bits the instant it is given.
+#[test]
+fn generating_uuids() {
+    let (code, stderr) = run_source(
+        "generating_uuids",
+        r#"
+uses { trendy.time, trendy.uuid };
+
+operator main{} [
+    var seen: relation { id: uuid } := relation {};
+    var i := 0;
+    while i < 2000 loop [
+        var id: uuid;
+        call generate{out v4: id};
+        insert seen relation { { id } };
+        i := i + 1;
+    ];
+    call debug_value{v: count{r: seen}};
+    call debug_value{v: is_empty{r: seen where not (id is uuid_v4)}};
+
+    var undone: uuid_v4;
+    var failures: relation transaction_collection;
+    var kept := treat uuid{text: "919108f7-52d1-4320-9bac-f847db4148a8"} as uuid_v4;
+    undone := kept;
+    transaction collecting failures [
+        call generate{out v4: undone};
+        insert seen relation { { id: undone } };
+        kept := undone;
+        fail failure{message: "no"};
+    ];
+    call debug_value{v: undone.text};
+    var after: uuid_v4;
+    call generate{out v4: after};
+    call debug_value{v: count{r: seen where id = after}};
+
+    var at := timestamp{
+        date: date{year: 2024, month: 3, day: 20},
+        time: time{hour: 3, minute: 6, second: 26, nanosecond: 999_999_999},
+    };
+    var seven: uuid_v7;
+    transaction [
+        call generate{at, out v7: seven};
+    ];
+    call debug_value{v: to_characters{from: seven.text}[1] = '0'};
+    call debug_value{v: (seven.bytes[1].value * 1099511627776
+        + seven.bytes[2].value * 4294967296
+        + seven.bytes[3].value * 16777216
+        + seven.bytes[4].value * 65536
+        + seven.bytes[5].value * 256
+        + seven.bytes[6].value)};
+    var clocked: uuid_v7;
+    call generate{out v7: clocked};
+    var later := seven;
+    call generate{at, out v7: later};
+    call debug_value{v: later.bytes[1] = seven.bytes[1] and later <> seven};
+    call debug_value{v: seven < clocked};
+    call debug_value{v: clocked.text = seven.text};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "2000",
+            "true",
+            "\"919108f7-52d1-4320-9bac-f847db4148a8\"",
+            "0",
+            "true",
+            "1710903986999",
+            "true",
+            "true",
+            "false",
         ]
     );
 }

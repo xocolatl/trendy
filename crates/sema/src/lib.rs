@@ -482,8 +482,12 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
             bodies.insert(signature.id, statements);
         }
     }
+    let main = files
+        .main()
+        .and_then(|file| main_signature(file, &namespaces, &operators))
+        .map(|signature| signature.id);
     body::deferred_checks(
-        &deferred, &bodies, &evaluated, &operators, &declared, errors,
+        &deferred, &bodies, &evaluated, &operators, &declared, main, errors,
     );
     Checked {
         namespaces,
@@ -569,24 +573,35 @@ impl Checked {
     }
 }
 
+/// The operator named `main` in the unit of `file`, the one without parameters, if
+/// there are several.
+fn main_signature<'o>(
+    file: &SourceFile,
+    namespaces: &Namespaces,
+    operators: &'o Operators,
+) -> Option<&'o operators::Signature> {
+    // The main unit's own, not another's it sees.
+    let mains: Vec<&operators::Signature> = operators
+        .declared_in("main", namespaces.unit_at(file.span()))
+        .collect();
+    mains
+        .iter()
+        .find(|s| s.written.is_empty())
+        .or_else(|| mains.first())
+        .copied()
+}
+
 /// The operator named `main`, which must be the program's own, an update
 /// operator taking no parameters, or only the errors it gives, `out
-/// errors: relation transaction_collection`: the one without parameters,
-/// if there are several.
+/// errors: relation transaction_collection`, or `None` after reporting why there
+/// is none the program can start in.
 fn entry(
     file: &SourceFile,
     namespaces: &Namespaces,
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::OperatorId> {
-    // The main unit's own, not another's it sees.
-    let mains: Vec<&operators::Signature> = operators
-        .declared_in("main", namespaces.unit_at(file.span()))
-        .collect();
-    let main = mains
-        .iter()
-        .find(|s| s.written.is_empty())
-        .or_else(|| mains.first());
+    let main = main_signature(file, namespaces, operators);
     let Some((signature, decl)) = main.and_then(|s| Some((s, s.decl.as_ref()?))) else {
         errors.push(errors::missing_main(file, namespaces));
         return None;
@@ -3631,6 +3646,213 @@ var zero := seg{{len: 0}};{MAIN}"
         assert!(analyze_str(&out("transaction")).is_ok());
         let read = "operator f{out e: relation transaction_collection} [ transaction collecting e []; ];\noperator main{} [ var e: relation transaction_collection; call f{out e: e}; ];";
         assert_eq!(codes(read), [Code::Unassigned]);
+    }
+
+    /// A program with the units of dates and UUIDs, that says what `main` does.
+    fn timed(operators: &str, main: &str) -> String {
+        format!(
+            "uses {{ trendy.time, trendy.uuid }};
+{operators}
+operator main{{}} [ var at: timestamp; var id: uuid_v7; var four: uuid_v4; {main} ];
+"
+        )
+    }
+
+    #[test]
+    fn the_clock_is_read_outside_a_transaction() {
+        let stamp = "operator stamp{out at: timestamp} [ call now{out at}; ];";
+        assert!(analyze_str(&timed(stamp, "call now{out at}; call stamp{out at};")).is_ok());
+        for (main, message) in [
+            (
+                "transaction [ call now{out at}; ];",
+                "`now` reads the clock, in a transaction",
+            ),
+            (
+                "transaction [ call stamp{out at}; ];",
+                "`stamp` reads the clock, in a transaction, as `stamp` calls `now`",
+            ),
+            (
+                "transaction [ transaction [ call now{out at}; ]; ];",
+                "`now` reads the clock, in a transaction",
+            ),
+            (
+                "transaction [ if at.date.days = 0 then [ call now{out at}; ]; ];",
+                "`now` reads the clock, in a transaction",
+            ),
+            // Without an instant, a version 7 UUID's bits read it.
+            (
+                "transaction [ call generate{out v7: id}; ];",
+                "`generate` reads the clock, in a transaction",
+            ),
+        ] {
+            let found = errors(&timed(stamp, &format!("call now{{out at}}; {main}")));
+            assert_eq!(found.len(), 1, "{main}: {found:#?}");
+            assert_eq!(found[0].code, Code::IoInTransaction, "{main}");
+            assert_eq!(found[0].message, message, "{main}");
+            assert!(
+                found[0].help[0].contains("`call transaction_start{out at};`"),
+                "{main}"
+            );
+        }
+        // A read-only operator reads nothing, a transaction of its own or not.
+        let read_only = "operator f{n: integer}: integer [ var at := 1; transaction [ at := n; ]; call now{out at}; at ];";
+        assert!(codes(&timed(read_only, "")).contains(&Code::ReadOnlyEffect));
+    }
+
+    #[test]
+    fn a_transactions_start_is_read_in_a_transaction() {
+        let stamp = "operator stamp{out at: timestamp} [ call transaction_start{out at}; ];
+operator through{out at: timestamp} [ call stamp{out at}; ];
+operator begun{out at: timestamp} [ transaction [ call stamp{out at}; ]; ];
+operator unused{out at: timestamp} [ call stamp{out at}; ];";
+        for good in [
+            "",
+            "transaction [ call transaction_start{out at}; ];",
+            "transaction [ call stamp{out at}; ];",
+            "transaction [ call through{out at}; ];",
+            "transaction [ transaction [ call through{out at}; ]; ];",
+            "transaction [ if at.date.days = 0 then [ call stamp{out at}; ]; ];",
+            // What begins one itself can be called with none running.
+            "call begun{out at};",
+            "transaction [ call begun{out at}; ];",
+        ] {
+            let source = timed(stamp, &format!("call now{{out at}}; {good}"));
+            assert!(analyze_str(&source).is_ok(), "{good}");
+        }
+        for (main, message, fixes) in [
+            (
+                "call transaction_start{out at};",
+                "`transaction_start` reads when a transaction began, and this call is in none",
+                true,
+            ),
+            (
+                "if at.date.days = 0 then [ call transaction_start{out at}; ];",
+                "`transaction_start` reads when a transaction began, and this call is in none",
+                true,
+            ),
+            (
+                "call stamp{out at};",
+                "`stamp` reads when a transaction began, as `stamp` calls `transaction_start`, and this call is in none",
+                false,
+            ),
+            (
+                "call through{out at};",
+                "`through` reads when a transaction began, as `stamp` calls `transaction_start`, and this call is in none",
+                false,
+            ),
+            // In a transaction too, what is called in none is reported.
+            (
+                "transaction [ call through{out at}; ]; call through{out at};",
+                "`through` reads when a transaction began, as `stamp` calls `transaction_start`, and this call is in none",
+                false,
+            ),
+        ] {
+            let source = timed(stamp, &format!("call now{{out at}}; {main}"));
+            let found = errors(&source);
+            assert_eq!(found.len(), 1, "{main}: {found:#?}");
+            assert_eq!(found[0].code, Code::OutsideAnyTransaction, "{main}");
+            assert_eq!(found[0].message, message, "{main}");
+            if fixes {
+                let fixed = fix(&source);
+                assert!(fixed.contains("call now{out at}; "), "{fixed}");
+                assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+            } else {
+                assert!(found[0].suggestions.is_empty(), "{main}");
+                assert!(found[0].help[0].contains("`transaction [ … ];`"), "{main}");
+            }
+        }
+        // Through a specification's version, whichever it is that reads it.
+        let versions = "type shape union;
+type circle is shape { { r: integer } };
+type square is shape { { side: integer } };
+operator stamp{s: shape, out at: timestamp};
+operator stamp{s: circle, out at: timestamp} [ call transaction_start{out at}; ];
+operator stamp{s: square, out at: timestamp} [ at := timestamp{date: date{days: s.side}, time: time{nanos_of_day: 0}}; ];";
+        let call = "call stamp{s: circle{r: 1}, out at};";
+        let outside = timed(versions, &format!("call now{{out at}}; {call}"));
+        assert_eq!(codes(&outside), [Code::OutsideAnyTransaction]);
+        let inside = timed(
+            versions,
+            &format!("call now{{out at}}; transaction [ {call} ];"),
+        );
+        assert!(analyze_str(&inside).is_ok());
+        // A read-only operator can't read it.
+        let read_only =
+            "operator f{n: integer}: integer [ var at := n; call transaction_start{out at}; at ];";
+        assert!(codes(&timed(read_only, "")).contains(&Code::ReadOnlyEffect));
+    }
+
+    /// Which version a new UUID is the call says, whatever the variable is of.
+    #[test]
+    fn a_new_uuid_is_of_the_version_the_call_names() {
+        let main = |call: &str| {
+            format!("uses {{ trendy.uuid }};\noperator main{{}} [ var id: uuid; {call} ];")
+        };
+        for call in ["call generate{out v4: id};", "call generate{out v7: id};"] {
+            assert!(analyze_str(&main(call)).is_ok(), "{call}");
+        }
+        // The one that named no version is fixed to the first trendy had.
+        let source = main("call generate{out uuid: id};");
+        assert_eq!(codes(&source), [Code::UnknownAttribute]);
+        let fixed = fix(&source);
+        assert_eq!(fixed, main("call generate{out v4: id};"));
+    }
+
+    #[test]
+    fn a_uuid_is_generated_in_a_transaction_from_what_it_is_given() {
+        let good = "transaction [
+            var started: timestamp;
+            call transaction_start{out at: started};
+            call generate{out v4: four};
+            call generate{at: started, out v7: id};
+        ];";
+        assert!(analyze_str(&timed("", good)).is_ok());
+        // 48 bits of milliseconds reach so far, from 1970.
+        for days in ["-1", "3_257_812"] {
+            let main = format!(
+                "call generate{{at: timestamp{{date: date{{days: {days}}}, time: time{{nanos_of_day: 0}}}}, out v7: id}};"
+            );
+            assert_eq!(
+                codes(&timed("", &main)),
+                [Code::BrokenCallConstraint],
+                "{days}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_languages_ways_of_reading_the_clock_are_explained() {
+        for written in [
+            "var a := current_timestamp;",
+            "var a := CURRENT_TIMESTAMP;",
+            "var a := current_date;",
+            "var a := getdate{};",
+            "var a := clock_timestamp{};",
+        ] {
+            let found = errors(&format!("uses {{ trendy.time }};\n{written}{MAIN}"));
+            assert_eq!(found[0].code, Code::UnknownName, "{written}");
+            assert!(
+                found[0].help[0].contains("`var at: timestamp; call now{out at};`"),
+                "{written}"
+            );
+        }
+        let found = errors(&format!("var a := transaction_timestamp;{MAIN}"));
+        assert!(
+            found[0].help[0].contains("call transaction_start{out at};"),
+            "{found:#?}"
+        );
+        // Written as a value, and with the unit not used, each says what to do.
+        let found = errors("uses { trendy.time };\noperator main{} [ var a := now{}; ];");
+        assert_eq!(found[0].code, Code::OperatorAsValue, "{found:#?}");
+        let found = errors("operator main{} [ var a := 1; call now{out at: a}; ];");
+        assert_eq!(found[0].code, Code::UnknownName, "{found:#?}");
+        assert!(found[0].notes[0].contains("`trendy.time`"), "{found:#?}");
+        // A mistyped call is one error, whatever is read after it.
+        let found = errors(
+            "uses { trendy.time };\noperator main{} [ var a: timestamp; call now{out a}; call debug_value{v: a}; ];",
+        );
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].code, Code::PositionalArgument, "{found:#?}");
     }
 
     #[test]
@@ -11138,7 +11360,8 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             own[0].help[0].contains("give the local variable a name of its own"),
             "{own:#?}"
         );
-        // A type parameter has no default, nor has a tuple with one.
+        // A type parameter has no default, nor has a tuple with one, so where
+        // nothing decides what runs, and it could as well have its value now, it does.
         let generic = errors(&format!(
             "operator f{{v: T}}: T types {{ T: any type }} [ var w: T; v ];{MAIN}"
         ));
@@ -16878,7 +17101,7 @@ var a := duration{n: days{n: 1}};
         let fs: Vec<&str> = program
             .operators
             .iter()
-            .filter(|o| o.name.ends_with('f'))
+            .filter(|o| o.name == "f" || o.name.ends_with("::f"))
             .map(|o| o.name.as_str())
             .collect();
         assert_eq!(fs, ["f", "f"]);

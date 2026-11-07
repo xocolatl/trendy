@@ -5,7 +5,8 @@
 //! ([`CATALOG`]), which describes the program's units, and whose
 //! constraints are the rules between them; `trendy.files` ([`FILES`]), which
 //! reads files; and `trendy.uuid` ([`UUID`]) and `trendy.time` ([`TIME`]), of
-//! ordinary trendy, for the units that use them.
+//! ordinary trendy but for reading the clock and giving random bits, for the units
+//! that use them.
 //!
 //! Drivers parse them, as [`UNITS`] lists them, alongside the program and
 //! hand them all to sema. Only these units may declare `builtin`

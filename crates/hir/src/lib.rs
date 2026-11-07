@@ -51,6 +51,43 @@ pub struct Program {
 }
 
 impl Program {
+    /// The operators a call of which can read when the outermost transaction
+    /// running began ([`UpdateBuiltin::ReadTransactionStart`]), directly or
+    /// through those they call, whichever of their versions runs. A transaction
+    /// that calls one reads the clock as it begins.
+    #[must_use]
+    pub fn reading_transaction_start(&self) -> BTreeSet<OperatorId> {
+        let builtin = Builtin::Update(UpdateBuiltin::ReadTransactionStart);
+        let mut reading: BTreeSet<OperatorId> = self
+            .operators
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, operator)| matches!(operator.kind, OperatorKind::Builtin(b) if b == builtin),
+            )
+            .map(|(i, _)| OperatorId(i))
+            .collect();
+        loop {
+            let before = reading.len();
+            for (i, operator) in self.operators.iter().enumerate() {
+                let through_a_version = operator
+                    .versions
+                    .iter()
+                    .any(|version| reading.contains(&version.operator));
+                let through_its_body = matches!(
+                    &operator.kind,
+                    OperatorKind::Update { body, .. } if body.calls_any_of(&reading)
+                );
+                if through_a_version || through_its_body {
+                    reading.insert(OperatorId(i));
+                }
+            }
+            if reading.len() == before {
+                return reading;
+            }
+        }
+    }
+
     /// Which operators call themselves, directly or through others. A
     /// specification calls each of its versions. No cycle goes through a
     /// constraint, a conversion or a `fail`'s `message`, which sema rejects
@@ -615,33 +652,52 @@ pub enum UpdateBuiltin {
     /// its error in the `out` parameter `errors` rather than stopping the
     /// program: an `unwritable_file` ([`LanguageError`]).
     SaveTextFileWithErrors,
+    /// The system's clock, as seconds since 1970-01-01 in UTC, rounded down,
+    /// and the nanoseconds past them, in its `out` parameters.
+    ReadClock,
+    /// What the clock showed as the outermost transaction running began, as
+    /// [`UpdateBuiltin::ReadClock`] gives it. Sema checks that a transaction is
+    /// running, wherever it is called from, and lowering that the clock was read
+    /// if it can be (see [`Program::reading_transaction_start`]).
+    ReadTransactionStart,
+    /// The next 64 random bits, in its `out` parameter, as an integer. They are
+    /// computed: only the first of them in a run reads anything, to seed what
+    /// computes them, and the seed has no bearing on what the program does.
+    RandomBits,
+}
+
+/// What a built-in does that a transaction's statements can't, at any depth of
+/// their calls, since nothing undoes it, and running them again could see another
+/// answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Io {
+    ReadsFile,
+    WritesFile,
+    ReadsClock,
 }
 
 impl UpdateBuiltin {
-    /// Whether it reads input or writes output, which a transaction's
-    /// statements do none of, at any depth of their calls, since nothing
-    /// undoes it: `debug_value` and `debug_table` write for the
-    /// programmer, so they are exempt.
+    /// What input it reads or output it writes, if any, which a transaction's
+    /// statements do none of, at any depth of their calls, since nothing undoes
+    /// it. `debug_value` and `debug_table` write for the programmer, so they are
+    /// exempt. A transaction's start is a value the transaction has, read before
+    /// any of its statements run, and random bits are computed.
     #[must_use]
-    pub fn does_io(self) -> bool {
+    pub fn io(self) -> Option<Io> {
         match self {
-            UpdateBuiltin::DebugValue | UpdateBuiltin::DebugTable => false,
+            UpdateBuiltin::DebugValue
+            | UpdateBuiltin::DebugTable
+            | UpdateBuiltin::ReadTransactionStart
+            | UpdateBuiltin::RandomBits => None,
             UpdateBuiltin::LoadTextFile
             | UpdateBuiltin::LoadTextFileWithErrors
             | UpdateBuiltin::LoadCsv
-            | UpdateBuiltin::LoadCsvWithErrors
-            | UpdateBuiltin::SaveTextFile
-            | UpdateBuiltin::SaveTextFileWithErrors => true,
+            | UpdateBuiltin::LoadCsvWithErrors => Some(Io::ReadsFile),
+            UpdateBuiltin::SaveTextFile | UpdateBuiltin::SaveTextFileWithErrors => {
+                Some(Io::WritesFile)
+            }
+            UpdateBuiltin::ReadClock => Some(Io::ReadsClock),
         }
-    }
-
-    /// Whether it writes a file, rather than reading one.
-    #[must_use]
-    pub fn writes_a_file(self) -> bool {
-        matches!(
-            self,
-            UpdateBuiltin::SaveTextFile | UpdateBuiltin::SaveTextFileWithErrors
-        )
     }
 
     /// Whether it reads a CSV file, as `load_csv`, with its `columns`.
@@ -1163,7 +1219,7 @@ impl Library {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 27] = [
+    pub const ALL: [Builtin; 30] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -1191,6 +1247,9 @@ impl Builtin {
         Builtin::Update(UpdateBuiltin::LoadCsvWithErrors),
         Builtin::Update(UpdateBuiltin::SaveTextFile),
         Builtin::Update(UpdateBuiltin::SaveTextFileWithErrors),
+        Builtin::Update(UpdateBuiltin::ReadClock),
+        Builtin::Update(UpdateBuiltin::ReadTransactionStart),
+        Builtin::Update(UpdateBuiltin::RandomBits),
     ];
 
     #[must_use]
@@ -1207,6 +1266,9 @@ impl Builtin {
             Builtin::Update(
                 UpdateBuiltin::SaveTextFile | UpdateBuiltin::SaveTextFileWithErrors,
             ) => "save_text_file",
+            Builtin::Update(UpdateBuiltin::ReadClock) => "read_clock",
+            Builtin::Update(UpdateBuiltin::ReadTransactionStart) => "read_transaction_start",
+            Builtin::Update(UpdateBuiltin::RandomBits) => "random_bits",
             Builtin::ReadOnly(builtin) => builtin.name(),
         }
     }
@@ -1273,7 +1335,10 @@ impl Builtin {
                 UpdateBuiltin::LoadTextFile
                 | UpdateBuiltin::LoadTextFileWithErrors
                 | UpdateBuiltin::SaveTextFile
-                | UpdateBuiltin::SaveTextFileWithErrors,
+                | UpdateBuiltin::SaveTextFileWithErrors
+                | UpdateBuiltin::ReadClock
+                | UpdateBuiltin::ReadTransactionStart
+                | UpdateBuiltin::RandomBits,
             ) => Vec::new(),
             Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
                 of_kind("ordered", &[Requirement::Order])
@@ -1301,6 +1366,12 @@ impl Builtin {
                     mode: Mode::Out,
                 },
             )
+        };
+        // As `builtin` does, and an `out` parameter for the errors it gives.
+        let with_errors = |builtin: UpdateBuiltin| {
+            let mut params = Builtin::Update(builtin).params(library);
+            params.extend([out("errors", library.errors_type())]);
+            params
         };
         match self {
             Builtin::Update(UpdateBuiltin::DebugValue) => [constant("v", parameter(0))].into(),
@@ -1340,23 +1411,25 @@ impl Builtin {
                 out("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
             ]
             .into(),
-            Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors) => [
-                constant("path", Type::Scalar(Scalar::Text)),
-                out("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
-                out("errors", library.errors_type()),
+            Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors) => {
+                with_errors(UpdateBuiltin::LoadTextFile)
+            }
+            Builtin::Update(UpdateBuiltin::ReadClock | UpdateBuiltin::ReadTransactionStart) => [
+                out("seconds", Type::Scalar(Scalar::Integer)),
+                out("nanos", Type::Scalar(Scalar::Integer)),
             ]
             .into(),
+            Builtin::Update(UpdateBuiltin::RandomBits) => {
+                [out("bits", Type::Scalar(Scalar::Integer))].into()
+            }
             Builtin::Update(UpdateBuiltin::SaveTextFile) => [
                 constant("path", Type::Scalar(Scalar::Text)),
                 constant("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
             ]
             .into(),
-            Builtin::Update(UpdateBuiltin::SaveTextFileWithErrors) => [
-                constant("path", Type::Scalar(Scalar::Text)),
-                constant("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
-                out("errors", library.errors_type()),
-            ]
-            .into(),
+            Builtin::Update(UpdateBuiltin::SaveTextFileWithErrors) => {
+                with_errors(UpdateBuiltin::SaveTextFile)
+            }
             Builtin::Update(UpdateBuiltin::LoadCsv) => [
                 constant("path", Type::Scalar(Scalar::Text)),
                 constant("header", Type::Scalar(Scalar::Boolean)),
@@ -1364,14 +1437,9 @@ impl Builtin {
                 out("rows", Type::Array(Box::new(parameter(1)))),
             ]
             .into(),
-            Builtin::Update(UpdateBuiltin::LoadCsvWithErrors) => [
-                constant("path", Type::Scalar(Scalar::Text)),
-                constant("header", Type::Scalar(Scalar::Boolean)),
-                constant("columns", parameter(0)),
-                out("rows", Type::Array(Box::new(parameter(1)))),
-                out("errors", library.errors_type()),
-            ]
-            .into(),
+            Builtin::Update(UpdateBuiltin::LoadCsvWithErrors) => {
+                with_errors(UpdateBuiltin::LoadCsv)
+            }
             Builtin::ReadOnly(
                 ReadOnlyBuiltin::Min
                 | ReadOnlyBuiltin::Max
@@ -2017,6 +2085,18 @@ impl Block {
                 .collect(),
             locals: self.locals.clone(),
         }
+    }
+
+    /// Whether the block's statements, or those in the blocks within them, call
+    /// any of `operators`.
+    #[must_use]
+    pub fn calls_any_of(&self, operators: &BTreeSet<OperatorId>) -> bool {
+        let mut calls = false;
+        self.each_statement(&mut |statement| {
+            calls |=
+                matches!(statement, Statement::Call(call) if operators.contains(&call.operator));
+        });
+        calls
     }
 
     /// Call `f` with each of the block's statements, and those in the

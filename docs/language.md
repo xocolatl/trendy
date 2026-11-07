@@ -2445,6 +2445,8 @@ program can tell by its bits. Its interface, what a unit that uses it sees:
    A unit that has them uses this one, `uses { trendy.uuid };`. */
 interface
 
+uses { trendy.time };
+
 /* A UUID: its 16 bytes, or its text, as RFC 9562 writes it, lowercase, each byte
    two hexadecimal digits, with dashes after the 4th, 6th, 8th and 10th, as
    `"00112233-4455-6677-8899-aabbccddeeff"`. Ordered by its bytes. */
@@ -2465,19 +2467,24 @@ type uuid_v4 is uuid { constraint (bytes[7] and x'f0') = x'40' and (bytes[9] and
    RFC 9562's variant. Every UUID whose bytes do is one. */
 type uuid_v7 is uuid { constraint (bytes[7] and x'f0') = x'70' and (bytes[9] and x'c0') = x'80' };
 
-/* Give `uuid` a UUID. Nothing generates a random one until trendy has a source
-   of random numbers, so for now it is always the nil UUID, all zeros. */
-operator generate{out uuid: uuid};
-
-/* Give `v4` a version 4 UUID. Nothing generates a random one until trendy has a
-   source of random numbers, so for now only its version and variant bits are
-   set. */
+/* Give `v4` a new version 4 UUID: 122 random bits. A transaction's statements can
+   call it, as they are computed from what was read once, before anything else. Its
+   argument can be a `uuid` variable, as any `out` parameter's can be of a supertype. */
 operator generate{out v4: uuid_v4};
 
-/* Give `v7` a version 7 UUID. Nothing generates one from the time and random
-   numbers until trendy has a source of them, so for now only its version and
-   variant bits are set. */
+/* Give `v7` a new version 7 UUID, which sorts by when it was made: the time by the
+   system's clock, to the millisecond, and 74 random bits. It reads the clock, so a
+   transaction's statements give it the time, as the next says (A0066). */
 operator generate{out v7: uuid_v7};
+
+/* Give `v7` a new version 7 UUID for the instant `at`, on or after 1970-01-01 and
+   before the year 10889, as its 48 bits of milliseconds hold no other. In a
+   transaction, `at` is what `transaction_start` gives. */
+operator generate{
+    at: timestamp,
+    out v7: uuid_v7,
+    constraint at.date.days >= 0 and at.date.days < 3_257_812,
+};
 ```
 
 ```trendy
@@ -2491,9 +2498,9 @@ operator main{} [
     call debug_value{v: id.bytes[7]};
     call debug_value{v: id is uuid_v4};
     call debug_value{v: is_uuid_text{text: "6BA7B810"}};
-    var made := treat uuid{bytes: x"00000000_0000_7000_8000_000000000000"} as uuid_v7;
+    var made: uuid_v7;
     call generate{out v7: made};
-    call debug_value{v: made.text};
+    call debug_value{v: (made.bytes[7] and x'f0') = x'70'};
 ];
 ```
 
@@ -2504,17 +2511,26 @@ operator main{} [
 - **Its text is lowercase,** as RFC 9562 writes it, so that each UUID has one text,
   as a possible representation must: `uuid{text: …}` of uppercase digits, or
   anything else `is_uuid_text` says isn't one, fails (R0017).
-- **`generate` makes no random UUIDs yet,** as trendy has no source of random numbers:
-  `generate{out uuid}` gives the nil UUID, and `generate{out v4}` and `generate{out
-  v7}` a UUID of zeros but for its version and variant bits. They are update operators,
-  as anything that reads a source of random numbers or the time must be, so that a
-  program that calls them won't change when they do.
+- **Which version, the call says:** `var id: uuid; call generate{out v4: id};`, as an
+  `out` argument can be of a supertype of its parameter's type. `generate{out uuid}`,
+  which gave the nil UUID before trendy had random numbers, is fixed to `out v4`
+  (A0010).
+- **`generate` makes new UUIDs.** It is an update operator, as what gives a new value
+  each call isn't a function of its arguments (RM Prescription 3). Its bits are computed,
+  by ChaCha20 from what the system gives once, as the program first asks for any, so a
+  transaction's statements can call it: nothing reads the world again, and a rollback
+  doesn't take the bits back, so nothing undone is given again.
+- **A version 7 UUID also has the time,** to the millisecond, so that it sorts by when it
+  was made. `generate{out v7}` reads the clock, so a transaction's statements can't call
+  it (A0066), and `generate{at, out v7}` takes the instant, which in a transaction is
+  what `transaction_start` gives. Its 48 bits reach from 1970 to the year 10889, and any
+  other instant fails where the call is (R0024).
 
 ### Dates and times
 
 `trendy.time`, a unit that comes with the compiler, which a unit uses with
 `uses { trendy.time };`, has `date`, `time`, `timestamp`, `offset_timestamp` and
-`duration`. It is trendy, so nothing in it is built in. Its interface, what a unit that uses it sees:
+`duration`. It is trendy, but for reading the clock. Its interface, what a unit that uses it sees:
 
 ```
 /* Dates and times: a day of the calendar, a time of day, an instant, an instant with
@@ -2663,6 +2679,17 @@ operator has_day_after_months{d: date, months: integer}: boolean;
    that hasn't that day, as February hasn't a 31st, is a broken constraint: nothing
    says which other day was meant. */
 operator add_months{d: date, months: integer, constraint has_day_after_months{d, months}}: date;
+
+/* Give `at` the instant it is, by the system's clock, which can be set back, so a
+   later read can give an earlier instant. It reads the world, so a transaction's
+   statements can't call it, at any depth (A0066): they have `transaction_start`. */
+operator now{out at: timestamp};
+
+/* Give `at` the instant the outermost transaction running began: the same however
+   often it is read, in whatever is nested in it, and a new one if it is run again.
+   Every call of it runs in a transaction, so one that can run in none is an error
+   (A0082). It is when the transaction began, not when what it does takes effect. */
+operator transaction_start{out at: timestamp};
 ```
 
 ```trendy
@@ -2708,7 +2735,6 @@ operator main{} [
 - **No `+` between them yet.** Compute with a component and select the result,
   `date{days: d.days + 30}`, as the error on `d + 30` says (A0022), and use the
   operators below on instants, which `t - s`, `t + d` and `t - d` are fixed to (A0022).
-  Nothing reads the clock yet.
 - **Text isn't a date,** but `"2024-03-05"` where a `date` is expected is fixed to
   `date{year: 2024, month: 3, day: 5}`, and so are ISO 8601's forms of the others
   (A0004), a `duration`'s `"PT1H30M"` among them. `datetime` and `instant` are fixed to
@@ -2742,7 +2768,25 @@ const lands := offset_timestamp{
     utc_offset: 10_800,
 };
 
+var bookings: relation { reference: text, at: timestamp } key { reference };
+
+operator book{reference: text} [
+    var at: timestamp;
+    call transaction_start{out at};
+    insert bookings relation { { reference, at } };
+];
+
 operator main{} [
+    var checked: timestamp;
+    call now{out at: checked};
+    call debug_value{v: checked.date.year >= 2024};
+
+    transaction [
+        call book{reference: "NBO-1"};
+        call book{reference: "NBO-2"};
+    ];
+    call debug_value{v: count{r: bookings{at}}};
+
     const flight := elapsed{from: leaves.timestamp, to: lands.timestamp};
     call debug_value{v: flight = minutes{n: 265}};
     call debug_value{v: after{t: leaves.timestamp, by: flight} = lands.timestamp};
@@ -2764,6 +2808,19 @@ operator main{} [
   `timestamp` reaches 27 billion, which is why it has two components.
 - **`after{t, by}` and `before{t, by}`** move an instant by a duration, either way, and
   fail past the end of a `date`'s range (R0017).
+- **`now{out at}` reads the system's clock.** It is an update operator, as what the
+  clock shows is no function of anything (RM Prescription 3), so a read-only operator
+  is given what it reads as an argument. The clock can be set back, so a later read can
+  give an earlier instant. It reads the world, so a transaction's statements can't call
+  it, at any depth (A0066).
+- **`transaction_start{out at}` gives the instant the outermost transaction running
+  began:** the same however often it is read, and in whatever is nested in it. A
+  transaction has it from before any of its statements run, so reading it reads nothing,
+  and a transaction run again has a new one. It is when the transaction began, not when
+  what it does takes effect. Every call of it runs in a transaction, so a call in `main`
+  that isn't in one, and that leads to it through calls that aren't either, is an error
+  (A0082), whose fix for a call of it itself is `now`. An operator that begins a
+  transaction of its own can be called from anywhere.
 - **A month has no fixed length, so it isn't a `duration`,** as it would be equal to
   some number of seconds, and adding the two would differ (RM Prescription 8).
   `months{n: 1}` is an error that says so (A0015).
@@ -6843,12 +6900,14 @@ Here Accra gets its 15 sacks before Tashkent turns out to have only 10,
 so the transaction undoes the transfer, Accra's sacks too, and `found`
 holds the error: `granaries` is as it was.
 
-- **Code never knows whether it is in a transaction.** An operator
+- **A failure doesn't depend on what encloses it.** An operator
   fails, and whatever encloses it decides what that means, so no
   operator takes a parameter for its errors (TTM, chapter 5, rules out
   "a feedback argument on each and every operator invocation").
 - **Transactions nest** (TTM OO Prescription 5), with the same syntax at
-  every depth: an inner one's failure undoes its own block, and, without
+  every depth, so that code can begin one "without having to know whether
+  that transaction will be part of some outer transaction": an inner one's
+  failure undoes its own block, and, without
   `collecting`, goes on to the one around it, which undoes its own; with,
   the one around it goes on.
 - **A transaction undoes everything its statements assigned:** the
@@ -6894,7 +6953,10 @@ holds the error: `granaries` is as it was.
   the transaction, and what it gives passed to the statements in it, and
   what a transaction decides to write is kept in a variable it assigns,
   which its rollback undoes too, and written after it. `debug_value` and
-  `debug_table` write for the programmer, so they are exempt.
+  `debug_table` write for the programmer, so they are exempt. The clock is
+  read before it too, or the transaction's statements take the instant it began,
+  `transaction_start`, which it has before any of them run (A0082), and random
+  bits are computed, so `generate` is no read.
 - **A transaction is a statement of an operator's body,** read-only too,
   where it undoes what it assigned of its local variables, and takes a
   failure of what it computes, and of a value block, where it does the
@@ -7231,6 +7293,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `t - s`, of two instants | `elapsed{from: s, to: t}` |
 | `t + d`, `t - d`, of an instant and a duration | `after{t, by: d}`, `before{t, by: d}` |
 | `d + interval '1 month'` | `add_months{d, months: 1}`, which fails if the month hasn't that day |
+| `now()`, `CURRENT_TIMESTAMP`, `Date.now()` | `var at: timestamp; call now{out at};` |
+| `now()` in a transaction, `transaction_timestamp()` | `var at: timestamp; call transaction_start{out at};` |
 | `'2024-03-05'::date`, `DATE '2024-03-05'` | `date{year: 2024, month: 3, day: 5}` |
 | `d + 30`, of a date | `date{days: d.days + 30}` |
 | `X'DEADBEEF'`, `'\xdeadbeef'::bytea` | `x"deadbeef"` |

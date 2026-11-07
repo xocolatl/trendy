@@ -7179,6 +7179,212 @@ pub extern "C" fn trendy_rt_too_deep() -> bool {
 pub static SITE: core::sync::atomic::AtomicPtr<Site> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
+/// C's `struct timespec`, on the 64-bit systems the compiler targets.
+#[cfg(not(test))]
+#[repr(C)]
+struct Timespec {
+    seconds: i64,
+    nanos: i64,
+}
+
+/// C's `CLOCK_REALTIME`, the same on the systems the compiler targets.
+#[cfg(not(test))]
+const CLOCK_REALTIME: i32 = 0;
+
+/// The seconds since 1970-01-01 in UTC the system's clock shows, rounded down, and
+/// the nanoseconds past them.
+#[cfg(not(test))]
+fn clock() -> (i64, i64) {
+    let mut now = Timespec {
+        seconds: 0,
+        nanos: 0,
+    };
+    // SAFETY: `now` is where it writes the time.
+    if unsafe { clock_gettime(CLOCK_REALTIME, &raw mut now) } != 0 {
+        internal_error("the system's clock can't be read");
+    }
+    (now.seconds, now.nanos)
+}
+
+/// Store at `seconds` the seconds the system's clock shows, and at `nanos` the
+/// nanoseconds past them, as `clock` says.
+///
+/// # Safety
+///
+/// Each must point to room for an integer.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_read_clock(seconds: *mut i64, nanos: *mut i64) {
+    let (shown, past) = clock();
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        seconds.write_unaligned(shown);
+        nanos.write_unaligned(past);
+    }
+}
+
+/// How many transactions that can read when they began are running, nested in one
+/// another.
+#[cfg(not(test))]
+static TRANSACTIONS_RUNNING: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// What the clock showed as the outermost of them began, as `clock` says.
+#[cfg(not(test))]
+static TRANSACTION_START: [core::sync::atomic::AtomicI64; 2] = [
+    core::sync::atomic::AtomicI64::new(0),
+    core::sync::atomic::AtomicI64::new(0),
+];
+
+/// A transaction that can read when it began begins: the outermost reads the clock.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_transaction_begins() {
+    use core::sync::atomic::Ordering::Relaxed;
+    if TRANSACTIONS_RUNNING.fetch_add(1, Relaxed) == 0 {
+        let (seconds, nanos) = clock();
+        TRANSACTION_START[0].store(seconds, Relaxed);
+        TRANSACTION_START[1].store(nanos, Relaxed);
+    }
+}
+
+/// One that called [`trendy_rt_transaction_begins`] ends, however it does.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_transaction_ends() {
+    use core::sync::atomic::Ordering::Relaxed;
+    TRANSACTIONS_RUNNING.fetch_sub(1, Relaxed);
+}
+
+/// Store at `seconds` and `nanos` what the clock showed as the outermost transaction
+/// running began, as [`trendy_rt_read_clock`] does. Sema checks that one is running.
+///
+/// # Safety
+///
+/// Each must point to room for an integer.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_read_transaction_start(seconds: *mut i64, nanos: *mut i64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if TRANSACTIONS_RUNNING.load(Relaxed) == 0 {
+        internal_error("a transaction's start is read with none running");
+    }
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        seconds.write_unaligned(TRANSACTION_START[0].load(Relaxed));
+        nanos.write_unaligned(TRANSACTION_START[1].load(Relaxed));
+    }
+}
+
+/// One round of `ChaCha20`'s on four words of its state (RFC 8439, 2.1).
+fn chacha_quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+    state[a] = state[a].wrapping_add(state[b]);
+    state[d] = (state[d] ^ state[a]).rotate_left(16);
+    state[c] = state[c].wrapping_add(state[d]);
+    state[b] = (state[b] ^ state[c]).rotate_left(12);
+    state[a] = state[a].wrapping_add(state[b]);
+    state[d] = (state[d] ^ state[a]).rotate_left(8);
+    state[c] = state[c].wrapping_add(state[d]);
+    state[b] = (state[b] ^ state[c]).rotate_left(7);
+}
+
+/// The block `ChaCha20` makes of `state` (RFC 8439, 2.3).
+fn chacha_block(state: &[u32; 16]) -> [u32; 16] {
+    let mut working = *state;
+    for _ in 0..10 {
+        chacha_quarter_round(&mut working, 0, 4, 8, 12);
+        chacha_quarter_round(&mut working, 1, 5, 9, 13);
+        chacha_quarter_round(&mut working, 2, 6, 10, 14);
+        chacha_quarter_round(&mut working, 3, 7, 11, 15);
+        chacha_quarter_round(&mut working, 0, 5, 10, 15);
+        chacha_quarter_round(&mut working, 1, 6, 11, 12);
+        chacha_quarter_round(&mut working, 2, 7, 8, 13);
+        chacha_quarter_round(&mut working, 3, 4, 9, 14);
+    }
+    for (word, start) in working.iter_mut().zip(state) {
+        *word = word.wrapping_add(*start);
+    }
+    working
+}
+
+/// What computes random bits: `ChaCha20`'s state, with its key and nonce from the
+/// system, read once, and the block it last made, of which `used` words are gone.
+/// Nothing undoes it, as a rollback can't be told from having used the bits, and so
+/// nothing is given twice.
+#[cfg(not(test))]
+struct RandomState {
+    seeded: bool,
+    state: [u32; 16],
+    block: [u32; 16],
+    used: usize,
+}
+
+/// [`RandomState`], which only the thread the program runs on uses.
+#[cfg(not(test))]
+struct SharedRandom(core::cell::UnsafeCell<RandomState>);
+
+// SAFETY: the program runs on one thread.
+#[cfg(not(test))]
+unsafe impl Sync for SharedRandom {}
+
+#[cfg(not(test))]
+static RANDOM: SharedRandom = SharedRandom(core::cell::UnsafeCell::new(RandomState {
+    seeded: false,
+    state: [0; 16],
+    block: [0; 16],
+    used: 16,
+}));
+
+/// The state `ChaCha20` starts in, its key and nonce from the system: `ChaCha20`'s own
+/// constant, then those, around a counter of two words, from 0.
+#[cfg(not(test))]
+fn seeded_chacha() -> [u32; 16] {
+    let mut seed = [0_u8; 40];
+    // SAFETY: `seed` is where it writes as many bytes as this says.
+    if unsafe { getentropy(seed.as_mut_ptr(), seed.len()) } != 0 {
+        internal_error("the system has no random bytes to start from");
+    }
+    let mut state = [0_u32; 16];
+    state[..4].copy_from_slice(&[0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
+    let words = seed
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
+    for (at, word) in (4..12).chain(14..16).zip(words) {
+        state[at] = word;
+    }
+    state
+}
+
+/// Store at `bits` the next 64 random bits, as an integer.
+///
+/// # Safety
+///
+/// It must point to room for an integer.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_random_bits(bits: *mut i64) {
+    // SAFETY: the program runs on one thread, and this is the only reference to it.
+    let random = unsafe { &mut *RANDOM.0.get() };
+    if !random.seeded {
+        random.state = seeded_chacha();
+        random.seeded = true;
+    }
+    if random.used + 2 > random.block.len() {
+        random.block = chacha_block(&random.state);
+        random.used = 0;
+        let (counter, carried) = random.state[12].overflowing_add(1);
+        random.state[12] = counter;
+        if carried {
+            random.state[13] = random.state[13].wrapping_add(1);
+        }
+    }
+    let high = u64::from(random.block[random.used]);
+    let low = u64::from(random.block[random.used + 1]);
+    random.used += 2;
+    // SAFETY: guaranteed by the caller.
+    unsafe { bits.write_unaligned(i64::from_ne_bytes(((high << 32) | low).to_ne_bytes())) };
+}
+
 /// Stop the program because the compiler and the runtime disagree, a
 /// compiler bug, which nothing should catch, writing `message`.
 #[cfg(not(test))]
@@ -10602,6 +10808,10 @@ unsafe extern "C" {
     ) -> i32;
     #[cfg(not(test))]
     fn pthread_join(thread: usize, result: *mut *mut core::ffi::c_void) -> i32;
+    #[cfg(not(test))]
+    fn clock_gettime(clock: i32, time: *mut Timespec) -> i32;
+    #[cfg(not(test))]
+    fn getentropy(buf: *mut u8, count: usize) -> i32;
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
     #[cfg(not(test))]
     fn open(path: *const u8, flags: i32, ...) -> i32;
@@ -10639,6 +10849,50 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 8439, 2.3.2's test vector.
+    #[test]
+    fn chacha_makes_the_block_its_rfc_says() {
+        let state = [
+            0x6170_7865,
+            0x3320_646e,
+            0x7962_2d32,
+            0x6b20_6574,
+            0x0302_0100,
+            0x0706_0504,
+            0x0b0a_0908,
+            0x0f0e_0d0c,
+            0x1312_1110,
+            0x1716_1514,
+            0x1b1a_1918,
+            0x1f1e_1d1c,
+            0x0000_0001,
+            0x0900_0000,
+            0x4a00_0000,
+            0x0000_0000,
+        ];
+        assert_eq!(
+            chacha_block(&state),
+            [
+                0xe4e7_f110,
+                0x1559_3bd1,
+                0x1fdd_0f50,
+                0xc471_20a3,
+                0xc7f4_d1c7,
+                0x0368_c033,
+                0x9aaa_2204,
+                0x4e6c_d4c3,
+                0x4664_82d2,
+                0x09aa_9f07,
+                0x05d7_c214,
+                0xa202_8bd9,
+                0xd19c_12b5,
+                0xb94e_16de,
+                0xe883_d0cb,
+                0x4e3c_50a2,
+            ]
+        );
+    }
 
     #[test]
     fn every_ascii_character_shares_bytes_never_released() {

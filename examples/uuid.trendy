@@ -26,13 +26,15 @@ operator main{} [
     call debug_value{v: timed};
     call debug_value{v: namespace < random};
     call debug_value{v: is_uuid_text{text: "not a UUID"}};
-    var nil := namespace;
-    call generate{out uuid: nil};
-    call debug_value{v: nil.text};
-    var four := treat random as uuid_v4;
+
+    /* New ones, with the bits of their versions, different each time. Which version is
+       the call's to say, whatever the variable is of. */
+    var any: uuid;
+    call generate{out v4: any};
+    var four: uuid_v4;
     call generate{out v4: four};
-    call debug_value{v: four.text};
-    var seven := treat timed as uuid_v7;
+    call debug_value{v: any <> four};
+    var seven: uuid_v7;
     call generate{out v7: seven};
-    call debug_value{v: seven.text};
+    call debug_value{v: timed < seven};
 ];

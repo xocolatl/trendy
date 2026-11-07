@@ -12,6 +12,7 @@ use trendy_lir as lir;
 pub fn lower(program: &hir::Program) -> lir::Program {
     let mut cx = Lowering::new(&program.files, &program.subtypes, integer_bounds(program));
     cx.recursion = program.recursion();
+    cx.reading_transaction_start = program.reading_transaction_start();
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
@@ -742,6 +743,9 @@ fn type_text(ty: &hir::Type) -> String {
 
 /// The program-wide part of lowering: the data objects, and the functions.
 struct Lowering {
+    /// The operators a call of which reads when a transaction began, so that a
+    /// transaction that calls one has to read the clock as it begins.
+    reading_transaction_start: BTreeSet<hir::OperatorId>,
     /// How values are laid out.
     families: Families,
     data: Vec<lir::Data>,
@@ -791,6 +795,7 @@ impl Lowering {
         bounds: HashMap<hir::OperatorId, IntegerBounds>,
     ) -> Self {
         Lowering {
+            reading_transaction_start: BTreeSet::new(),
             families: Families::new(subtypes, bounds),
             data: Vec::new(),
             descriptors: HashMap::new(),
@@ -2862,9 +2867,21 @@ impl<'a> FunctionBuilder<'a> {
         for kept in &kept {
             kept.keep(self, cx);
         }
+        // What it calls reads when it began, which its statements can't read themselves.
+        let clocked = body.calls_any_of(&cx.reading_transaction_start);
+        let clock = |this: &mut Self, function| {
+            if clocked {
+                this.insts.push(lir::Inst::CallRuntime {
+                    function,
+                    args: Vec::new(),
+                });
+            }
+        };
+        clock(self, lir::RuntimeFn::TransactionBegins);
         let (rollback, after) = (self.new_block(), self.new_block());
         let lets = self.lets.len();
         self.catching(rollback, |this| this.block(body, cx));
+        clock(self, lir::RuntimeFn::TransactionEnds);
         for kept in &kept {
             kept.give_up(self, cx);
         }
@@ -2874,6 +2891,7 @@ impl<'a> FunctionBuilder<'a> {
         }
         self.end_block(lir::Terminator::Jump(after), rollback);
 
+        clock(self, lir::RuntimeFn::TransactionEnds);
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::EndSince,
             args: vec![outer],
@@ -2920,6 +2938,17 @@ impl<'a> FunctionBuilder<'a> {
         self.end_block(lir::Terminator::Jump(after), raise);
         self.collect(&collection, target, own, None, cx);
         self.end_block(lir::Terminator::Raise, after);
+    }
+
+    /// What `function` reads of the clock, given to the `out` parameters of `call`.
+    fn clock_read(&mut self, function: lir::RuntimeFn, call: &hir::Call, cx: &mut Lowering) {
+        let (seconds, nanos) = (self.slot(lir::Layout::I64), self.slot(lir::Layout::I64));
+        self.insts.push(lir::Inst::CallRuntime {
+            function,
+            args: vec![seconds.clone(), nanos.clone()],
+        });
+        self.store(&call.updated["seconds"], seconds, cx);
+        self.store(&call.updated["nanos"], nanos, cx);
     }
 
     /// Add `own`, a transaction's block's warnings, which it holds, and
@@ -3387,6 +3416,18 @@ impl<'a> FunctionBuilder<'a> {
                 let (lines, _) = self.loaded(function, call, &ty, given, cx);
                 self.store(target, lines, cx);
                 self.store(&call.updated["errors"], errors.value, cx);
+            }
+            hir::UpdateBuiltin::ReadClock => self.clock_read(lir::RuntimeFn::ReadClock, call, cx),
+            hir::UpdateBuiltin::ReadTransactionStart => {
+                self.clock_read(lir::RuntimeFn::ReadTransactionStart, call, cx);
+            }
+            hir::UpdateBuiltin::RandomBits => {
+                let bits = self.slot(lir::Layout::I64);
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::RandomBits,
+                    args: vec![bits.clone()],
+                });
+                self.store(&call.updated["bits"], bits, cx);
             }
             hir::UpdateBuiltin::SaveTextFile => {
                 let args = vec![
