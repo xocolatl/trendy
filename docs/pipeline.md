@@ -2172,6 +2172,14 @@ the way to it, before what comes after that runs. The slots start null as the
 function is entered, and its failure exit, and a transaction's rollback
 of its statements, release them too.
 
+A block's local variables last no longer than that either: the statement that
+last mentions one gives up what it holds, as nothing after it can read it
+(`FunctionBuilder::statements_of`, `last_mentioned`), a loop in the block being
+one statement of it, so what it mentions lasts as long as the loop does, and
+what the block leads to reading it keeps it to the block's end. What a
+statement assigns counts as mentioning it, as a transaction reads what it may
+have to give back.
+
 An `if` statement has no scope of its own: its condition is computed in
 one, which ends before either block runs, and copied out first, and each
 statement in its blocks has its own, as any statement does. Then it

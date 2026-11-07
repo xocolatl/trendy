@@ -1797,6 +1797,20 @@ impl Statement {
         }
     }
 
+    /// Whether the statement, or a block within it, reads the local variable
+    /// `id`, or assigns it.
+    #[must_use]
+    pub fn mentions_local(&self, id: LocalId) -> bool {
+        let target = Target::Local(id);
+        let mut mentions = self.assigns().contains(&&target);
+        self.for_each_expr(&mut |expr| mentions |= expr.reads_local(id));
+        mentions
+            || self
+                .blocks()
+                .iter()
+                .any(|block| block.times_assigned(id) > 0)
+    }
+
     /// The statement with each block in it, not those within them, replaced
     /// by what `f` makes of it.
     #[must_use]
@@ -1954,7 +1968,8 @@ pub struct Block {
     /// Each statement, with where it is.
     pub statements: Vec<(Site, Statement)>,
     /// The local variables declared in it, not in a block within it: their
-    /// memory is released at its end.
+    /// memory is released after the last statement that mentions them, or at its
+    /// end, if what it leads to reads them.
     pub locals: Vec<LocalId>,
 }
 

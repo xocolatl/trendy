@@ -6298,7 +6298,10 @@ fn explain() {
 }
 
 /// The most memory the executable at `path` held as it ran, in bytes, and that
-/// it ran without failing.
+/// it ran without failing. On macOS, the allocator keeps large blocks a program has
+/// freed, for the next to use, and they count as the process's, which here would be
+/// much of the figure and vary from run to run: without that, this is what the program
+/// holds.
 fn peak_memory(path: &Path) -> u64 {
     let (flag, label, unit) = if cfg!(target_os = "macos") {
         ("-l", "maximum resident set size", 1)
@@ -6308,6 +6311,7 @@ fn peak_memory(path: &Path) -> u64 {
     let run = Command::new("/usr/bin/time")
         .arg(flag)
         .arg(path)
+        .env("MallocLargeCache", "0")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&run.stderr);
@@ -8990,6 +8994,175 @@ operator main{} [
     let (code, stderr) = run_source("closure_named_join", source);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stderr.trim(), "8195");
+}
+
+/// A local variable of a body with statements lasts no longer than the last statement that
+/// mentions it, as a binding does: of six, each read only by the next, at most two are held,
+/// of 16 and 96 MB at the end, where all of them come to 336 MB.
+#[test]
+fn a_local_variable_lasts_no_longer_than_its_last_use() {
+    let chain =
+        "const a := series{from: 1, to: 2000000} extend { k := value * one } remove {value};
+    const b := a extend { w1 := k + 1 };
+    const c := b extend { w2 := k + 2 };
+    const d := c extend { w3 := k + 3 };
+    const e := d extend { w4 := k + 4 };
+    const f := e extend { w5 := k + 5 };";
+    for (name, source) in [
+        (
+            "in_main",
+            format!(
+                "operator main{{}} [
+    var one := 1;
+    {chain}
+    call debug_value{{v: count{{r: f}}}};
+];"
+            ),
+        ),
+        (
+            "in_a_body_with_statements",
+            format!(
+                "operator g{{one: integer}}: integer [
+    var ran := 0;
+    while ran < 1 loop [
+        ran := ran + 1;
+    ];
+    {chain}
+    count{{r: f}}
+];
+
+operator main{{}} [
+    var one := 1;
+    call debug_value{{v: g{{one}}}};
+];"
+            ),
+        ),
+        (
+            "in_an_update_operator",
+            format!(
+                "operator g{{one: integer, out n: integer}} [
+    {chain}
+    n := count{{r: f}};
+    call debug_value{{v: n}};
+];
+
+operator main{{}} [
+    var one := 1;
+    var n := 0;
+    call g{{one, out n}};
+];"
+            ),
+        ),
+    ] {
+        let peak = peak_memory_of(&format!("local_last_use_{name}"), &source, 0);
+        assert!(peak < 230 << 20, "{name}: {peak} bytes");
+    }
+}
+
+/// What a local variable holds lasts as long as anything can read it: a later statement, a
+/// loop that goes round again, a branch, what a body ends with, or a transaction that can
+/// give it back. Each value here points to something, so that one given up early would show.
+#[test]
+fn a_local_variable_lasts_as_long_as_anything_reads_it() {
+    let source = r#"operator ends_with_it{p: relation { a: integer }}: text [
+    var ran := 0;
+    while ran < 1 loop [
+        ran := ran + 1;
+    ];
+    const held := to_text{from: count{r: p}} || " held";
+    const unread := to_text{from: count{r: p}} || " unread";
+    var seen := unread;
+    seen := held;
+    seen
+];
+
+operator of_a_tuple{}: text [
+    var ran := 0;
+    while ran < 1 loop [
+        ran := ran + 1;
+    ];
+    const t := tuple { a: to_text{from: ran} || " in a tuple", b: 2 };
+    const a := t.a;
+    const later := a || " later";
+    later
+];
+
+operator gives{out said: text} [
+    const made := "made " || to_text{from: 1 + 1};
+    said := made;
+];
+
+operator changes{var v: relation { a: integer }} [
+    const was := v;
+    v := v where a > 2;
+    call debug_value{v: count{r: was}};
+];
+
+operator main{} [
+    const p := series{from: 1, to: 5} rename {value as a};
+    const in_loop := to_text{from: count{r: p}} || " in a loop";
+    const in_branch := to_text{from: count{r: p}} || " in a branch";
+    const for_array := array [to_text{from: 1 + 0} || " of", to_text{from: 1 + 1} || " of"];
+    const after := to_text{from: 7 * 6} || " after";
+    var i := 0;
+    while i < 3 loop [
+        const each := in_loop || " " || to_text{from: i};
+        call debug_value{v: each};
+        i := i + 1;
+    ];
+    if count{r: p} > 1 then [
+        call debug_value{v: in_branch};
+    ] else [
+        call debug_value{v: "not " || in_branch};
+    ];
+    for element in for_array loop [
+        call debug_value{v: element};
+    ];
+    call debug_value{v: ends_with_it{p}};
+    call debug_value{v: of_a_tuple{}};
+    var said := "";
+    call gives{out said};
+    call debug_value{v: said};
+    var v := p;
+    call changes{var v};
+    call debug_value{v: count{r: v}};
+    var kept := to_text{from: 1 + 1} || " kept";
+    var found: relation transaction_collection;
+    transaction collecting found [
+        kept := to_text{from: 1 + 2} || " changed";
+        const inside := kept || " inside";
+        call debug_value{v: inside};
+        fail failure{message: "undone"};
+    ];
+    call debug_value{v: kept};
+    call debug_value{v: count{r: found}};
+    call debug_value{v: after};
+];
+"#;
+    let (code, stderr) = run_source("local_last_use_reads", source);
+    assert_eq!(code, 0, "{stderr}");
+    let written: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        written,
+        [
+            r#""5 in a loop 0""#,
+            r#""5 in a loop 1""#,
+            r#""5 in a loop 2""#,
+            r#""5 in a branch""#,
+            r#""1 of""#,
+            r#""2 of""#,
+            r#""5 held""#,
+            r#""1 in a tuple later""#,
+            r#""made 2""#,
+            "5",
+            "3",
+            r#""3 changed inside""#,
+            r#""2 kept""#,
+            "1",
+            r#""42 after""#,
+        ],
+        "{stderr}"
+    );
 }
 
 /// What `save_text_file` writes is what `load_text_file` reads back, line for line, each

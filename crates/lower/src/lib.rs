@@ -1828,7 +1828,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Run(block, value) => {
                 self.note_loose_locals(block, Some(value));
-                self.running(block, &result, ty, cx, |this, cx| {
+                self.running(block, value, &result, ty, cx, |this, cx| {
                     this.returned(value, ty, cx);
                 });
             }
@@ -1945,9 +1945,11 @@ impl<'a> FunctionBuilder<'a> {
     fn tail_block(&mut self, block: &hir::Block, cx: &mut Lowering) {
         self.note_loose_locals(block, None);
         if let Some(((site, last), statements)) = block.statements.split_last() {
-            for (site, statement) in statements {
+            let last_mentioned = last_mentioned(block, None);
+            for (at, (site, statement)) in statements.iter().enumerate() {
                 self.at(Some(*site), cx);
                 self.statement(statement, cx);
+                self.release_locals_last_mentioned_at(at, &last_mentioned, cx);
             }
             self.at(Some(*site), cx);
             match last {
@@ -1970,34 +1972,40 @@ impl<'a> FunctionBuilder<'a> {
     /// again, has none to give up.
     fn block(&mut self, block: &hir::Block, cx: &mut Lowering) {
         self.note_loose_locals(block, None);
-        self.statements_of(block, cx);
+        self.statements_of(block, None, cx);
         self.release_locals_of(block, cx);
     }
 
-    /// The statements of `block`.
-    fn statements_of(&mut self, block: &hir::Block, cx: &mut Lowering) {
-        for (site, statement) in &block.statements {
+    /// The statements of `block`, each followed by the release of the references held by
+    /// the local variables that nothing after it mentions, in the block or in `end`, what
+    /// is computed from them when it has run, so that a relation lasts no longer than its
+    /// last use, as a binding's does (see [`FunctionBuilder::let_chain`]).
+    fn statements_of(&mut self, block: &hir::Block, end: Option<&hir::Expr>, cx: &mut Lowering) {
+        let last_mentioned = last_mentioned(block, end);
+        for (at, (site, statement)) in block.statements.iter().enumerate() {
             self.at(Some(*site), cx);
             self.statement(statement, cx);
+            self.release_locals_last_mentioned_at(at, &last_mentioned, cx);
+        }
+    }
+
+    /// The release of the references held by the local variables of `last_mentioned` that
+    /// the statement at `at` is the last to mention.
+    fn release_locals_last_mentioned_at(
+        &mut self,
+        at: usize,
+        last_mentioned: &[(hir::LocalId, usize)],
+        cx: &mut Lowering,
+    ) {
+        for (id, _) in last_mentioned.iter().filter(|(_, last)| *last == at) {
+            self.release_local(*id, cx);
         }
     }
 
     /// The release of the references `block`'s local variables hold.
     fn release_locals_of(&mut self, block: &hir::Block, cx: &mut Lowering) {
         for id in &block.locals {
-            let place = self.local_places[id.0]
-                .as_ref()
-                .expect("a block's local variables are placed first");
-            if place.holds {
-                let descriptor = cx.descriptor(&self.locals[id.0].ty);
-                self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::Release,
-                    args: vec![
-                        place.value.clone(),
-                        lir::Place::whole(lir::Base::Data(descriptor)),
-                    ],
-                });
-            }
+            self.release_local(*id, cx);
         }
     }
 
@@ -2069,7 +2077,7 @@ impl<'a> FunctionBuilder<'a> {
         self.note_loose_locals(block, Some(value));
         let ty = self.type_of(value);
         let result = self.slot(cx.layout(&ty));
-        self.running(block, &result, &ty, cx, |this, cx| {
+        self.running(block, value, &result, &ty, cx, |this, cx| {
             let src = this.place(value, cx);
             this.insts.push(lir::Inst::Copy {
                 dst: result.clone(),
@@ -2080,11 +2088,13 @@ impl<'a> FunctionBuilder<'a> {
         result
     }
 
-    /// `block`'s statements then what `value` adds, which stores the value at
-    /// `result`, of the type `ty`, as [`FunctionBuilder::run`] says.
+    /// `block`'s statements then what `value` adds, which stores the value of
+    /// `end`, what they lead to, at `result`, of the type `ty`, as
+    /// [`FunctionBuilder::run`] says.
     fn running(
         &mut self,
         block: &hir::Block,
+        end: &hir::Expr,
         result: &lir::Place,
         ty: &hir::Type,
         cx: &mut Lowering,
@@ -2117,7 +2127,7 @@ impl<'a> FunctionBuilder<'a> {
         }
         let (outer_scope, outer_site) = (self.scope.take(), self.site);
         self.nested_scope(cx, |this, cx| {
-            this.statements_of(block, cx);
+            this.statements_of(block, Some(end), cx);
             value(this, cx);
             this.scoped |= cx.points(ty);
             vec![(result.clone(), ty.clone())]
@@ -8438,6 +8448,24 @@ fn arcs_of_closure(mut expr: &hir::Expr) -> Option<&hir::Expr> {
         hir::Expr::Tclose(arcs) => Some(arcs),
         _ => None,
     }
+}
+
+/// Each local variable of `block` that the block holds to no later than one of its
+/// statements, with where that is: the last that mentions it, unless `end`, what is computed
+/// from them when they have run, reads it too. A statement in a loop in the block runs again,
+/// but is one statement of it, so what it mentions lasts as long as the loop does.
+fn last_mentioned(block: &hir::Block, end: Option<&hir::Expr>) -> Vec<(hir::LocalId, usize)> {
+    block
+        .locals
+        .iter()
+        .filter(|id| end.is_none_or(|end| !end.reads_local(**id)))
+        .filter_map(|id| {
+            let mentions =
+                |(_, statement): &(hir::Site, hir::Statement)| statement.mentions_local(*id);
+            let last = block.statements.iter().rposition(mentions)?;
+            Some((*id, last))
+        })
+        .collect()
 }
 
 /// Whether removing `names` from the relation `view` reads can't make two of its tuples
