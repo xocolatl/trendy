@@ -158,6 +158,7 @@ impl Sites {
                     self.expr(value, site);
                 }
                 hir::Statement::Transaction(_, body) => self.block(body, site),
+                hir::Statement::Declare(_) => {}
             }
         }
     }

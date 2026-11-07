@@ -373,16 +373,37 @@ pub(crate) fn declarations(
 
 /// The local variable `decl` declares in the body of an operator with the
 /// type parameters `types`, or in a value block, whose names `names`
-/// resolves, and its initial value: the one given, or else its type's
-/// default, which a type parameter has none of, nor a tuple with one. It
-/// is checked as a program variable's declaration is, but with a value
-/// known only when running.
+/// resolves, and its initial value, as [`assignable`] says, where no statement
+/// could assign one later: a type with no default is an error.
 pub(crate) fn local(
     decl: &VarDecl,
     types: &[hir::TypeParameter],
     names: &mut dyn Names,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(hir::Local, hir::Expr)> {
+    let (local, value) = assignable(decl, types, names, errors)?;
+    if let Some(value) = value {
+        return Some((local, value));
+    }
+    let type_expr = decl.type_expr()?;
+    let name = decl.name()?.ident()?;
+    errors.push(errors::no_default_value(name.text(), &local.ty, &type_expr));
+    None
+}
+
+/// The local variable `decl` declares in the body of an operator with the
+/// type parameters `types`, or in a value block, whose names `names`
+/// resolves, and its initial value: the one given, or else its type's
+/// default, or else none, as a type parameter has no default, nor a tuple with
+/// one, for a statement to assign it before anything reads it. It is checked as
+/// a program variable's declaration is, but with a value known only when
+/// running.
+pub(crate) fn assignable(
+    decl: &VarDecl,
+    types: &[hir::TypeParameter],
+    names: &mut dyn Names,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<(hir::Local, Option<hir::Expr>)> {
     let ident = decl.name()?.ident()?;
     let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
     let declared = decl.type_expr().map(|t| {
@@ -402,17 +423,14 @@ pub(crate) fn local(
             errors.push(errors::untyped_variable(name, span));
             return None;
         }
-        (Some((ty, type_expr)), None) => {
+        (Some((ty, _)), None) => {
             let ty = ty?;
-            let Some(default) = ty.default_value() else {
-                errors.push(errors::no_default_value(name, &ty, &type_expr));
-                return None;
-            };
-            (ty, hir::Expr::Constant(default))
+            let default = ty.default_value().map(hir::Expr::Constant);
+            (ty, default)
         }
         (None, Some(written)) => {
             let value = checker.expr(&written, None, errors)?;
-            (checker.ty(&value), value)
+            (checker.ty(&value), Some(value))
         }
         (Some((None, _)), Some(written)) => {
             // The type is invalid, but the value can still have errors of
@@ -426,11 +444,11 @@ pub(crate) fn local(
                 origin: Origin::Type(type_expr),
             };
             let value = checker.expr(&written, Some(&expected), errors)?;
-            (ty, value)
+            (ty, Some(value))
         }
     };
     // A relation known when compiling is checked against the keys now.
-    let known = crate::ops::known_value(&value);
+    let known = value.as_ref().and_then(crate::ops::known_value);
     let keys = keys::keys(decl, name, &ty, known, names, errors)?;
     Some((
         hir::Local {

@@ -2875,8 +2875,12 @@ operator main{} [
   default, as the program's do; but its value is computed when its
   declaration runs, from the parameters and variables then. A type
   parameter has no default, since each call gives it a type, nor has a
-  tuple with one, so a local variable of one needs an initial value
-  (A0006); but a relation or an array with one starts empty, as any does.
+  tuple with one, and a relation or an array with one starts empty, as any
+  does. A local variable of a type with no default can be declared without a
+  value, for a statement to give it one, an assignment or an `out` argument, on
+  every path to where it is read, which is otherwise an error (A0054). A read-only
+  body that nothing in decides what runs next could as well give it its value where
+  it is declared, and has to (A0006).
   A relation's keys are checked whenever it is assigned (R0008), and when
   compiling if the value is known then.
 - **It is in scope in all of its block,** the body, or a branch of an
@@ -3315,8 +3319,9 @@ operator main{} [
   otherwise an error (A0022). A parameter of `any type` takes them, and
   one of `any ordered` those of a type with an order.
 - **There is no default,** since no value of a type is any more a start
-  than another: a variable of one, or of a tuple with one, needs an
-  initial value (A0006).
+  than another: a variable of the program's of one, or of a tuple with one,
+  needs an initial value (A0006), and a local variable a statement gives one
+  before anything reads it (A0054).
 - **A value is written as its selector's invocation,** by `debug_value`,
   `debug_table` and `to_text`: `position{latitude: -1.29e0, longitude:
   3.682e1}`, which reads back as the same value. It is in the stored
@@ -3608,8 +3613,9 @@ operator main{} [
 - **Subtypes are disjoint:** a value carries its type, so no ellipse is
   a polygon, and a value of the union type is of exactly one of its
   subtypes.
-- **A union type has no default and no order,** so a variable of one
-  needs an initial value (A0006), and `<` is an error (A0022). `load_csv`
+- **A union type has no default and no order,** so a variable of the program's
+  of one needs an initial value (A0006), a local variable has none until a
+  statement gives it one (A0054), and `<` is an error (A0022). `load_csv`
   reads a subtype's values as any type's, but not a union type's, since
   a record's columns can't say which subtype it is.
 - **A subtype's value is a value of its union type,** so it can be given
@@ -3628,9 +3634,15 @@ operator main{} [
   12): `figure = lake` compares two plane figures, whichever is written
   first, but `lake = field` is an error, since no ellipse is a polygon
   (A0004).
-- **A `var` or `out` argument is of exactly its parameter's type** (IM
+- **A `var` argument is of exactly its parameter's type** (IM
   Prescription 19), since the operator can give the variable any value
-  of that type, which a variable of a subtype couldn't hold (A0004).
+  of that type, which a variable of a subtype couldn't hold, and reads
+  what it holds, which a variable of a supertype could hold a value of
+  another type than (A0004). An `out` argument can be of a supertype of its
+  parameter's type: the operator never reads it, and what it gives it as it
+  ends is one of the variable's values, as an assignment of it would be
+  (RM Prescription 3). So `var f: figure; call make{out c: f};` gives `f` a
+  circle.
 
 `x is t` tells the subtypes apart: it is true if the value of `x` is of
 the type `t`, or of one of its subtypes (IM Prescription 15). In the rest
@@ -5397,8 +5409,9 @@ operator main{} [
   as `"é"` isn't `"e\u{301}"`: nothing normalizes. Characters are ordered by
   their code points, as text is. There is no collation, as there is none of text.
 - **It has no default,** as no character is any more a start than another, and none
-  is empty: `var c: character;` is an error (A0006), but a relation or an array of them
-  starts empty, as any does.
+  is empty: `var c: character;` is an error of the program's variables (A0006), and a
+  local variable has no value until a statement gives it one (A0054), but a relation or
+  an array of them starts empty, as any does.
 
 ### Bytes
 

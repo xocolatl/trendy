@@ -3627,13 +3627,10 @@ var zero := seg{{len: 0}};{MAIN}"
                 "operator f{{out n: integer}} [ var e: relation transaction_collection; {transaction} [ n := 1; ]; ];\noperator main{{}} [ var n := 0; call f{{out n: n}}; ];"
             )
         };
-        assert_eq!(
-            codes(&out("transaction collecting e")),
-            [Code::UnassignedOut]
-        );
+        assert_eq!(codes(&out("transaction collecting e")), [Code::Unassigned]);
         assert!(analyze_str(&out("transaction")).is_ok());
         let read = "operator f{out e: relation transaction_collection} [ transaction collecting e []; ];\noperator main{} [ var e: relation transaction_collection; call f{out e: e}; ];";
-        assert_eq!(codes(read), [Code::UnassignedOut]);
+        assert_eq!(codes(read), [Code::Unassigned]);
     }
 
     #[test]
@@ -4679,7 +4676,9 @@ operator main{} [
             assert!(analyze_str(&var(declared)).is_ok(), "{declared}");
         }
         let source = "operator main{} [ var c: character; ];";
-        assert_eq!(codes(source), [Code::UntypedVariable]);
+        assert!(analyze_str(source).is_ok());
+        let source = "operator main{} [ var c: character; call debug_value{v: c}; ];";
+        assert_eq!(codes(source), [Code::Unassigned]);
     }
 
     #[test]
@@ -5357,7 +5356,7 @@ operator main{} [
         }
         assert_eq!(
             codes("operator main{out errors: relation transaction_collection} [];"),
-            [Code::UnassignedOut]
+            [Code::Unassigned]
         );
         let errors = errors("operator main{errors: text, more: integer} [];");
         assert_eq!(errors[0].code, Code::MainSignature);
@@ -8655,6 +8654,112 @@ operator main{} [
         assert!(analyze_str(&fine).is_ok(), "{:?}", messages(&fine));
     }
 
+    /// A variable whose type has no default has no value until a statement gives it
+    /// one: reading it before then would read whatever is there, with nothing to say so.
+    #[test]
+    fn a_variable_without_a_default_is_assigned_before_it_is_read() {
+        const GIVE: &str = "p := pair{label: \"a\", n: 1};";
+        const PAIR: &str = "type pair { { label: text, n: integer } };
+operator give{out p: pair} [ p := pair{label: \"a\", n: 1}; ];
+operator poke{var p: pair} [ update p { n := 3 }; ];
+";
+        let body = |statements: &str| {
+            format!(
+                "{PAIR}operator main{{}} [\n    var c := 1;\n    var p: pair;\n    {statements}\n];\n"
+            )
+        };
+        for good in [
+            "",
+            "call give{out p}; call debug_value{v: p};",
+            "p := pair{label: \"a\", n: 1}; call debug_value{v: p.n};",
+            "if c = 1 then [ call give{out p}; ] else [ p := pair{label: \"b\", n: 2}; ]; call debug_value{v: p};",
+            "if c = 1 then [ call give{out p}; call debug_value{v: p}; ];",
+            "loop [ call give{out p}; c := c + 1; ] while c < 3; call debug_value{v: p};",
+            "transaction [ call give{out p}; ]; call debug_value{v: p};",
+            // Assigned twice, and passed on once it has a value.
+            "call give{out p}; call poke{var p}; call give{out p}; call debug_value{v: p};",
+            // Assigned from itself, once it has a value.
+            "call give{out p}; p := pair{label: p.label, n: p.n + 1};",
+            "call give{out p}; update p { n := 3 };",
+        ] {
+            let source = body(good);
+            assert!(analyze_str(&source).is_ok(), "{good}");
+        }
+        for (bad, at) in [
+            ("call debug_value{v: p};", "p}"),
+            ("call debug_value{v: p.n};", "p.n"),
+            (
+                "const m := [ const a := 1; p.n + a ]; call debug_value{v: m};",
+                "p.n",
+            ),
+            (
+                "const r := relation { { k: 1 } } where k = p.n; call debug_value{v: r};",
+                "p.n",
+            ),
+            ("p := pair{label: \"a\", n: p.n};", "p.n"),
+            ("update p { n := 3 };", "p {"),
+            ("call poke{var p};", "p}"),
+            (
+                "if c = 1 then [ call give{out p}; ]; call debug_value{v: p};",
+                "p};",
+            ),
+            (
+                "if c = 1 then [ call give{out p}; ] else [ c := 2; ]; call debug_value{v: p};",
+                "p};",
+            ),
+            (
+                "while c < 3 loop [ call give{out p}; c := c + 1; ]; call debug_value{v: p};",
+                "p};",
+            ),
+            (
+                "for x in array [1] loop [ call give{out p}; ]; call debug_value{v: p};",
+                "p};",
+            ),
+        ] {
+            let source = body(bad);
+            let found = errors(&source);
+            assert_eq!(
+                found
+                    .iter()
+                    .map(|e| (e.code, e.message.as_str()))
+                    .collect::<Vec<_>>(),
+                [(
+                    Code::Unassigned,
+                    "the variable `p` is read before it is assigned"
+                )],
+                "{bad}"
+            );
+            let last = source.rfind(at).unwrap();
+            let first = source.find(bad).unwrap() + bad.find(at).unwrap();
+            assert!(
+                (first..=last).contains(&found[0].span().start),
+                "{bad}: {:?}",
+                found[0].span()
+            );
+            assert_eq!(
+                found[0].secondary[0].message, "declared without a value",
+                "{bad}"
+            );
+            assert!(found[0].help[0].contains("assign `p`"), "{bad}");
+        }
+        // A transaction that collects its errors may undo what it assigned.
+        let collected = body(&format!(
+            "var e: relation transaction_collection; transaction collecting e [ {GIVE} ]; call debug_value{{v: p}};"
+        ));
+        assert_eq!(codes(&collected), [Code::Unassigned]);
+        // A type with a default starts at it, and can be read at once.
+        let integer = "operator main{} [ var n: integer; call debug_value{v: n}; ];";
+        assert!(analyze_str(integer).is_ok());
+        // Of a type parameter's too, an update operator's.
+        let generic = "operator f{v: T, out r: T} types { T: any type } [ var w: T; w := v; r := w; ];\noperator main{} [];";
+        assert!(analyze_str(generic).is_ok(), "{generic}");
+        let generic = "operator f{v: T, out r: T} types { T: any type } [ var w: T; r := w; ];\noperator main{} [];";
+        assert_eq!(codes(generic), [Code::Unassigned]);
+        // A variable of the program's has nothing to go by.
+        let global = format!("{PAIR}var p: pair;{MAIN}");
+        assert_eq!(codes(&global), [Code::UntypedVariable]);
+    }
+
     #[test]
     fn out_parameters_are_assigned_before_they_are_read() {
         let body = |body: &str| {
@@ -8701,7 +8806,7 @@ operator main{} [
                     .map(|e| (e.code, e.message.as_str()))
                     .collect::<Vec<_>>(),
                 [(
-                    Code::UnassignedOut,
+                    Code::Unassigned,
                     "the `out` parameter `n` is read before it is assigned"
                 )],
                 "{read}"
@@ -10960,7 +11065,8 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             .iter()
             .filter_map(|(_, s)| match s {
                 hir::Statement::Assign(a) => Some(a.iter().map(|a| a.target.clone()).collect()),
-                hir::Statement::Call(_)
+                hir::Statement::Declare(_)
+                | hir::Statement::Call(_)
                 | hir::Statement::If(..)
                 | hir::Statement::Loop(..)
                 | hir::Statement::For(..)
@@ -11034,7 +11140,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
         );
         // A type parameter has no default, nor has a tuple with one.
         let generic = errors(&format!(
-            "operator f{{v: T}} types {{ T: any type }} [ var w: T; ];{MAIN}"
+            "operator f{{v: T}}: T types {{ T: any type }} [ var w: T; v ];{MAIN}"
         ));
         assert_eq!(generic[0].code, Code::UntypedVariable);
         assert_eq!(
@@ -11042,7 +11148,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             "variable `w`, of type `T`, has no initial value"
         );
         let tuple = errors(&format!(
-            "operator f{{v: T}} types {{ T: any type }} [ var w: tuple {{ v: T }}; ];{MAIN}"
+            "operator f{{v: T}}: T types {{ T: any type }} [ var w: tuple {{ v: T }}; v ];{MAIN}"
         ));
         assert_eq!(tuple[0].code, Code::UntypedVariable);
         // But a relation or an array with one starts empty, as any does.
@@ -11286,7 +11392,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             codes(&format!(
                 "operator f{{out y: integer}} [ y := [ var a := y; if a > 0 then [ a := 1; ]; a ]; ];{MAIN}"
             )),
-            [Code::UnassignedOut]
+            [Code::Unassigned]
         );
     }
 
@@ -13606,6 +13712,37 @@ operator sides{{f: square}}: integer [ 4 ];{MAIN}"
             ),
             "{found:#?}"
         );
+        // An `out` parameter's can be of a supertype, as the operator gives it a
+        // value of its type and reads nothing; but not of a subtype, nor of another
+        // type, and a `var` parameter's can't be either.
+        let make = "operator make{out d: disc} [ d := round; ];\n";
+        for good in [
+            "var f: figure; call make{out d: f};",
+            "var d: disc; call make{out d};",
+        ] {
+            let source = format!("{FIGURES}{make}operator main{{}} [ {good} ];");
+            assert!(analyze_str(&source).is_ok(), "{good}");
+        }
+        let poke = "operator poke{var d: disc} [ d := round; ];\n";
+        for (bad, body) in [
+            (
+                "a `var` one's",
+                format!(
+                    "{poke}operator main{{}} [ var f: figure := round; call poke{{var d: f}}; ];"
+                ),
+            ),
+            (
+                "another type's",
+                format!("{make}operator main{{}} [ var n := 1; call make{{out d: n}}; ];"),
+            ),
+            (
+                "a subtype's",
+                "operator any{out f: figure} [ f := box; ];\noperator main{} [ var d := round; call any{out f: d}; ];".to_string(),
+            ),
+        ] {
+            let found = codes(&format!("{FIGURES}{body}"));
+            assert_eq!(found, [Code::TypeMismatch], "{bad}");
+        }
         // A `var` parameter's argument is of exactly its type, which the
         // operator can assign any value of.
         let found = errors(&format!(

@@ -11515,6 +11515,193 @@ operator main{} [
     assert!(!stderr.contains("not here"), "{stderr}");
 }
 
+/// A variable given to an `out` or a `var` parameter after a transaction undid what it held,
+/// and round a loop, whose address is taken again each time.
+#[test]
+fn a_variable_is_passed_on_after_what_it_held_is_given_up() {
+    let (code, stderr) = run_source(
+        "passed_after_undoing",
+        r#"
+type pair { { label: text, n: integer } };
+
+operator give{out p: pair, n: integer} [
+    p := pair{label: to_text{from: n}, n};
+];
+
+operator poke{var p: pair} [
+    update p { n := p.n + 1 };
+];
+
+operator main{} [
+    var one := parse_integer{from: "1"};
+    var undone := pair{label: "start", n: one};
+    var failures: relation transaction_collection;
+    transaction collecting failures [
+        call give{out p: undone, n: 7};
+        fail failure{message: "no"};
+    ];
+    call debug_value{v: undone};
+    call poke{var p: undone};
+    call debug_value{v: undone};
+    call give{out p: undone, n: 8};
+    call debug_value{v: undone};
+    var i := 0;
+    while i < 2 loop [
+        var each := pair{label: "each", n: i};
+        call poke{var p: each};
+        call debug_value{v: each.n};
+        i := i + 1;
+    ];
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "pair{label: \"start\", n: 1}",
+            "pair{label: \"start\", n: 2}",
+            "pair{label: \"8\", n: 8}",
+            "1",
+            "2",
+        ]
+    );
+}
+
+/// An `out` parameter's variable can be of a supertype of its type, a union type or a type a
+/// constraint defines a subtype of: it is given what the operator gives it as it ends, round a
+/// loop too, of what points to something.
+#[test]
+fn an_out_parameter_gives_a_variable_of_a_supertype_its_value() {
+    let (code, stderr) = run_source(
+        "out_to_a_supertype",
+        r#"
+type figure union;
+type circle is figure { { label: text, r: integer } };
+type square is figure { { side: integer } };
+
+type positive { { n: integer } };
+type small is positive { constraint n < 10 };
+
+operator make{n: integer, out c: circle} [
+    c := circle{label: to_text{from: n}, r: n};
+];
+
+operator choose{n: integer, out s: small} [
+    s := treat positive{n} as small;
+];
+
+operator main{} [
+    var one := parse_integer{from: "1"};
+    var f: figure;
+    call make{n: one, out c: f};
+    call debug_value{v: f};
+    var g: figure := square{side: 2};
+    call make{n: 7 * one, out c: g};
+    call debug_value{v: g};
+    var p: positive := positive{n: 40};
+    call choose{n: 3 * one, out s: p};
+    call debug_value{v: p.n};
+    var shapes: relation { f: figure } := relation {};
+    var h: figure;
+    var i := 0;
+    while i < 3 loop [
+        call make{n: i, out c: h};
+        insert shapes relation { { f: h } };
+        i := i + 1;
+    ];
+    call debug_value{v: count{r: shapes where f is circle}};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "circle{label: \"1\", r: 1}",
+            "circle{label: \"7\", r: 7}",
+            "3",
+            "3",
+        ]
+    );
+}
+
+/// What a local variable holds before a statement gives it a value is never read, and is
+/// given up as any other's, whichever way the program goes: of a type that points to something,
+/// not assigned at all, assigned on one way of two, round a loop, and undone by a transaction.
+#[test]
+fn a_variable_without_a_value_yet() {
+    let (code, stderr) = run_source(
+        "without_a_value_yet",
+        r#"
+type pair { { label: text, n: integer } };
+type figure union;
+type circle is figure { { r: integer } };
+type square is figure { { side: text } };
+
+operator give{out p: pair, n: integer} [
+    p := pair{label: to_text{from: n}, n};
+];
+
+operator choose{n: integer, out f: figure} [
+    if n = 1 then [
+        f := circle{r: n};
+    ] else [
+        f := square{side: to_text{from: n}};
+    ];
+];
+
+operator main{} [
+    var one := parse_integer{from: "1"};
+    var never: pair;
+    var on_one_way: pair;
+    if one = 2 then [
+        call give{out p: on_one_way, n: one};
+    ];
+    var i := 0;
+    while i < 3 loop [
+        var each: pair;
+        call give{out p: each, n: i};
+        call debug_value{v: each.label};
+        i := i + 1;
+    ];
+    var undone: pair;
+    var failures: relation transaction_collection;
+    transaction collecting failures [
+        call give{out p: undone, n: 7};
+        fail failure{message: "no"};
+    ];
+    call give{out p: undone, n: 8};
+    call debug_value{v: undone};
+    call debug_value{v: count{r: failures}};
+    var f: figure;
+    call choose{n: one, out f};
+    call debug_value{v: f};
+    var c: character;
+    c := to_characters{from: "é"}[1];
+    call debug_value{v: c};
+    var t: tuple { p: pair, k: integer };
+    t := tuple { p: undone, k: 2 };
+    call debug_value{v: t.k};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "\"0\"",
+            "\"1\"",
+            "\"2\"",
+            "pair{label: \"8\", n: 8}",
+            "1",
+            "circle{r: 1}",
+            "'é'",
+            "2",
+        ]
+    );
+}
+
 /// Past the end of a `date`'s range there is no instant, and the failure leads to the call.
 #[test]
 fn an_instant_past_the_end_of_time_fails() {

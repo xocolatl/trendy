@@ -2031,8 +2031,9 @@ blocks: each block is a list of instructions (`Copy`, `Call`,
 `CallRuntime`, the boolean and integer `Unary` and `Binary`, `Unary`'s
 conversions of a count to an integer and of an array's position less 1 to
 an index, `Element` and `Increment` for loops and indexes, `IsNull`, `Address`
-for a variable passed to a `var` or `out` parameter, and `RelationAddress` for an
-operand of a join of several) ending in a
+for a variable passed to a `var` or `out` parameter, `RelationAddress` for an
+operand of a join of several, and `NoValueYet` for a local variable declared without
+one) ending in a
 terminator: `Return`, `Jump`, `Branch`, `Fail`, `Raise`, `Failed` or
 `TailCall`, which goes to a function in place of this one, its result where
 this one's goes, and whose arguments must outlive its frame. A `CheckStack`

@@ -158,7 +158,7 @@ codes! {
     MisplacedMode => "A0051",
     ArgumentMode => "A0052",
     Aliased => "A0053",
-    UnassignedOut => "A0054",
+    Unassigned => "A0054",
     UnreadableAttribute => "A0055",
     UnchosenOperator => "A0056",
     SelectorName => "A0057",

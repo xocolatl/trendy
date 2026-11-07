@@ -2699,6 +2699,10 @@ impl<'a> FunctionBuilder<'a> {
     fn statement(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
         let assigns = statement.assigns();
         match statement {
+            hir::Statement::Declare(id) => {
+                let (place, _) = self.local_place(*id);
+                self.insts.push(lir::Inst::NoValueYet(place));
+            }
             hir::Statement::Call(call) => self.scoped(|this| {
                 this.call(call, cx);
                 this.constraints_checked(&assigns, cx);
@@ -5304,7 +5308,7 @@ impl<'a> FunctionBuilder<'a> {
                         ..around
                     },
                 ),
-                hir::Statement::Transaction(..) => true,
+                hir::Statement::Declare(_) | hir::Statement::Transaction(..) => true,
             };
             own && statement
                 .blocks()

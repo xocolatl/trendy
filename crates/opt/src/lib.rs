@@ -418,7 +418,7 @@ fn collect_exprs<'e>(statement: &'e hir::Statement, exprs: &mut Vec<&'e hir::Exp
         | hir::Statement::For(_, condition, _)
         | hir::Statement::Fail(condition)
         | hir::Statement::Warn(condition) => exprs.push(condition),
-        hir::Statement::Transaction(..) => {}
+        hir::Statement::Declare(_) | hir::Statement::Transaction(..) => {}
     }
     for block in statement.blocks() {
         for (_, inner) in &block.statements {

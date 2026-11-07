@@ -1393,6 +1393,12 @@ pub enum Inst {
     /// Store at `dst`, a [`Layout::Address`], the address of `src`: a
     /// variable passed to a `var` or `out` parameter.
     Address { dst: Place, src: Place },
+    /// A local variable at `0` has no value from here until something gives it one, and
+    /// what it held is gone: round a loop, what the variable held the last time. No code,
+    /// as for [`Inst::InAnyOrder`], and it counts as writing all of it, as
+    /// [`Function::read_after_release`] goes: nothing reads it until it has been given one,
+    /// which sema checks, and passing its address to an `out` parameter is how it gets one.
+    NoValueYet(Place),
     /// As [`Inst::Address`], of a relation given to [`RuntimeFn::Join`], which says if it
     /// is `loose`, in no particular order, as anything that goes on to read one has to
     /// ([`Function::loose_read`]). Only the join reads it, before it gives anything up, so
@@ -1945,11 +1951,14 @@ impl Inst {
         for place in reads {
             read_of(place, released, found);
         }
+        // An address just taken is of what has a value, as reading it just said, however
+        // much of what holds the address it is: one field of what a call is given.
+        let fresh = matches!(self, Inst::Address { .. } | Inst::Element { .. });
         if let Some(Place {
             base: Base::Slot(slot),
             path,
         }) = written
-            && path.is_empty()
+            && (path.is_empty() || fresh)
         {
             released.remove(slot);
         }
@@ -2072,6 +2081,7 @@ impl Inst {
     /// The places the instruction reads, and the one it writes, if it does.
     fn reads_and_write(&self) -> (Vec<&Place>, Option<&Place>) {
         match self {
+            Inst::NoValueYet(place) => (Vec::new(), Some(place)),
             Inst::CheckStack | Inst::Site(_) | Inst::InAnyOrder(_) | Inst::InOrderOf { .. } => {
                 (Vec::new(), None)
             }
@@ -2348,6 +2358,32 @@ mod tests {
 
     fn one(insts: Vec<Inst>) -> Option<(usize, usize)> {
         found(vec![block(insts, Terminator::Return)])
+    }
+
+    /// What a call is given holds the address of a variable, one of its fields. Given up since
+    /// the last call, and given a value again, the address taken now is of that.
+    #[test]
+    fn an_address_taken_again_is_of_what_has_a_value() {
+        let address = || Inst::Address {
+            dst: part(1),
+            src: slot(0),
+        };
+        let call = || copy(slot(2), slot(1));
+        // Taken of what is given up, it reads what is gone.
+        assert_eq!(one(vec![release(0), address()]), Some((0, 0)));
+        // And taken before, what it holds is gone.
+        assert_eq!(one(vec![address(), release(0), call()]), Some((0, 1)));
+        // Given a value again, what is taken again is good.
+        assert_eq!(
+            one(vec![
+                address(),
+                release(0),
+                copy(slot(0), slot(3)),
+                address(),
+                call()
+            ]),
+            None
+        );
     }
 
     /// Going through what has been given up reads freed memory, and giving it up again can

@@ -210,7 +210,7 @@ pub struct ConstantId(pub usize);
 
 /// Index into an update operator's local variables
 /// ([`OperatorKind::Update`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LocalId(pub usize);
 
 /// A local variable of an operator, purely local to it (TTM RM Prescription
@@ -1730,6 +1730,10 @@ impl Call {
 /// A statement in an operator's body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
+    /// `var x: T;`, of a type with no default: the local variable has no value
+    /// until a statement gives it one, which sema has checked comes before anything
+    /// reads it.
+    Declare(LocalId),
     /// `call name{arguments};`.
     Call(Call),
     /// Assignments made at once (TTM RM Prescription 21), each to a
@@ -1791,9 +1795,11 @@ impl Statement {
             Statement::Loop(_, body, _)
             | Statement::For(_, _, body)
             | Statement::Transaction(_, body) => vec![body],
-            Statement::Call(_) | Statement::Assign(_) | Statement::Fail(_) | Statement::Warn(_) => {
-                Vec::new()
-            }
+            Statement::Declare(_)
+            | Statement::Call(_)
+            | Statement::Assign(_)
+            | Statement::Fail(_)
+            | Statement::Warn(_) => Vec::new(),
         }
     }
 
@@ -1823,7 +1829,8 @@ impl Statement {
             Statement::Loop(condition, body, check) => Statement::Loop(condition, f(body), check),
             Statement::For(local, array, body) => Statement::For(local, array, f(body)),
             Statement::Transaction(collecting, body) => Statement::Transaction(collecting, f(body)),
-            statement @ (Statement::Call(_)
+            statement @ (Statement::Declare(_)
+            | Statement::Call(_)
             | Statement::Assign(_)
             | Statement::Fail(_)
             | Statement::Warn(_)) => statement,
@@ -1840,7 +1847,8 @@ impl Statement {
             Statement::Assign(assignments) => assignments.iter().map(|a| &a.target).collect(),
             Statement::Call(call) => call.updated.values().collect(),
             Statement::Transaction(collecting, _) => collecting.iter().collect(),
-            Statement::If(..)
+            Statement::Declare(_)
+            | Statement::If(..)
             | Statement::Loop(..)
             | Statement::For(..)
             | Statement::Fail(_)
@@ -1853,6 +1861,7 @@ impl Statement {
     #[must_use]
     pub fn map_exprs(self, f: &mut dyn FnMut(Expr) -> Expr) -> Statement {
         match self {
+            Statement::Declare(id) => Statement::Declare(id),
             Statement::Call(call) => Statement::Call(Call {
                 args: call
                     .args
@@ -1900,7 +1909,7 @@ impl Statement {
             | Statement::For(_, condition, _)
             | Statement::Fail(condition)
             | Statement::Warn(condition) => f(condition),
-            Statement::Transaction(..) => {}
+            Statement::Declare(_) | Statement::Transaction(..) => {}
         }
         for block in self.blocks() {
             block.for_each_expr(f);
@@ -1911,6 +1920,7 @@ impl Statement {
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Statement {
         match self {
+            Statement::Declare(id) => Statement::Declare(*id),
             Statement::Call(call) => Statement::Call(call.instantiated(types)),
             Statement::Assign(assignments) => Statement::Assign(
                 assignments

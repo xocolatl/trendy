@@ -249,8 +249,14 @@ pub(crate) fn body(
     let mut ok = true;
     for (name, param) in &signature.params {
         if param.mode != hir::Mode::Out
-            || statements.outs.assigned.contains(name)
-            || statements.outs.reported.contains(name)
+            || statements
+                .unassigned
+                .assigned
+                .contains(&NoValueYet::Out(name.clone()))
+            || statements
+                .unassigned
+                .reported
+                .contains(&NoValueYet::Out(name.clone()))
         {
             continue;
         }
@@ -293,24 +299,46 @@ pub(crate) fn run(
     (checker.locals.finish(), value)
 }
 
-/// What is known of an update operator's `out` parameters where the
-/// statement being checked is: which are assigned on every path to it, and
-/// where it reads and assigns them, which [`Statements::settle`] then
-/// reports and counts.
+/// What has no value until a statement assigns it: an update operator's
+/// `out` parameter, or a local variable declared without a value, whose type
+/// has no default.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum NoValueYet {
+    Out(String),
+    Local(hir::LocalId),
+}
+
+/// What is known of what has no value yet where the statement being checked
+/// is: which are assigned on every path to it, and where it reads and assigns
+/// them, which [`Statements::settle`] then reports and counts.
 #[derive(Default)]
-pub(crate) struct Outs {
+pub(crate) struct Unassigned {
+    /// The local variables declared without a value, with their declarations.
+    locals: BTreeMap<hir::LocalId, VarDecl>,
     /// Those assigned on every path to the statement.
-    assigned: BTreeSet<String>,
+    assigned: BTreeSet<NoValueYet>,
     /// Each read of one in the statement, and where.
-    reads: Vec<(String, Span)>,
+    reads: Vec<(NoValueYet, Span)>,
     /// Each the statement assigns, and where it names it: an assignment's
     /// target, which a change such as `insert` reads, or an `out`
     /// argument.
-    targets: Vec<(String, Span)>,
+    targets: Vec<(NoValueYet, Span)>,
     /// Those read before they are assigned, already reported: making one
     /// `var`, as the fix does, makes assigning it on every path needless
     /// too.
-    reported: BTreeSet<String>,
+    reported: BTreeSet<NoValueYet>,
+}
+
+impl Unassigned {
+    /// What `target` is of what has no value until it is assigned, if it is
+    /// any, of those of an operator with the `out` parameters `is_out` says.
+    fn of(&self, target: &hir::Target, is_out: impl Fn(&str) -> bool) -> Option<NoValueYet> {
+        match target {
+            hir::Target::Parameter(name) if is_out(name) => Some(NoValueYet::Out(name.clone())),
+            hir::Target::Local(id) if self.locals.contains_key(id) => Some(NoValueYet::Local(*id)),
+            _ => None,
+        }
+    }
 }
 
 /// Checks a block of statements, each block's local variables in scope in
@@ -326,9 +354,9 @@ struct Statements<'a, 'b> {
     /// Where each transaction the statement being checked is in writes its
     /// keyword, outermost first.
     transactions: Vec<Span>,
-    /// The `out` parameters assigned on every path to the statement being
-    /// checked, and its reads of them.
-    outs: Outs,
+    /// What has no value yet of what is assigned on every path to the
+    /// statement being checked, and its reads of it.
+    unassigned: Unassigned,
     /// What the tests of the `if` statements and `while` loops the
     /// statement being checked is in show of the names' values, but of
     /// those a statement before it may have assigned.
@@ -347,7 +375,7 @@ impl<'a, 'b> Statements<'a, 'b> {
             locals,
             frozen: Vec::new(),
             transactions: Vec::new(),
-            outs: Outs::default(),
+            unassigned: Unassigned::default(),
             narrowed: Facts::default(),
             ended: BTreeMap::new(),
         }
@@ -360,7 +388,7 @@ impl Statements<'_, '_> {
             around: &mut *self.around,
             locals: &mut self.locals,
             frozen: &self.frozen,
-            outs: &mut self.outs,
+            unassigned: &mut self.unassigned,
             narrowed: &self.narrowed,
             ended: &self.ended,
         }
@@ -391,16 +419,16 @@ impl Statements<'_, '_> {
         assigns.of_names(self.narrowed.names(), global)
     }
 
-    /// Report each read of an `out` parameter in the statement just
+    /// Report each read of what has no value yet in the statement just
     /// checked, `statement`, before it is assigned on every path to there,
     /// then count each it assigns as assigned from then on: if it has
     /// errors, each it names as assigned. A change to one that reads it,
     /// such as `insert`, reads it where it names it.
     fn settle(&mut self, statement: Option<&hir::Statement>, errors: &mut Vec<Diagnostic>) {
-        let targets = std::mem::take(&mut self.outs.targets);
+        let targets = std::mem::take(&mut self.unassigned.targets);
         let Some(statement) = statement else {
             self.flush(errors);
-            self.outs
+            self.unassigned
                 .assigned
                 .extend(targets.into_iter().map(|(name, _)| name));
             return;
@@ -408,14 +436,18 @@ impl Statements<'_, '_> {
         let assigned: Vec<&hir::Target> = match statement {
             hir::Statement::Assign(assignments) => {
                 for assignment in assignments {
-                    let hir::Target::Parameter(name) = &assignment.target else {
+                    let around = &*self.around;
+                    let Some(assigned) = self
+                        .unassigned
+                        .of(&assignment.target, |name| around.is_out(name))
+                    else {
                         continue;
                     };
                     if ops::targets_read(&assignment.value).contains(&assignment.target)
-                        && !self.outs.reads.iter().any(|(n, _)| n == name)
-                        && let Some((_, span)) = targets.iter().find(|(n, _)| n == name)
+                        && !self.unassigned.reads.iter().any(|(n, _)| *n == assigned)
+                        && let Some((_, span)) = targets.iter().find(|(n, _)| *n == assigned)
                     {
-                        self.outs.reads.push((name.clone(), *span));
+                        self.unassigned.reads.push((assigned, *span));
                     }
                 }
                 assignments.iter().map(|a| &a.target).collect()
@@ -425,30 +457,38 @@ impl Statements<'_, '_> {
         };
         self.flush(errors);
         for target in assigned {
-            if let hir::Target::Parameter(name) = target
-                && self.around.is_out(name)
-            {
-                self.outs.assigned.insert(name.clone());
+            let around = &*self.around;
+            if let Some(assigned) = self.unassigned.of(target, |name| around.is_out(name)) {
+                self.unassigned.assigned.insert(assigned);
             }
         }
     }
 
-    /// Report each read of an `out` parameter checked since the last,
+    /// Report each read of what has no value yet checked since the last,
     /// before it is assigned on every path to here.
     fn flush(&mut self, errors: &mut Vec<Diagnostic>) {
         let mut reported: Vec<Span> = Vec::new();
-        for (name, span) in std::mem::take(&mut self.outs.reads) {
-            if self.outs.assigned.contains(&name) || reported.contains(&span) {
+        for (read, span) in std::mem::take(&mut self.unassigned.reads) {
+            if self.unassigned.assigned.contains(&read) || reported.contains(&span) {
                 continue;
             }
             reported.push(span);
-            // Only an update operator has `out` parameters.
-            let decl = self
-                .update
-                .as_ref()
-                .and_then(|update| update.cx.operators.get(update.within).param_decl(&name));
-            errors.push(errors::read_before_assigned(&name, span, decl.as_ref()));
-            self.outs.reported.insert(name);
+            match &read {
+                NoValueYet::Out(name) => {
+                    // Only an update operator has `out` parameters.
+                    let decl = self
+                        .update
+                        .as_ref()
+                        .and_then(|update| update.cx.operators.get(update.within).param_decl(name));
+                    errors.push(errors::read_before_assigned(name, span, decl.as_ref()));
+                }
+                NoValueYet::Local(id) => {
+                    if let Some(decl) = self.unassigned.locals.get(id) {
+                        errors.push(errors::local_read_before_assigned(decl, span));
+                    }
+                }
+            }
+            self.unassigned.reported.insert(read);
         }
     }
 
@@ -579,8 +619,24 @@ impl Statements<'_, '_> {
                 self.signal_stmt(errors::Signal::Warn, stmt.keyword(), stmt.error(), errors)
             }
         };
+        if checked.is_none() {
+            self.count_as_assigned(stmt);
+        }
         self.settle(checked.as_ref(), errors);
         checked
+    }
+
+    /// Count what `stmt`, which has errors, names to assign as assigned, so that
+    /// reading it later isn't an error of its own: as a `var` or `out` argument of a
+    /// call that couldn't be checked.
+    fn count_as_assigned(&mut self, stmt: &ast::Statement) {
+        for name in narrowed::Assigns::of(stmt).names.keys() {
+            let assigned = match self.locals.find(name) {
+                Some(Local::Declared(id, ..)) => NoValueYet::Local(id),
+                _ => NoValueYet::Out(name.clone()),
+            };
+            self.unassigned.assigned.insert(assigned);
+        }
     }
 
     /// `fail e;` or `warn e;`, as `signal` says, written `keyword` and
@@ -653,7 +709,7 @@ impl Statements<'_, '_> {
             errors,
         );
         // The block may not run, so what it assigns isn't assigned after.
-        let before = self.outs.assigned.clone();
+        let before = self.unassigned.assigned.clone();
         let mut checked = Vec::new();
         for statement in &statements {
             match self.sited(statement, errors) {
@@ -661,7 +717,7 @@ impl Statements<'_, '_> {
                 None => ok = false,
             }
         }
-        self.outs.assigned = before;
+        self.unassigned.assigned = before;
         let locals = self.locals.exit();
         self.frozen.pop();
         let body = hir::Block {
@@ -692,7 +748,7 @@ impl Statements<'_, '_> {
         let mut ok = self
             .locals
             .enter(statements.iter().cloned(), self.around.declaring(), errors);
-        let before = self.outs.assigned.clone();
+        let before = self.unassigned.assigned.clone();
         let keyword = stmt.keyword().map_or_else(
             || stmt.span(),
             |keyword| trendy_syntax::span(keyword.text_range()),
@@ -708,7 +764,7 @@ impl Statements<'_, '_> {
         self.transactions.pop();
         let locals = self.locals.exit();
         if collecting.is_some() {
-            self.outs.assigned = before;
+            self.unassigned.assigned = before;
         }
         ok &= stmt.body().is_some() && collecting.as_ref().is_none_or(Option::is_some);
         let body = hir::Block {
@@ -749,15 +805,20 @@ impl Statements<'_, '_> {
             errors.push(errors::collecting_mismatch(name, span, &assignee.ty));
             return None;
         }
-        if let hir::Target::Parameter(name) = &assignee.target {
-            self.outs.reads.push((name.clone(), span));
+        let around = &*self.around;
+        if let Some(read) = self
+            .unassigned
+            .of(&assignee.target, |name| around.is_out(name))
+        {
+            self.unassigned.reads.push((read, span));
             self.flush(errors);
         }
         Some(assignee.target)
     }
 
     /// The declaration `decl` of a local variable: its initial value's
-    /// assignment. Its local variable is declared from then on.
+    /// assignment, of none if it has none, for a statement to give it one
+    /// before anything reads it. Its local variable is declared from then on.
     fn declaration(
         &mut self,
         decl: &VarDecl,
@@ -768,12 +829,16 @@ impl Statements<'_, '_> {
             .type_parameters()
             .map(<[hir::TypeParameter]>::to_vec)
             .unwrap_or_default();
-        let checked = locals::local(decl, &types, &mut self.names(), errors);
+        let checked = locals::assignable(decl, &types, &mut self.names(), errors);
         let (local, value) = checked.unzip();
         let id = self.locals.declare(decl, local)?;
+        let Some(value) = value? else {
+            self.unassigned.locals.insert(id, decl.clone());
+            return Some(hir::Statement::Declare(id));
+        };
         Some(hir::Statement::Assign(vec![hir::Assignment {
             target: hir::Target::Local(id),
-            value: value?,
+            value,
         }]))
     }
 
@@ -1000,15 +1065,15 @@ impl Statements<'_, '_> {
             }
             let span = value.span();
             let within = |s: &Span| span.start <= s.start && s.end <= span.end;
-            let passed: Vec<(String, Span)> = self
-                .outs
+            let passed: Vec<(NoValueYet, Span)> = self
+                .unassigned
                 .reads
                 .iter()
                 .filter(|(_, s)| within(s))
                 .cloned()
                 .collect();
-            self.outs.reads.retain(|(_, s)| !within(s));
-            self.outs.targets.extend(passed);
+            self.unassigned.reads.retain(|(_, s)| !within(s));
+            self.unassigned.targets.extend(passed);
         }
     }
 
@@ -1108,20 +1173,20 @@ impl Statements<'_, '_> {
             // if true is so where the block starts.
             hir::Check::Before => {
                 self.flush(errors);
-                let before = self.outs.assigned.clone();
+                let before = self.unassigned.assigned.clone();
                 let (when_true, _) = self.facts(&written);
                 let (narrowed, ended) = (self.narrowed.clone(), self.ended.clone());
                 self.narrowed = narrowed.and(&when_true);
                 let block = self.block(&statements, errors);
                 (self.narrowed, self.ended) = (narrowed, ended);
-                self.outs.assigned = before;
+                self.unassigned.assigned = before;
                 block
             }
             // The block runs at least once, before the condition.
             hir::Check::After => {
-                let condition_reads = std::mem::take(&mut self.outs.reads);
+                let condition_reads = std::mem::take(&mut self.unassigned.reads);
                 let block = self.block(&statements, errors);
-                self.outs.reads = condition_reads;
+                self.unassigned.reads = condition_reads;
                 self.flush(errors);
                 block
             }
@@ -1156,7 +1221,7 @@ impl Statements<'_, '_> {
         // What the branch taken assigns is assigned after: what both do,
         // unless the condition says which. Each branch knows what the
         // condition shows of the names' values, as it is true or false.
-        let before = self.outs.assigned.clone();
+        let before = self.unassigned.assigned.clone();
         let (when_true, when_false) = self.facts(&condition_expr);
         let (narrowed, ended) = (self.narrowed.clone(), self.ended.clone());
         self.narrowed = narrowed.and(&when_true);
@@ -1165,12 +1230,12 @@ impl Statements<'_, '_> {
             taken == Some(false),
             errors,
         );
-        let after_then = std::mem::replace(&mut self.outs.assigned, before);
+        let after_then = std::mem::replace(&mut self.unassigned.assigned, before);
         (self.narrowed, self.ended) = (narrowed.and(&when_false), ended.clone());
         let otherwise = self.branch(stmt.else_branch(), taken == Some(true), errors);
         (self.narrowed, self.ended) = (narrowed, ended);
-        let after_otherwise = std::mem::take(&mut self.outs.assigned);
-        self.outs.assigned = match taken {
+        let after_otherwise = std::mem::take(&mut self.unassigned.assigned);
+        self.unassigned.assigned = match taken {
             Some(true) => after_then,
             Some(false) => after_otherwise,
             None => after_then.intersection(&after_otherwise).cloned().collect(),
@@ -1222,7 +1287,9 @@ impl Statements<'_, '_> {
 /// from, in the operator called or in those it calls, and each that passes
 /// one to a `var` parameter of an operator that reads or assigns it
 /// itself, there or in the update operators it calls: the read-only ones
-/// read no variable of the program's.
+/// read no variable of the program's. Each call in a transaction that reads
+/// input or writes output, and each of `main`'s that reads when a transaction
+/// began, with none running.
 pub(crate) fn deferred_checks(
     deferred: &Deferred,
     bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
@@ -1330,8 +1397,8 @@ fn io_steps(
 }
 
 /// A step from an operator to one it calls, or a version of it it runs,
-/// on the way to input or output: their names, and where the call is, if
-/// it is one.
+/// on the way to what a built-in does: their names, and where the call is,
+/// if it is one.
 pub(crate) struct IoStep {
     pub(crate) caller: String,
     pub(crate) callee: String,
@@ -1504,7 +1571,7 @@ fn exprs_in(block: &hir::Block, f: &mut dyn FnMut(&hir::Expr)) {
         hir::Statement::If(condition, ..) | hir::Statement::Loop(condition, ..) => f(condition),
         hir::Statement::For(_, array, _) => f(array),
         hir::Statement::Fail(error) | hir::Statement::Warn(error) => f(error),
-        hir::Statement::Transaction(..) => {}
+        hir::Statement::Declare(_) | hir::Statement::Transaction(..) => {}
     });
 }
 
@@ -1567,9 +1634,9 @@ struct BodyNames<'a> {
     /// What the `for` loops the statement being checked is in keep from
     /// changing.
     frozen: &'a [Frozen],
-    /// Where the statement being checked reads and assigns the operator's
-    /// `out` parameters.
-    outs: &'a mut Outs,
+    /// Where the statement being checked reads and assigns what has no value
+    /// yet.
+    unassigned: &'a mut Unassigned,
     /// What tests show of the names' values where the statement is.
     narrowed: &'a Facts,
     /// Where a statement before it may assign each name it ended what
@@ -1600,14 +1667,19 @@ impl BodyNames<'_> {
         })
     }
 
-    /// Note a read at `span` of what `lookup` found, if it is an `out`
-    /// parameter, for [`Statements::settle`] to report.
-    fn read(&mut self, lookup: &Lookup, name: &str, span: Span) {
-        if let Lookup::Found(hir::Expr::Parameter(parameter)) = lookup
-            && self.around.is_out(parameter)
-        {
-            self.outs.reads.push((name.to_string(), span));
-        }
+    /// Note a read at `span` of what `lookup` found, if it has no value until
+    /// it is assigned, for [`Statements::settle`] to report.
+    fn read(&mut self, lookup: &Lookup, span: Span) {
+        let read = match lookup {
+            Lookup::Found(hir::Expr::Parameter(parameter)) if self.around.is_out(parameter) => {
+                NoValueYet::Out(parameter.clone())
+            }
+            Lookup::Found(hir::Expr::Local(id)) if self.unassigned.locals.contains_key(id) => {
+                NoValueYet::Local(*id)
+            }
+            _ => return,
+        };
+        self.unassigned.reads.push((read, span));
     }
 }
 
@@ -1625,21 +1697,20 @@ impl Names for BodyNames<'_> {
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        let lookup = self.local(name, span, errors).unwrap_or_else(|| {
-            let lookup = self.around.resolve(name, span, errors);
-            self.read(&lookup, name, span);
-            lookup
-        });
+        let lookup = self
+            .local(name, span, errors)
+            .unwrap_or_else(|| self.around.resolve(name, span, errors));
+        self.read(&lookup, span);
         let facts = self.narrowed;
         narrowed::narrow(facts, name, lookup, self)
     }
 
     fn resolve_variable(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        self.local(name, span, errors).unwrap_or_else(|| {
-            let lookup = self.around.resolve_variable(name, span, errors);
-            self.read(&lookup, name, span);
-            lookup
-        })
+        let lookup = self
+            .local(name, span, errors)
+            .unwrap_or_else(|| self.around.resolve_variable(name, span, errors));
+        self.read(&lookup, span);
+        lookup
     }
 
     fn narrowing_ended(&self, name: &str) -> Option<Span> {
@@ -1762,6 +1833,9 @@ impl BodyNames<'_> {
                 return None;
             }
             Some(Local::Declared(id, local, Declaration::Var(declaration))) => {
+                if self.unassigned.locals.contains_key(&id) {
+                    self.unassigned.targets.push((NoValueYet::Local(id), span));
+                }
                 return Some(Assignee::local(id, local, declaration));
             }
             Some(Local::Declared(_, _, declaration @ Declaration::Loop(_))) => {
@@ -1794,7 +1868,9 @@ impl BodyNames<'_> {
         if let hir::Target::Parameter(parameter) = &assignee.target
             && self.around.is_out(parameter)
         {
-            self.outs.targets.push((name.to_string(), span));
+            self.unassigned
+                .targets
+                .push((NoValueYet::Out(parameter.clone()), span));
         }
         Some(assignee)
     }

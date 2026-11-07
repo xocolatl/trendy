@@ -272,7 +272,9 @@ pub(crate) fn local_out_of_scope(
 
 /// A variable `name`, of type `ty`, written `type_expr`, which has no
 /// default, without an initial value: a type with a type parameter in it,
-/// or with a type of the program's own, or `character`.
+/// or with a type of the program's own, or `character`, where no statement
+/// could give it a value later: a variable of the program's, or a value block's
+/// with no statements that assign it.
 pub(crate) fn no_default_value(name: &str, ty: &hir::Type, type_expr: &TypeExpr) -> Diagnostic {
     let why = if ty.parameters().next().is_some() {
         "each call gives a type parameter its type, so a type with one in it has no default"
@@ -1088,7 +1090,7 @@ pub(crate) fn variable_subtype(
     written: &Expr,
 ) -> Diagnostic {
     type_mismatch(declared, origin, actual, None, written).with_note(format!(
-        "a `var` or `out` parameter's argument is a variable of exactly its type, since the operator can give it any value of `{declared}`, which a variable of `{actual}` can't hold (*Type Inheritance and Relational Theory*, IM Prescription 19)"
+        "a `var` or `out` parameter's argument is a variable of its type, or an `out` one's of a supertype of it, since the operator can give it any value of `{declared}`, which a variable of `{actual}` can't hold (*Type Inheritance and Relational Theory*, IM Prescription 19)"
     ))
 }
 
@@ -9245,7 +9247,7 @@ pub(crate) fn read_before_assigned(
     decl: Option<&ast::AttributeType>,
 ) -> Diagnostic {
     let d = Diagnostic::error(
-        Code::UnassignedOut,
+        Code::Unassigned,
         format!("the `out` parameter `{name}` is read before it is assigned"),
         span,
         "read here",
@@ -9264,11 +9266,31 @@ pub(crate) fn read_before_assigned(
         )
 }
 
+/// A read at `span` of the local variable `decl` declares without a value,
+/// whose type has no default, before it is assigned on every path to there.
+pub(crate) fn local_read_before_assigned(decl: &VarDecl, span: Span) -> Diagnostic {
+    let name = decl
+        .name()
+        .and_then(|name| name.ident())
+        .map_or_else(String::new, |ident| ident.text().to_string());
+    Diagnostic::error(
+        Code::Unassigned,
+        format!("the variable `{name}` is read before it is assigned"),
+        span,
+        "read here",
+    )
+    .with_secondary(decl.span(), "declared without a value")
+    .with_note("a variable whose type has no default has no value until a statement gives it one, as an `out` argument or an assignment does, on every path to where it is read: an `if` without `else`, a `while` loop and a `for` loop may not run their statements")
+    .with_help(format!(
+        "assign `{name}` on every path before this, or give it a value where it is declared"
+    ))
+}
+
 /// The `out` parameter `name` of `operator`, whose name `ident` is where it
 /// is declared, which isn't assigned on every path through the operator.
 pub(crate) fn unassigned_out(name: &str, operator: &str, ident: &SyntaxToken) -> Diagnostic {
     Diagnostic::error(
-        Code::UnassignedOut,
+        Code::Unassigned,
         format!("the `out` parameter `{name}` isn't assigned on every path through `{operator}`"),
         trendy_syntax::span(ident.text_range()),
         "not always assigned",

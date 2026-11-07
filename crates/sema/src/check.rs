@@ -1602,29 +1602,9 @@ impl<'a> Checker<'a> {
                     Param::Value(ty) => {
                         self.typed_argument(&value, name, ty, None, &mut types, errors)
                     }
-                    // A variable of exactly the parameter's type, which the
-                    // operator can give any value of it (*Type Inheritance
-                    // and Relational Theory*, IM Prescription 19), as it is
-                    // declared.
-                    Param::Variable(ty, _) => {
-                        let mut variables = crate::narrowed::Unnarrowed {
-                            outer: &mut *self.names,
-                        };
-                        let checked = Checker::new(&mut variables)
-                            .typed_argument(&value, name, ty, None, &mut types, errors);
-                        match checked {
-                            Some(hir::Expr::Treat(declared, variable)) => {
-                                let actual = self.ty(&variable);
-                                errors.push(errors::variable_subtype(
-                                    &declared,
-                                    &actual,
-                                    &signature.param_origin(name),
-                                    &value,
-                                ));
-                                None
-                            }
-                            checked => checked,
-                        }
+                    Param::Variable(ty, mode) => {
+                        let parameter = (name, ty, *mode);
+                        self.variable_argument(&value, parameter, &mut types, signature, errors)
                     }
                     Param::Per { relation, ty } => {
                         let heading = &relations[relation].1;
@@ -1746,6 +1726,56 @@ impl<'a> Checker<'a> {
     /// is invalid. A `per` argument, of the parameter `relation`, has the
     /// attributes of the tuples of its relation's argument, `heading`, in
     /// scope, and must use them: otherwise it is the same for every tuple.
+    /// The variable `value` for the `var` or `out` parameter `name` of `signature`,
+    /// of type `ty`, checked, or `None` after reporting why it can't be: one of
+    /// exactly the parameter's type, which the operator can give any value of it
+    /// (*Type Inheritance and Relational Theory*, IM Prescription 19), as it is
+    /// declared. An `out` parameter's can be of a supertype of it, as the operator
+    /// never reads it, and what it gives the variable as it ends is one of the
+    /// variable's values.
+    fn variable_argument(
+        &mut self,
+        value: &Expr,
+        (name, ty, mode): (&str, &hir::Type, hir::Mode),
+        types: &mut TypeArguments,
+        signature: &Signature,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let mut variables = crate::narrowed::Unnarrowed {
+            outer: &mut *self.names,
+        };
+        let mut variable_checker = Checker::new(&mut variables);
+        if mode == hir::Mode::Out
+            && types.know(ty)
+            && let Some(wider) = variable_checker.of_a_supertype(value, ty)
+        {
+            return Some(wider);
+        }
+        match variable_checker.typed_argument(value, name, ty, None, types, errors) {
+            Some(hir::Expr::Treat(declared, variable)) => {
+                let actual = self.ty(&variable);
+                errors.push(errors::variable_subtype(
+                    &declared,
+                    &actual,
+                    &signature.param_origin(name),
+                    value,
+                ));
+                None
+            }
+            checked => checked,
+        }
+    }
+
+    /// `value`, checked, if it is a variable of a supertype of `ty`, but not `ty`
+    /// itself; and otherwise nothing, and no errors, as it is then checked as any
+    /// argument is.
+    fn of_a_supertype(&mut self, value: &Expr, ty: &hir::Type) -> Option<hir::Expr> {
+        let mut quiet = Vec::new();
+        let checked = self.expr(value, None, &mut quiet)?;
+        let actual = self.ty(&checked);
+        (quiet.is_empty() && actual != *ty && ty.is_subtype_of(&actual)).then_some(checked)
+    }
+
     fn typed_argument(
         &mut self,
         value: &Expr,
