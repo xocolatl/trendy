@@ -20,7 +20,9 @@ use crate::{Files, Namespaces, errors, ops, sections};
 /// Every constraint on the variables of `files`, a database's aside (see
 /// [`crate::databases`]), checked: its condition, a boolean, mentions
 /// one or more variables, and their initial values satisfy it. The valid
-/// ones, after reporting the rest.
+/// ones of the program's units, after reporting the rest: one of a unit that
+/// comes with the compiler that nothing uses is no part of it, nor checked as
+/// it starts.
 pub(crate) fn check(
     files: &Files,
     cx: &Context,
@@ -29,7 +31,11 @@ pub(crate) fn check(
     files
         .constraints()
         .filter(|decl| decl.part_of().is_none())
-        .filter_map(|decl| constraint(&decl, cx, errors))
+        .filter_map(|decl| {
+            let checked = constraint(&decl, cx, errors)?;
+            let unit = cx.namespaces.unit_at(decl.span());
+            cx.namespaces.units().in_program(unit).then_some(checked)
+        })
         .collect()
 }
 
@@ -308,13 +314,15 @@ impl<'c, 'a> ConditionNames<'c, 'a> {
     }
 
     /// Reading the variable of the program's `id`, written `name` at `span`:
-    /// its initial value, when the condition is of those.
+    /// its initial value, when the condition is of those, but for one the
+    /// runtime gives its value as the program starts, which only the program
+    /// knows.
     fn variable_read(&mut self, id: hir::VariableId, name: String, span: Span) -> Lookup {
         self.mentioned.entry(name).or_insert((id, span));
         // A variable with errors in its declaration is already reported.
         match &self.cx.variables[id.0] {
             // Of its declared type, which can be a supertype of its value's.
-            Some(variable) if self.initial => {
+            Some(variable) if self.initial && variable.given.is_none() => {
                 Lookup::Found(hir::Expr::Constant(variable.init.clone()).treated(&variable.ty))
             }
             Some(_) => Lookup::Found(hir::Expr::Variable(id)),

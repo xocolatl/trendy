@@ -1575,11 +1575,19 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    /// `builtin type name;` or `builtin operator name{params};`, with a
+    /// `builtin type name;`, `builtin operator name{params};`, with a
     /// result type for a read-only one and type parameters for a generic
-    /// one: a declaration of something the compiler implements. Only the
-    /// prelude has these.
+    /// one, or `builtin var name: type;`, a variable whose value the runtime
+    /// gives as the program starts: a declaration of something the compiler
+    /// implements. Only the units that come with it have these.
     fn builtin(&mut self) {
+        if self
+            .found_after(1)
+            .is_some_and(|f| f.kind == SyntaxKind::VarKw)
+        {
+            self.builtin_var_decl();
+            return;
+        }
         self.form = errors::BUILTIN_FORM;
         let is_type = self
             .found_after(1)
@@ -4274,6 +4282,23 @@ impl<'a> Parser<'a> {
     fn var_decl(&mut self) {
         let outer_form = std::mem::replace(&mut self.form, errors::VARIABLE_FORM);
         self.start_node(SyntaxKind::VarDecl);
+        self.var_decl_rest();
+        self.form = outer_form;
+    }
+
+    /// `builtin var name: type;`, a variable declaration, after `builtin`,
+    /// whose value sema checks it hasn't, as the runtime gives it.
+    fn builtin_var_decl(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::VARIABLE_FORM);
+        self.start_node(SyntaxKind::VarDecl);
+        self.bump();
+        self.var_decl_rest();
+        self.form = outer_form;
+    }
+
+    /// A variable declaration from its `var` or `const` on, in its node,
+    /// which this finishes.
+    fn var_decl_rest(&mut self) {
         let first = self.found();
         let constant = first.is_some_and(|f| f.spells(SyntaxKind::ConstKw));
         self.bump();
@@ -4366,7 +4391,6 @@ impl<'a> Parser<'a> {
         self.keys();
         self.end_statement();
         self.builder.finish_node();
-        self.form = outer_form;
     }
 
     /// A variable's keys, each `key { a, b }`, and their spans.
@@ -8808,6 +8832,22 @@ SourceFile
                 .map(|h| h.attributes().count()),
             Some(1)
         );
+        // A variable the runtime gives its value, a variable's declaration, with
+        // its `var` after `builtin`, and its keys.
+        let parse = parse_str("builtin var environment: relation variable key { name };");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let Some(trendy_syntax::ast::Item::Variable(given)) = parse.tree.items().next() else {
+            panic!("a variable");
+        };
+        assert!(given.builtin().is_some());
+        assert_eq!(given.keyword().map(|k| k.kind()), Some(SyntaxKind::VarKw));
+        assert_eq!(given.keys().count(), 1);
+        let ordinary = parse_str("var count := 0;");
+        let Some(trendy_syntax::ast::Item::Variable(ordinary)) = ordinary.tree.items().next()
+        else {
+            panic!("a variable");
+        };
+        assert!(ordinary.builtin().is_none());
     }
 
     #[test]

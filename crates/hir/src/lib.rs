@@ -750,6 +750,9 @@ pub enum LanguageError {
     NotOneLine,
     /// An argument the program was started with isn't UTF-8 text (R0028).
     NotUtf8Argument,
+    /// A variable of the environment the program was started with isn't
+    /// UTF-8 text, its name or its value (R0029).
+    NotUtf8Environment,
     /// A CSV file's field isn't a value of its attribute's type (R0014).
     UnreadableField,
     /// A value a CSV file's record gives breaks its type's constraint
@@ -820,7 +823,7 @@ pub enum LanguageError {
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 34] = [
+    pub const ALL: [LanguageError; 35] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -855,6 +858,7 @@ impl LanguageError {
         LanguageError::UnwritableFile,
         LanguageError::NotOneLine,
         LanguageError::NotUtf8Argument,
+        LanguageError::NotUtf8Environment,
     ];
 
     /// The code a failure with it is written with, when nothing takes it.
@@ -866,6 +870,7 @@ impl LanguageError {
             LanguageError::UnwritableFile => Code::UnwritableFile,
             LanguageError::NotOneLine => Code::NotOneLine,
             LanguageError::NotUtf8Argument => Code::NotUtf8Argument,
+            LanguageError::NotUtf8Environment => Code::NotUtf8Environment,
             LanguageError::MalformedCsv => Code::MalformedCsv,
             LanguageError::MissingColumn
             | LanguageError::ColumnShared
@@ -910,6 +915,7 @@ impl LanguageError {
             LanguageError::UnwritableFile => "unwritable_file",
             LanguageError::NotOneLine => "not_one_line",
             LanguageError::NotUtf8Argument => "not_utf8_argument",
+            LanguageError::NotUtf8Environment => "not_utf8_environment",
             LanguageError::MalformedCsv => "malformed_csv",
             LanguageError::MissingColumn => "missing_column",
             LanguageError::UnreadableField => "unreadable_field",
@@ -954,109 +960,141 @@ impl LanguageError {
         LanguageError::ALL.into_iter().find(|e| e.name() == name)
     }
 
-    /// Its type's components.
+    /// Its type's components: an error of a file's has its `path`, and the rest.
     #[must_use]
     pub fn components(self) -> Heading {
         let (text, integer) = (Scalar::Text, Scalar::Integer);
-        let components: &[(&str, Scalar)] = match self {
+        let (of_a_file, rest): (bool, &[(&str, Scalar)]) = match self {
             LanguageError::UnreadableFile | LanguageError::UnwritableFile => {
-                &[("path", text), ("reason", text)]
+                (true, &[("reason", text)])
             }
-            LanguageError::NotUtf8 | LanguageError::NotOneLine => {
-                &[("path", text), ("line", integer)]
-            }
-            LanguageError::MalformedCsv => &[("path", text), ("line", integer), ("problem", text)],
-            LanguageError::MissingColumn => &[
-                ("path", text),
-                ("attribute", text),
-                ("column", integer),
-                ("columns", integer),
-            ],
-            LanguageError::UnreadableField => &[
-                ("path", text),
-                ("line", integer),
-                ("column", integer),
-                ("attribute", text),
-                ("type", text),
-                ("text", text),
-                ("out_of_range", Scalar::Boolean),
-            ],
-            LanguageError::BrokenConstraintInFile => &[
-                ("path", text),
-                ("line", integer),
-                ("attribute", text),
-                ("value", text),
-                ("type", text),
-                ("constraint", text),
-            ],
-            LanguageError::ComponentKeyViolatedInFile => &[
-                ("path", text),
-                ("line", integer),
-                ("attribute", text),
-                ("type", text),
-                ("component", text),
-                ("key", text),
-                ("first", text),
-                ("second", text),
-            ],
-            LanguageError::OverlappingSubtypesInFile => &[
-                ("path", text),
-                ("line", integer),
-                ("attribute", text),
-                ("value", text),
-                ("first", text),
-                ("second", text),
-            ],
-            LanguageError::Overflow | LanguageError::DivisionByZero => &[("operation", text)],
-            LanguageError::NotOneTuple => &[("count", integer)],
-            LanguageError::IndexOutOfRange => &[("position", integer), ("length", integer)],
+            LanguageError::NotUtf8 | LanguageError::NotOneLine => (true, &[("line", integer)]),
+            LanguageError::MalformedCsv => (true, &[("line", integer), ("problem", text)]),
+            LanguageError::MissingColumn => (
+                true,
+                &[
+                    ("attribute", text),
+                    ("column", integer),
+                    ("columns", integer),
+                ],
+            ),
+            LanguageError::UnreadableField => (
+                true,
+                &[
+                    ("line", integer),
+                    ("column", integer),
+                    ("attribute", text),
+                    ("type", text),
+                    ("text", text),
+                    ("out_of_range", Scalar::Boolean),
+                ],
+            ),
+            LanguageError::BrokenConstraintInFile => (
+                true,
+                &[
+                    ("line", integer),
+                    ("attribute", text),
+                    ("value", text),
+                    ("type", text),
+                    ("constraint", text),
+                ],
+            ),
+            LanguageError::ComponentKeyViolatedInFile => (
+                true,
+                &[
+                    ("line", integer),
+                    ("attribute", text),
+                    ("type", text),
+                    ("component", text),
+                    ("key", text),
+                    ("first", text),
+                    ("second", text),
+                ],
+            ),
+            LanguageError::OverlappingSubtypesInFile => (
+                true,
+                &[
+                    ("line", integer),
+                    ("attribute", text),
+                    ("value", text),
+                    ("first", text),
+                    ("second", text),
+                ],
+            ),
+            other => (false, other.components_of_values()),
+        };
+        let path = of_a_file.then_some(("path", text));
+        heading_of_scalars(
+            &path
+                .into_iter()
+                .chain(rest.iter().copied())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The components of one that isn't an error of a file's, which
+    /// [`LanguageError::components`] gives itself.
+    fn components_of_values(self) -> &'static [(&'static str, Scalar)] {
+        use Scalar::{Approximate, Boolean, Integer, Text};
+        match self {
+            LanguageError::Overflow | LanguageError::DivisionByZero => &[("operation", Text)],
+            LanguageError::NotOneTuple => &[("count", Integer)],
+            LanguageError::IndexOutOfRange => &[("position", Integer), ("length", Integer)],
             LanguageError::TupleMismatch => {
-                &[("attribute", text), ("first", text), ("second", text)]
+                &[("attribute", Text), ("first", Text), ("second", Text)]
             }
             LanguageError::SharedTuple
             | LanguageError::MissingTuple
-            | LanguageError::TupleRemovedTwice => &[("value", text)],
+            | LanguageError::TupleRemovedTwice => &[("value", Text)],
             LanguageError::KeyViolated => &[
-                ("variable", text),
-                ("key", text),
-                ("first", text),
-                ("second", text),
+                ("variable", Text),
+                ("key", Text),
+                ("first", Text),
+                ("second", Text),
             ],
             LanguageError::ComponentKeyViolated => &[
-                ("type", text),
-                ("component", text),
-                ("key", text),
-                ("first", text),
-                ("second", text),
+                ("type", Text),
+                ("component", Text),
+                ("key", Text),
+                ("first", Text),
+                ("second", Text),
             ],
-            LanguageError::ElementSetTwice => &[("element", text), ("within", Scalar::Boolean)],
-            LanguageError::NoMinOrMax => &[("aggregate", text)],
-            LanguageError::Unparsable => &[
-                ("text", text),
-                ("type", text),
-                ("out_of_range", Scalar::Boolean),
-            ],
+            LanguageError::ElementSetTwice => &[("element", Text), ("within", Boolean)],
+            LanguageError::NoMinOrMax => &[("aggregate", Text)],
+            LanguageError::Unparsable => {
+                &[("text", Text), ("type", Text), ("out_of_range", Boolean)]
+            }
             LanguageError::BrokenConstraint => {
-                &[("value", text), ("type", text), ("constraint", text)]
+                &[("value", Text), ("type", Text), ("constraint", Text)]
             }
-            LanguageError::NoSquareRoot => &[("of", Scalar::Approximate)],
-            LanguageError::NotOfType => &[("value", text), ("type", text)],
+            LanguageError::NoSquareRoot => &[("of", Approximate)],
+            LanguageError::NotOfType => &[("value", Text), ("type", Text)],
             LanguageError::OverlappingSubtypes => {
-                &[("value", text), ("first", text), ("second", text)]
+                &[("value", Text), ("first", Text), ("second", Text)]
             }
-            LanguageError::BrokenCallConstraint => &[("called", text), ("constraint", text)],
-            LanguageError::TooDeep => &[("bytes", integer)],
-            LanguageError::NotUtf8Argument => &[("position", integer)],
+            LanguageError::BrokenCallConstraint => &[("called", Text), ("constraint", Text)],
+            LanguageError::TooDeep => &[("bytes", Integer)],
+            LanguageError::NotUtf8Argument => &[("position", Integer)],
+            LanguageError::NotUtf8Environment => &[("name", Text)],
             LanguageError::ColumnShared => {
-                &[("first", text), ("second", text), ("column", integer)]
+                &[("first", Text), ("second", Text), ("column", Integer)]
             }
-            LanguageError::ColumnBelowOne => &[("attribute", text), ("column", integer)],
-            LanguageError::ConstraintViolated => &[("constraint", text), ("condition", text)],
+            LanguageError::ColumnBelowOne => &[("attribute", Text), ("column", Integer)],
+            LanguageError::ConstraintViolated => &[("constraint", Text), ("condition", Text)],
             LanguageError::ConstraintViolatedBy => {
-                &[("constraint", text), ("condition", text), ("tuples", text)]
+                &[("constraint", Text), ("condition", Text), ("tuples", Text)]
             }
-        };
-        heading_of_scalars(components)
+            LanguageError::UnreadableFile
+            | LanguageError::UnwritableFile
+            | LanguageError::NotUtf8
+            | LanguageError::NotOneLine
+            | LanguageError::MalformedCsv
+            | LanguageError::MissingColumn
+            | LanguageError::UnreadableField
+            | LanguageError::BrokenConstraintInFile
+            | LanguageError::ComponentKeyViolatedInFile
+            | LanguageError::OverlappingSubtypesInFile => &[],
+        }
     }
 }
 
@@ -4184,14 +4222,61 @@ pub struct Variable {
     pub name: String,
     pub ty: Type,
     /// Always explicit: sema supplies the type's default when the source
-    /// gives no value.
+    /// gives no value, as it does for one the runtime gives its value.
     pub init: Value,
+    /// What the runtime gives it as the program starts, if it is one of
+    /// those, a `builtin var`, whose value only the program knows.
+    pub given: Option<Given>,
     /// A relation variable's keys (TTM RM Prescription 15), each a set of
     /// attribute names, which `init` satisfies: no two tuples have the same
     /// values for a key's attributes, and no key contains another. There is
     /// always at least one: the whole heading when the source declares
     /// none. Variables of other types have none.
     pub keys: Vec<Key>,
+}
+
+/// A variable whose value the runtime gives as the program starts, before
+/// `main` runs, rather than an initial value known when compiling: one a unit
+/// that comes with the compiler declares, `builtin var`, which sema checks
+/// against these. The program is given it only if something it runs reads or
+/// assigns it, so that what it never looks at can't stop it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Given {
+    /// The arguments the program was started with, but its path, in order:
+    /// an `array text`.
+    Arguments,
+    /// The environment the program was started with, each variable by its
+    /// name, the first of each name: a `relation { name: text, value: text }`.
+    Environment,
+}
+
+impl Given {
+    /// Every one, as sema checks them.
+    pub const ALL: [Given; 2] = [Given::Arguments, Given::Environment];
+
+    /// The unit that declares each.
+    pub const UNIT: &'static str = "trendy.process";
+
+    /// Its name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Given::Arguments => "arguments",
+            Given::Environment => "environment",
+        }
+    }
+
+    /// Its type.
+    #[must_use]
+    pub fn ty(self) -> Type {
+        let text = || Type::Scalar(Scalar::Text);
+        match self {
+            Given::Arguments => Type::Array(Box::new(text())),
+            Given::Environment => Type::Relation(Heading::new(
+                [("name".to_string(), text()), ("value".to_string(), text())].into(),
+            )),
+        }
+    }
 }
 
 /// A key: a set of a relation's attributes, by name.

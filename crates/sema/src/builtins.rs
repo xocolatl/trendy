@@ -478,6 +478,83 @@ pub(crate) fn operators(
     }
 }
 
+/// What the runtime gives the variable `decl`, a `builtin var`, named `ident`,
+/// of type `ty`, as the program starts, if it is a unit that comes with the
+/// compiler's, or `None`: one elsewhere is reported with the program's
+/// operators (see [`crate::operators::signatures`]). One of a name, unit or
+/// type the compiler gives none of, or with a value of its own, is an
+/// internal error.
+pub(crate) fn given(
+    decl: &ast::VarDecl,
+    ident: &SyntaxToken,
+    ty: &hir::Type,
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Given> {
+    let unit = namespaces
+        .units()
+        .name(namespaces.unit_at(ident_span(ident)));
+    if !unit.starts_with("trendy.") {
+        return None;
+    }
+    let name = ident.text();
+    let Some(given) = hir::Given::ALL
+        .into_iter()
+        .find(|g| g.name() == name && unit == hir::Given::UNIT)
+    else {
+        errors.push(internal(
+            format!("the runtime gives no variable `{name}` of `{unit}`"),
+            ident,
+        ));
+        return None;
+    };
+    if decl.initializer().is_some() {
+        errors.push(internal(
+            format!("`{name}` has the value the runtime gives, and none of its own"),
+            ident,
+        ));
+        return None;
+    }
+    if *ty != given.ty() {
+        errors.push(internal(
+            format!("`{name}` is a `{}` as the runtime gives it", given.ty()),
+            ident,
+        ));
+        return None;
+    }
+    Some(given)
+}
+
+/// Report each variable the runtime gives that no unit that comes with the
+/// compiler, of `files`, declares, an internal error, at the prelude's end.
+pub(crate) fn given_declared(files: &Files, errors: &mut Vec<Diagnostic>) {
+    let declared: BTreeSet<String> = files
+        .items()
+        .filter(|(source, _)| source.is_compilers())
+        .filter_map(|(_, item)| match item {
+            Item::Variable(decl) if decl.builtin().is_some() => {
+                Some(decl.name()?.ident()?.text().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    let end = Span::empty(files.prelude().span().end);
+    for given in hir::Given::ALL {
+        if !declared.contains(given.name()) {
+            errors.push(Diagnostic::error(
+                Code::Internal,
+                format!(
+                    "no unit that comes with the compiler declares `builtin var {}: {};`",
+                    given.name(),
+                    given.ty()
+                ),
+                end,
+                "missing",
+            ));
+        }
+    }
+}
+
 /// The identity of each error the language makes, the type a unit that
 /// comes with the compiler, in `files`, declares for it, reporting the
 /// prelude's `error` and `message` if it doesn't declare them as the

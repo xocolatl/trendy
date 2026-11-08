@@ -726,6 +726,10 @@ impl<'a> Checker<'a> {
                     errors.push(errors::constant_as_value(name, written, &meant));
                     return None;
                 }
+                if let Some(error) = errors::unused_unit(&ident, Kind::Variable, namespaces) {
+                    errors.push(error);
+                    return None;
+                }
                 let candidates = self.names.candidates(span);
                 let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
                 errors.push(if self.names.unnumbered() {

@@ -2197,10 +2197,20 @@ impl QualifiedName {
 }
 
 impl VarDecl {
-    /// The word it starts with, `var` or `const`.
+    /// The word it starts with, `var` or `const`, after `builtin`, if it has
+    /// that.
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {
-        significant_tokens(&self.0).next()
+        significant_tokens(&self.0).find(|t| t.kind() != SyntaxKind::BuiltinKw)
+    }
+
+    /// The `builtin` before `var` of a variable whose value the runtime
+    /// gives, if it is one.
+    #[must_use]
+    pub fn builtin(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0)
+            .next()
+            .filter(|t| t.kind() == SyntaxKind::BuiltinKw)
     }
 
     /// Whether it declares a constant, which is never assigned, rather than a

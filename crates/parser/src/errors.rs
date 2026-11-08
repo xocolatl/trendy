@@ -30,7 +30,7 @@ pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation varia
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
-pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;`, or `builtin type name: { kind, … };` with the kinds it is of, `builtin operator name{params};`, or `builtin operator name{params}: type;` with a result type, then `types { T: any type }` for type parameters, only in the prelude";
+pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;`, or `builtin type name: { kind, … };` with the kinds it is of, `builtin operator name{params};`, or `builtin operator name{params}: type;` with a result type, then `types { T: any type }` for type parameters, or `builtin var name: type;`, only in the units that come with the compiler";
 pub(crate) const TYPE_DECL_FORM: &str = "a type is declared as `type name { { component: type, … } };`, with the components of its possible representation in braces of their own";
 pub(crate) const DATABASE_FORM: &str = "a database is declared as `database name;`, and its units add relvars and constraints to it, each named after it: `var name.pantry: relation { … };`, `constraint name.stocked := …;`";
 pub(crate) const CONSTRAINT_DECL_FORM: &str = "a constraint is declared as `constraint name := condition;`, a condition on the unit's variables that holds whenever a statement ends";

@@ -302,6 +302,11 @@ impl Files {
             .map(|(_, tree)| tree)
     }
 
+    /// The file of `unit`.
+    pub(crate) fn tree(&self, unit: hir::FileId) -> &SourceFile {
+        &self.units[unit.0].1
+    }
+
     /// The catalog's unit.
     pub(crate) fn catalog(&self) -> &SourceFile {
         &self.units[self.catalog.0].1
@@ -442,6 +447,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     // whose operators come first.
     named_types::resolve(files, &mut namespaces, hir::OperatorId(0), errors);
     builtins::library(files, &mut namespaces, errors);
+    builtins::given_declared(files, errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
@@ -458,6 +464,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     // Then the constraints on the variables, which their initial values
     // satisfy, and the update operators' bodies, which refer to both.
     let context = body::Context {
+        files,
         sites: &sites,
         namespaces: &namespaces,
         operators: &operators,
@@ -611,10 +618,8 @@ fn entry(
         for param in params.attributes() {
             let error = if param.is_named("errors") {
                 errors::main_errors(&param, &signature.params["errors"], namespaces)
-            } else if param.is_named("arguments") {
-                errors::main_arguments(&param, &signature.params["arguments"])
             } else {
-                Some(errors::main_with_params(&params, &param))
+                Some(errors::main_with_params(&params, &param, namespaces))
             };
             if let Some(error) = error {
                 errors.push(error);
@@ -1155,14 +1160,20 @@ impl Namespaces {
     }
 
     /// The names of the units whose interfaces declare `name` as a thing
-    /// of `kind`'s, a type, a heading or an operator, which what is written
-    /// at `at` doesn't see, but could use, by their names; and the section
-    /// it is written in, whose `uses` would gain one.
+    /// of `kind`'s, a type, a heading, an operator, or a value, a variable or
+    /// a constant, which what is written at `at` doesn't see, but could use,
+    /// by their names; and the section it is written in, whose `uses` would
+    /// gain one.
     pub(crate) fn exporters(&self, name: &str, at: Span, kind: Kind) -> (Vec<&str>, ast::Section) {
         let viewer = self.viewer(at);
         let units = match kind {
             Kind::Defined => self.types.unseen_exporters(name, viewer, &self.units),
             Kind::Heading => self.headings.unseen_exporters(name, viewer, &self.units),
+            Kind::Variable | Kind::Constant => {
+                let mut units = self.variables.unseen_exporters(name, viewer, &self.units);
+                units.extend(self.constants.unseen_exporters(name, viewer, &self.units));
+                units
+            }
             _ => self.operators.unseen_exporters(name, viewer, &self.units),
         };
         let mut names: Vec<&str> = units.into_iter().map(|u| self.units.name(u)).collect();
@@ -1857,8 +1868,16 @@ mod tests {
 
     const MAIN: &str = "\noperator main{} [];";
 
+    /// The variables of `program`, but those the runtime gives, which only
+    /// `trendy.process` declares.
+    fn own_variables(program: &hir::Program) -> impl Iterator<Item = &hir::Variable> {
+        program.variables.iter().filter(|v| v.given.is_none())
+    }
+
+    /// The variables `source` declares.
     fn variables(source: &str) -> Vec<hir::Variable> {
-        analyze_str(&format!("{source}{MAIN}")).unwrap().variables
+        let program = analyze_str(&format!("{source}{MAIN}")).unwrap();
+        own_variables(&program).cloned().collect()
     }
 
     #[test]
@@ -1894,12 +1913,14 @@ mod tests {
                     name: "i".to_string(),
                     ty: hir::Type::Scalar(hir::Scalar::Integer),
                     init: hir::Value::Integer(7),
+                    given: None,
                     keys: Vec::new(),
                 },
                 hir::Variable {
                     name: "t".to_string(),
                     ty: hir::Type::Scalar(hir::Scalar::Text),
                     init: hir::Value::Text("a\tb".to_string()),
+                    given: None,
                     keys: Vec::new(),
                 },
             ]
@@ -3456,7 +3477,7 @@ var zero := seg{{len: 0}};{MAIN}"
             "{strip}{version}var a := area{{s: strip{{length: 2, width: 3}}}};\nvar b := area{{s: square{{side: 2}}}};\noperator main{{}} [];"
         );
         let program = analyze_with(&parse(&program), &prelude).unwrap();
-        let values: Vec<_> = program.variables.iter().map(|v| v.init.clone()).collect();
+        let values: Vec<_> = own_variables(&program).map(|v| v.init.clone()).collect();
         assert_eq!(values, [hir::Value::Integer(6), hir::Value::Integer(4)]);
         // Without its version, the program's type is reported, at it.
         let source = format!("{strip}operator main{{}} [];");
@@ -4504,14 +4525,13 @@ operator main{} [
         let interface = "interface\n\ntype duration {\n    { seconds: integer },\n    { hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 },\n    constraint seconds >= 0,\n};\n\nimplementation\n\n";
         let part = "type duration {\n    { hours: integer, minutes: integer }\n        to { seconds := hours * 3600 + minutes * 60 }\n        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },\n};\n\n";
         let program = |rest: &str| format!("{interface}{part}{rest}operator main{{}} [];");
-        let values: Vec<String> = analyze_str(&program(
+        let analyzed = analyze_str(&program(
             "var a := duration{hours: 1, minutes: 30}.seconds;\nvar b := duration{seconds: 5400}.minutes;\n",
         ))
-        .unwrap()
-        .variables
-        .iter()
-        .map(|v| v.init.to_string())
-        .collect();
+        .unwrap();
+        let values: Vec<String> = own_variables(&analyzed)
+            .map(|v| v.init.to_string())
+            .collect();
         assert_eq!(values, ["5400", "30"]);
         // Its representation's constraint, and the type's, checked as ever.
         assert_eq!(
@@ -5577,9 +5597,73 @@ operator main{} [
     }
 
     #[test]
-    fn main_takes_its_arguments_and_its_errors() {
-        // Other languages' names for the arguments are fixed to them.
+    fn the_runtime_gives_trendy_process_its_variables_as_the_program_starts() {
+        // Read and assigned as any other unit's, from `main` on.
+        let source = "uses { trendy.process };\n\noperator main{} [\n    call debug_value{v: arguments};\n    insert environment relation { { name: \"LANG\", value: \"sw_KE\" } };\n];";
+        let program = analyze_str(source).unwrap();
+        let given: Vec<Option<hir::Given>> = program
+            .variables
+            .iter()
+            .filter_map(|v| v.given)
+            .map(Some)
+            .collect();
+        assert_eq!(
+            given,
+            [Some(hir::Given::Arguments), Some(hir::Given::Environment)]
+        );
+        // Its constraint, which only the program can check of what it is
+        // given, is checked as it starts, and is no program's that doesn't use
+        // the unit.
+        assert!(program.constraints.iter().any(|c| c.checked_at_start));
+        let unused = analyze_str("operator main{} [];").unwrap();
+        assert!(unused.constraints.is_empty(), "{:#?}", unused.constraints);
+        // Not when compiling.
+        let source = "uses { trendy.process };\n\nvar first := arguments;\n\noperator main{} [];";
+        assert_eq!(codes(source), [Code::InitialValueWhenRunning]);
+        // A program declares none.
+        let source = "builtin var mine: integer;\n\noperator main{} [];";
+        let found = errors(source);
+        assert_eq!(found[0].code, Code::BuiltinInProgram, "{found:#?}");
+        assert!(found[0].help[0].contains("remove `builtin`"), "{found:#?}");
+        // The unit's declarations are the compiler's: one it gives no value,
+        // or of another type, or with a value of its own, is an internal error,
+        // and so is one missing.
+        let process = trendy_prelude::PROCESS.source;
+        for (from, to) in [
+            (
+                "builtin var arguments: array text;",
+                "builtin var arguments: array text;\nbuiltin var flags: array text;",
+            ),
+            (
+                "builtin var arguments: array text;",
+                "builtin var arguments: text;",
+            ),
+            (
+                "builtin var arguments: array text;",
+                "builtin var arguments: array text := array [];",
+            ),
+            (
+                "builtin var arguments: array text;",
+                "var arguments: array text;",
+            ),
+        ] {
+            assert!(process.contains(from));
+            let source = process.replacen(from, to, 1);
+            let found = checked_with(trendy_prelude::PROCESS, &parse(&source));
+            assert!(
+                found.iter().any(|e| e.code == Code::Internal),
+                "{to}: {found:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn main_takes_its_errors() {
+        // The arguments are `trendy.process`'s, by any name another language
+        // gives them: the fix removes the parameter, and uses the unit.
         for written in [
+            "arguments: array text",
+            "var arguments: array text",
             "args: text",
             "argv: array text",
             "ARGV: array text",
@@ -5587,44 +5671,60 @@ operator main{} [
         ] {
             let source = format!("operator main{{{written}}} [];");
             assert_eq!(codes(&source), [Code::MainSignature], "{written}");
-            assert_eq!(fix(&source), "operator main{arguments: array text} [];");
+            assert_eq!(
+                fix(&source),
+                "uses { trendy.process };\n\noperator main{} [];",
+                "{written}"
+            );
         }
-        for (written, fixed) in [
-            ("arguments: text", "arguments: array text"),
-            ("var arguments: array text", "arguments: array text"),
-            ("out arguments: array text", "arguments: array text"),
-            ("depth: integer", ""),
-            (
-                "arguments: array text, depth: integer",
-                "arguments: array text",
-            ),
+        // Where the unit is used already, its `arguments` are what the
+        // parameter was.
+        let source = "uses { trendy.process };\n\noperator main{arguments: array text} [\n    call debug_value{v: arguments};\n];";
+        let fixed = fix(source);
+        assert_eq!(
+            fixed,
+            "uses { trendy.process };\n\noperator main{} [\n    call debug_value{v: arguments};\n];"
+        );
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        // Another parameter is removed.
+        let source = "operator main{depth: integer} [];";
+        assert_eq!(codes(source), [Code::MainSignature]);
+        assert_eq!(fix(source), "operator main{} [];");
+        // Read elsewhere, the arguments and the environment say where they are.
+        for (name, rule) in [
+            ("argv", "variable `arguments`"),
+            ("args", "variable `arguments`"),
+            ("argc", "variable `arguments`"),
+            ("ARGV", "variable `arguments`"),
+            ("environ", "variable `environment`"),
+            ("env", "variable `environment`"),
+            ("ENV", "variable `environment`"),
         ] {
-            let source = format!("operator main{{{written}}} [];");
-            // An `out` one isn't assigned either, which the same fix mends.
-            assert_eq!(codes(&source)[0], Code::MainSignature, "{written}");
-            let right = format!("operator main{{{fixed}}} [];");
-            assert_eq!(fix(&source), right, "{written}");
-            assert!(analyze_str(&right).is_ok(), "{right}");
-        }
-        // The two, in either order.
-        for written in [
-            "arguments: array text, out errors: relation transaction_collection",
-            "out errors: relation transaction_collection, arguments: array text",
-        ] {
-            let source = format!("operator main{{{written}}} [ errors := relation {{}}; ];");
-            assert!(analyze_str(&source).is_ok(), "{written}");
-        }
-        // Read elsewhere, they say where they are.
-        for name in ["argv", "args", "argc", "ARGV"] {
             let found = errors(&format!(
                 "operator main{{}} [ call debug_value{{v: {name}}}; ];"
             ));
             assert_eq!(found[0].code, Code::UnknownName, "{name}");
+            assert!(found[0].notes[0].contains(rule), "{name}: {found:#?}");
+        }
+        // So do C's `getenv` and `setenv`.
+        for source in [
+            "operator main{} [ call debug_value{v: getenv{name: \"HOME\"}}; ];",
+            "operator main{} [ call setenv{name: \"HOME\", value: \"/\"}; ];",
+        ] {
+            let found = errors(source);
+            assert_eq!(found[0].code, Code::UnknownName, "{source}");
             assert!(
-                found[0].notes[0].contains("`operator main{arguments: array text}"),
-                "{name}"
+                found[0].notes[0].contains("variable `environment`"),
+                "{source}: {found:#?}"
             );
         }
+        // Without the unit, they are offered with it.
+        let found = errors("operator main{} [ call debug_value{v: environment}; ];");
+        assert_eq!(found[0].code, Code::UnknownName);
+        assert_eq!(
+            fix("operator main{} [ call debug_value{v: environment}; ];"),
+            "uses { trendy.process };\n\noperator main{} [ call debug_value{v: environment}; ];"
+        );
         let given = "operator main{out errors: relation transaction_collection} [ errors := relation {}; ];";
         assert!(analyze_str(given).is_ok());
         // An `out` parameter, of a `relation transaction_collection`,
@@ -5838,7 +5938,7 @@ operator main{} [
     fn bits_of_integers() {
         let values = |source: &str| -> Vec<hir::Value> {
             let program = analyze_str(source).unwrap();
-            program.variables.iter().map(|v| v.init.clone()).collect()
+            own_variables(&program).map(|v| v.init.clone()).collect()
         };
         assert_eq!(
             values(&format!(
@@ -9378,7 +9478,7 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
             "{SAME}var t := same{{a: 1, b: 1}};\nvar f := same{{b: \"Lhasa\", a: \"Lima\"}};\nvar r := same{{a: relation {{ {{ x: 1 }} }}, b: relation {{}}}};{MAIN}"
         ))
         .unwrap();
-        let values: Vec<_> = program.variables.iter().map(|v| v.init.clone()).collect();
+        let values: Vec<_> = own_variables(&program).map(|v| v.init.clone()).collect();
         assert_eq!(
             values,
             [
@@ -9719,9 +9819,7 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
             ])
         };
         let program = units("uses { tally };\n\noperator count{r: any relation}: integer [ 0 ];\noperator some{r: any relation, of: boolean per r}: boolean [ true ];\nvar r := relation { { x: 1 }, { x: 2 } };\nvar mine := count{r: r};\nvar theirs := tallied{r: r};\nvar any := some{r: r, of: x > 5};\n\noperator main{} [];").unwrap();
-        let values: Vec<String> = program
-            .variables
-            .iter()
+        let values: Vec<String> = own_variables(&program)
             .map(|v| v.init.to_string())
             .collect();
         assert_eq!(values[1..], ["0", "2", "true"]);
@@ -9742,9 +9840,7 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
         );
         // A type of a prelude operator's name, whose selector overloads it.
         let program = units("type count { { n: integer } };\nvar c := count{n: 1};\nvar n := count{r: relation { { x: 1 } }};\n\noperator main{} [];").unwrap();
-        let values: Vec<String> = program
-            .variables
-            .iter()
+        let values: Vec<String> = own_variables(&program)
             .map(|v| v.init.to_string())
             .collect();
         assert_eq!(values, ["count{n: 1}", "1"]);
@@ -15183,9 +15279,7 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             ])
         };
         let program = units(main).unwrap();
-        let values: Vec<String> = program
-            .variables
-            .iter()
+        let values: Vec<String> = own_variables(&program)
             .map(|v| v.init.to_string())
             .collect();
         assert_eq!(values, ["20", "seas.depths::metres{m: 281}"]);
@@ -15317,9 +15411,7 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             ("discs", DISCS_UNIT),
         ])
         .unwrap();
-        let values: Vec<String> = program
-            .variables
-            .iter()
+        let values: Vec<String> = own_variables(&program)
             .map(|v| v.init.to_string())
             .collect();
         assert_eq!(values, ["1.2e1", "4e0"]);
@@ -17242,7 +17334,7 @@ var a := duration{n: days{n: 1}};
         let main = format!("{LAKES}\noperator main{{}} [ call bump{{}}; ];");
         let lakes = format!("{EXPORTS}{LAKES}");
         let program = analyze_units(&[("program", &main), ("lakes", &lakes)]).unwrap();
-        let variables: Vec<&str> = program.variables.iter().map(|v| v.name.as_str()).collect();
+        let variables: Vec<&str> = own_variables(&program).map(|v| v.name.as_str()).collect();
         assert_eq!(
             variables,
             [

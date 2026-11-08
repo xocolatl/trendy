@@ -4,14 +4,15 @@
 //! compiler implements, and defines others in trendy; the catalog
 //! ([`CATALOG`]), which describes the program's units, and whose
 //! constraints are the rules between them; `trendy.files` ([`FILES`]), which
-//! reads files; and `trendy.uuid` ([`UUID`]) and `trendy.time` ([`TIME`]), of
-//! ordinary trendy but for reading the clock and giving random bits, for the units
-//! that use them.
+//! reads files; `trendy.uuid` ([`UUID`]) and `trendy.time` ([`TIME`]), of
+//! ordinary trendy but for reading the clock and giving random bits; and
+//! `trendy.process` ([`PROCESS`]), the arguments and environment the program
+//! was started with, for the units that use them.
 //!
 //! Drivers parse them, as [`UNITS`] lists them, alongside the program and
 //! hand them all to sema. Only these units may declare `builtin`
-//! operators, and sema checks each declaration against the operator the
-//! compiler actually provides.
+//! operators and variables, and sema checks each declaration against what
+//! the compiler actually provides.
 
 /// A unit that comes with the compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,15 @@ pub const TIME: Unit = Unit {
     source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/time.trendy"),
 };
 
+/// `trendy.process`, the arguments and environment the program was started
+/// with.
+pub const PROCESS: Unit = Unit {
+    name: "trendy.process",
+    path: "<process>",
+    source: include_str!("process.trendy"),
+    source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/process.trendy"),
+};
+
 /// Every unit that comes with the compiler, in the order their texts
 /// follow a program's units' in its spans: the prelude last.
-pub const UNITS: [Unit; 5] = [TIME, UUID, FILES, CATALOG, PRELUDE];
+pub const UNITS: [Unit; 6] = [PROCESS, TIME, UUID, FILES, CATALOG, PRELUDE];

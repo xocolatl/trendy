@@ -1,0 +1,22 @@
+/* What the program is started with, which `trendy.process` gives it: its
+   arguments, an array of text, in the order given, but its path, and its
+   environment, a relation of each variable's name and value. Each name given
+   is welcomed, and with none, everyone is, in Swahili, unless the
+   environment's `GREETING` says how. */
+uses { trendy.process };
+
+operator welcome{greeting: text, name: text}: text [
+    greeting || ", " || name || "!"
+];
+
+operator main{} [
+    var chosen := environment where name = "GREETING";
+    var greeting := if is_empty{r: chosen} then "Karibu" else value from chosen{value};
+    if length{a: arguments} = 0 then [
+        call debug_value{v: welcome{greeting, name: "kila mtu"}};
+    ] else [
+        for name in arguments loop [
+            call debug_value{v: welcome{greeting, name}};
+        ];
+    ];
+];

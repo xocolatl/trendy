@@ -7132,18 +7132,21 @@ extern "C" fn run_on_stack(entry: *mut core::ffi::c_void) -> *mut core::ffi::c_v
 /// # Safety
 ///
 /// `entry` must be a function that takes nothing and returns whether it failed,
-/// and `strings` point to `count` C strings, the program's path and then its
-/// arguments, as C's `main` is given them, which last as long as the program.
+/// `strings` point to `count` C strings, the program's path and then its
+/// arguments, and `environment` to C strings, `name=value`, ended by a null
+/// pointer, as C's `main` is given them, which last as long as the program.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_run(
     entry: extern "C" fn() -> u8,
     count: i32,
     strings: *const *const core::ffi::c_char,
+    environment: *const *const core::ffi::c_char,
 ) -> i32 {
     use core::sync::atomic::Ordering::Relaxed;
     ARGUMENT_COUNT.store(usize::try_from(count).unwrap_or(0), Relaxed);
     ARGUMENT_VALUES.store(strings.cast_mut(), Relaxed);
+    ENVIRONMENT.store(environment.cast_mut(), Relaxed);
     // SAFETY: each is given what it asks for, of memory that outlives it.
     unsafe {
         let mut attr = core::mem::MaybeUninit::<PthreadAttr>::uninit();
@@ -7176,6 +7179,12 @@ static ARGUMENT_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::Ato
 /// Where they are.
 #[cfg(not(test))]
 static ARGUMENT_VALUES: core::sync::atomic::AtomicPtr<*const core::ffi::c_char> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// The environment C's `main` was given: C strings, `name=value`, ended by a null
+/// pointer, which the program never changes.
+#[cfg(not(test))]
+static ENVIRONMENT: core::sync::atomic::AtomicPtr<*const core::ffi::c_char> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Store at `dst` the array of the program's arguments, of the type `desc` describes,
@@ -7226,6 +7235,93 @@ pub unsafe extern "C" fn trendy_rt_arguments(dst: *mut Text, desc: *const TypeDe
         dst.write_unaligned(Text {
             bytes: array,
             len: given,
+        });
+        Ok(())
+    })
+}
+
+/// Store at `dst` the array of the variables of the environment the program was
+/// started with, of the type `desc` describes, `array tuple { name: text, value:
+/// text }`, in the order given, in memory the statement owns: the first of each name,
+/// as the system's `getenv` finds them, so none without `=` or a name. Fails, with a
+/// `not_utf8_environment`, before anything is made, if one's name or value isn't
+/// UTF-8 text, or if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `dst` must have room for an array, and the program must have been run by
+/// [`trendy_rt_run`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_environment(dst: *mut Text, desc: *const TypeDesc) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller: `trendy_rt_run` stored what C's `main` was
+    // given, which lasts as long as the program.
+    status(|| unsafe {
+        let entries = ENVIRONMENT.load(Relaxed);
+        let mut given = 0;
+        while !entries.is_null() && !(*entries.add(given)).is_null() {
+            given += 1;
+        }
+        let variables = Temp::<(&str, &str)>::new(given.max(1))?;
+        let mut kept = 0;
+        for i in 0..given {
+            let entry = core::ffi::CStr::from_ptr(*entries.add(i)).to_bytes();
+            let Some((name, value)) = entry
+                .iter()
+                .position(|&byte| byte == b'=')
+                .filter(|&at| at > 0)
+                .map(|at| (&entry[..at], &entry[at + 1..]))
+            else {
+                continue;
+            };
+            let earlier = (0..kept).any(|j| variables.ptr().add(j).read().0.as_bytes() == name);
+            if earlier {
+                continue;
+            }
+            let (Ok(name_text), Ok(value_text)) =
+                (core::str::from_utf8(name), core::str::from_utf8(value))
+            else {
+                let written = Made::written(|out| {
+                    for chunk in name.utf8_chunks() {
+                        out.write_str(chunk.valid())?;
+                        if !chunk.invalid().is_empty() {
+                            out.write_char(char::REPLACEMENT_CHARACTER)?;
+                        }
+                    }
+                    Ok(())
+                })?;
+                return Err(fail_as(NOT_UTF8_ENVIRONMENT, &[("name", written.at())]));
+            };
+            variables.ptr().add(kept).write((name_text, value_text));
+            kept += 1;
+        }
+        let desc = &*desc;
+        let element = desc.element();
+        let Some(size) = kept.checked_mul(element.size) else {
+            return Err(out_of_memory());
+        };
+        let array = allocate_buffer(size, desc)?;
+        let fields = attributes(element);
+        let (name_at, value_at) = (fields[0].offset, fields[1].offset);
+        let tuple = Temp::<u8>::zeroed(element.size)?;
+        for i in 0..kept {
+            let (name, value) = variables.ptr().add(i).read();
+            tuple
+                .ptr()
+                .add(name_at)
+                .cast::<Text>()
+                .write_unaligned(scope_text(name)?);
+            tuple
+                .ptr()
+                .add(value_at)
+                .cast::<Text>()
+                .write_unaligned(scope_text(value)?);
+            copy_element(array, array.add(i * element.size), tuple.ptr(), element);
+        }
+        dst.write_unaligned(Text {
+            bytes: array,
+            len: kept,
         });
         Ok(())
     })
@@ -8557,7 +8653,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 34] = [
+pub const KINDS: [&str; 35] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -8592,6 +8688,7 @@ pub const KINDS: [&str; 34] = [
     "unwritable_file",
     "not_one_line",
     "not_utf8_argument",
+    "not_utf8_environment",
 ];
 
 /// The place in [`KINDS`] of the kind named `name`, found when the runtime
@@ -8633,6 +8730,8 @@ pub const UNWRITABLE_FILE: usize = place("unwritable_file");
 pub const NOT_ONE_LINE: usize = place("not_one_line");
 /// `not_utf8_argument`'s, as [`UNREADABLE_FILE`] is.
 pub const NOT_UTF8_ARGUMENT: usize = place("not_utf8_argument");
+/// `not_utf8_environment`'s, as [`UNREADABLE_FILE`] is.
+pub const NOT_UTF8_ENVIRONMENT: usize = place("not_utf8_environment");
 /// `malformed_csv`'s, as [`UNREADABLE_FILE`] is.
 pub const MALFORMED_CSV: usize = place("malformed_csv");
 /// `missing_column`'s, as [`UNREADABLE_FILE`] is.

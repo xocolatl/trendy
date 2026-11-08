@@ -78,6 +78,18 @@ fn build_and_run_with(
     dir: &Path,
     arguments: &[&std::ffi::OsStr],
 ) -> (i32, String) {
+    build_and_run_in(input, output, dir, arguments, &[])
+}
+
+/// As [`build_and_run_with`], with the environment the program is started with
+/// changed as `environment` says: each variable set, or removed, for `None`.
+fn build_and_run_in(
+    input: &Path,
+    output: &Path,
+    dir: &Path,
+    arguments: &[&std::ffi::OsStr],
+    environment: &[(&str, Option<&std::ffi::OsStr>)],
+) -> (i32, String) {
     let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
         .arg(input)
         .arg("-o")
@@ -90,14 +102,20 @@ fn build_and_run_with(
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    let run = Command::new(output)
+    let mut command = Command::new(output);
+    command
         .args(arguments)
         .current_dir(dir)
         .env("MallocScribble", "1")
         .env("MallocPreScribble", "1")
-        .env("MALLOC_PERTURB_", "85")
-        .output()
-        .unwrap();
+        .env("MALLOC_PERTURB_", "85");
+    for (name, value) in environment {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let run = command.output().unwrap();
     let path = input.to_str().unwrap();
     let file = input.file_name().unwrap().to_str().unwrap();
     let stderr = String::from_utf8_lossy(&run.stderr).replace(path, file);
@@ -113,36 +131,36 @@ fn empty_main() {
     assert_eq!(compile_and_run("empty_main"), 0);
 }
 
-/// The example of the arguments a program is started with, started with none and with
-/// some.
+/// The example of what a program is started with, started with no arguments and with
+/// some, and with a `GREETING` in its environment and without.
 #[test]
-fn arguments() {
-    let (code, stderr) = run_example("arguments");
-    assert_eq!((code, stderr.as_str()), (0, "\"Karibu, kila mtu!\"\n"));
+fn process() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let given = ["Amani", "Mei Ling", "Oluwaseun"].map(std::ffi::OsStr::new);
-    let (code, stderr) = build_and_run_with(
-        &workspace_root().join("examples/arguments.trendy"),
-        &dir.join("arguments_given"),
-        &workspace_root(),
-        &given,
-    );
+    let run = |name: &str, arguments: &[&str], greeting: Option<&str>| {
+        let arguments: Vec<&std::ffi::OsStr> = arguments.iter().map(std::ffi::OsStr::new).collect();
+        build_and_run_in(
+            &workspace_root().join("examples/process.trendy"),
+            &dir.join(name),
+            &workspace_root(),
+            &arguments,
+            &[("GREETING", greeting.map(std::ffi::OsStr::new))],
+        )
+    };
+    let (code, stderr) = run("process_none", &[], None);
+    assert_eq!((code, stderr.as_str()), (0, "\"Karibu, kila mtu!\"\n"));
+    let (code, stderr) = run("process_given", &["Amani", "Mei Ling"], Some("Ẹ káàbọ̀"));
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(
         stderr.lines().collect::<Vec<_>>(),
-        [
-            "\"Karibu, Amani!\"",
-            "\"Karibu, Mei Ling!\"",
-            "\"Karibu, Oluwaseun!\"",
-        ]
+        ["\"Ẹ káàbọ̀, Amani!\"", "\"Ẹ káàbọ̀, Mei Ling!\""]
     );
 }
 
-/// What `main` is given of the arguments: each, as it was written, but the program's path,
-/// with its errors too; and none of it if one isn't UTF-8 text, which stops the program
-/// before `main` runs.
+/// What a program is given of its arguments: each, as it was written, but its path;
+/// and none of it if one isn't UTF-8 text, which stops the program before `main` runs,
+/// but only one that reads them.
 #[test]
-fn main_is_given_the_arguments() {
+fn the_program_is_given_its_arguments() {
     use std::os::unix::ffi::OsStrExt;
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let run = |name: &str, source: &str, arguments: &[&std::ffi::OsStr]| {
@@ -150,7 +168,9 @@ fn main_is_given_the_arguments() {
         std::fs::write(&input, source).unwrap();
         build_and_run_with(&input, &dir.join(name), &workspace_root(), arguments)
     };
-    let shown = "operator main{arguments: array text} [
+    let shown = "uses { trendy.process };
+
+operator main{} [
     call debug_value{v: \"started\"};
     call debug_value{v: arguments};
 ];
@@ -180,21 +200,139 @@ fn main_is_given_the_arguments() {
             format!("error[{code_r}]: argument 2 isn't UTF-8 text\n").as_str()
         )
     );
-    // With its errors, in either order, which are written as it returns.
-    let both = "operator main{out errors: relation transaction_collection, arguments: array text} [
-    errors := relation { { error: failure{message: \"given \" || to_text{from: length{a: arguments}}}, failed: false } };
+    // A program that never reads them isn't stopped by them, though it uses the unit.
+    let unread = "uses { trendy.process };
+
+operator main{} [
+    call debug_value{v: count{r: environment} >= 0};
 ];
 ";
-    let (code, stderr) = run("arguments_and_errors", both, &given[..2]);
-    let failure = trendy_diag::Code::Failed.id();
+    let (code, stderr) = run("arguments_unread", unread, &bad);
+    assert_eq!((code, stderr.as_str()), (0, "true\n"));
+    // Assigned, they are what the program reads after.
+    let assigned = "uses { trendy.process };
+
+operator main{} [
+    arguments := arguments || array [\"added\"];
+    call debug_value{v: arguments};
+];
+";
+    let (code, stderr) = run("arguments_assigned", assigned, &given[1..2]);
     assert_eq!(
         (code, stderr.as_str()),
-        (0, format!("warning[{failure}]: given 2\n").as_str())
+        (0, "array [\"two words\", \"added\"]\n")
     );
-    let (code, stderr) = run("arguments_and_errors_bad", both, &bad);
+}
+
+/// What a program is given of its environment: each variable, by its name, the first of
+/// each name, but one without a name, as `getenv` finds them; which stops the program
+/// before `main` runs if one isn't UTF-8 text, but only one that reads it. Assigned, it
+/// keeps its constraint.
+#[test]
+fn the_program_is_given_its_environment() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let shown = "uses { trendy.process };
+
+operator main{} [
+    call debug_value{v: environment where name = \"GREETING\" or name = \"EMPTY\" or name = \"FIRST\"};
+];
+";
+    let input = dir.join("environment_shown.trendy");
+    std::fs::write(&input, shown).unwrap();
+    let program = dir.join("environment_shown");
+    let run = |environment: &[(&str, Option<&std::ffi::OsStr>)]| {
+        build_and_run_in(&input, &program, &workspace_root(), &[], environment)
+    };
+    let set = |value: &'static str| Some(std::ffi::OsStr::new(value));
+    let (code, stderr) = run(&[
+        ("GREETING", set("Habari")),
+        ("EMPTY", set("")),
+        ("FIRST", None),
+    ]);
+    assert_eq!(
+        (code, stderr.as_str()),
+        (
+            0,
+            "relation { name: text, value: text } { { name: \"EMPTY\", value: \"\" }, { name: \"GREETING\", value: \"Habari\" } }\n"
+        )
+    );
+    // A value, or a name, that isn't UTF-8 text, written with U+FFFD for what isn't.
+    let latin1 = std::ffi::OsStr::from_bytes(b"caf\xe9");
+    let code_r = trendy_diag::Code::NotUtf8Environment.id();
+    let (code, stderr) = run(&[("GREETING", Some(latin1))]);
+    assert_eq!(
+        (code, stderr.as_str()),
+        (
+            1,
+            format!("error[{code_r}]: the environment variable GREETING isn't UTF-8 text\n")
+                .as_str()
+        )
+    );
+    let named = std::ffi::OsStr::from_bytes(b"B\xe9D");
+    let output = Command::new(&program).env(named, "1").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("error[{code_r}]: the environment variable B\u{fffd}D isn't UTF-8 text\n")
+    );
+    // A program that never reads it isn't stopped by it.
+    let unread = dir.join("environment_unread.trendy");
+    std::fs::write(
+        &unread,
+        "uses { trendy.process };\n\noperator main{} [\n    call debug_value{v: length{a: arguments}};\n];\n",
+    )
+    .unwrap();
+    let (code, stderr) = build_and_run_in(
+        &unread,
+        &dir.join("environment_unread"),
+        &workspace_root(),
+        &[],
+        &[("GREETING", Some(latin1))],
+    );
+    assert_eq!((code, stderr.as_str()), (0, "0\n"));
+    // As the system starts it, with a name twice, one without `=`, and one without a
+    // name, which a shell never writes: the first of the name, and neither of the others.
+    let source = dir.join("environment_starter.c");
+    std::fs::write(
+        &source,
+        "#include <unistd.h>\nint main(int argc, char **argv) {\n    (void)argc;\n    char *environment[] = {\"FIRST=one\", \"FIRST=two\", \"FIRST\", \"=nameless\", 0};\n    execve(argv[1], argv + 1, environment);\n    return 127;\n}\n",
+    )
+    .unwrap();
+    let starter = dir.join("environment_starter");
+    let built = Command::new("cc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&starter)
+        .status()
+        .unwrap();
+    assert!(built.success());
+    let output = Command::new(&starter).arg(&program).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "relation { name: text, value: text } { { name: \"FIRST\", value: \"one\" } }\n"
+    );
+    // A variable no process could be given breaks its constraint.
+    let assigned = dir.join("environment_assigned.trendy");
+    std::fs::write(
+        &assigned,
+        "uses { trendy.process };\n\noperator main{} [\n    insert environment relation { { name: \"A=B\", value: \"1\" } };\n];\n",
+    )
+    .unwrap();
+    let (code, stderr) = build_and_run_in(
+        &assigned,
+        &dir.join("environment_assigned"),
+        &workspace_root(),
+        &[],
+        &[],
+    );
     assert_eq!(code, 1, "{stderr}");
     assert!(
-        stderr.starts_with(&format!("error[{code_r}]: argument 2")),
+        stderr.starts_with(&format!(
+            "error[{}]: the constraint `given` is broken",
+            trendy_diag::Code::ConstraintViolated.id()
+        )),
         "{stderr}"
     );
 }
@@ -569,11 +707,13 @@ fn read_back(source: &str, written: &str) -> trendy_hir::Value {
 
 #[test]
 fn debug_output_reads_back_as_the_same_value() {
-    // `debug.trendy` prints its variables first, in declaration order.
+    // `debug.trendy` prints its variables first, in declaration order, which
+    // come before those the runtime gives `trendy.process`.
     let source = std::fs::read_to_string(workspace_root().join("examples/debug.trendy")).unwrap();
     let program = analyze(&source);
     let (_, stderr) = run_example("debug");
-    for (variable, line) in program.variables.iter().zip(stderr.lines()) {
+    let own = program.variables.iter().filter(|v| v.given.is_none());
+    for (variable, line) in own.zip(stderr.lines()) {
         assert_eq!(
             read_back(&source, line),
             variable.init,

@@ -216,6 +216,7 @@ codes! {
     UnwritableFile => "R0026",
     NotOneLine => "R0027",
     NotUtf8Argument => "R0028",
+    NotUtf8Environment => "R0029",
     Internal => "X0000",
 }
 
@@ -268,6 +269,7 @@ impl Code {
                 | Code::NotOneLine
                 | Code::NotUtf8
                 | Code::NotUtf8Argument
+                | Code::NotUtf8Environment
                 | Code::MalformedCsv
                 | Code::Warned
                 | Code::Internal

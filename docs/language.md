@@ -44,30 +44,12 @@ The calls aren't part of the error: an error is what went wrong, a value
 the program can test (see [Failures](#failures)), and the calls are
 where its failure went.
 
-`main` can take the arguments the program is started with, but its path, as
-`arguments: array text`, in the order given, each as it was written:
+What the program is started with, its arguments and its environment, are
+the variables of `trendy.process`, a unit that comes with the compiler (see
+[Arguments and the environment](#arguments-and-the-environment)), which `main`
+reads, as any other unit can.
 
-```trendy
-operator main{arguments: array text} [
-    for each in arguments loop [
-        call debug_value{v: each};
-    ];
-];
-```
-
-- **They are a value `main` is given,** read once, before it runs, as they
-  can't change while the program does. What needs them is given them, a
-  read-only operator too, and a transaction's statements read them as they
-  read any value. `length{a: arguments}` is how many there are.
-- **An argument that isn't UTF-8 text stops the program before `main` runs**
-  (R0028), saying which, from 1, as it can't be text, and dropping it or
-  changing its bytes would have the program act on what it wasn't given.
-- **Other languages' names are fixed:** `main{args: …}`, `argv` and Java's
-  `String[] args` to `arguments: array text`, and their names elsewhere say
-  where the arguments are (A0019, A0015).
-
-`main` can give errors, as its parameter `out errors`, beside its arguments or
-alone, of the type a
+`main` can give errors, as its parameter `out errors`, of the type a
 transaction collects into, `relation transaction_collection` (see
 [Transactions](#transactions)), which it assigns, as any `out`
 parameter (A0054). When it returns, the program writes them: the
@@ -96,7 +78,9 @@ operator main{out errors: relation transaction_collection} [
 ```
 
 `main` takes no other parameters, and has no result type (A0019): the
-fixes make `errors` an `out` parameter, and of its type.
+fixes make `errors` an `out` parameter, and of its type, and remove
+another, such as `arguments`, `args` or `argv`, which they read from
+`trendy.process` instead.
 
 ## Units
 
@@ -1660,11 +1644,6 @@ type broken_call_constraint is error { { called: text, constraint: text } };
    the stack (R0025). */
 type too_deep is error { { bytes: integer } };
 
-/* An argument the program was started with, at `position`, from 1, isn't UTF-8
-   text, so `main`'s `arguments` can't have it: the program stops before `main`
-   runs (R0028). */
-type not_utf8_argument is error { { position: integer } };
-
 /* A statement left the variables so that the constraint named
    `constraint` is false: its condition, or the operand of its `and` that
    is, written `condition` (R0023). */
@@ -2893,6 +2872,95 @@ var due := add_months{d: date{year: 2024, month: 1, day: 31}, months: 1};
 
 operator main{} [];
 ```
+
+### Arguments and the environment
+
+`trendy.process`, a unit that comes with the compiler, which a unit uses with
+`uses { trendy.process };`, has what the program was started with: its
+arguments and its environment, each a variable the runtime gives its value as
+the program starts, before `main` runs, a `builtin var`. Its interface, what a
+unit that uses it sees:
+
+```
+/* `trendy.process`: what the program was started with, its arguments and
+   its environment, which the runtime gives it as it starts, before `main`
+   runs, if anything it runs reads or assigns them, so that what a program
+   never looks at can't stop it. */
+
+interface
+
+/* A variable of the environment: its name and its value. */
+heading variable := { name: text, value: text };
+
+/* The arguments the program was started with, in the order given, each as
+   it was written, but the program's path. One that isn't UTF-8 text stops
+   the program before `main` runs (R0028). */
+builtin var arguments: array text;
+
+/* The environment the program was started with: each of its variables, the
+   first of each name, as the system's `getenv` finds them, so none without
+   a name. One that isn't UTF-8 text, its name or its value, stops the
+   program before `main` runs (R0029). */
+builtin var environment: relation variable key { name };
+
+/* Whether a process can be given the variable `name`, of `value`, which the
+   system writes `name=value`, ended by NUL: its name isn't empty, and has no
+   `=`, and neither has NUL. */
+operator can_be_given{name: text, value: text}: boolean;
+
+/* Every variable of the environment is one a process can be given. */
+constraint given := is_empty{r: environment where not can_be_given{name, value}};
+
+/* An argument the program was started with, at `position`, from 1, isn't
+   UTF-8 text, so `arguments` can't have it: the program stops before `main`
+   runs (R0028). */
+type not_utf8_argument is error { { position: integer } };
+
+/* A variable of the environment the program was started with isn't UTF-8
+   text, its name or its value, so `environment` can't have it: the program
+   stops before `main` runs (R0029). `name` is its name, each byte of it
+   that isn't UTF-8 written as U+FFFD. */
+type not_utf8_environment is error { { name: text } };
+```
+
+```trendy
+uses { trendy.process };
+
+operator main{} [
+    for each in arguments loop [
+        call debug_value{v: each};
+    ];
+    var home := environment where name = "HOME";
+    if not is_empty{r: home} then [
+        call debug_value{v: value from home{value}};
+    ];
+];
+```
+
+- **They are variables, which any unit that uses the unit reads and
+  assigns,** as it does any other unit's (see [Units](#units)). An initial
+  value can't read them, as only the program knows them (A0077), nor can a
+  read-only operator, which is given what it needs of them (A0050).
+  `length{a: arguments}` is how many arguments there are, and `environment
+  where name = "HOME"` the variable `HOME`, if there is one.
+- **The program is given them only if something it runs reads or assigns
+  them,** so that what it never looks at can't stop it: a program that reads
+  its arguments alone is never stopped by its environment.
+- **An argument, or a variable of the environment, that isn't UTF-8 text
+  stops the program before `main` runs** (R0028, R0029), saying which, as it
+  can't be text, and dropping it or changing its bytes would have the program
+  act on what it wasn't given. An argument is said by its position, from 1, and
+  a variable by its name, each byte of it that isn't UTF-8 written as U+FFFD.
+- **The environment is what the system's `getenv` finds:** the first variable
+  of each name, as a name is its key, and none without a name, nor an entry
+  without `=`. Its constraint, which a variable a program adds keeps too, is
+  what a process can be given: a name, without `=`, and neither with NUL. It
+  is the program's own, which nothing outside it changes while it runs, nor
+  does assigning it change anything outside it.
+- **Other languages' names are fixed:** `main{arguments: …}`, `main{args:
+  …}` and Java's `String[] args` are removed from `main`, which uses
+  `trendy.process` instead (A0019), and `argv`, `argc`, `environ` and `env`
+  elsewhere say where the arguments and the environment are (A0015).
 
 ## Variables
 
@@ -7348,8 +7416,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `x += 1`, `x++`, `++x` | `x := x + 1;` |
 | `BLOB`, `bytea`, `VARBINARY`, `bytes`, `byte[]` | `array byte` |
 | `u8`, `uint8`, `octet` | `byte` |
-| `sys.argv`, `process.argv`, `os.Args`, `std::env::args()`, `String[] args` | `operator main{arguments: array text}`, without the program's path |
+| `sys.argv`, `process.argv`, `os.Args`, `std::env::args()`, `String[] args` | `arguments`, of `trendy.process`, without the program's path |
 | `argc`, `len(sys.argv)` | `length{a: arguments}` |
+| `getenv("HOME")`, `os.environ["HOME"]`, `process.env.HOME`, `$HOME` | `environment where name = "HOME"`, of `trendy.process` |
 | `datetime`, `Instant`, `timestamptz` | `timestamp`, of `trendy.time` |
 | `datetimeoffset`, `OffsetDateTime` | `offset_timestamp`, of `trendy.time` |
 | `interval`, `timedelta`, `TimeSpan` | `duration`, of `trendy.time` |

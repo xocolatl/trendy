@@ -351,7 +351,8 @@ impl<'a> Globals<'a> {
 
     /// Reading the variable `id`, written `name` at `span`, in an initial
     /// value: its own, which a constant's can't read, as what it is computed
-    /// from never changes.
+    /// from never changes, and nothing's, if the runtime gives it its value as
+    /// the program starts.
     fn variable_read(
         &mut self,
         id: hir::VariableId,
@@ -371,6 +372,10 @@ impl<'a> Globals<'a> {
                 constant,
                 self.declared.decl(id),
             ));
+            return Lookup::Reported;
+        }
+        if self.declared.decl(id).builtin().is_some() {
+            errors.push(errors::given_in_initial_value(name, span));
             return Lookup::Reported;
         }
         match self.reach(id, span, errors) {
@@ -1767,6 +1772,10 @@ fn variable(
         }
     };
     let keys = keys::keys(decl, ident.text(), &ty, Some(&init), globals, errors)?;
+    let given = match decl.builtin() {
+        Some(_) => crate::builtins::given(decl, &ident, &ty, namespaces, errors),
+        None => None,
+    };
     let id = globals
         .declared
         .find(ident.text(), trendy_syntax::span(ident.text_range()))
@@ -1775,6 +1784,7 @@ fn variable(
         name: globals.declared.identity(id).to_string(),
         ty,
         init,
+        given,
         keys,
     })
 }

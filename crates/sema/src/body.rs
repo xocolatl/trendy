@@ -21,6 +21,8 @@ use crate::{Namespaces, Sites, assign, errors, locals, ops, scope};
 
 /// Everything a body can refer to.
 pub(crate) struct Context<'a> {
+    /// The program's units' files.
+    pub(crate) files: &'a crate::Files,
     /// Where each place in the file is.
     pub(crate) sites: &'a Sites<'a>,
     pub(crate) namespaces: &'a Namespaces,
@@ -2148,6 +2150,14 @@ impl Around for UpdateNames<'_, '_> {
             ));
         } else if let Some((kind, _)) = cx.namespaces.operator(name, span) {
             errors.push(errors::assigned_operator(name, span, kind));
+        } else if let Some(error) = errors::unused_unit_in(
+            name,
+            span,
+            cx.files.tree(cx.namespaces.unit_at(span)),
+            crate::Kind::Variable,
+            cx.namespaces,
+        ) {
+            errors.push(error);
         } else {
             let variables: Vec<&str> = locals
                 .iter()

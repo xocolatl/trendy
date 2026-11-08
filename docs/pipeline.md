@@ -39,7 +39,11 @@ and the scalar types first, which only the prelude declares
 (`builtins::kinds`), and the built-in operators, which any unit of the
 library declares (`hir::Builtin`, `builtins::operators`), each once,
 once the types they can name, the prelude's among them, are resolved,
-which makes their signatures, each in its unit and section. It checks
+which makes their signatures, each in its unit and section, and the
+built-in variables, `builtin var`, which only `trendy.process` declares,
+each the variable whose value the runtime gives as the program starts
+(`hir::Given`, `builtins::given`, of its name and type, without a value of
+its own, and `builtins::given_declared`, each once). It checks
 the rest of the library with the program, in the same namespaces, the
 prelude's declarations first: nothing of it is frozen, so the program
 extends it as it does its own, with a subtype of a union type it
@@ -1427,10 +1431,15 @@ where the part has them, which the runtime makes a `constraint_violated`
 or a `constraint_violated_by` of (`trendy_rt_constraint_violated`,
 `_by`), as it does for the language's other failures. Sema can't compute some
 conditions of the initial values (`Initially::Unknown`): what reads a constant
-the compiler can't compute, or runs statements. Then the entry checks that
+the compiler can't compute, or runs statements, or a variable the runtime
+gives its value (`hir::Variable::given`). Then the entry checks that
 constraint first, at its declaration (`VariableConstraint::checked_at_start`,
 `constraints_checked_at_start`), as nothing else says that the initial values
-satisfy it.
+satisfy it, after giving each variable the runtime gives its value that the
+lowered functions use (`lir::Function::data_used`), so that what the program
+never reads or assigns can't stop it (`FunctionBuilder::given_variables`). A
+unit that comes with the compiler that nothing uses has no constraints in the
+program, nor any checked as it starts.
 
 A database shares the variables' namespace, and its relvars and
 constraints are named within it (`databases::check`, after the globals). A
@@ -2637,10 +2646,12 @@ produced with Cranelift.
   variables, and `trendy_const_<index>` for constants, all local;
 - laying out data for the target's byte order and pointer size, where every
   object occupies at least one byte;
-- calling conventions, and the C-ABI `main`, which has `trendy_rt_run` run the
-  entry function on the program's stack (see [Recursion](#recursion)), with the
-  arguments the system gave it, of which the entry function makes `main`'s
-  `arguments`, if it takes them (`trendy_rt_arguments`);
+- calling conventions, and the C-ABI `main`, `main(argc, argv, envp)`, which has
+  `trendy_rt_run` run the entry function on the program's stack (see
+  [Recursion](#recursion)), with the arguments and the environment the system
+  gave it, of which the entry function makes `trendy.process`'s `arguments` and
+  `environment`, if the program uses them (`trendy_rt_arguments`,
+  `trendy_rt_environment`);
 - `shl` and `shr` (`Functions::shifted`): Cranelift's shifts take the
   count modulo 64, so a count is first clamped to 63, which gives a right
   shift's result beyond it, and a left shift lost a bit if shifting back

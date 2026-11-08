@@ -41,10 +41,11 @@ pub fn lower(program: &hir::Program) -> lir::Program {
 }
 
 /// The function the executable starts in: it gives the runtime the table
-/// of the errors the language makes ([`Lowering::failures`]), gives `main`
-/// the program's arguments, if it takes `arguments` ([`Arguments`]), calls
-/// `main`, and writes the errors it gives, if it takes `out errors`, and
-/// fails if one failed ([`Given`]); if `main` fails, it writes the calls
+/// of the errors the language makes ([`Lowering::failures`]), gives each
+/// variable the runtime gives its value that the program uses that value
+/// ([`FunctionBuilder::given_variables`]), checks the constraints the compiler couldn't,
+/// calls `main`, and writes the errors it gives, if it takes `out errors`, and
+/// fails if one failed ([`MainErrors`]); if `main` fails, it writes the calls
 /// the failure passed through (its trace), after its error, then fails. An error waiting, with
 /// nothing to take it, a `fail`'s or the language's, is written first: its
 /// message, as `message` gives it, with its kind's code, and where it
@@ -80,31 +81,31 @@ fn entry(
         field.path.push(at);
         Some(field)
     };
-    let given = field("errors").map(|at| Given::new(&mut b, at, cx));
-    let arguments = field("arguments").map(|at| Arguments::new(&mut b, at, cx));
+    let main_errors = field("errors").map(|at| MainErrors::new(&mut b, at, cx));
+    // What main, and all it reaches, uses, which is lowered by now.
+    let used: BTreeSet<lir::DataId> = cx
+        .functions
+        .values()
+        .flat_map(lir::Function::data_used)
+        .collect();
     b.catching(handle, |b| {
-        if let Some(arguments) = &arguments {
-            arguments.read(b, cx);
-        }
+        b.given_variables(&used, cx);
         b.constraints_checked_at_start(cx);
         b.insts.push(lir::Inst::Call {
             function: main,
             args: args.clone(),
             result: None,
         });
-        if let Some(given) = &given {
-            given.write(b, cx);
+        if let Some(main_errors) = &main_errors {
+            main_errors.write(b, cx);
         }
     });
-    if let Some(arguments) = &arguments {
-        arguments.release(&mut b, cx);
-    }
-    if let Some(given) = &given {
-        given.release(&mut b, cx);
+    if let Some(main_errors) = &main_errors {
+        main_errors.release(&mut b, cx);
         let (failing, returning) = (b.new_block(), b.new_block());
         b.end_block(
             lir::Terminator::Branch {
-                condition: given.failed.clone(),
+                condition: main_errors.failed.clone(),
                 then: failing,
                 otherwise: returning,
             },
@@ -123,11 +124,8 @@ fn entry(
         args: Vec::new(),
     });
     written.release(&mut b, cx);
-    if let Some(arguments) = &arguments {
-        arguments.release(&mut b, cx);
-    }
-    if let Some(given) = &given {
-        given.release(&mut b, cx);
+    if let Some(main_errors) = &main_errors {
+        main_errors.release(&mut b, cx);
     }
     let after = b.new_block();
     b.end_block(lir::Terminator::Failed, after);
@@ -140,7 +138,7 @@ fn entry(
 /// transaction_collection`, which the entry writes when it returns: the
 /// warnings, then the failures, each with its message and its kind's code,
 /// and no site, as an error holds none, then fails if one failed.
-struct Given {
+struct MainErrors {
     /// The relation, which `main` assigns: null until it does.
     errors: lir::Place,
     /// Its type.
@@ -149,7 +147,7 @@ struct Given {
     failed: lir::Place,
 }
 
-impl Given {
+impl MainErrors {
     /// Its slots, which the entry block of `b` sets as it starts: no errors, and
     /// none failed; and their address at `arg`, of `main`'s arguments.
     fn new(b: &mut FunctionBuilder, arg: lir::Place, cx: &mut Lowering) -> Self {
@@ -168,7 +166,7 @@ impl Given {
             dst: arg,
             src: errors.clone(),
         });
-        Given { errors, ty, failed }
+        MainErrors { errors, ty, failed }
     }
 
     /// Write the errors, with `b` building the code: the warnings, then
@@ -225,55 +223,6 @@ impl Given {
         b.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Release,
             args: vec![self.errors.clone(), descriptor],
-        });
-    }
-}
-
-/// The program's arguments, which the entry gives `main`, if it takes `arguments`,
-/// an `array text`: what the program was started with, but its path.
-struct Arguments {
-    /// Where `main`'s arguments have it: empty until it is read.
-    at: lir::Place,
-    ty: hir::Type,
-}
-
-impl Arguments {
-    /// Where it goes, `at`, which the entry block of `b` makes empty as it starts.
-    fn new(b: &mut FunctionBuilder, at: lir::Place, cx: &mut Lowering) -> Self {
-        let main = b.program.operator(b.program.entry);
-        let ty = main.params["arguments"].ty.clone();
-        let layout = cx.layout(&ty);
-        b.insts.push(lir::Inst::Copy {
-            dst: at.clone(),
-            src: zero_constant(&layout, cx),
-            layout,
-        });
-        Arguments { at, ty }
-    }
-
-    /// Read them, with `b` building the code, which fails if one isn't UTF-8 text:
-    /// in a scope of their own, which gives what holds them its own reference.
-    fn read(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.ty)));
-        b.scoped(|b| {
-            b.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Arguments,
-                args: vec![self.at.clone(), descriptor.clone()],
-            });
-            b.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Retain,
-                args: vec![self.at.clone(), descriptor],
-            });
-            b.scoped = true;
-        });
-    }
-
-    /// Give up the references they hold, with `b` building the code.
-    fn release(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.ty)));
-        b.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Release,
-            args: vec![self.at.clone(), descriptor],
         });
     }
 }
@@ -2808,6 +2757,64 @@ impl<'a> FunctionBuilder<'a> {
             if !constraint.variables.is_disjoint(&variables) {
                 self.variable_constraint_checked(index, cx);
             }
+        }
+    }
+
+    /// Give each variable the runtime gives its value, as the program starts,
+    /// that value, if `used`, the data the program's functions use, has it, so
+    /// that one the program never reads or assigns can't stop it: the
+    /// arguments, or the environment's array, which becomes its relation. Each
+    /// is made in a scope of its own, which gives the variable its own
+    /// reference.
+    fn given_variables(&mut self, used: &BTreeSet<lir::DataId>, cx: &mut Lowering) {
+        let program = self.program;
+        for (i, variable) in program.variables.iter().enumerate() {
+            let Some(given) = variable.given else {
+                continue;
+            };
+            if !used.contains(&self.variable_data[i]) {
+                continue;
+            }
+            let at = in_data(self.variable_data[i]);
+            let ty = variable.ty.clone();
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+            self.scoped(|b| {
+                match given {
+                    hir::Given::Arguments => b.insts.push(lir::Inst::CallRuntime {
+                        function: lir::RuntimeFn::Arguments,
+                        args: vec![at.clone(), descriptor.clone()],
+                    }),
+                    hir::Given::Environment => {
+                        let hir::Type::Relation(heading) = &ty else {
+                            unreachable!("sema gives the environment its relation type");
+                        };
+                        let array_ty =
+                            hir::Type::Array(Box::new(hir::Type::Tuple(heading.clone())));
+                        let array = b.slot(cx.layout(&array_ty));
+                        let array_descriptor =
+                            lir::Place::whole(lir::Base::Data(cx.descriptor(&array_ty)));
+                        b.insts.push(lir::Inst::CallRuntime {
+                            function: lir::RuntimeFn::Environment,
+                            args: vec![array.clone(), array_descriptor],
+                        });
+                        let unloading = hir::Unloading {
+                            named: None,
+                            numbered: None,
+                        };
+                        let relation = b.unloaded(&array, &array_ty, &ty, &unloading, cx);
+                        b.insts.push(lir::Inst::Copy {
+                            dst: at.clone(),
+                            src: relation,
+                            layout: cx.layout(&ty),
+                        });
+                    }
+                }
+                b.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Retain,
+                    args: vec![at.clone(), descriptor.clone()],
+                });
+                b.scoped = true;
+            });
         }
     }
 
@@ -7486,11 +7493,28 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let array_ty = self.type_of(array);
-        let hir::Type::Array(element) = &array_ty else {
+        let relation_ty = self.type_of(expr);
+        let src = self.place(array, cx);
+        let dst = self.unloaded(&src, &array_ty, &relation_ty, unloading, cx);
+        self.operand_read(array, &src, &array_ty, cx);
+        dst
+    }
+
+    /// The relation of type `relation_ty` the array at `src`, of type
+    /// `array_ty`, makes, as `unloading` says, in a new slot, in memory the
+    /// statement owns: the runtime's.
+    fn unloaded(
+        &mut self,
+        src: &lir::Place,
+        array_ty: &hir::Type,
+        relation_ty: &hir::Type,
+        unloading: &hir::Unloading,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let hir::Type::Array(element) = array_ty else {
             unreachable!("sema unloads only arrays");
         };
-        let relation_ty = self.type_of(expr);
-        let hir::Type::Relation(heading) = &relation_ty else {
+        let hir::Type::Relation(heading) = relation_ty else {
             unreachable!("an unload makes a relation");
         };
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
@@ -7537,13 +7561,12 @@ impl<'a> FunctionBuilder<'a> {
             .collect();
         let part_count = usize_constant(len(parts.len()), cx);
         let number_count = usize_constant(len(numbers.len()), cx);
-        let src = self.place(array, cx);
-        let dst = self.slot(cx.layout(&relation_ty));
+        let dst = self.slot(cx.layout(relation_ty));
         let args = vec![
             dst.clone(),
             src.clone(),
-            lir::Place::whole(lir::Base::Data(cx.descriptor(&array_ty))),
-            lir::Place::whole(lir::Base::Data(cx.descriptor(&relation_ty))),
+            lir::Place::whole(lir::Base::Data(cx.descriptor(array_ty))),
+            lir::Place::whole(lir::Base::Data(cx.descriptor(relation_ty))),
             lir::Place::whole(lir::Base::Data(cx.constant(parts))),
             part_count,
             lir::Place::whole(lir::Base::Data(cx.constant(numbers))),
@@ -7554,7 +7577,6 @@ impl<'a> FunctionBuilder<'a> {
             args,
         });
         self.scoped = true;
-        self.operand_read(array, &src, &array_ty, cx);
         dst
     }
 
@@ -10071,6 +10093,7 @@ mod tests {
             name: name.to_string(),
             ty: init.ty(),
             init,
+            given: None,
             keys,
         }
     }

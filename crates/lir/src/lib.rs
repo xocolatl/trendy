@@ -154,6 +154,26 @@ pub struct Function {
 pub struct SlotId(pub usize);
 
 impl Function {
+    /// The data its instructions and terminators read or write: of the
+    /// program's variables, those it uses.
+    #[must_use]
+    pub fn data_used(&self) -> BTreeSet<DataId> {
+        let mut used = BTreeSet::new();
+        let mut note = |place: &Place| {
+            if let Base::Data(id) = place.base {
+                used.insert(id);
+            }
+        };
+        for block in &self.blocks {
+            for inst in &block.insts {
+                let (reads, write) = inst.reads_and_write();
+                reads.into_iter().chain(write).for_each(&mut note);
+            }
+            block.terminator.each_read(&mut note);
+        }
+        used
+    }
+
     /// A slot that something reads after [`RuntimeFn::Release`] has made it zero, or
     /// [`RuntimeFn::DropOperand`] may have freed what it points to, with nothing having
     /// written all of it since, on some way through the function, and the block that reads
@@ -486,6 +506,13 @@ runtime_functions! {
     /// memory the statement owns. It fails, with a `not_utf8_argument`, if one isn't
     /// UTF-8 text, or if the memory can't be allocated.
     Arguments => "trendy_rt_arguments", true;
+    /// `trendy_rt_environment(dst, descriptor)`: store at `dst` the array of the
+    /// variables of the environment the program was started with, each a tuple of its
+    /// name and value, the first of each name, but one without a name, of the type the
+    /// descriptor describes, in memory the statement owns. It fails, with a
+    /// `not_utf8_environment`, if one isn't UTF-8 text, or if the memory can't be
+    /// allocated.
+    Environment => "trendy_rt_environment", true;
     /// `trendy_rt_read_clock(seconds, nanos)`: store at `seconds` the seconds since
     /// 1970-01-01 in UTC the system's clock shows, rounded down, and at `nanos` the
     /// nanoseconds past them.
@@ -694,9 +721,9 @@ runtime_functions! {
     /// `trendy_rt_too_deep()`: write the error of calls that have used up
     /// the stack, each with work left when it returns.
     TooDeep => "trendy_rt_too_deep", true;
-    /// `trendy_rt_run(entry, count, strings)`: run the program, whose entry function is
-    /// `entry`, on the stack it needs, with the arguments C's `main` is given, giving
-    /// the status to exit with, which only `main` calls.
+    /// `trendy_rt_run(entry, count, strings, environment)`: run the program, whose entry
+    /// function is `entry`, on the stack it needs, with the arguments and the environment
+    /// C's `main` is given, giving the status to exit with, which only `main` calls.
     Run => "trendy_rt_run", false;
     /// `trendy_rt_remove(relation, tuples, descriptor, combination)`: take
     /// the tuples of the relation `tuples` from the relation variable at
@@ -1050,6 +1077,7 @@ impl RuntimeFn {
                 | RuntimeFn::ReadTransactionStart
                 | RuntimeFn::RandomBytes
                 | RuntimeFn::Arguments
+                | RuntimeFn::Environment
         )
     }
 }
@@ -1965,7 +1993,7 @@ pub enum Terminator {
 }
 
 /// Index into [`Program::data`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DataId(pub usize);
 
 /// A statically allocated object.

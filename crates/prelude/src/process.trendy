@@ -1,0 +1,68 @@
+/* `trendy.process`: what the program was started with, its arguments and
+   its environment, which the runtime gives it as it starts, before `main`
+   runs, if anything it runs reads or assigns them, so that what a program
+   never looks at can't stop it. */
+
+interface
+
+/* A variable of the environment: its name and its value. */
+heading variable := { name: text, value: text };
+
+/* The arguments the program was started with, in the order given, each as
+   it was written, but the program's path. One that isn't UTF-8 text stops
+   the program before `main` runs (R0028). */
+builtin var arguments: array text;
+
+/* The environment the program was started with: each of its variables, the
+   first of each name, as the system's `getenv` finds them, so none without
+   a name. One that isn't UTF-8 text, its name or its value, stops the
+   program before `main` runs (R0029). */
+builtin var environment: relation variable key { name };
+
+/* Whether a process can be given the variable `name`, of `value`, which the
+   system writes `name=value`, ended by NUL: its name isn't empty, and has no
+   `=`, and neither has NUL. */
+operator can_be_given{name: text, value: text}: boolean;
+
+/* Every variable of the environment is one a process can be given. */
+constraint given := is_empty{r: environment where not can_be_given{name, value}};
+
+/* An argument the program was started with, at `position`, from 1, isn't
+   UTF-8 text, so `arguments` can't have it: the program stops before `main`
+   runs (R0028). */
+type not_utf8_argument is error { { position: integer } };
+
+/* A variable of the environment the program was started with isn't UTF-8
+   text, its name or its value, so `environment` can't have it: the program
+   stops before `main` runs (R0029). `name` is its name, each byte of it
+   that isn't UTF-8 written as U+FFFD. */
+type not_utf8_environment is error { { name: text } };
+
+implementation
+
+/* Each loop stops at the first code point that can't be given, as no loop
+   leaves early. */
+operator can_be_given{name: text, value: text}: boolean [
+    var points := to_code_points{from: name};
+    var given := length{a: points} > 0;
+    var at := 1;
+    while given and at <= length{a: points} loop [
+        given := points[at].value <> 0x3D and points[at].value <> 0x00;
+        at := at + 1;
+    ];
+    points := to_code_points{from: value};
+    at := 1;
+    while given and at <= length{a: points} loop [
+        given := points[at].value <> 0;
+        at := at + 1;
+    ];
+    given
+];
+
+operator message{error: not_utf8_argument}: text [
+    "argument " || to_text{from: error.position} || " isn't UTF-8 text"
+];
+
+operator message{error: not_utf8_environment}: text [
+    "the environment variable " || error.name || " isn't UTF-8 text"
+];

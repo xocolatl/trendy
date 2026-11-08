@@ -2022,14 +2022,19 @@ pub(crate) fn builtin_in_program(
         || trendy_syntax::span(decl.text_range()),
         |k| trendy_syntax::span(k.text_range()),
     );
-    Diagnostic::error(
+    let d = Diagnostic::error(
         Code::BuiltinInProgram,
         "built-ins can only be declared in the units that come with the compiler",
         span,
         "not allowed in a program",
     )
-    .with_note("the units that come with the compiler declare the types and operators it implements: the prelude, `integer` and `debug_value` among them, which every unit sees, and `trendy.files`, `load_csv` among them, which a unit uses")
-    .with_help("to define an operator, remove `builtin` and give it a body: `operator name{…} [ … ];`")
+    .with_note("the units that come with the compiler declare the types, operators and variables it implements: the prelude, `integer` and `debug_value` among them, which every unit sees, `trendy.files`, `load_csv` among them, and `trendy.process`, `environment` among them, which a unit uses");
+    if decl.kind() == trendy_syntax::SyntaxKind::VarDecl {
+        return d.with_help("to declare a variable, remove `builtin` and give it its initial value: `var name := …;`");
+    }
+    d.with_help(
+        "to define an operator, remove `builtin` and give it a body: `operator name{…} [ … ];`",
+    )
 }
 
 /// The type parameter `name`, declared at `span`, already declared at
@@ -2396,9 +2401,14 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
     // SQL writes what the clock shows as a value.
     let lowercase = name.to_lowercase();
     if ARGUMENTS_ELSEWHERE[..3].contains(&lowercase.as_str()) || lowercase == "argc" {
-        return d
-            .with_note("the arguments a program is started with are what `main` is given, if it takes them: `operator main{arguments: array text} [ … ];`, without the program's path")
-            .with_help("take them in `main`, and give them to what needs them; `length{a: arguments}` is how many there are");
+        return d.with_note(ARGUMENTS_RULE).with_help(
+            "use `trendy.process`, and read `arguments`; `length{a: arguments}` is how many there are",
+        );
+    }
+    if ENVIRONMENT_ELSEWHERE.contains(&lowercase.as_str()) {
+        return d.with_note(ENVIRONMENT_RULE).with_help(
+            "use `trendy.process`, and read `environment`: `environment where name = \"HOME\"` is the variable `HOME`, if there is one",
+        );
     }
     if (lowercase == "transaction_timestamp" || CLOCK_NAMES.contains(&lowercase.as_str()))
         && let Some((note, help)) = absent(name)
@@ -2634,6 +2644,16 @@ pub(crate) fn unknown_operator(
 /// as it finds `min` for `avg` and `cos` for `log`: each with what the
 /// prelude has instead, and how to write the value with it.
 const ABSENT: &[(&[&str], &str, &str)] = &[
+    (
+        &["getenv", "secure_getenv"],
+        ENVIRONMENT_RULE,
+        "use `trendy.process`, and read `environment`: `environment where name = \"HOME\"` is the variable `HOME`, if there is one",
+    ),
+    (
+        &["setenv", "putenv", "unsetenv"],
+        ENVIRONMENT_RULE,
+        "use `trendy.process`, and assign `environment`: `insert`, `update` and `delete` change its variables, which changes nothing outside the program",
+    ),
     (
         CLOCK_NAMES,
         "the clock isn't a function of anything, so no read-only operator reads it: `now`, of `trendy.time`, is an update operator, which gives what it reads through an `out` parameter (RM Prescription 3)",
@@ -4038,7 +4058,17 @@ pub(crate) fn main_with_result(decl: &trendy_syntax::ast::Operator) -> Diagnosti
 }
 
 /// The rule of `main`'s parameters, which A0019 reports.
-const MAIN_PARAMETERS: &str = "execution starts in `main`, which can take the arguments the program is started with, but its path, as `arguments: array text`, and can give the errors the program writes when it returns, and exits with 1 if one failed, as `out errors: relation transaction_collection`";
+const MAIN_PARAMETERS: &str = "execution starts in `main`, which can give the errors the program writes when it returns, and exits with 1 if one failed, as `out errors: relation transaction_collection`, and takes nothing";
+
+/// Where the environment a program is started with is, for notes.
+const ENVIRONMENT_RULE: &str = "the environment the program is started with is `trendy.process`'s variable `environment`, a `relation { name: text, value: text }`, keyed by `name`, which any unit that uses that unit reads and assigns";
+
+/// Other languages' names, lowercase, for the environment a program is
+/// started with, or a variable of it, as a value or an operator.
+const ENVIRONMENT_ELSEWHERE: &[&str] = &["environ", "env", "environment_variables"];
+
+/// Where the arguments a program is started with are, for notes.
+const ARGUMENTS_RULE: &str = "the arguments the program is started with, but its path, are `trendy.process`'s variable `arguments`, an `array text`, which any unit that uses that unit reads, as it does its `environment`";
 
 /// Other languages' names, lowercase, for the arguments a program is started with,
 /// as `main`'s parameter, or as a value.
@@ -4059,6 +4089,7 @@ const ARGUMENTS_ELSEWHERE: &[&str] = &[
 pub(crate) fn main_with_params(
     params: &trendy_syntax::ast::Heading,
     param: &trendy_syntax::ast::AttributeType,
+    namespaces: &Namespaces,
 ) -> Diagnostic {
     let name = param
         .name()
@@ -4071,79 +4102,39 @@ pub(crate) fn main_with_params(
         "not one of `main`'s",
     )
     .with_note(MAIN_PARAMETERS);
-    if ARGUMENTS_ELSEWHERE.contains(&name.to_lowercase().as_str()) {
-        return d.with_suggestion(
-            "take the program's arguments as `arguments: array text`",
-            vec![Edit {
-                span: param.span(),
-                replacement: "arguments: array text".to_string(),
-            }],
-        );
-    }
     let alone = params.attributes().count() == 1;
-    d.with_suggestion(
-        "remove the parameter",
-        vec![Edit {
-            span: if alone {
-                params.span()
-            } else {
-                params.removal(param)
-            },
-            replacement: if alone { "{}" } else { "" }.to_string(),
-        }],
-    )
-}
-
-/// `main`'s parameter `arguments`, written `param`, which sema made `given`: what is
-/// wrong with it, if anything, for the arguments `main` is given, an `array text`,
-/// whose fix is certain.
-pub(crate) fn main_arguments(
-    param: &trendy_syntax::ast::AttributeType,
-    given: &hir::Parameter,
-) -> Option<Diagnostic> {
-    let expected = hir::Type::Array(Box::new(hir::Type::Scalar(hir::Scalar::Text)));
-    if given.ty != expected {
-        let written = param.type_expr()?;
-        return Some(
-            Diagnostic::error(
-                Code::MainSignature,
-                format!("`main`'s arguments are an `array text`, not `{}`", given.ty),
-                written.span(),
-                format!("this is `{}`", given.ty),
-            )
-            .with_note(MAIN_PARAMETERS)
-            .with_suggestion(
-                "make it an `array text`",
-                vec![Edit {
-                    span: written.span(),
-                    replacement: "array text".to_string(),
-                }],
-            ),
-        );
+    let mut edits = vec![Edit {
+        span: if alone {
+            params.span()
+        } else {
+            params.removal(param)
+        },
+        replacement: if alone { "{}" } else { "" }.to_string(),
+    }];
+    let lowercase = name.to_lowercase();
+    if lowercase != "arguments" && !ARGUMENTS_ELSEWHERE.contains(&lowercase.as_str()) {
+        return d.with_suggestion("remove the parameter", edits);
     }
-    let mode = param.mode().filter(|_| given.mode != hir::Mode::Const)?;
-    let removed = param.name().map_or(mode.span(), |name| {
-        Span::new(mode.span().start, name.span().start)
-    });
-    Some(
-        Diagnostic::error(
-            Code::MainSignature,
-            format!(
-                "`main` is given its arguments, so `arguments` isn't `{}`",
-                given.mode.word()
-            ),
-            mode.span(),
-            "nothing assigns it",
-        )
-        .with_note(MAIN_PARAMETERS)
-        .with_suggestion(
-            "take them as a value",
-            vec![Edit {
-                span: removed,
-                replacement: String::new(),
-            }],
-        ),
-    )
+    let d = d.with_note(ARGUMENTS_RULE);
+    // The unit, used where `main` is, unless it is already.
+    let (units, section) = namespaces.exporters("arguments", param.span(), Kind::Variable);
+    if units == [hir::Given::UNIT] {
+        let file = param.syntax().ancestors().find_map(SourceFile::cast);
+        match file.and_then(|file| sections::uses_added(&file, section, hir::Given::UNIT)) {
+            Some(uses) => edits.push(uses),
+            None => return d.with_help("remove the parameter, and use `trendy.process`"),
+        }
+    }
+    let message = if edits.len() == 1 {
+        "remove the parameter"
+    } else {
+        "remove the parameter, and use `trendy.process`"
+    };
+    let d = d.with_suggestion(message, edits);
+    if name == "arguments" {
+        return d;
+    }
+    d.with_help(format!("then read `arguments` where `{name}` is read"))
 }
 
 /// `main`'s parameter `errors`, written `param`, which sema made
@@ -9183,6 +9174,22 @@ pub(crate) fn constant_type_differs(
 
 /// The variable `name`, declared by `declaration`, read at `span`, in the value
 /// of the constant `constant`.
+/// The variable `name`, written at `span` in an initial value, which is known
+/// when compiling, though the runtime gives it its value as the program
+/// starts.
+pub(crate) fn given_in_initial_value(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::InitialValueWhenRunning,
+        format!("an initial value can't read `{name}`, which the program is given as it starts"),
+        span,
+        "known only when the program runs",
+    )
+    .with_note(format!("a variable's initial value is known when compiling, so that the program starts with every variable holding its value, and the runtime gives `{name}` its value as the program starts, before `main` runs"))
+    .with_help(format!(
+        "declare the variable with its type, and assign it from `{name}` in `main`"
+    ))
+}
+
 pub(crate) fn variable_in_constant(
     name: &str,
     span: Span,
@@ -10095,8 +10102,8 @@ pub(crate) fn operator_clash(
     Some(clash(&shown, span, &declared, &qualified))
 }
 
-/// The type, heading or operator `token` names, as `kind` says, which what
-/// is written there doesn't see, but which the interface of each of some
+/// The type, heading, operator or value `token` names, as `kind` says, which
+/// what is written there doesn't see, but which the interface of each of some
 /// units of the program declares: with a fix that names the only one in
 /// the `uses` of the section it is written in, or, for several, help.
 pub(crate) fn unused_unit(
@@ -10104,13 +10111,25 @@ pub(crate) fn unused_unit(
     kind: Kind,
     namespaces: &Namespaces,
 ) -> Option<Diagnostic> {
-    let name = token.text();
+    let file = token.parent_ancestors().find_map(SourceFile::cast)?;
     let span = trendy_syntax::span(token.text_range());
+    unused_unit_in(token.text(), span, &file, kind, namespaces)
+}
+
+/// As [`unused_unit`], of `name`, written at `span` in `file`.
+pub(crate) fn unused_unit_in(
+    name: &str,
+    span: Span,
+    file: &SourceFile,
+    kind: Kind,
+    namespaces: &Namespaces,
+) -> Option<Diagnostic> {
     let (units, section) = namespaces.exporters(name, span, kind);
     let first = *units.first()?;
     let (code, what) = match kind {
         Kind::Defined => (Code::UnknownType, "type"),
         Kind::Heading => (Code::UnknownType, "heading"),
+        Kind::Variable | Kind::Constant => (Code::UnknownName, "value"),
         _ => (Code::UnknownName, "operator"),
     };
     let listed: Vec<String> = units.iter().map(|u| format!("`{u}`")).collect();
@@ -10132,8 +10151,7 @@ pub(crate) fn unused_unit(
     if units.len() > 1 {
         return Some(d.with_help(format!("use the unit that declares the `{name}` meant")));
     }
-    let file = token.parent_ancestors().find_map(SourceFile::cast)?;
-    Some(match sections::uses_added(&file, section, first) {
+    Some(match sections::uses_added(file, section, first) {
         Some(edit) => d.with_suggestion(format!("use `{first}`"), vec![edit]),
         None => d.with_help(format!("use `{first}`")),
     })

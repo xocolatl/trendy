@@ -132,6 +132,7 @@ fn define_main(
     run_signature.params.push(AbiParam::new(pointer));
     run_signature.params.push(AbiParam::new(types::I32));
     run_signature.params.push(AbiParam::new(pointer));
+    run_signature.params.push(AbiParam::new(pointer));
     run_signature.returns.push(AbiParam::new(types::I32));
     let run = module
         .declare_function(
@@ -140,9 +141,11 @@ fn define_main(
             &run_signature,
         )
         .map_err(|e| e.to_string())?;
-    // `int main(int argc, char **argv)`.
+    // `int main(int argc, char **argv, char **envp)`, as the systems a
+    // program runs on start it.
     let mut main_signature = module.make_signature();
     main_signature.params.push(AbiParam::new(types::I32));
+    main_signature.params.push(AbiParam::new(pointer));
     main_signature.params.push(AbiParam::new(pointer));
     main_signature.returns.push(AbiParam::new(types::I32));
     let main = module
@@ -158,7 +161,7 @@ fn define_main(
             let shim = module.declare_func_in_func(shim, b.func);
             let run = module.declare_func_in_func(run, b.func);
             let address = b.ins().func_addr(pointer, shim);
-            let call = b.ins().call(run, &[address, given[0], given[1]]);
+            let call = b.ins().call(run, &[address, given[0], given[1], given[2]]);
             b.inst_results(call)[0]
         },
     )

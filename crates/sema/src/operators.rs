@@ -867,8 +867,8 @@ impl Signature {
 /// conversions, then the built-ins', which can name the prelude's types,
 /// then each file's operators and selectors, the prelude's first, each
 /// with its parameters and result type checked. Built-in operators
-/// declared outside the units that come with the compiler are reported,
-/// as are built-in types and kinds outside the prelude. `main` is checked
+/// and variables declared outside the units that come with the compiler are
+/// reported, as are built-in types and kinds outside the prelude. `main` is checked
 /// as an update operator, even with a result type, which is reported when
 /// the entry point is.
 pub(crate) fn signatures(
@@ -903,6 +903,9 @@ pub(crate) fn signatures(
                 builtin.keyword(),
                 builtin.syntax(),
             )),
+            Item::Variable(decl) if decl.builtin().is_some() && !source.is_compilers() => {
+                errors.push(errors::builtin_in_program(decl.builtin(), decl.syntax()));
+            }
             Item::Type(decl) => {
                 for signature in from_type(&decl, source, namespaces) {
                     list.push(Signature {
