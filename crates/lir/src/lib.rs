@@ -527,8 +527,10 @@ runtime_functions! {
     /// [`RuntimeFn::TransactionBegins`] ends, however it does.
     TransactionEnds => "trendy_rt_transaction_ends", false;
     /// `trendy_rt_random_bytes(dst, count, descriptor)`: store at `dst` an array of
-    /// the next `count` random bytes, of the type the descriptor describes, `array byte`,
-    /// in memory the statement owns. It fails if the memory can't be allocated.
+    /// the next `count` random bytes, of the type the descriptor describes, `array byte`
+    /// or, for bytes in a hierarchy, the array of their components,
+    /// `{ value: integer }`, in memory the statement owns. It fails if the memory
+    /// can't be allocated.
     RandomBytes => "trendy_rt_random_bytes", true;
     /// `trendy_rt_join(dst, relations, operands, count, result, joined, orders)`: if the
     /// largest of the `count` relations whose addresses are at `relations` is large enough
@@ -553,6 +555,17 @@ runtime_functions! {
     /// descriptor's address; their types are in the table of errors
     /// ([`RuntimeFn::Failures`]).
     LoadTextFileWithErrors => "trendy_rt_load_text_file_with_errors", true;
+    /// `trendy_rt_load_binary_file(dst, path, descriptor)`: store at `dst` the
+    /// array of the bytes of the file at `path`, a text, in order, of the type
+    /// the descriptor describes, as for [`RuntimeFn::RandomBytes`], in memory
+    /// the statement owns. It fails if the file can't be read, or if the
+    /// memory can't be allocated.
+    LoadBinaryFile => "trendy_rt_load_binary_file", true;
+    /// `trendy_rt_load_binary_file_with_errors(dst, path, errors, descriptor)`:
+    /// as [`RuntimeFn::LoadBinaryFile`], but a file that can't be read gives no
+    /// bytes, and its error at `errors`, an `unreadable_file`, rather than
+    /// failing, as for [`RuntimeFn::LoadTextFileWithErrors`].
+    LoadBinaryFileWithErrors => "trendy_rt_load_binary_file_with_errors", true;
     /// `trendy_rt_save_text_file(path, lines)`: write the array of texts
     /// `lines` to the text file at `path`, a text, each ending in a line feed.
     /// It fails if the file can't be written, or if a line wouldn't read back
@@ -1045,6 +1058,8 @@ impl RuntimeFn {
                 | RuntimeFn::Join
                 | RuntimeFn::LoadTextFile
                 | RuntimeFn::LoadTextFileWithErrors
+                | RuntimeFn::LoadBinaryFile
+                | RuntimeFn::LoadBinaryFileWithErrors
                 | RuntimeFn::LoadCsv
                 | RuntimeFn::LoadCsvWithErrors
                 | RuntimeFn::Sum

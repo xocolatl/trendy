@@ -1,5 +1,8 @@
 /* Bytes: `byte` is a number from 0 to 255, written in hexadecimal, and binary data is
-   an array of them. Each file format's first bytes say what it is, as these do. */
+   an array of them, as `load_binary_file` reads a file. Each file format's first bytes
+   say what it is, as these do. */
+uses { trendy.files };
+
 var formats := relation {
     { format: "PNG", magic: x"89_50_4e_47" },
     { format: "gzip", magic: x"1f_8b" },
@@ -34,6 +37,20 @@ operator starts_with{data: array byte, start: array byte}: boolean [
     same
 ];
 
+/* Which of `formats` the file at `path` is, by its first bytes, whatever else they
+   are: none for text, and for a file that can't be read, why. */
+operator identify{path: text} [
+    var data: array byte;
+    var errors: relation { error: error };
+    call load_binary_file{path, out bytes: data, out errors};
+    if is_empty{r: errors} then [
+        call debug_value{v: length{a: data}};
+        call debug_value{v: (formats where starts_with{data, start: magic}){format}};
+    ] else [
+        call debug_value{v: message{error: value from errors}};
+    ];
+];
+
 operator main{} [
     call debug_table{r: formats};
     var header := x"89504e47" || x"0d0a1a0a";
@@ -48,4 +65,7 @@ operator main{} [
     call debug_value{v: header < x"8a"};
     call debug_table{r: formats where starts_with{data: header, start: magic}};
     call debug_value{v: to_text{from: x"7F45"}};
+    call identify{path: "examples/rivers.txt.gz"};
+    call identify{path: "examples/rivers.txt"};
+    call identify{path: "examples/kente.png"};
 ];

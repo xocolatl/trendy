@@ -2874,7 +2874,10 @@ fn spelled_like(
 /// lowercase, with trendy's, of a relation if it takes one, and of an array
 /// if that is another: Python's `len` counts either, as SQL's `CARDINALITY` and Java's
 /// `size` do; R's and Kotlin's `readLines` read a file's lines, as
-/// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do, and
+/// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do;
+/// .NET's and Java's `ReadAllBytes`, Python's `read_bytes`, Kotlin's
+/// `readBytes` and Ruby's `binread` read a file's bytes, as
+/// `load_binary_file` does, which a reader might call `read_binary_file`;
 /// pandas' and R's `read_csv` and Julia's `readcsv` a CSV file's records;
 /// and
 /// JavaScript's `parseInt` and `parseFloat`, Java's `parseDouble`, and C's
@@ -2893,6 +2896,11 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("prod", "product", None),
     ("readlines", "load_text_file", None),
     ("readalllines", "load_text_file", None),
+    ("readallbytes", "load_binary_file", None),
+    ("read_bytes", "load_binary_file", None),
+    ("readbytes", "load_binary_file", None),
+    ("binread", "load_binary_file", None),
+    ("read_binary_file", "load_binary_file", None),
     ("read_csv", "load_csv", None),
     ("readcsv", "load_csv", None),
     ("writelines", "save_text_file", None),

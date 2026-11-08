@@ -10776,6 +10776,26 @@ operator main{{}} [
         // A unit that uses it already only gets the name.
         let source = "uses { trendy.files };\n\noperator main{} [\n    var lines: array text;\n    call readLines{path: \"rivers.txt\", out lines: lines};\n];\n";
         assert_eq!(fix(source), source.replace("readLines", "load_text_file"));
+        // A file's bytes: .NET's and Java's, Python's, Kotlin's and Ruby's,
+        // and the name `load_`'s being `read_` elsewhere gives it.
+        for written in [
+            "ReadAllBytes",
+            "readAllBytes",
+            "read_bytes",
+            "readBytes",
+            "binread",
+            "read_binary_file",
+        ] {
+            let source =
+                format!("operator main{{}} [\n    var data := {written}{{\"kente.png\"}};\n];\n");
+            let fixed = fix(&fix(&source));
+            assert_eq!(
+                fixed,
+                "uses { trendy.files };\n\noperator main{} [\n    var data: array byte;\n    call load_binary_file{path: \"kente.png\", out bytes: data};\n];\n",
+                "{written}"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
         // A CSV file's records: pandas' and R's, and Julia's, whose
         // arguments the program then names, with the columns and whether
         // there is a header.

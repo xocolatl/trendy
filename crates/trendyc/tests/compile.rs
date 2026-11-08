@@ -3077,6 +3077,72 @@ operator main{{}} [
 }
 
 #[test]
+fn a_binary_file_is_read_whatever_its_bytes() {
+    // Bytes that aren't UTF-8, a carriage return and a line feed, and a zero,
+    // each as it is, and an empty file, which has none; with errors, a file
+    // that can't be read gives none, and its error, as a directory does.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("binary");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (data, empty, missing) = (
+        dir.join("data.bin"),
+        dir.join("empty.bin"),
+        dir.join("missing.bin"),
+    );
+    std::fs::write(&data, b"Amaz\xF4nas\r\n\x00").unwrap();
+    std::fs::write(&empty, b"").unwrap();
+    drop(std::fs::remove_file(&missing));
+    let source = format!(
+        "uses {{ trendy.files }};
+
+operator show{{path: text}} [
+    var bytes: array byte;
+    var errors: relation {{ error: error }};
+    call load_binary_file{{path, out bytes, out errors}};
+    call debug_value{{v: bytes}};
+    call debug_value{{v: errors}};
+];
+
+operator main{{}} [
+    var bytes: array byte;
+    call load_binary_file{{path: {data:?}, out bytes}};
+    call debug_value{{v: bytes}};
+    call debug_value{{v: length{{a: bytes}}}};
+    call debug_value{{v: bytes[5]}};
+    call show{{path: {empty:?}}};
+    call show{{path: {missing:?}}};
+    call show{{path: {dir:?}}};
+    call load_binary_file{{path: {missing:?}, out bytes}};
+];
+"
+    );
+    let (code, stderr) = run_source("binary_file", &source);
+    let (missing, dir) = (missing.display(), dir.display());
+    let unreadable = |path: &dyn std::fmt::Display, reason: &str| {
+        format!(
+            r#"relation {{ error: error }} {{ {{ error: unreadable_file{{path: "{path}", reason: "{reason}"}} }} }}"#
+        )
+    };
+    let none = "x\"\"".to_string();
+    let expected = [
+        r#"x"416d617af46e61730d0a00""#.to_string(),
+        "11".to_string(),
+        "x'f4'".to_string(),
+        none.clone(),
+        "relation { error: error } {}".to_string(),
+        none.clone(),
+        unreadable(&missing, "No such file or directory"),
+        none,
+        unreadable(&dir, "Is a directory"),
+        format!(r#"error[R0012]: can't read "{missing}": No such file or directory"#),
+    ];
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(
+        stderr.lines().take(expected.len()).collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
 fn a_programs_type_of_an_errors_name_leaves_the_languages_error() {
     // A program's own `unreadable_file`, and `trendy.files`'s, which a unit
     // of it reads with: each called by its unit's name, and a load gives
@@ -11552,6 +11618,11 @@ fn bytes() {
             "│ PNG    │ x\"89504e47\" │",
             "└────────┴─────────────┘",
             "\"x\\\"7f45\\\"\"",
+            "62",
+            "relation { format: text } { { format: \"gzip\" } }",
+            "42",
+            "relation { format: text } {}",
+            "\"can't read \\\"examples/kente.png\\\": No such file or directory\"",
         ]
     );
 }
@@ -11679,13 +11750,14 @@ x"01c8"
 }
 
 /// A program's own subtype of `byte` puts it in a hierarchy, which changes how its
-/// values are stored but not what they are, and leaves another unit's `uuid` as it is.
+/// values are stored but not what they are, and leaves another unit's `uuid` as it is,
+/// and the bytes the runtime makes, read or random, are each of its most specific type.
 #[test]
 fn bytes_of_a_subtype_when_the_program_runs() {
     let (code, stderr) = run_source(
         "bytes_in_a_hierarchy",
         r#"
-uses { trendy.uuid };
+uses { trendy.uuid, trendy.files };
 
 type ascii is byte { constraint value < 128 };
 
@@ -11709,6 +11781,14 @@ operator main{} [
     var id := uuid{bytes: x"00112233_4455_6677_8899_aabbccddeeff"};
     call debug_value{v: id.text};
     call debug_value{v: id < uuid{text: "ff112233-4455-6677-8899-aabbccddeeff"}};
+    var read: array byte;
+    call load_binary_file{path: "examples/rivers.txt.gz", out bytes: read};
+    call debug_value{v: read[1] is ascii};
+    call debug_value{v: read[2] is ascii};
+    call debug_value{v: array [read[1], read[2]] = x"1f8b"};
+    var random: uuid_v4;
+    call generate{out v4: random};
+    call debug_value{v: to_characters{from: random.text}[15]};
 ];
 "#,
     );
@@ -11727,6 +11807,10 @@ operator main{} [
             "relation { a: byte } { { a: x'61' }, { a: x'ff' } }",
             "\"00112233-4455-6677-8899-aabbccddeeff\"",
             "true",
+            "true",
+            "false",
+            "true",
+            "'4'",
         ]
     );
 }

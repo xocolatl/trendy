@@ -89,7 +89,11 @@ first, folding gives each value its type (`ops::specialized`), and when
 running, if a subtype a constraint defines puts `code_point` in a
 hierarchy, lowering makes each value of the runtime's array in a new one
 (`made_in_hierarchy`), and copies their components out of one for
-`from_code_points`. `debug_value` and `debug_table`, update operators, are runtime calls
+`from_code_points`. Only compiled code chooses a value's most specific
+type, so a runtime function that makes an array of a type in a hierarchy,
+as `random_bytes` and `load_binary_file` make bytes, makes the array of
+their components (`made_by_runtime`), and lowering makes the values of them
+(`FunctionBuilder::made_of_components`). `debug_value` and `debug_table`, update operators, are runtime calls
 given their argument and its type's descriptor (`trendy_rt_debug_value`,
 `trendy_rt_debug_table`). `to_text` is
 a runtime call, which writes the value as `debug_value` does; folded, it
@@ -102,7 +106,9 @@ into its `out` parameter's variable, since two reads can differ and a
 read-only operator's calls can't (TTM RM Prescription 3): a `call`
 statement, which nothing evaluates when compiling, and which lowering
 makes a runtime call (`trendy_rt_load_text_file`) and an assignment of
-its result. Its overload with `out errors`, `relation { error: error }`,
+its result. `load_binary_file` is one too (`trendy_rt_load_binary_file`),
+which reads a file's bytes as they are, sharing the reading of them with
+the loaders of text (`contents_or_error`). Its overload with `out errors`, `relation { error: error }`,
 gives a file's failures as values rather than stopping the program
 (`trendy_rt_load_text_file_with_errors`): the errors the language makes
 are the compiler's (`hir::LanguageError`, each a name, components and a

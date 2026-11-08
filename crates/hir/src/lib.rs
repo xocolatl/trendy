@@ -637,6 +637,14 @@ pub enum UpdateBuiltin {
     /// its error in the `out` parameter `errors` rather than stopping the
     /// program: an `unreadable_file` or a `not_utf8` ([`LanguageError`]).
     LoadTextFileWithErrors,
+    /// Read the bytes of a file, whatever it holds, in order, into its `out`
+    /// parameter, an `array byte`, when the program runs, as
+    /// [`UpdateBuiltin::LoadTextFile`] reads a file's lines.
+    LoadBinaryFile,
+    /// As [`UpdateBuiltin::LoadBinaryFile`], but a file it can't read gives
+    /// its error in the `out` parameter `errors` rather than stopping the
+    /// program: an `unreadable_file` ([`LanguageError`]).
+    LoadBinaryFileWithErrors,
     /// The records of a CSV file, as tuples whose attributes are its
     /// columns of their names, read when the program runs, as
     /// [`UpdateBuiltin::LoadTextFile`] reads a file's lines.
@@ -692,6 +700,8 @@ impl UpdateBuiltin {
             | UpdateBuiltin::RandomBytes => None,
             UpdateBuiltin::LoadTextFile
             | UpdateBuiltin::LoadTextFileWithErrors
+            | UpdateBuiltin::LoadBinaryFile
+            | UpdateBuiltin::LoadBinaryFileWithErrors
             | UpdateBuiltin::LoadCsv
             | UpdateBuiltin::LoadCsvWithErrors => Some(Io::ReadsFile),
             UpdateBuiltin::SaveTextFile | UpdateBuiltin::SaveTextFileWithErrors => {
@@ -1304,6 +1314,15 @@ impl UpdateBuiltin {
             ]
             .into(),
             UpdateBuiltin::LoadTextFileWithErrors => with_errors(UpdateBuiltin::LoadTextFile),
+            UpdateBuiltin::LoadBinaryFile => [
+                constant("path", text()),
+                out(
+                    "bytes",
+                    Type::Array(Box::new(Type::Defined(library.byte.clone()))),
+                ),
+            ]
+            .into(),
+            UpdateBuiltin::LoadBinaryFileWithErrors => with_errors(UpdateBuiltin::LoadBinaryFile),
             UpdateBuiltin::ReadClock | UpdateBuiltin::ReadTransactionStart => {
                 [out("seconds", integer()), out("nanos", integer())].into()
             }
@@ -1385,7 +1404,7 @@ impl ReadOnlyBuiltin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 30] = [
+    pub const ALL: [Builtin; 32] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -1409,6 +1428,8 @@ impl Builtin {
         Builtin::ReadOnly(ReadOnlyBuiltin::Atan2),
         Builtin::Update(UpdateBuiltin::LoadTextFile),
         Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors),
+        Builtin::Update(UpdateBuiltin::LoadBinaryFile),
+        Builtin::Update(UpdateBuiltin::LoadBinaryFileWithErrors),
         Builtin::Update(UpdateBuiltin::LoadCsv),
         Builtin::Update(UpdateBuiltin::LoadCsvWithErrors),
         Builtin::Update(UpdateBuiltin::SaveTextFile),
@@ -1426,6 +1447,9 @@ impl Builtin {
             Builtin::Update(
                 UpdateBuiltin::LoadTextFile | UpdateBuiltin::LoadTextFileWithErrors,
             ) => "load_text_file",
+            Builtin::Update(
+                UpdateBuiltin::LoadBinaryFile | UpdateBuiltin::LoadBinaryFileWithErrors,
+            ) => "load_binary_file",
             Builtin::Update(UpdateBuiltin::LoadCsv | UpdateBuiltin::LoadCsvWithErrors) => {
                 "load_csv"
             }
@@ -1500,6 +1524,8 @@ impl Builtin {
             | Builtin::Update(
                 UpdateBuiltin::LoadTextFile
                 | UpdateBuiltin::LoadTextFileWithErrors
+                | UpdateBuiltin::LoadBinaryFile
+                | UpdateBuiltin::LoadBinaryFileWithErrors
                 | UpdateBuiltin::SaveTextFile
                 | UpdateBuiltin::SaveTextFileWithErrors
                 | UpdateBuiltin::ReadClock

@@ -7549,8 +7549,8 @@ fn random_byte() -> u8 {
 }
 
 /// Store at `dst` an array of the next `*count` random bytes, of the type `desc`
-/// describes, `array byte`, in memory the statement owns. Fails if the memory can't be
-/// allocated.
+/// describes, as `byte_array` makes it, in memory the statement owns. Fails if the
+/// memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -7568,29 +7568,49 @@ pub unsafe extern "C" fn trendy_rt_random_bytes(
         let Ok(count) = usize::try_from(count.read_unaligned()) else {
             internal_error("a negative number of random bytes is asked for");
         };
-        let desc = &*desc;
+        let bytes = byte_array((0..count).map(|_| random_byte()), &*desc)?;
+        dst.write_unaligned(bytes);
+        Ok(())
+    })
+}
+
+/// The array of `bytes`, in order, of the type `desc` describes,
+/// `array byte`, or, for bytes in a hierarchy, the array of their
+/// components, `array tuple { value: integer }`, which compiled code makes
+/// them of, as only it chooses their most specific types: each a byte's
+/// number, stored in one byte, or as an integer. In memory the statement
+/// owns. Fails if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor of one of those array types. The
+/// statement must have begun a scope.
+#[cfg(not(test))]
+unsafe fn byte_array(bytes: impl ExactSizeIterator<Item = u8>, desc: &TypeDesc) -> Fallible<Text> {
+    // SAFETY: guaranteed by the caller; each byte goes in the array's room for
+    // it.
+    unsafe {
+        let count = bytes.len();
         let element = desc.element();
         let Some(size) = count.checked_mul(element.size) else {
             return Err(out_of_memory());
         };
         let array = allocate_buffer(size, desc)?;
-        // A byte's number, stored in one byte, or as an integer in a hierarchy.
         let number = &attributes(element)[0];
-        for i in 0..count {
+        let in_one_byte = (*number.desc).kind == KIND_U8;
+        for (i, byte) in bytes.enumerate() {
             let at = array.add(i * element.size + number.offset);
-            let byte = random_byte();
-            if (*number.desc).kind == KIND_U8 {
+            if in_one_byte {
                 at.write(byte);
             } else {
                 at.cast::<i64>().write_unaligned(i64::from(byte));
             }
         }
-        dst.write_unaligned(Text {
+        Ok(Text {
             bytes: array,
             len: count,
-        });
-        Ok(())
-    })
+        })
+    }
 }
 
 /// Stop the program because the compiler and the runtime disagree, a
@@ -8331,6 +8351,83 @@ pub unsafe extern "C" fn trendy_rt_load_text_file_with_errors(
     })
 }
 
+/// Store at `dst` the array of the bytes of the file at `path`, whatever
+/// they are, in the file's order, of the type `desc` describes, as
+/// `byte_array` makes it, in memory the statement owns. Fails if the file can't be
+/// read (R0012), or the memory can't be allocated.
+///
+/// # Safety
+///
+/// `path` must point to a valid text value, `desc` to a valid descriptor
+/// of that array type, and `dst` to memory for an array. The statement
+/// must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_load_binary_file(
+    dst: *mut Text,
+    path: *const Text,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let path = read_text(path.cast());
+        // With no errors to give its failure to, a file that can't be read
+        // fails.
+        let bytes = bytes_of(contents_or_error(path, None)?.as_ref(), &*desc)?;
+        dst.write_unaligned(bytes);
+        Ok(())
+    })
+}
+
+/// As [`trendy_rt_load_binary_file`], but rather than failing for a file
+/// that can't be read, store at `dst` no bytes, and at `errors` its one
+/// error, an `unreadable_file`, and none if the file is read. Fails if the
+/// memory can't be allocated.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_load_binary_file`], and `errors` must point to a
+/// valid [`Errors`] of the type [`UNREADABLE_FILE`] says.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_load_binary_file_with_errors(
+    dst: *mut Text,
+    path: *const Text,
+    errors: *mut Errors,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let path = read_text(path.cast());
+        let mut found = Found::new((*errors).relation);
+        let bytes = bytes_of(contents_or_error(path, Some(&mut found))?.as_ref(), &*desc)?;
+        let found = found.finish()?;
+        dst.write_unaligned(bytes);
+        (&raw mut (*errors).found).write_unaligned(found);
+        Ok(())
+    })
+}
+
+/// The array of the bytes of a file's `contents`, of the type `desc`
+/// describes, as [`byte_array`] makes it, in memory the statement owns, and
+/// no bytes for a file that couldn't be read. Fails if the memory can't be
+/// allocated.
+///
+/// # Safety
+///
+/// As for [`byte_array`].
+#[cfg(not(test))]
+unsafe fn bytes_of(contents: Option<&Temp<u8>>, desc: &TypeDesc) -> Fallible<Text> {
+    // SAFETY: guaranteed by the caller; the contents are `len` bytes.
+    unsafe {
+        let bytes: &[u8] = match contents {
+            Some(contents) => core::slice::from_raw_parts(contents.ptr(), contents.len),
+            None => &[],
+        };
+        byte_array(bytes.iter().copied(), desc)
+    }
+}
+
 /// Write the array of texts at `lines` to the text file at `path`, each ending
 /// in a line feed, so that [`trendy_rt_load_text_file`] reads them back. Fails
 /// if the file can't be written (R0026), if a line wouldn't read back as one
@@ -8430,11 +8527,43 @@ fn reads_back_as_one_line(line: &str) -> bool {
     !line.contains('\n') && !line.ends_with('\r')
 }
 
+/// The bytes of the file at `path`, or `None`, after giving `found` why
+/// the file can't be read, an `unreadable_file` (R0012), which, with no
+/// `found`, it fails with ([`give`]). Fails too if the memory for them
+/// can't be allocated.
+///
+/// # Safety
+///
+/// `found`'s descriptor must be valid. The statement must have begun a
+/// scope.
+#[cfg(not(test))]
+unsafe fn contents_or_error(path: &str, found: Option<&mut Found>) -> Fallible<Option<Temp<u8>>> {
+    match try_read_file(path)? {
+        Ok(contents) => Ok(Some(contents)),
+        Err(reason) => {
+            let (path, reason) = (scope_text(path)?, scope_text(reason)?);
+            // SAFETY: guaranteed by the caller.
+            unsafe {
+                give(
+                    found,
+                    UNREADABLE_FILE,
+                    &[
+                        ("path", (&raw const path).cast()),
+                        ("reason", (&raw const reason).cast()),
+                    ],
+                )?;
+            }
+            Ok(None)
+        }
+    }
+}
+
 /// The text of the file at `path`, and the memory it is in, which it
 /// lasts as long as, or `None`, after giving `found` why the file can't be
-/// read, or isn't UTF-8 text: an `unreadable_file` (R0012) or a `not_utf8`
-/// (R0013), which, with no `found`, it fails with ([`give`]). Fails too if
-/// the memory for them can't be allocated.
+/// read, or isn't UTF-8 text: an `unreadable_file` (R0012), as
+/// [`contents_or_error`] gives it, or a `not_utf8` (R0013), which, with no
+/// `found`, it fails with ([`give`]). Fails too if the memory for them
+/// can't be allocated.
 ///
 /// # Safety
 ///
@@ -8448,20 +8577,8 @@ unsafe fn file_or_error<'a>(
     // SAFETY: guaranteed by the caller; the text is in the memory, which
     // moving the memory's owner doesn't move.
     unsafe {
-        let contents = match try_read_file(path)? {
-            Ok(read) => read,
-            Err(reason) => {
-                let (path, reason) = (scope_text(path)?, scope_text(reason)?);
-                give(
-                    found,
-                    UNREADABLE_FILE,
-                    &[
-                        ("path", (&raw const path).cast()),
-                        ("reason", (&raw const reason).cast()),
-                    ],
-                )?;
-                return Ok(None);
-            }
+        let Some(contents) = contents_or_error(path, found.as_deref_mut())? else {
+            return Ok(None);
         };
         let bytes = core::slice::from_raw_parts(contents.ptr(), contents.len);
         match try_file_text(bytes) {

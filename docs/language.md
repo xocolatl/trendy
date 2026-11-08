@@ -2039,10 +2039,10 @@ an error whose fix uses it (A0015, A0003). Its interface, what a unit
 that uses it sees:
 
 ```
-/* Reading and writing files: the lines of a text file, and the records of
-   a CSV file, each read or written when the program runs, so by an update
-   operator, with the errors only a file gives. A unit that reads or writes
-   one uses it, `uses { trendy.files };`. */
+/* Reading and writing files: the lines of a text file, the bytes of any
+   file, and the records of a CSV file, each read or written when the
+   program runs, so by an update operator, with the errors only a file
+   gives. A unit that reads or writes one uses it, `uses { trendy.files };`. */
 interface
 
 /* Read the lines of the text file at `path` into `lines`, in the file's
@@ -2087,6 +2087,24 @@ builtin operator save_text_file{path: text, lines: array text};
 builtin operator save_text_file{
     path: text,
     lines: array text,
+    out errors: relation { error: error },
+};
+
+/* Read the bytes of the file at `path` into `bytes`, whatever they are, in
+   the file's order, so that its first byte is the array's element 1. `path`
+   is relative to the directory the program runs in, unless it is absolute.
+   Each call reads the file as it is when the program runs, as
+   `load_text_file` does, so it is an update operator, which `call`
+   invokes. A file that can't be read fails (R0012). */
+builtin operator load_binary_file{path: text, out bytes: array byte};
+
+/* Read the bytes of the file at `path` into `bytes`, as the other
+   `load_binary_file` does, but rather than stopping the program for a file
+   that can't be read, give no bytes, and its error, an `unreadable_file`,
+   in `errors`, which is empty when the file is read. */
+builtin operator load_binary_file{
+    path: text,
+    out bytes: array byte,
     out errors: relation { error: error },
 };
 
@@ -2335,6 +2353,34 @@ operator main{} [
   names `out errors`, which is then empty, or holds its `unwritable_file { path,
   reason }`. A failure partway, as on a full disk, can leave part of the lines in
   the file, and what it held before is gone.
+
+**`load_binary_file{path: text, out bytes: array byte}`** reads input: the
+bytes of any file, into the variable its call gives `bytes`, an `array byte`
+(see [Bytes](#bytes)).
+
+```trendy
+uses { trendy.files };
+
+operator main{} [
+    var bytes: array byte;
+    call load_binary_file{path: "kente.png", out bytes};
+    call debug_value{v: length{a: bytes}};
+    call debug_value{v: bytes[1] = x'89'};
+];
+```
+
+- **The bytes are an array, in the file's order,** whatever they are: nothing
+  reads them as text, so a file needn't be UTF-8, and a line's end is two bytes,
+  or one, as any others are. The first byte is element 1, and an empty file has
+  none.
+- **It is an update operator,** as `load_text_file` is, and reads the file when
+  the program runs, relative to the directory it runs in, stopping it if the
+  file can't be read (R0012). .NET's and Java's `ReadAllBytes`, Python's
+  `read_bytes`, Kotlin's `readBytes` and Ruby's `binread` are fixed to it, then
+  to a call with the variable its `out` argument.
+- **Unless the call names `out errors`,** as `load_text_file`'s can: then a file
+  that can't be read gives no bytes, and its `unreadable_file` in `errors`, which
+  is empty when the file is read.
 
 **`load_csv{path: text, header: boolean, columns: C, out rows: array T}`**,
 where `C` and `T` are any tuples, reads the records of a CSV file into the

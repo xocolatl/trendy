@@ -3212,18 +3212,21 @@ impl<'a> FunctionBuilder<'a> {
         self.exit_to(depth + 1, None, if next { again } else { after }, cx);
     }
 
-    /// The random bytes `call` asks for, given to its `out` parameter.
+    /// The random bytes `call` asks for, given to its `out` parameter, which
+    /// the runtime makes as [`made_by_runtime`] says.
     fn random_bytes(&mut self, call: &hir::Call, cx: &mut Lowering) {
         let target = &call.updated["bytes"];
         let ty = self.assigned(target).0.clone();
-        let bytes = self.slot(cx.layout(&ty));
+        let made = made_by_runtime(&ty);
+        let bytes = self.slot(cx.layout(&made));
         let count = self.place(&call.args["count"], cx);
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&made)));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::RandomBytes,
             args: vec![bytes.clone(), count, descriptor],
         });
         self.scoped = true;
+        let bytes = self.made_of_components(bytes, &ty, cx);
         self.store(target, bytes, cx);
     }
 
@@ -3708,21 +3711,18 @@ impl<'a> FunctionBuilder<'a> {
                 self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
             }
             hir::UpdateBuiltin::LoadTextFile => {
-                let target = &call.updated["lines"];
-                let ty = self.assigned(target).0.clone();
-                let (lines, _) =
-                    self.loaded(lir::RuntimeFn::LoadTextFile, call, &ty, Vec::new(), cx);
-                self.store(target, lines, cx);
+                self.file_loaded(lir::RuntimeFn::LoadTextFile, "lines", call, cx);
             }
             hir::UpdateBuiltin::LoadTextFileWithErrors => {
-                let target = &call.updated["lines"];
-                let ty = self.assigned(target).0.clone();
-                let errors = self.errors(cx);
-                let given = vec![errors.given.clone()];
                 let function = lir::RuntimeFn::LoadTextFileWithErrors;
-                let (lines, _) = self.loaded(function, call, &ty, given, cx);
-                self.store(target, lines, cx);
-                self.store(&call.updated["errors"], errors.value, cx);
+                self.file_loaded_with_errors(function, "lines", call, cx);
+            }
+            hir::UpdateBuiltin::LoadBinaryFile => {
+                self.file_loaded(lir::RuntimeFn::LoadBinaryFile, "bytes", call, cx);
+            }
+            hir::UpdateBuiltin::LoadBinaryFileWithErrors => {
+                let function = lir::RuntimeFn::LoadBinaryFileWithErrors;
+                self.file_loaded_with_errors(function, "bytes", call, cx);
             }
             hir::UpdateBuiltin::ReadClock => self.clock_read(lir::RuntimeFn::ReadClock, call, cx),
             hir::UpdateBuiltin::ReadTransactionStart => {
@@ -3841,6 +3841,42 @@ impl<'a> FunctionBuilder<'a> {
             self.insts.push(lir::Inst::Address { dst, src });
         }
         given
+    }
+
+    /// What the runtime's `function` reads of the file at `call`'s `path`, an
+    /// array, which it makes as [`made_by_runtime`] says, given to the `out`
+    /// parameter `read`, `lines` or `bytes`.
+    fn file_loaded(
+        &mut self,
+        function: lir::RuntimeFn,
+        read: &str,
+        call: &hir::Call,
+        cx: &mut Lowering,
+    ) {
+        let target = &call.updated[read];
+        let ty = self.assigned(target).0.clone();
+        let (made, _) = self.loaded(function, call, &made_by_runtime(&ty), Vec::new(), cx);
+        let array = self.made_of_components(made, &ty, cx);
+        self.store(target, array, cx);
+    }
+
+    /// As [`FunctionBuilder::file_loaded`], with what it can't read of the
+    /// file given to the `out` parameter `errors`.
+    fn file_loaded_with_errors(
+        &mut self,
+        function: lir::RuntimeFn,
+        read: &str,
+        call: &hir::Call,
+        cx: &mut Lowering,
+    ) {
+        let target = &call.updated[read];
+        let ty = self.assigned(target).0.clone();
+        let errors = self.errors(cx);
+        let given = vec![errors.given.clone()];
+        let (made, _) = self.loaded(function, call, &made_by_runtime(&ty), given, cx);
+        let array = self.made_of_components(made, &ty, cx);
+        self.store(target, array, cx);
+        self.store(&call.updated["errors"], errors.value, cx);
     }
 
     /// `call`, of `load_text_file` or `load_csv`: what the runtime function
@@ -4648,52 +4684,56 @@ impl<'a> FunctionBuilder<'a> {
 
     /// The value of `call`, of `to_code_points`: the array of its text's
     /// code points, as `hir::ReadOnlyBuiltin::evaluate` gives it, which the
-    /// runtime makes of their stored components, `{ value: integer }`. If
-    /// `code_point` is in a hierarchy, as a subtype a constraint defines
-    /// puts it, each is then made in a new array as selecting it would make
-    /// it, of its most specific type.
+    /// runtime makes as [`made_by_runtime`] says.
     fn code_points(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
         let ty = self.program.result(call);
-        let hir::Type::Array(element) = &ty else {
-            unreachable!("`to_code_points` gives an array");
-        };
-        let hir::Type::Defined(code_point) = &**element else {
-            unreachable!("`to_code_points` gives code points");
-        };
-        let components = hir::Type::Tuple(code_point.components.clone());
-        // Out of a hierarchy, each is what the runtime makes of its components, as they
-        // are stored, narrower or not.
-        let stored = if element.root().is_none() {
-            ty.clone()
-        } else {
-            hir::Type::Array(Box::new(components.clone()))
-        };
+        let made = made_by_runtime(&ty);
         let text = self.place(&call.args["from"], cx);
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&stored)));
-        let points = self.slot(cx.layout(&stored));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&made)));
+        let points = self.slot(cx.layout(&made));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::ToCodePoints,
             args: vec![points.clone(), text, descriptor],
         });
         self.scoped = true;
-        // Laid out as their stored components.
+        self.made_of_components(points, &ty, cx)
+    }
+
+    /// The array of type `ty` of what a runtime function made at `made`, of
+    /// the type [`made_by_runtime`] gives for it: `made` itself, or, for one
+    /// of a type in a hierarchy, made of their components, a new array the
+    /// statement holds, each made as selecting it would make it, of its most
+    /// specific type.
+    fn made_of_components(
+        &mut self,
+        made: lir::Place,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let hir::Type::Array(element) = ty else {
+            return made;
+        };
+        let hir::Type::Defined(defined) = &**element else {
+            return made;
+        };
         if element.root().is_none() {
-            return points;
+            return made;
         }
-        let mut count = points.clone();
+        let components = hir::Type::Tuple(defined.components.clone());
+        let mut count = made.clone();
         count.path.push(1);
-        let made = self.allocated(&ty, count, cx);
+        let values = self.allocated(ty, count, cx);
         let layout = cx.layout(element);
         self.each_tuple(
-            &points,
+            &made,
             cx.layout(&components),
             cx,
-            |this, point, index, cx| {
-                let dst = this.element(&made, index, layout);
-                this.made_in_hierarchy(code_point, &point, &dst, &Checking::Selected, cx);
+            |this, value, index, cx| {
+                let dst = this.element(&values, index, layout);
+                this.made_in_hierarchy(defined, &value, &dst, &Checking::Selected, cx);
             },
         );
-        made
+        values
     }
 
     /// The value of `call`, of `from_code_points`: the text of its array's
@@ -9227,6 +9267,24 @@ fn operand_layout(operand: lir::Operand) -> lir::Layout {
         lir::Operand::Numeric(lir::Numeric::Integer) => lir::Layout::I64,
         lir::Operand::Numeric(lir::Numeric::Approximate) => lir::Layout::F64Bits,
         lir::Operand::Usize => unreachable!("only comparisons take indexes"),
+    }
+}
+
+/// The type of what a runtime function makes for a value of `ty`: `ty`
+/// itself, with each value of a type of the program's own made of its
+/// components as they are stored, narrower or not, but for an array of
+/// values of a type in a hierarchy, whose most specific types only compiled
+/// code chooses, the array of their components, which
+/// [`FunctionBuilder::made_of_components`] then makes them of.
+fn made_by_runtime(ty: &hir::Type) -> hir::Type {
+    match ty {
+        hir::Type::Array(element) if element.root().is_some() => {
+            let hir::Type::Defined(defined) = &**element else {
+                unreachable!("a runtime function makes no array of a union type's values");
+            };
+            hir::Type::Array(Box::new(hir::Type::Tuple(defined.components.clone())))
+        }
+        _ => ty.clone(),
     }
 }
 
