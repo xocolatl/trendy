@@ -660,10 +660,11 @@ pub enum UpdateBuiltin {
     /// running, wherever it is called from, and lowering that the clock was read
     /// if it can be (see [`Program::reading_transaction_start`]).
     ReadTransactionStart,
-    /// The next 64 random bits, in its `out` parameter, as an integer. They are
-    /// computed: only the first of them in a run reads anything, to seed what
-    /// computes them, and the seed has no bearing on what the program does.
-    RandomBits,
+    /// The next `count` random bytes, in its `out` parameter, an `array byte`, which
+    /// says how many bits that is whatever an `integer` is. They are computed: only
+    /// the first of them in a run reads anything, to seed what computes them, and the
+    /// seed has no bearing on what the program does.
+    RandomBytes,
 }
 
 /// What a built-in does that a transaction's statements can't, at any depth of
@@ -688,7 +689,7 @@ impl UpdateBuiltin {
             UpdateBuiltin::DebugValue
             | UpdateBuiltin::DebugTable
             | UpdateBuiltin::ReadTransactionStart
-            | UpdateBuiltin::RandomBits => None,
+            | UpdateBuiltin::RandomBytes => None,
             UpdateBuiltin::LoadTextFile
             | UpdateBuiltin::LoadTextFileWithErrors
             | UpdateBuiltin::LoadCsv
@@ -1224,6 +1225,127 @@ impl Library {
     }
 }
 
+/// A parameter of a built-in, `name`, a value of `ty`.
+fn constant(name: &str, ty: Type) -> (String, Parameter) {
+    (name.to_string(), Parameter::constant(ty))
+}
+
+/// A built-in's `out` parameter, `name`, of `ty`.
+fn out(name: &str, ty: Type) -> (String, Parameter) {
+    (
+        name.to_string(),
+        Parameter {
+            ty,
+            mode: Mode::Out,
+        },
+    )
+}
+
+impl UpdateBuiltin {
+    /// Its parameters, as [`Builtin::params`] says, its type parameters' types
+    /// `parameter` gives.
+    fn params(
+        self,
+        library: &Library,
+        parameter: &dyn Fn(usize) -> Type,
+    ) -> BTreeMap<String, Parameter> {
+        let text = || Type::Scalar(Scalar::Text);
+        let integer = || Type::Scalar(Scalar::Integer);
+        // As `builtin` does, and an `out` parameter for the errors it gives.
+        let with_errors = |builtin: UpdateBuiltin| {
+            let mut params = builtin.params(library, parameter);
+            params.extend([out("errors", library.errors_type())]);
+            params
+        };
+        match self {
+            UpdateBuiltin::DebugValue => [constant("v", parameter(0))].into(),
+            UpdateBuiltin::DebugTable => [constant("r", parameter(0))].into(),
+            UpdateBuiltin::LoadTextFile => [
+                constant("path", text()),
+                out("lines", Type::Array(Box::new(text()))),
+            ]
+            .into(),
+            UpdateBuiltin::LoadTextFileWithErrors => with_errors(UpdateBuiltin::LoadTextFile),
+            UpdateBuiltin::ReadClock | UpdateBuiltin::ReadTransactionStart => {
+                [out("seconds", integer()), out("nanos", integer())].into()
+            }
+            UpdateBuiltin::RandomBytes => [
+                constant("count", integer()),
+                out(
+                    "bytes",
+                    Type::Array(Box::new(Type::Defined(library.byte.clone()))),
+                ),
+            ]
+            .into(),
+            UpdateBuiltin::SaveTextFile => [
+                constant("path", text()),
+                constant("lines", Type::Array(Box::new(text()))),
+            ]
+            .into(),
+            UpdateBuiltin::SaveTextFileWithErrors => with_errors(UpdateBuiltin::SaveTextFile),
+            UpdateBuiltin::LoadCsv => [
+                constant("path", text()),
+                constant("header", Type::Scalar(Scalar::Boolean)),
+                constant("columns", parameter(0)),
+                out("rows", Type::Array(Box::new(parameter(1)))),
+            ]
+            .into(),
+            UpdateBuiltin::LoadCsvWithErrors => with_errors(UpdateBuiltin::LoadCsv),
+        }
+    }
+}
+
+impl ReadOnlyBuiltin {
+    /// Its parameters, as [`Builtin::params`] says, its type parameters' types
+    /// `parameter` gives.
+    fn params(
+        self,
+        library: &Library,
+        parameter: &dyn Fn(usize) -> Type,
+    ) -> BTreeMap<String, Parameter> {
+        let text = || Type::Scalar(Scalar::Text);
+        let approximate = || Type::Scalar(Scalar::Approximate);
+        match self {
+            ReadOnlyBuiltin::Count => [constant("r", parameter(0))].into(),
+            ReadOnlyBuiltin::Length => [constant("a", parameter(0))].into(),
+            ReadOnlyBuiltin::ToText => [constant("from", parameter(0))].into(),
+            ReadOnlyBuiltin::ToApproximate => {
+                [constant("from", Type::Scalar(Scalar::Integer))].into()
+            }
+            ReadOnlyBuiltin::ParseInteger
+            | ReadOnlyBuiltin::ParseApproximate
+            | ReadOnlyBuiltin::ParseBoolean
+            | ReadOnlyBuiltin::ToCodePoints
+            | ReadOnlyBuiltin::ToCharacters => [constant("from", text())].into(),
+            ReadOnlyBuiltin::FromCharacters => [constant(
+                "from",
+                Type::Array(Box::new(Type::Scalar(Scalar::Character))),
+            )]
+            .into(),
+            ReadOnlyBuiltin::FromCodePoints => [constant("from", library.code_points())].into(),
+            ReadOnlyBuiltin::Sqrt | ReadOnlyBuiltin::Sin | ReadOnlyBuiltin::Cos => {
+                [constant("of", approximate())].into()
+            }
+            ReadOnlyBuiltin::Atan2 => {
+                [constant("y", approximate()), constant("x", approximate())].into()
+            }
+            ReadOnlyBuiltin::Min
+            | ReadOnlyBuiltin::Max
+            | ReadOnlyBuiltin::Sum
+            | ReadOnlyBuiltin::Product => {
+                let tuples = Heading::new(
+                    [
+                        ("of".to_string(), parameter(0)),
+                        (wrapped("r"), parameter(1)),
+                    ]
+                    .into(),
+                );
+                [constant("r", Type::Relation(tuples))].into()
+            }
+        }
+    }
+}
+
 impl Builtin {
     pub const ALL: [Builtin; 30] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
@@ -1255,7 +1377,7 @@ impl Builtin {
         Builtin::Update(UpdateBuiltin::SaveTextFileWithErrors),
         Builtin::Update(UpdateBuiltin::ReadClock),
         Builtin::Update(UpdateBuiltin::ReadTransactionStart),
-        Builtin::Update(UpdateBuiltin::RandomBits),
+        Builtin::Update(UpdateBuiltin::RandomBytes),
     ];
 
     #[must_use]
@@ -1274,7 +1396,7 @@ impl Builtin {
             ) => "save_text_file",
             Builtin::Update(UpdateBuiltin::ReadClock) => "read_clock",
             Builtin::Update(UpdateBuiltin::ReadTransactionStart) => "read_transaction_start",
-            Builtin::Update(UpdateBuiltin::RandomBits) => "random_bits",
+            Builtin::Update(UpdateBuiltin::RandomBytes) => "random_bytes",
             Builtin::ReadOnly(builtin) => builtin.name(),
         }
     }
@@ -1344,7 +1466,7 @@ impl Builtin {
                 | UpdateBuiltin::SaveTextFileWithErrors
                 | UpdateBuiltin::ReadClock
                 | UpdateBuiltin::ReadTransactionStart
-                | UpdateBuiltin::RandomBits,
+                | UpdateBuiltin::RandomBytes,
             ) => Vec::new(),
             Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
                 of_kind("ordered", &[Requirement::Order])
@@ -1363,104 +1485,9 @@ impl Builtin {
     pub fn params(self, library: &Library) -> BTreeMap<String, Parameter> {
         let types = self.types();
         let parameter = |index: usize| Type::Parameter(types[index].clone());
-        let constant = |name: &str, ty: Type| (name.to_string(), Parameter::constant(ty));
-        let out = |name: &str, ty: Type| {
-            (
-                name.to_string(),
-                Parameter {
-                    ty,
-                    mode: Mode::Out,
-                },
-            )
-        };
-        // As `builtin` does, and an `out` parameter for the errors it gives.
-        let with_errors = |builtin: UpdateBuiltin| {
-            let mut params = Builtin::Update(builtin).params(library);
-            params.extend([out("errors", library.errors_type())]);
-            params
-        };
         match self {
-            Builtin::Update(UpdateBuiltin::DebugValue) => [constant("v", parameter(0))].into(),
-            Builtin::Update(UpdateBuiltin::DebugTable)
-            | Builtin::ReadOnly(ReadOnlyBuiltin::Count) => [constant("r", parameter(0))].into(),
-            Builtin::ReadOnly(ReadOnlyBuiltin::Length) => [constant("a", parameter(0))].into(),
-            Builtin::ReadOnly(ReadOnlyBuiltin::ToText) => [constant("from", parameter(0))].into(),
-            Builtin::ReadOnly(ReadOnlyBuiltin::ToApproximate) => {
-                [constant("from", Type::Scalar(Scalar::Integer))].into()
-            }
-            Builtin::ReadOnly(
-                ReadOnlyBuiltin::ParseInteger
-                | ReadOnlyBuiltin::ParseApproximate
-                | ReadOnlyBuiltin::ParseBoolean,
-            ) => [constant("from", Type::Scalar(Scalar::Text))].into(),
-            Builtin::ReadOnly(ReadOnlyBuiltin::ToCodePoints | ReadOnlyBuiltin::ToCharacters) => {
-                [constant("from", Type::Scalar(Scalar::Text))].into()
-            }
-            Builtin::ReadOnly(ReadOnlyBuiltin::FromCharacters) => [constant(
-                "from",
-                Type::Array(Box::new(Type::Scalar(Scalar::Character))),
-            )]
-            .into(),
-            Builtin::ReadOnly(ReadOnlyBuiltin::FromCodePoints) => {
-                [constant("from", library.code_points())].into()
-            }
-            Builtin::ReadOnly(
-                ReadOnlyBuiltin::Sqrt | ReadOnlyBuiltin::Sin | ReadOnlyBuiltin::Cos,
-            ) => [constant("of", Type::Scalar(Scalar::Approximate))].into(),
-            Builtin::ReadOnly(ReadOnlyBuiltin::Atan2) => [
-                constant("y", Type::Scalar(Scalar::Approximate)),
-                constant("x", Type::Scalar(Scalar::Approximate)),
-            ]
-            .into(),
-            Builtin::Update(UpdateBuiltin::LoadTextFile) => [
-                constant("path", Type::Scalar(Scalar::Text)),
-                out("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
-            ]
-            .into(),
-            Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors) => {
-                with_errors(UpdateBuiltin::LoadTextFile)
-            }
-            Builtin::Update(UpdateBuiltin::ReadClock | UpdateBuiltin::ReadTransactionStart) => [
-                out("seconds", Type::Scalar(Scalar::Integer)),
-                out("nanos", Type::Scalar(Scalar::Integer)),
-            ]
-            .into(),
-            Builtin::Update(UpdateBuiltin::RandomBits) => {
-                [out("bits", Type::Scalar(Scalar::Integer))].into()
-            }
-            Builtin::Update(UpdateBuiltin::SaveTextFile) => [
-                constant("path", Type::Scalar(Scalar::Text)),
-                constant("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
-            ]
-            .into(),
-            Builtin::Update(UpdateBuiltin::SaveTextFileWithErrors) => {
-                with_errors(UpdateBuiltin::SaveTextFile)
-            }
-            Builtin::Update(UpdateBuiltin::LoadCsv) => [
-                constant("path", Type::Scalar(Scalar::Text)),
-                constant("header", Type::Scalar(Scalar::Boolean)),
-                constant("columns", parameter(0)),
-                out("rows", Type::Array(Box::new(parameter(1)))),
-            ]
-            .into(),
-            Builtin::Update(UpdateBuiltin::LoadCsvWithErrors) => {
-                with_errors(UpdateBuiltin::LoadCsv)
-            }
-            Builtin::ReadOnly(
-                ReadOnlyBuiltin::Min
-                | ReadOnlyBuiltin::Max
-                | ReadOnlyBuiltin::Sum
-                | ReadOnlyBuiltin::Product,
-            ) => {
-                let tuples = Heading::new(
-                    [
-                        ("of".to_string(), parameter(0)),
-                        (wrapped("r"), parameter(1)),
-                    ]
-                    .into(),
-                );
-                [constant("r", Type::Relation(tuples))].into()
-            }
+            Builtin::Update(builtin) => builtin.params(library, &parameter),
+            Builtin::ReadOnly(builtin) => builtin.params(library, &parameter),
         }
     }
 

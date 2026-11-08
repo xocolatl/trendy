@@ -2997,6 +2997,21 @@ impl<'a> FunctionBuilder<'a> {
         self.end_block(lir::Terminator::Raise, after);
     }
 
+    /// The random bytes `call` asks for, given to its `out` parameter.
+    fn random_bytes(&mut self, call: &hir::Call, cx: &mut Lowering) {
+        let target = &call.updated["bytes"];
+        let ty = self.assigned(target).0.clone();
+        let bytes = self.slot(cx.layout(&ty));
+        let count = self.place(&call.args["count"], cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::RandomBytes,
+            args: vec![bytes.clone(), count, descriptor],
+        });
+        self.scoped = true;
+        self.store(target, bytes, cx);
+    }
+
     /// What `function` reads of the clock, given to the `out` parameters of `call`.
     fn clock_read(&mut self, function: lir::RuntimeFn, call: &hir::Call, cx: &mut Lowering) {
         let (seconds, nanos) = (self.slot(lir::Layout::I64), self.slot(lir::Layout::I64));
@@ -3478,14 +3493,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::UpdateBuiltin::ReadTransactionStart => {
                 self.clock_read(lir::RuntimeFn::ReadTransactionStart, call, cx);
             }
-            hir::UpdateBuiltin::RandomBits => {
-                let bits = self.slot(lir::Layout::I64);
-                self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::RandomBits,
-                    args: vec![bits.clone()],
-                });
-                self.store(&call.updated["bits"], bits, cx);
-            }
+            hir::UpdateBuiltin::RandomBytes => self.random_bytes(call, cx),
             hir::UpdateBuiltin::SaveTextFile => {
                 let args = vec![
                     self.place(&call.args["path"], cx),

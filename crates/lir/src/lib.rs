@@ -499,9 +499,10 @@ runtime_functions! {
     /// `trendy_rt_transaction_ends()`: one that called
     /// [`RuntimeFn::TransactionBegins`] ends, however it does.
     TransactionEnds => "trendy_rt_transaction_ends", false;
-    /// `trendy_rt_random_bits(bits)`: store at `bits` the next 64 random bits, as an
-    /// integer.
-    RandomBits => "trendy_rt_random_bits", false;
+    /// `trendy_rt_random_bytes(dst, count, descriptor)`: store at `dst` an array of
+    /// the next `count` random bytes, of the type the descriptor describes, `array byte`,
+    /// in memory the statement owns. It fails if the memory can't be allocated.
+    RandomBytes => "trendy_rt_random_bytes", true;
     /// `trendy_rt_join(dst, relations, operands, count, result, joined, orders)`: if the
     /// largest of the `count` relations whose addresses are at `relations` is large enough
     /// for it to matter, store at `dst` their join, of the type `result` describes, in an
@@ -1047,7 +1048,7 @@ impl RuntimeFn {
                 | RuntimeFn::Assign
                 | RuntimeFn::ReadClock
                 | RuntimeFn::ReadTransactionStart
-                | RuntimeFn::RandomBits
+                | RuntimeFn::RandomBytes
                 | RuntimeFn::Arguments
         )
     }

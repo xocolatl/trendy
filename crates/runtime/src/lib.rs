@@ -7378,15 +7378,15 @@ fn chacha_block(state: &[u32; 16]) -> [u32; 16] {
     working
 }
 
-/// What computes random bits: `ChaCha20`'s state, with its key and nonce from the
-/// system, read once, and the block it last made, of which `used` words are gone.
+/// What computes random bytes: `ChaCha20`'s state, with its key and nonce from the
+/// system, read once, and the block it last made, of which `used` bytes are gone.
 /// Nothing undoes it, as a rollback can't be told from having used the bits, and so
 /// nothing is given twice.
 #[cfg(not(test))]
 struct RandomState {
     seeded: bool,
     state: [u32; 16],
-    block: [u32; 16],
+    block: [u8; 64],
     used: usize,
 }
 
@@ -7402,8 +7402,8 @@ unsafe impl Sync for SharedRandom {}
 static RANDOM: SharedRandom = SharedRandom(core::cell::UnsafeCell::new(RandomState {
     seeded: false,
     state: [0; 16],
-    block: [0; 16],
-    used: 16,
+    block: [0; 64],
+    used: 64,
 }));
 
 /// The state `ChaCha20` starts in, its key and nonce from the system: `ChaCha20`'s own
@@ -7426,22 +7426,21 @@ fn seeded_chacha() -> [u32; 16] {
     state
 }
 
-/// Store at `bits` the next 64 random bits, as an integer.
-///
-/// # Safety
-///
-/// It must point to room for an integer.
+/// The next random byte, of the stream `ChaCha20` makes, seeded from the system the
+/// first time.
 #[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_random_bits(bits: *mut i64) {
+fn random_byte() -> u8 {
     // SAFETY: the program runs on one thread, and this is the only reference to it.
     let random = unsafe { &mut *RANDOM.0.get() };
     if !random.seeded {
         random.state = seeded_chacha();
         random.seeded = true;
     }
-    if random.used + 2 > random.block.len() {
-        random.block = chacha_block(&random.state);
+    if random.used == random.block.len() {
+        let words = chacha_block(&random.state);
+        for (bytes, word) in random.block.chunks_exact_mut(4).zip(words) {
+            bytes.copy_from_slice(&word.to_le_bytes());
+        }
         random.used = 0;
         let (counter, carried) = random.state[12].overflowing_add(1);
         random.state[12] = counter;
@@ -7449,11 +7448,53 @@ pub unsafe extern "C" fn trendy_rt_random_bits(bits: *mut i64) {
             random.state[13] = random.state[13].wrapping_add(1);
         }
     }
-    let high = u64::from(random.block[random.used]);
-    let low = u64::from(random.block[random.used + 1]);
-    random.used += 2;
+    random.used += 1;
+    random.block[random.used - 1]
+}
+
+/// Store at `dst` an array of the next `*count` random bytes, of the type `desc`
+/// describes, `array byte`, in memory the statement owns. Fails if the memory can't be
+/// allocated.
+///
+/// # Safety
+///
+/// `dst` must have room for an array, `count` point to an integer that isn't negative,
+/// as `trendy.uuid`, the one unit that calls it, makes sure, and `desc` be the array's.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_random_bytes(
+    dst: *mut Text,
+    count: *const i64,
+    desc: *const TypeDesc,
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe { bits.write_unaligned(i64::from_ne_bytes(((high << 32) | low).to_ne_bytes())) };
+    status(|| unsafe {
+        let Ok(count) = usize::try_from(count.read_unaligned()) else {
+            internal_error("a negative number of random bytes is asked for");
+        };
+        let desc = &*desc;
+        let element = desc.element();
+        let Some(size) = count.checked_mul(element.size) else {
+            return Err(out_of_memory());
+        };
+        let array = allocate_buffer(size, desc)?;
+        // A byte's number, stored in one byte, or as an integer in a hierarchy.
+        let number = &attributes(element)[0];
+        for i in 0..count {
+            let at = array.add(i * element.size + number.offset);
+            let byte = random_byte();
+            if (*number.desc).kind == KIND_U8 {
+                at.write(byte);
+            } else {
+                at.cast::<i64>().write_unaligned(i64::from(byte));
+            }
+        }
+        dst.write_unaligned(Text {
+            bytes: array,
+            len: count,
+        });
+        Ok(())
+    })
 }
 
 /// Stop the program because the compiler and the runtime disagree, a

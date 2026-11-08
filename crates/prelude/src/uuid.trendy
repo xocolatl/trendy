@@ -46,7 +46,9 @@ operator generate{
 
 implementation
 
-builtin operator random_bits{out bits: integer};
+/* Give `bytes` the next `count` random bytes. Only this unit calls it, and never with a
+   negative count. */
+builtin operator random_bytes{count: integer, out bytes: array byte};
 
 const hex_digits := to_characters{from: "0123456789abcdef"};
 
@@ -150,44 +152,40 @@ type uuid {
         },
 };
 
-/* The byte of `n` that is `shift` bits up. */
+/* The byte of `n`, which isn't negative, that is `shift` bits up. */
 operator byte_of{n: integer, shift: integer}: byte [
     byte{value: (n shr shift) and 0xff}
 ];
 
 /* Give `v4` a new version 4 UUID. */
 operator generate{out v4: uuid_v4} [
-    var high: integer;
-    var low: integer;
-    call random_bits{out bits: high};
-    call random_bits{out bits: low};
+    var random: array byte;
+    call random_bytes{count: 16, out bytes: random};
     v4 := treat uuid{
         bytes: array [
-            byte_of{n: high, shift: 56},
-            byte_of{n: high, shift: 48},
-            byte_of{n: high, shift: 40},
-            byte_of{n: high, shift: 32},
-            byte_of{n: high, shift: 24},
-            byte_of{n: high, shift: 16},
-            byte_of{n: high, shift: 8} and x'0f' or x'40',
-            byte_of{n: high, shift: 0},
-            byte_of{n: low, shift: 56} and x'3f' or x'80',
-            byte_of{n: low, shift: 48},
-            byte_of{n: low, shift: 40},
-            byte_of{n: low, shift: 32},
-            byte_of{n: low, shift: 24},
-            byte_of{n: low, shift: 16},
-            byte_of{n: low, shift: 8},
-            byte_of{n: low, shift: 0},
+            random[1],
+            random[2],
+            random[3],
+            random[4],
+            random[5],
+            random[6],
+            random[7] and x'0f' or x'40',
+            random[8],
+            random[9] and x'3f' or x'80',
+            random[10],
+            random[11],
+            random[12],
+            random[13],
+            random[14],
+            random[15],
+            random[16],
         ],
     } as uuid_v4;
 ];
 
 operator generate{at: timestamp, out v7: uuid_v7} [
-    var high: integer;
-    var low: integer;
-    call random_bits{out bits: high};
-    call random_bits{out bits: low};
+    var random: array byte;
+    call random_bytes{count: 10, out bytes: random};
     var millis := at.date.days * 86_400_000 + at.time.nanos_of_day div 1_000_000;
     v7 := treat uuid{
         bytes: array [
@@ -197,16 +195,16 @@ operator generate{at: timestamp, out v7: uuid_v7} [
             byte_of{n: millis, shift: 16},
             byte_of{n: millis, shift: 8},
             byte_of{n: millis, shift: 0},
-            byte_of{n: high, shift: 8} and x'0f' or x'70',
-            byte_of{n: high, shift: 0},
-            byte_of{n: low, shift: 56} and x'3f' or x'80',
-            byte_of{n: low, shift: 48},
-            byte_of{n: low, shift: 40},
-            byte_of{n: low, shift: 32},
-            byte_of{n: low, shift: 24},
-            byte_of{n: low, shift: 16},
-            byte_of{n: low, shift: 8},
-            byte_of{n: low, shift: 0},
+            random[1] and x'0f' or x'70',
+            random[2],
+            random[3] and x'3f' or x'80',
+            random[4],
+            random[5],
+            random[6],
+            random[7],
+            random[8],
+            random[9],
+            random[10],
         ],
     } as uuid_v7;
 ];

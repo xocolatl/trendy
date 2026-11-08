@@ -63,6 +63,13 @@ in the "Diagnostics" section of `docs/pipeline.md`.
   `out` parameter, never a read-only one (`hir::ReadOnlyBuiltin`), and a
   program's read-only operator reads none of the program's variables
   (A0050). See rule 6 in `docs/pipeline.md`.
+- A type is its set of values, and `integer` is the set of all integers,
+  however the compiler stores them today: the implementation must never seep
+  through. No operator, built-in or diagnostic may depend on a width, a layout
+  or a representation (TTM RM Prescription 4), so a built-in takes sizes in
+  the values' own terms, as `random_bytes` takes a count of bytes, never "the
+  bits of an integer", and a limit such as overflow is the implementation's
+  failure (R0001), not a property of the type.
 - Keep built-ins as few as possible. An operator that can be written in
   trendy is defined in the prelude, in trendy, rather than built in. When the
   language gains a feature, check whether it lets a built-in be replaced by

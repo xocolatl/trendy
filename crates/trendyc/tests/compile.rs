@@ -11942,6 +11942,16 @@ operator main{} [
     ];
     call debug_value{v: count{r: seen}};
     call debug_value{v: is_empty{r: seen where not (id is uuid_v4)}};
+    /* Each byte takes more than one value, the last too. */
+    var varied := 0;
+    var position := 1;
+    while position <= 16 loop [
+        if count{r: (seen extend { b := id.bytes[position] }){b}} > 1 then [
+            varied := varied + 1;
+        ];
+        position := position + 1;
+    ];
+    call debug_value{v: varied};
 
     var undone: uuid_v4;
     var failures: relation transaction_collection;
@@ -11989,6 +11999,7 @@ operator main{} [
         [
             "2000",
             "true",
+            "16",
             "\"919108f7-52d1-4320-9bac-f847db4148a8\"",
             "0",
             "true",
