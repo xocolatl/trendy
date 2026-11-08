@@ -413,7 +413,8 @@ fn variables() {
             // A roll call, by a `while` over the guests' positions, three
             // knocks, by a `loop`, the last calling, as the others go on to
             // the next, and goodbyes, by a `for` over the guests; then the
-            // first room free, which a `loop` leaves at.
+            // first room free, which a `loop` leaves at, and the first free
+            // floor by floor, which a named loop is left at, from inside.
             r#""1. Amara""#,
             r#""2. Wanjiru""#,
             r#""hodi""#,
@@ -421,6 +422,7 @@ fn variables() {
             r#""kwaheri, Amara""#,
             r#""kwaheri, Wanjiru""#,
             "1",
+            r#""floor 2, room 4""#,
             "┌──────┬──────┐",
             "│ born │ name │",
             "├──────┼──────┤",
@@ -11175,6 +11177,51 @@ operator main{} [
             "3",
         ]
     );
+}
+
+/// `leave name;` and `iterate name;` leave a loop around the innermost, or go
+/// on to its next run, past the end of the loops within it.
+#[test]
+fn named_loops_are_left_and_gone_on_with() {
+    let (code, stderr) = run_source(
+        "named_loops",
+        r#"operator find{grid: array array integer, target: integer}: text [
+    var row := 0;
+    var found := "none";
+    for cells in grid loop as rows [
+        row := row + 1;
+        var column := 0;
+        for cell in cells loop [
+            column := column + 1;
+            if cell < 0 then [
+                iterate rows;
+            ];
+            if cell = target then [
+                found := to_text{from: row} || "," || to_text{from: column};
+                leave rows;
+            ];
+        ];
+    ];
+    found
+];
+
+operator main{} [
+    call debug_value{v: find{grid: array [array [1, -2, 7], array [3, 7, 9]], target: 7}};
+    var tries := 0;
+    loop as retry [
+        tries := tries + 1;
+        while true loop [
+            if tries < 3 then [
+                iterate retry;
+            ];
+            leave retry;
+        ];
+    ] while true;
+    call debug_value{v: tries};
+];
+"#,
+    );
+    assert_eq!((code, stderr.as_str()), (0, "\"2,2\"\n3\n"));
 }
 
 /// A `return` of a call that closes a cycle of calls is a tail call, two

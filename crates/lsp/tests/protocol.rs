@@ -46,7 +46,8 @@ impl Client {
                 "parameter",
                 "operator",
                 "comment",
-                "namespace"
+                "namespace",
+                "label"
             ])
         );
         client.notify("initialized", json!({}));

@@ -117,6 +117,27 @@ operator first_free{taken: relation { room: integer, guest: text }}: integer [
     candidate
 ];
 
+/* The first free room, floor by floor, each floor's rooms in order: a loop
+   is named after its `loop`, `loop as search`, so that `leave search;`
+   leaves it from the loop inside it, which `leave;` alone would leave. */
+operator free_on{
+    floors: array array integer,
+    taken: relation { room: integer, guest: text },
+}: text [
+    var found := "none";
+    var floor := 0;
+    for rooms_on in floors loop as search [
+        floor := floor + 1;
+        for candidate in rooms_on loop [
+            if is_empty{r: taken where room = candidate} then [
+                found := "floor " || to_text{from: floor} || ", room " || to_text{from: candidate};
+                leave search;
+            ];
+        ];
+    ];
+    found
+];
+
 operator main{} [
     t := t || "kwaheri";
     call debug_value{v: t};
@@ -167,6 +188,7 @@ operator main{} [
     call debug_table{r: rooms};
     call roll_call{};
     call debug_value{v: first_free{taken: rooms}};
+    call debug_value{v: free_on{floors: array [array [2, 3], array [4, 5]], taken: rooms}};
 
     /* Two changes that touch the same tuple conflict, since neither
        order is the right one: this stops the program, writing

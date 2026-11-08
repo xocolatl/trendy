@@ -28,6 +28,8 @@ pub enum Class {
     Comment,
     /// A unit's name, or the name a unit gives another.
     Unit,
+    /// A loop's name, after `loop as`, `leave` or `iterate`.
+    Label,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +156,10 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
         }
         (Some(SyntaxKind::NameRef), Some(SyntaxKind::CallStmt | SyntaxKind::CallExpr)) => {
             (Class::Operator, false)
+        }
+        (Some(SyntaxKind::Name), Some(SyntaxKind::LoopName)) => (Class::Label, true),
+        (Some(SyntaxKind::NameRef), Some(SyntaxKind::LeaveStmt | SyntaxKind::IterateStmt)) => {
+            (Class::Label, false)
         }
         (Some(SyntaxKind::NameRef), _) if is_parameter(token) => (Class::Parameter, false),
         (Some(SyntaxKind::NameRef | SyntaxKind::QualifiedName), _) => (Class::Variable, false),
@@ -962,6 +968,24 @@ mod tests {
                 ("r", Class::Attribute, false),
                 (">", Class::ExprOperator, false),
                 ("0e0", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn loop_names() {
+        assert_eq!(
+            highlight("operator f{} [ while true loop as scan [ leave scan; ]; ];"),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("while", Class::Keyword, false),
+                ("true", Class::Keyword, false),
+                ("loop", Class::Keyword, false),
+                ("as", Class::Keyword, false),
+                ("scan", Class::Label, true),
+                ("leave", Class::Keyword, false),
+                ("scan", Class::Label, false),
             ]
         );
     }

@@ -68,6 +68,7 @@ ast_node!(CallStmt);
 ast_node!(ReturnStmt);
 ast_node!(LeaveStmt);
 ast_node!(IterateStmt);
+ast_node!(LoopName);
 ast_node!(FailStmt);
 ast_node!(WarnStmt);
 ast_node!(IfStmt);
@@ -1191,6 +1192,12 @@ pub enum ElseBranch {
 }
 
 impl WhileStmt {
+    /// The loop's name, after `loop as`, if it has one.
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(LoopName::cast)?.name()
+    }
+
     /// The `while`.
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {
@@ -1211,6 +1218,12 @@ impl WhileStmt {
 }
 
 impl LoopStmt {
+    /// The loop's name, after `loop as`, if it has one.
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(LoopName::cast)?.name()
+    }
+
     /// The `loop`, or the word another language writes for it, which is
     /// reported: C's `do`.
     #[must_use]
@@ -1238,6 +1251,12 @@ impl LoopStmt {
 }
 
 impl ForStmt {
+    /// The loop's name, after `loop as`, if it has one.
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(LoopName::cast)?.name()
+    }
+
     /// The `for`, or the word another language writes for it, which is
     /// reported: C#'s `foreach`.
     #[must_use]
@@ -1338,11 +1357,25 @@ impl IfStmt {
     }
 }
 
+impl LoopName {
+    /// The name, after `as`.
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+}
+
 impl LeaveStmt {
     /// The `leave` keyword, as written.
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).next()
+    }
+
+    /// The name of the loop it leaves, if it names one.
+    #[must_use]
+    pub fn loop_name(&self) -> Option<NameRef> {
+        self.0.children().find_map(NameRef::cast)
     }
 
     /// The span to delete to remove the statement, as for
@@ -1358,6 +1391,12 @@ impl IterateStmt {
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).next()
+    }
+
+    /// The name of the loop it goes on with, if it names one.
+    #[must_use]
+    pub fn loop_name(&self) -> Option<NameRef> {
+        self.0.children().find_map(NameRef::cast)
     }
 
     /// The span to delete to remove the statement, as for

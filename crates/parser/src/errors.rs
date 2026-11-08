@@ -1692,7 +1692,7 @@ pub(crate) fn loop_until(until: Found, condition: Span) -> Diagnostic {
 }
 
 /// What leaves a loop early, for notes.
-const LOOP_EXITS: &str = "`leave;` leaves the innermost loop the statement is in, and `iterate;` skips the rest of its block, going on to its next run, which a `while` loop's condition decides, as it does each";
+const LOOP_EXITS: &str = "`leave;` leaves the innermost loop the statement is in, and `iterate;` skips the rest of its block, going on to its next run, which a `while` loop's condition decides, as it does each; `leave name;` and `iterate name;` are of the loop around it named so, `loop as name`";
 
 /// `break` or `continue`, `found`: the early exit trendy writes `word`,
 /// `leave` or `iterate`.
@@ -1713,20 +1713,34 @@ pub(crate) fn loop_exit(found: Found, word: &str) -> Diagnostic {
     )
 }
 
-/// `name`, a loop's name after `word`, `leave` or `iterate`, as Tutorial D's
-/// `LEAVE` and SQL's `ITERATE` name the loop they are of.
-pub(crate) fn named_exit(name: Found, word: &str) -> Diagnostic {
-    Diagnostic::error(
+/// `name`, a loop's name, with its `:`, `removed`, before the loop, as
+/// Tutorial D, Java and JavaScript write one, whose `loop` ends at `after`,
+/// if it has one, where `as name` goes.
+pub(crate) fn named_loop(name: Found, removed: Span, after: Option<usize>) -> Diagnostic {
+    let d = Diagnostic::error(
         Code::LoopSpelling,
-        format!("`{word}` names no loop"),
+        format!("a loop's name is written after its `loop`, `loop as {}`", name.text),
         name.span,
-        "a loop's name",
+        "before the loop",
     )
     .with_note(LOOP_EXITS)
-    .with_note("loops have no names: each `leave` and `iterate` is of the innermost loop it is in")
-    .with_help(format!(
-        "remove the name, if the loop it names is the innermost, or else end the inner loops with `{word};` too, as by a variable each tests after it"
-    ))
+    .with_note("a loop is named after its `loop`, as in `while c loop as scan [ … ];`, which `leave scan;` and `iterate scan;` name, from in it");
+    let Some(after) = after else {
+        return d.with_help(format!("write `as {}` after the loop's `loop`", name.text));
+    };
+    d.with_suggestion(
+        format!("write `loop as {}`", name.text),
+        vec![
+            Edit {
+                span: removed,
+                replacement: String::new(),
+            },
+            Edit {
+                span: Span::empty(after),
+                replacement: format!(" as {}", name.text),
+            },
+        ],
+    )
 }
 
 /// `elif`, `elsif` or `elseif`, `found`, in an `if`: `else if`.

@@ -2153,6 +2153,50 @@ mod tests {
     }
 
     #[test]
+    fn leave_and_iterate_can_name_a_loop_they_are_in() {
+        let update = |body: &str| format!("operator f{{n: integer}} [\n{body}\n];{MAIN}");
+        // Of a loop around the innermost, which an always true condition of an
+        // inner loop can then end; loops side by side can share a name.
+        for body in [
+            "for x in array [1] loop as rows [ for y in array [2] loop [ if y = n then [ leave rows; ]; ]; ];",
+            "loop as retry [ while true loop [ iterate retry; ]; ] while n > 0;",
+            "for x in array [1] loop as each [ leave each; ]; for y in array [2] loop as each [ if y = n then [ iterate each; ]; call debug_value{v: y}; ];",
+        ] {
+            let source = update(body);
+            assert!(
+                analyze_str(&source).is_ok(),
+                "{body}: {:#?}",
+                analyze_str(&source).err()
+            );
+        }
+        // A name no loop around has, fixed to one it misspells.
+        let source = update("for x in array [1] loop as rows [ leave rowz; ];");
+        assert_eq!(codes(&source), [Code::Exit]);
+        assert_eq!(
+            fix(&source),
+            update("for x in array [1] loop as rows [ leave rows; ];")
+        );
+        // A value block's statements are in no loop of theirs.
+        assert_eq!(
+            codes(&update(
+                "for x in array [1] loop as rows [ var v := [ leave rows; 1 ]; leave rows; ];"
+            )),
+            [Code::Exit]
+        );
+        // A loop in another can't share its name.
+        assert_eq!(
+            codes(&update(
+                "for x in array [1] loop as rows [ for y in array [1] loop as rows [ leave rows; ]; leave rows; ];"
+            )),
+            [Code::DuplicateName]
+        );
+        // A name nothing names changes nothing, which the fix removes.
+        let source = update("for x in array [1] loop as rows [ leave; ];");
+        assert_eq!(codes(&source), [Code::Exit]);
+        assert_eq!(fix(&source), update("for x in array [1] loop [ leave; ];"));
+    }
+
+    #[test]
     fn leave_and_iterate_are_of_the_innermost_loop() {
         let update = |body: &str| format!("operator f{{n: integer}} [\n{body}\n];{MAIN}");
         // In a loop, of each kind, through `if`s and transactions.
@@ -11589,8 +11633,8 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
                 | hir::Statement::Warn(_)
                 | hir::Statement::Transaction(..)
                 | hir::Statement::Return(_)
-                | hir::Statement::Leave
-                | hir::Statement::Iterate => None,
+                | hir::Statement::Leave(_)
+                | hir::Statement::Iterate(_) => None,
             })
             .collect();
         let local = |i| vec![hir::Target::Local(hir::LocalId(i))];

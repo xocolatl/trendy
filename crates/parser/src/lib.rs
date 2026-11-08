@@ -62,6 +62,7 @@ fn parsed(source: &str, tokens: &[Token], errors: Vec<Diagnostic>) -> Parse {
         params_end: None,
         body_front: None,
         headers: Vec::new(),
+        loop_keyword_end: None,
         builder: TreeBuilder::new(),
         errors,
     };
@@ -108,6 +109,9 @@ struct Parser<'a> {
     /// The sections' headers so far, each with its word: where a unit's
     /// sections go out of order.
     headers: Vec<(Section, Found<'a>)>,
+    /// Where the `loop` of the loop last parsed ends, if it has one: where a
+    /// name written before the loop goes.
+    loop_keyword_end: Option<usize>,
     builder: TreeBuilder,
     errors: Vec<Diagnostic>,
 }
@@ -214,8 +218,12 @@ enum StatementStart {
     /// A database's relvar's declaration, `var kitchen.pantry: …`, which
     /// goes at the top level.
     PartVar,
-    /// `break;` or `LEAVE name;`, which trendy has none of.
+    /// `leave;` or `iterate;`, with a loop's name or not, or another
+    /// language's `break;`, `continue;` or `LEAVE name;`.
     Exit,
+    /// `name: while …`, a loop with its name before it, as Tutorial D, Java
+    /// and JavaScript write one.
+    NamedLoop,
     Call,
     Var,
     /// `let x = 1;`, as Rust and JavaScript declare a variable.
@@ -2137,7 +2145,22 @@ impl<'a> Parser<'a> {
             && self
                 .found_after(1)
                 .is_some_and(|f| matches!(f.kind, SyntaxKind::Semicolon | SyntaxKind::Ident));
-        Some(if self.at_if() {
+        // `scan: while …`: a name, its `:` and a loop's start after it.
+        let named_loop = found.kind == SyntaxKind::Ident
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Colon)
+            && self.found_after(2).is_some_and(|f| {
+                f.spells(SyntaxKind::WhileKw)
+                    || f.spells(SyntaxKind::ForKw)
+                    || f.spells(SyntaxKind::LoopKw)
+                    || ["foreach", "do", "repeat"]
+                        .iter()
+                        .any(|word| f.text.eq_ignore_ascii_case(word))
+            });
+        Some(if named_loop {
+            StatementStart::NamedLoop
+        } else if self.at_if() {
             StatementStart::If
         } else if found.spells(SyntaxKind::WhileKw) {
             StatementStart::While
@@ -2318,6 +2341,7 @@ impl<'a> Parser<'a> {
                 self.errors.push(errors::assertion(found));
             }
             Some(StatementStart::Exit) => self.exit_stmt(found),
+            Some(StatementStart::NamedLoop) => self.named_loop(found),
             Some(StatementStart::Call) => self.call_stmt(),
             Some(StatementStart::Var) => self.var_decl(),
             Some(StatementStart::MiscasedVar(keyword)) => {
@@ -2749,6 +2773,8 @@ impl<'a> Parser<'a> {
         match self.found() {
             Some(found) if found.spells(SyntaxKind::LoopKw) => {
                 self.any_case(SyntaxKind::LoopKw);
+                self.loop_keyword_end = Some(found.span.end);
+                self.loop_name();
                 self.branch(unbracketed)
             }
             Some(found)
@@ -3171,6 +3197,8 @@ impl<'a> Parser<'a> {
         let found = self.found().expect("at a loop");
         if found.spells(SyntaxKind::LoopKw) {
             self.any_case(SyntaxKind::LoopKw);
+            self.loop_keyword_end = Some(found.span.end);
+            self.loop_name();
         } else {
             self.bump();
             self.errors.push(errors::loop_spelling(found));
@@ -3377,14 +3405,51 @@ impl<'a> Parser<'a> {
             });
         }
         if self.at(SyntaxKind::Ident) {
-            let name = self.found().expect("at the loop's name");
-            self.start_node(SyntaxKind::Error);
+            self.start_node(SyntaxKind::NameRef);
             self.bump();
             self.builder.finish_node();
-            self.errors.push(errors::named_exit(name, word));
         }
         self.end_statement();
         self.builder.finish_node();
+    }
+
+    /// `as name` after a loop's `loop`, if it is there: the loop's name, which
+    /// a `leave` or an `iterate` in it can name.
+    fn loop_name(&mut self) {
+        if !self.at(SyntaxKind::AsKw) {
+            return;
+        }
+        self.start_node(SyntaxKind::LoopName);
+        self.bump();
+        if self.at(SyntaxKind::Ident) {
+            self.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::Ident,
+                "name the loop after `as`, as in `while c loop as scan [ … ];`",
+            );
+        }
+        self.builder.finish_node();
+    }
+
+    /// `name: while …`, at `name`, a loop with its name and `:` before it, as
+    /// Tutorial D, Java and JavaScript write one: reported, the fix moving
+    /// the name after the loop's `loop`, as `loop as name`, if it has one.
+    fn named_loop(&mut self, name: Found) {
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        self.bump();
+        self.builder.finish_node();
+        let removed = Span::new(
+            name.span.start,
+            self.found().map_or(name.span.end, |f| f.span.start),
+        );
+        self.loop_keyword_end = None;
+        self.statement();
+        self.errors
+            .push(errors::named_loop(name, removed, self.loop_keyword_end));
     }
 
     /// `return;` or `return value;`, with `return` in any case, as Tutorial
@@ -8534,20 +8599,36 @@ SourceFile
             fix(&body("WHILE n < 5; n := n + 1; END WHILE;")),
             body("while n < 5 loop [ n := n + 1; ];")
         );
-        // Other languages' early exits, as trendy writes them, which name no loop.
+        // Other languages' early exits, as trendy writes them.
         assert_eq!(fix(&body("break;")), body("leave;"));
         assert_eq!(fix(&body("continue;")), body("iterate;"));
         assert_eq!(fix(&body("LEAVE;")), body("leave;"));
+        assert_eq!(fix(&body("LEAVE outer;")), body("leave outer;"));
+        // A loop's name, after `loop as`, in each of the three, which a `leave`
+        // and an `iterate` can name.
+        for named in [
+            "while n > 0 loop as scan [ leave scan; ];",
+            "loop as retry [ iterate retry; ] while n > 0;",
+            "for x in a loop as each [ iterate each; ];",
+        ] {
+            let parse = parse_str(&body(named));
+            assert!(parse.errors.is_empty(), "{named}: {:#?}", parse.errors);
+            let names = parse
+                .tree
+                .syntax()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::LoopName)
+                .count();
+            assert_eq!(names, 1, "{named}");
+        }
+        // Written before the loop, as Tutorial D, Java and JavaScript write it.
         assert_eq!(
-            messages(&body("LEAVE outer;")),
-            [
-                "`LEAVE` is not a keyword; write `leave`",
-                "`leave` names no loop"
-            ]
+            fix(&body("outer: for x in a loop [ leave outer; ];")),
+            body("for x in a loop as outer [ leave outer; ];")
         );
         assert_eq!(
-            messages(&body("iterate rows;")),
-            ["`iterate` names no loop"]
+            fix(&body("scan: while n > 0 loop [ leave scan; ];")),
+            body("while n > 0 loop as scan [ leave scan; ];")
         );
         // As trendy writes them, and as names elsewhere.
         let parse = parse_str(&body("leave; iterate; var leave := 1; iterate := leave;"));

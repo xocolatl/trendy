@@ -265,7 +265,7 @@ pub(crate) fn body(
     let mut statements = Statements::new(&mut around, Some(update));
     let checked: Vec<ast::Statement> = body.statements().collect();
     let block = statements.block(&checked, errors);
-    errors.extend(pointless_exits_at_end(&checked, "return"));
+    errors.extend(pointless_exits_at_end(&checked, "return", &|_| false));
     let block = block?;
     // Every `out` parameter is assigned, whichever way the body goes.
     let signature = cx.operators.get(within);
@@ -295,23 +295,35 @@ pub(crate) fn body(
     ok.then(|| (statements.locals.finish(), block))
 }
 
-/// The errors of the `iterate`s that end `statements`, a loop's block, or a
-/// branch of an `if` that does: each skips nothing.
-fn pointless_iterate(statements: &[ast::Statement]) -> Vec<Diagnostic> {
-    pointless_exits_at_end(statements, "iterate")
+/// The errors of the `iterate`s of the loop named `name`, if it has one, that
+/// end `statements`, its block, or a branch of an `if` that does: each skips
+/// nothing. One of a loop around it skips that loop's next runs.
+fn pointless_iterate(statements: &[ast::Statement], name: Option<&ast::Name>) -> Vec<Diagnostic> {
+    let name = name.and_then(ast::Name::ident);
+    pointless_exits_at_end(statements, "iterate", &|stmt: &ast::IterateStmt| match stmt
+        .loop_name()
+        .and_then(|n| n.ident())
+    {
+        None => true,
+        Some(named) => name.as_ref().is_some_and(|own| own.text() == named.text()),
+    })
 }
 
-/// The errors of the exits `word`, `iterate` or `return;`, that end
-/// `statements`, or a branch of an `if` that does, as nothing would run
-/// between each and where it goes.
-fn pointless_exits_at_end(statements: &[ast::Statement], word: &str) -> Vec<Diagnostic> {
+/// The errors of the exits `word`, `iterate`, of the loop `ours` says, or
+/// `return;`, that end `statements`, or a branch of an `if` that does, as
+/// nothing would run between each and where it goes.
+fn pointless_exits_at_end(
+    statements: &[ast::Statement],
+    word: &str,
+    ours: &dyn Fn(&ast::IterateStmt) -> bool,
+) -> Vec<Diagnostic> {
     let pointless = |keyword: Option<SyntaxToken>, removal: Span| {
         keyword.map(|keyword| {
             errors::pointless_exit(word, trendy_syntax::span(keyword.text_range()), removal)
         })
     };
     match statements.last() {
-        Some(ast::Statement::Iterate(stmt)) if word == "iterate" => {
+        Some(ast::Statement::Iterate(stmt)) if word == "iterate" && ours(stmt) => {
             pointless(stmt.keyword(), stmt.removal())
                 .into_iter()
                 .collect()
@@ -326,14 +338,18 @@ fn pointless_exits_at_end(statements: &[ast::Statement], word: &str) -> Vec<Diag
                 .then_block()
                 .map(|body| body.statements().collect())
                 .unwrap_or_default();
-            let mut found = pointless_exits_at_end(&then, word);
+            let mut found = pointless_exits_at_end(&then, word, ours);
             match stmt.else_branch() {
                 Some(ast::ElseBranch::Block(body)) => {
                     let otherwise: Vec<ast::Statement> = body.statements().collect();
-                    found.extend(pointless_exits_at_end(&otherwise, word));
+                    found.extend(pointless_exits_at_end(&otherwise, word, ours));
                 }
                 Some(ast::ElseBranch::If(inner)) => {
-                    found.extend(pointless_exits_at_end(&[ast::Statement::If(inner)], word));
+                    found.extend(pointless_exits_at_end(
+                        &[ast::Statement::If(inner)],
+                        word,
+                        ours,
+                    ));
                 }
                 None => {}
             }
@@ -449,9 +465,26 @@ struct Statements<'a, 'b> {
     /// Where a statement may assign each name it ended what tests showed
     /// of, in the branch or block being checked.
     ended: BTreeMap<String, Span>,
-    /// How many loops of these statements the statement being checked is
-    /// in, which `leave` and `iterate` are of.
-    loops: usize,
+    /// The loops of these statements the statement being checked is in,
+    /// innermost last, which `leave` and `iterate` are of.
+    loops: Vec<Looped>,
+}
+
+/// A loop the statement being checked is in: its name, if it has one, and
+/// whether a `leave` or an `iterate` names it.
+struct Looped {
+    name: Option<ast::Name>,
+    named: bool,
+}
+
+/// What a `while` loop or a `loop … while` is written with: its `while`, its
+/// condition, its block, its name, if it has one, and its span.
+struct LoopParts {
+    keyword: Option<SyntaxToken>,
+    condition: Option<ast::Expr>,
+    body: Option<ast::Body>,
+    name: Option<ast::Name>,
+    span: Span,
 }
 
 impl<'a, 'b> Statements<'a, 'b> {
@@ -466,7 +499,7 @@ impl<'a, 'b> Statements<'a, 'b> {
             unassigned: Unassigned::default(),
             narrowed: Facts::default(),
             ended: BTreeMap::new(),
-            loops: 0,
+            loops: Vec::new(),
         }
     }
 }
@@ -698,33 +731,35 @@ impl Statements<'_, '_> {
             ast::Statement::Block(block) => assign::block(block, &mut self.names(), errors),
             ast::Statement::Return(stmt) => self.return_stmt(stmt, errors),
             ast::Statement::Leave(stmt) => {
-                self.loop_exit(stmt.keyword(), hir::Statement::Leave, errors)
+                let out = self.loop_exit(stmt.keyword(), stmt.loop_name(), "leave", errors);
+                out.map(hir::Statement::Leave)
             }
             ast::Statement::Iterate(stmt) => {
-                self.loop_exit(stmt.keyword(), hir::Statement::Iterate, errors)
+                let out = self.loop_exit(stmt.keyword(), stmt.loop_name(), "iterate", errors);
+                out.map(hir::Statement::Iterate)
             }
             ast::Statement::Var(decl) => self.declaration(decl, errors),
             // These settle their parts as they check them.
             ast::Statement::If(stmt) => return self.if_stmt(stmt, errors),
             ast::Statement::While(stmt) => {
-                return self.loop_stmt(
-                    stmt.keyword(),
-                    stmt.condition(),
-                    stmt.body(),
-                    hir::Check::Before,
-                    stmt.span(),
-                    errors,
-                );
+                let parts = LoopParts {
+                    keyword: stmt.keyword(),
+                    condition: stmt.condition(),
+                    body: stmt.body(),
+                    name: stmt.name(),
+                    span: stmt.span(),
+                };
+                return self.loop_stmt(parts, hir::Check::Before, errors);
             }
             ast::Statement::Loop(stmt) => {
-                return self.loop_stmt(
-                    stmt.while_keyword(),
-                    stmt.condition(),
-                    stmt.body(),
-                    hir::Check::After,
-                    stmt.span(),
-                    errors,
-                );
+                let parts = LoopParts {
+                    keyword: stmt.while_keyword(),
+                    condition: stmt.condition(),
+                    body: stmt.body(),
+                    name: stmt.name(),
+                    span: stmt.span(),
+                };
+                return self.loop_stmt(parts, hir::Check::After, errors);
             }
             ast::Statement::For(stmt) => return self.for_stmt(stmt, errors),
             ast::Statement::Transaction(stmt) => return self.transaction_stmt(stmt, errors),
@@ -808,30 +843,84 @@ impl Statements<'_, '_> {
         }
     }
 
-    /// `leave;` or `iterate;`, `exit`, written with `keyword`, of the innermost
-    /// loop of these statements, which there must be.
+    /// `leave` or `iterate`, as `word` says, written with `keyword`, and
+    /// `name`, if it names a loop: how many loops out from the innermost the
+    /// loop it is of is, the one of that name, or else the innermost, of
+    /// these statements, which there must be.
     fn loop_exit(
         &mut self,
         keyword: Option<SyntaxToken>,
-        exit: hir::Statement,
+        name: Option<ast::NameRef>,
+        word: &str,
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<hir::Statement> {
-        if self.loops > 0 {
-            return Some(exit);
-        }
+    ) -> Option<usize> {
         let keyword = keyword?;
-        let word = if matches!(exit, hir::Statement::Leave) {
-            "leave"
-        } else {
-            "iterate"
-        };
         let in_block = self.update.is_none() && self.around.result().is_none();
-        errors.push(errors::exit_outside_loop(
-            word,
-            trendy_syntax::span(keyword.text_range()),
-            in_block,
-        ));
+        let Some(name) = name.and_then(|name| name.ident()) else {
+            if !self.loops.is_empty() {
+                return Some(0);
+            }
+            errors.push(errors::exit_outside_loop(
+                word,
+                trendy_syntax::span(keyword.text_range()),
+                in_block,
+            ));
+            return None;
+        };
+        let is_named = |looped: &Looped| {
+            looped
+                .name
+                .as_ref()
+                .and_then(ast::Name::ident)
+                .is_some_and(|ident| ident.text() == name.text())
+        };
+        if let Some(at) = self.loops.iter().rposition(is_named) {
+            self.loops[at].named = true;
+            return Some(self.loops.len() - 1 - at);
+        }
+        let around: Vec<String> = self
+            .loops
+            .iter()
+            .filter_map(|looped| Some(looped.name.as_ref()?.ident()?.text().to_string()))
+            .collect();
+        let around: Vec<&str> = around.iter().map(String::as_str).collect();
+        errors.push(errors::unknown_loop(word, &name, &around, in_block));
+        // One it misspells is named, as far as anything can tell.
+        for looped in &mut self.loops {
+            looped.named = true;
+        }
         None
+    }
+
+    /// Check `block`, of a loop named `name`, if it has one, which no loop
+    /// around it already is, as these statements' `leave` and `iterate` are of
+    /// it, from in it. A name none of them names is reported, as it changes
+    /// nothing.
+    fn in_loop<T>(
+        &mut self,
+        name: Option<ast::Name>,
+        errors: &mut Vec<Diagnostic>,
+        block: impl FnOnce(&mut Self, &mut Vec<Diagnostic>) -> T,
+    ) -> T {
+        let ident = name.as_ref().and_then(ast::Name::ident);
+        if let Some(ident) = &ident {
+            let outer = self.loops.iter().find_map(|looped| {
+                looped
+                    .name
+                    .as_ref()
+                    .filter(|n| n.ident().is_some_and(|i| i.text() == ident.text()))
+            });
+            if let Some(outer) = outer {
+                errors.push(errors::loop_named_twice(ident, outer));
+            }
+        }
+        self.loops.push(Looped { name, named: false });
+        let checked = block(self, errors);
+        let looped = self.loops.pop().expect("pushed above");
+        if let (Some(name), false) = (looped.name, looped.named) {
+            errors.extend(errors::unused_loop_name(&name));
+        }
+        checked
     }
 
     /// `fail e;` or `warn e;`, as `signal` says, written `keyword` and
@@ -905,13 +994,13 @@ impl Statements<'_, '_> {
         );
         // The block may not run, so what it assigns isn't assigned after.
         let before = self.unassigned.assigned.clone();
-        self.loops += 1;
-        let checked = self.each_sited(&statements, &mut ok, errors);
-        self.loops -= 1;
+        let checked = self.in_loop(stmt.name(), errors, |this, errors| {
+            this.each_sited(&statements, &mut ok, errors)
+        });
         self.unassigned.assigned = before;
         let locals = self.locals.exit();
         self.frozen.pop();
-        errors.extend(pointless_iterate(&statements));
+        errors.extend(pointless_iterate(&statements, stmt.name().as_ref()));
         let body = hir::Block {
             statements: checked,
             locals,
@@ -1363,66 +1452,62 @@ impl Statements<'_, '_> {
     /// is known to be true when compiling, is reported.
     fn loop_stmt(
         &mut self,
-        keyword: Option<SyntaxToken>,
-        condition: Option<ast::Expr>,
-        body: Option<ast::Body>,
+        parts: LoopParts,
         check: hir::Check,
-        span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Statement> {
-        let (keyword, written, body) = (keyword?, condition?, body?);
+        let span = parts.span;
+        let (keyword, written, body) = (parts.keyword?, parts.condition?, parts.body?);
         let boolean = Expected {
             ty: hir::Type::Scalar(hir::Scalar::Boolean),
             origin: Origin::Operator(keyword),
         };
         let condition = Checker::new(&mut self.names()).expr(&written, Some(&boolean), errors);
         let statements: Vec<ast::Statement> = body.statements().collect();
-        self.loops += 1;
-        let block = match check {
+        let block = self.in_loop(parts.name.clone(), errors, |this, errors| match check {
             // The block may not run, so what it assigns isn't assigned
             // after; the condition is computed before it, so what it shows
             // if true is so where the block starts.
             hir::Check::Before => {
-                self.flush(errors);
-                let before = self.unassigned.assigned.clone();
-                let (when_true, _) = self.facts(&written);
-                let (narrowed, ended) = (self.narrowed.clone(), self.ended.clone());
-                self.narrowed = narrowed.and(&when_true);
-                let block = self.block(&statements, errors);
-                (self.narrowed, self.ended) = (narrowed, ended);
-                self.unassigned.assigned = before;
+                this.flush(errors);
+                let before = this.unassigned.assigned.clone();
+                let (when_true, _) = this.facts(&written);
+                let (narrowed, ended) = (this.narrowed.clone(), this.ended.clone());
+                this.narrowed = narrowed.and(&when_true);
+                let block = this.block(&statements, errors);
+                (this.narrowed, this.ended) = (narrowed, ended);
+                this.unassigned.assigned = before;
                 block
             }
             // The block runs at least once, before the condition, unless it
             // leaves before its end, or goes on to its next run, which can be
             // none.
             hir::Check::After => {
-                let condition_reads = std::mem::take(&mut self.unassigned.reads);
-                let before = self.unassigned.assigned.clone();
-                let block = self.block(&statements, errors);
+                let condition_reads = std::mem::take(&mut this.unassigned.reads);
+                let before = this.unassigned.assigned.clone();
+                let block = this.block(&statements, errors);
                 if block.as_ref().is_none_or(|block| {
                     let exits = block.loop_exits();
                     exits.leaves || exits.iterates
                 }) {
-                    self.unassigned.assigned = before;
+                    this.unassigned.assigned = before;
                 }
-                self.unassigned.reads = condition_reads;
-                self.flush(errors);
+                this.unassigned.reads = condition_reads;
+                this.flush(errors);
                 block
             }
-        };
-        self.loops -= 1;
+        });
         let exits = block.as_ref().map(hir::Block::loop_exits);
         let pointless = errors::pointless_loop(span, &written, &body, check, exits);
         let reported = pointless.is_some();
         errors.extend(pointless);
         // A condition always true never ends the loop, which its block must.
-        let leaves = exits.is_none_or(|exits| exits.leaves || exits.returns);
+        let leaves = exits.is_none_or(|exits| exits.leaves || exits.outward);
         if !reported && !leaves && condition == Some(hir::Expr::Constant(hir::Value::Boolean(true)))
         {
             errors.push(errors::endless_loop(&written));
         }
-        errors.extend(pointless_iterate(&statements));
+        errors.extend(pointless_iterate(&statements, parts.name.as_ref()));
         Some(hir::Statement::Loop(condition?, block?, check))
     }
 
@@ -1829,8 +1914,8 @@ fn exprs_in(block: &hir::Block, f: &mut dyn FnMut(&hir::Expr)) {
         hir::Statement::Declare(_)
         | hir::Statement::Transaction(..)
         | hir::Statement::Return(None)
-        | hir::Statement::Leave
-        | hir::Statement::Iterate => {}
+        | hir::Statement::Leave(_)
+        | hir::Statement::Iterate(_) => {}
     });
 }
 

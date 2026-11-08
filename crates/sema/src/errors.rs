@@ -5081,7 +5081,7 @@ pub(crate) fn pointless_loop(
     let replaced = |replacement: String| vec![Edit { span, replacement }];
     let exits = exits.unwrap_or_default();
     match (written, check) {
-        (Some(true), _) if exits.leaves || exits.returns => None,
+        (Some(true), _) if exits.leaves || exits.outward => None,
         (Some(false), hir::Check::After) if exits.leaves || exits.iterates => None,
         (Some(true), _) => Some(
             d(
@@ -9000,7 +9000,7 @@ pub(crate) fn return_in_block(stmt: &trendy_syntax::ast::ReturnStmt) -> Diagnost
 }
 
 /// What `leave` and `iterate` are, for notes.
-const LOOP_EXITS: &str = "`leave;` leaves the innermost loop it is in, and `iterate;` goes on to its next run, past the rest of its block, the loop's condition checked first, as after each run";
+const LOOP_EXITS: &str = "`leave;` leaves the innermost loop it is in, and `iterate;` goes on to its next run, past the rest of its block, the loop's condition checked first, as after each run; `leave name;` and `iterate name;` are of the loop around them named so, `loop as name`";
 
 /// `word`, `leave` or `iterate`, at `span`, in no loop of the body or value
 /// block it is in.
@@ -9016,6 +9016,80 @@ pub(crate) fn exit_outside_loop(word: &str, span: Span, in_block: bool) -> Diagn
         return d.with_note("a value block's statements are its own, and a loop around the block is no loop of theirs, as they compute its value").with_help("compute the value, then leave the loop after the statement that the block is in");
     }
     d.with_help("put it in the loop it is to leave, or leave the operator with `return`")
+}
+
+/// `word`, `leave` or `iterate`, naming `name`, which no loop around it is
+/// named, of those named `names`, in the body or value block it is in.
+pub(crate) fn unknown_loop(
+    word: &str,
+    name: &SyntaxToken,
+    names: &[&str],
+    in_block: bool,
+) -> Diagnostic {
+    let span = trendy_syntax::span(name.text_range());
+    let d = Diagnostic::error(
+        Code::Exit,
+        format!("no loop around this `{word}` is named `{}`", name.text()),
+        span,
+        "no loop's name",
+    )
+    .with_note(LOOP_EXITS)
+    .with_note("a loop is named after its `loop`, `loop as name`, and a `leave` or an `iterate` names one it is in");
+    let d = if in_block {
+        d.with_note("a value block's statements are its own, and a loop around the block is no loop of theirs, as they compute its value")
+    } else {
+        d
+    };
+    spelled_like(
+        d,
+        name.text(),
+        span,
+        names,
+        &format!("name a loop it is in, written `loop as {}`", name.text()),
+    )
+}
+
+/// The loop's name `name`, which the loop `outer`, around it, has already:
+/// a `leave` or an `iterate` of it couldn't say which.
+pub(crate) fn loop_named_twice(name: &SyntaxToken, outer: &ast::Name) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateName,
+        format!("a loop around this one is named `{}` already", name.text()),
+        trendy_syntax::span(name.text_range()),
+        "named again",
+    )
+    .with_secondary(outer.span(), "the loop around it")
+    .with_note("a `leave` or an `iterate` names the loop it is of, so no loop in another has its name; loops side by side can share one")
+    .with_help("give one of them another name")
+}
+
+/// The loop's name `name`, in `as name` after its `loop`, which no `leave` or
+/// `iterate` names, so that it changes nothing, which the fix removes.
+pub(crate) fn unused_loop_name(name: &ast::Name) -> Option<Diagnostic> {
+    let named = name.syntax().parent()?;
+    let start = named
+        .prev_sibling_or_token()
+        .filter(|e| e.kind() == trendy_syntax::SyntaxKind::Whitespace)
+        .map_or_else(
+            || usize::from(named.text_range().start()),
+            |e| usize::from(e.text_range().start()),
+        );
+    Some(
+        Diagnostic::error(
+            Code::Exit,
+            format!("no `leave` or `iterate` names the loop `{}`", name.syntax().text()),
+            name.span(),
+            "named, and never named again",
+        )
+        .with_note("a loop's name is for a `leave` or an `iterate` in it to name the loop it is of, and changes nothing else")
+        .with_suggestion(
+            "remove the name",
+            vec![Edit {
+                span: Span::new(start, usize::from(named.text_range().end())),
+                replacement: String::new(),
+            }],
+        ),
+    )
 }
 
 /// `word`, an early exit at `span`, whose removal is `removal`, which skips

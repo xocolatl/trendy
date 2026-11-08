@@ -427,10 +427,12 @@ A statement is a call, an assignment statement (`AssignStmt`), an
 `assign` block (`AssignBlock`) of assignment statements, made at once, or an
 early exit: a `return` (`ReturnStmt`), with a value or without, and
 `leave;` and `iterate;` (`LeaveStmt`, `IterateStmt`), whose words are
-contextual keywords before `;`, to which other languages' `break` and
-`continue` are fixed, and after which a loop's name is reported, as
-Tutorial D's `LEAVE` and SQL's `ITERATE` write one (P0032,
-`Parser::exit_stmt`). An
+contextual keywords before `;` or a loop's name (`NameRef`), to which other
+languages' `break` and `continue` are fixed (P0032, `Parser::exit_stmt`). A
+loop's name follows its `loop`, `loop as name` (`LoopName`,
+`Parser::loop_name`), in each of the three, and one written before the
+loop, `name: while …`, is fixed to it (P0032, `Parser::named_loop`, by where
+the loop's `loop` ends, `loop_keyword_end`). An
 assignment is `target := value` (`Assignment`) or a shorthand starting
 with its keyword:
 `insert` and `d_insert` (`Insertion`), `delete` and `i_delete`
@@ -873,9 +875,14 @@ it, or a `return`), and is reported (A0046). The early exits are
 `hir::Statement::Return`, `Leave` and `Iterate`: a `return`'s value is of
 the result type a read-only operator's names give (`Around::result`), and
 an update operator's has none (A0035, `Around::refused`); `leave` and
-`iterate` are of a loop of the statements checked (`Statements::loops`),
+`iterate` are of a loop of the statements checked (`Statements::loops`,
+each `Looped`, with its name), the innermost or the one their name names,
 which a value block's statements, checked on their own, never start in
-(A0084). A statement after one that always leaves its block
+(A0084, fixed to a name a misspelling is of), and the HIR's is how many
+loops out it is, 0 for the innermost (`hir::Statement::Leave`, `Iterate`),
+which lowering counts its `Exit::Loop`s by. A loop in another can't have its
+name (A0001), and a name nothing names is reported (A0084,
+`Statements::in_loop`). A statement after one that always leaves its block
 (`hir::Statement::always_exits`: an exit, a `fail`, or an `if` whose
 branches all do) never runs (A0085, `Statements::each_sited`), and nor does
 a body's value after one (`errors::unreachable_value`); an `iterate` at the

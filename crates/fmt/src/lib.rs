@@ -1278,6 +1278,12 @@ mod tests {
             "operator f{} [\n    while true loop [\n        if n > 0 then [\n            leave;\n        ];\n        iterate;\n    ];\n    return;\n];\n"
         );
         assert_eq!(
+            fmt(
+                "operator f{}[for x in a loop  as   rows[leave   rows;];loop as again[iterate again;]while n<3;];"
+            ),
+            "operator f{} [\n    for x in a loop as rows [\n        leave rows;\n    ];\n    loop as again [\n        iterate again;\n    ] while n < 3;\n];\n"
+        );
+        assert_eq!(
             fmt("operator f{}:integer[if n>0 then[return   n;];0];"),
             "operator f{}: integer [\n    if n > 0 then [\n        return n;\n    ];\n    0\n];\n"
         );

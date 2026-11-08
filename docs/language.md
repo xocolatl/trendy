@@ -3438,10 +3438,29 @@ operator greet{names: array text} [
     ];
 ];
 
+/* The first row with a negative number in it, but for rows with a zero,
+   which `iterate rows;` goes on from, past the rest of the inner loop. */
+operator first_negative_row{grid: array array integer}: integer [
+    var row := 0;
+    for cells in grid loop as rows [
+        row := row + 1;
+        for cell in cells loop [
+            if cell = 0 then [
+                iterate rows;
+            ];
+            if cell < 0 then [
+                return row;
+            ];
+        ];
+    ];
+    0
+];
+
 operator main{} [
     call debug_value{v: first_negative{a: array [3, -4, -1]}};
     call debug_value{v: odd_sum{a: array [1, 2, 3, 4, 5]}};
     call greet{names: array ["Amara", "Kofi"]};
+    call debug_value{v: first_negative_row{grid: array [array [0, -1], array [2, -3]]}};
 ];
 ```
 
@@ -3456,13 +3475,24 @@ operator main{} [
   local variables are gone, and a transaction it leaves commits, as at its
   block's end, collecting its warnings (see [Transactions](#transactions)).
   So `leave` or `return` from a transaction keeps what its statements did.
-- **`leave` and `iterate` are of the innermost loop,** which a loop's name
-  can't choose (P0032), and of one of the body, or the value block, they are
-  in: a value block's statements compute its value, and a loop around it is
-  no loop of theirs, so one in no loop is an error (A0084). `iterate` checks
-  a loop's condition first, as after each run, so it can end a `loop [ … ]
-  while c;` too. After `leave` or `iterate` in a `loop` that runs once,
-  nothing its block assigns after them is assigned for sure.
+- **`leave` and `iterate` are of the innermost loop,** or, with a name, of
+  the loop around them named so, `loop as name`, past the end of the loops
+  within it, and of one of the body, or the value block, they are in: a
+  value block's statements compute its value, and a loop around it is no loop
+  of theirs, so one in no loop, or of a name no loop around it has, is an
+  error, fixed to a name it misspells (A0084). `iterate` checks a loop's
+  condition first, as after each run, so it can end a `loop [ … ] while c;`
+  too. After `leave` or `iterate` in a `loop` that runs once, nothing its
+  block assigns after them is assigned for sure.
+- **A loop's name follows its `loop`,** `while c loop as scan [ … ];`, `loop
+  as retry [ … ] while c;` and `for x in a loop as each [ … ];`, as `as`
+  names what is before it elsewhere. Only a `leave` or an `iterate` in the
+  loop names it, so it is no name of anything else's, and clashes with no
+  variable or attribute; a loop in another can't have its name, as one of
+  them couldn't name it then (A0001), though loops side by side can share
+  one. A name nothing names changes nothing, which the fix removes (A0084),
+  and one written before the loop, `scan: while …`, as Tutorial D, Java and
+  JavaScript write it, is fixed to `loop as scan` (P0032).
 - **Nothing after an exit in its block runs,** nor after a `fail`, or an
   `if` whose branches all leave theirs, so a statement there is an error,
   which the fix deletes (A0085). An exit that skips nothing is one too,
@@ -7509,8 +7539,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `{ let x = 1; x * 2 }`, Rust's block, in an expression | `[ var x := 1; x * 2 ]` |
 | `while (c) { … }`, `while c do … end`, `WHILE c; … END WHILE` | `while c loop [ … ];` |
 | `do { … } while (c);`, `repeat … until c` | `loop [ … ] while c;`, `loop [ … ] while not (c);` |
-| `break`, `LEAVE name` | `leave;`, of the innermost loop |
-| `continue`, `ITERATE name` | `iterate;`, of the innermost loop |
+| `break`, `LEAVE` | `leave;`, of the innermost loop |
+| `continue`, `ITERATE` | `iterate;`, of the innermost loop |
+| `outer: for (…)`, `break outer;`, Tutorial D's `name: WHILE …` and `LEAVE name` | `for … loop as outer [ … ];`, `leave outer;` |
 | `foreach (x in a) { … }`, `for x of a`, `for x in a:` | `for x in a loop [ … ];` |
 | `for (i = 0; i < n; i++)` | `var i := 1; while i <= n loop [ …; i := i + 1; ];` |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |

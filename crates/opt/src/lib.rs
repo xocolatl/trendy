@@ -422,8 +422,8 @@ fn collect_exprs<'e>(statement: &'e hir::Statement, exprs: &mut Vec<&'e hir::Exp
         hir::Statement::Declare(_)
         | hir::Statement::Transaction(..)
         | hir::Statement::Return(None)
-        | hir::Statement::Leave
-        | hir::Statement::Iterate => {}
+        | hir::Statement::Leave(_)
+        | hir::Statement::Iterate(_) => {}
     }
     for block in statement.blocks() {
         for (_, inner) in &block.statements {

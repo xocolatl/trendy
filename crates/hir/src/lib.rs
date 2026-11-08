@@ -1917,24 +1917,28 @@ pub enum Statement {
     /// leaving the operator, from wherever in its body, past the end of each
     /// loop, transaction and block it is in, as it would come to each end.
     Return(Option<Expr>),
-    /// `leave;`: leaving the innermost loop it is in, as its condition being
-    /// false does, past the end of each transaction and block within it.
-    Leave,
-    /// `iterate;`: going on to the innermost loop's next run, its condition
-    /// checked as after each, past the end of each transaction and block
-    /// within it.
-    Iterate,
+    /// `leave;`, or `leave name;`: leaving a loop it is in, as its condition
+    /// being false does, past the end of each transaction, block and loop
+    /// within it: the innermost, for 0, and else the one that many loops
+    /// out, which the name names.
+    Leave(usize),
+    /// `iterate;`, or `iterate name;`: going on to a loop's next run, its
+    /// condition checked as after each, past the end of each transaction,
+    /// block and loop within it, as for [`Statement::Leave`].
+    Iterate(usize),
 }
 
 /// How a loop's block can leave it, early (see [`Block::loop_exits`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LoopExits {
-    /// By `leave`, to after the loop.
+    /// By a `leave` of it, to after the loop.
     pub leaves: bool,
-    /// By `iterate`, to its next run, which a condition can make its end.
+    /// By an `iterate` of it, to its next run, which a condition can make
+    /// its end.
     pub iterates: bool,
-    /// By `return`, out of the operator.
-    pub returns: bool,
+    /// Out of it and more: by a `return`, out of the operator, or by a
+    /// `leave` or an `iterate` of a loop around it.
+    pub outward: bool,
 }
 
 /// When a loop checks its condition.
@@ -1953,9 +1957,10 @@ impl Statement {
     #[must_use]
     pub fn always_exits(&self) -> bool {
         match self {
-            Statement::Return(_) | Statement::Leave | Statement::Iterate | Statement::Fail(_) => {
-                true
-            }
+            Statement::Return(_)
+            | Statement::Leave(_)
+            | Statement::Iterate(_)
+            | Statement::Fail(_) => true,
             Statement::If(_, then, otherwise) => then.always_exits() && otherwise.always_exits(),
             Statement::Declare(_)
             | Statement::Call(_)
@@ -1982,8 +1987,8 @@ impl Statement {
             | Statement::Fail(_)
             | Statement::Warn(_)
             | Statement::Return(_)
-            | Statement::Leave
-            | Statement::Iterate => Vec::new(),
+            | Statement::Leave(_)
+            | Statement::Iterate(_) => Vec::new(),
         }
     }
 
@@ -2019,8 +2024,8 @@ impl Statement {
             | Statement::Fail(_)
             | Statement::Warn(_)
             | Statement::Return(_)
-            | Statement::Leave
-            | Statement::Iterate) => statement,
+            | Statement::Leave(_)
+            | Statement::Iterate(_)) => statement,
         }
     }
 
@@ -2041,8 +2046,8 @@ impl Statement {
             | Statement::Fail(_)
             | Statement::Warn(_)
             | Statement::Return(_)
-            | Statement::Leave
-            | Statement::Iterate => Vec::new(),
+            | Statement::Leave(_)
+            | Statement::Iterate(_) => Vec::new(),
         }
     }
 
@@ -2087,7 +2092,7 @@ impl Statement {
                 Statement::Transaction(collecting, body.map_exprs(f))
             }
             Statement::Return(value) => Statement::Return(value.map(f)),
-            statement @ (Statement::Leave | Statement::Iterate) => statement,
+            statement @ (Statement::Leave(_) | Statement::Iterate(_)) => statement,
         }
     }
 
@@ -2105,8 +2110,8 @@ impl Statement {
             Statement::Declare(_)
             | Statement::Transaction(..)
             | Statement::Return(None)
-            | Statement::Leave
-            | Statement::Iterate => {}
+            | Statement::Leave(_)
+            | Statement::Iterate(_) => {}
         }
         for block in self.blocks() {
             block.for_each_expr(f);
@@ -2151,8 +2156,8 @@ impl Statement {
             Statement::Return(value) => {
                 Statement::Return(value.as_ref().map(|value| value.instantiated(types)))
             }
-            Statement::Leave => Statement::Leave,
-            Statement::Iterate => Statement::Iterate,
+            Statement::Leave(out) => Statement::Leave(*out),
+            Statement::Iterate(out) => Statement::Iterate(*out),
         }
     }
 }
@@ -2231,30 +2236,36 @@ impl Block {
     }
 
     /// How a statement of the block, the block of a loop, or of a block
-    /// within it, can leave it: by a `leave` or an `iterate` of the loop, of no
-    /// loop within it, or by a `return`, from anywhere in it.
+    /// within it, can leave it: by a `leave` or an `iterate` of the loop, or
+    /// by one of a loop around it, or a `return`, from anywhere in it.
     #[must_use]
     pub fn loop_exits(&self) -> LoopExits {
         let mut exits = LoopExits::default();
+        self.note_loop_exits(0, &mut exits);
+        exits
+    }
+
+    /// Note in `exits` how the block, `within` loops inside the loop whose
+    /// exits they are, can leave that loop.
+    fn note_loop_exits(&self, within: usize, exits: &mut LoopExits) {
         for (_, statement) in &self.statements {
             match statement {
-                Statement::Leave => exits.leaves = true,
-                Statement::Iterate => exits.iterates = true,
-                Statement::Return(_) => exits.returns = true,
+                Statement::Leave(out) if *out == within => exits.leaves = true,
+                Statement::Iterate(out) if *out == within => exits.iterates = true,
+                Statement::Leave(out) | Statement::Iterate(out) if *out > within => {
+                    exits.outward = true;
+                }
+                Statement::Return(_) => exits.outward = true,
                 Statement::Loop(_, body, _) | Statement::For(_, _, body) => {
-                    exits.returns |= body.returns();
+                    body.note_loop_exits(within + 1, exits);
                 }
                 statement => {
                     for block in statement.blocks() {
-                        let inner = block.loop_exits();
-                        exits.leaves |= inner.leaves;
-                        exits.iterates |= inner.iterates;
-                        exits.returns |= inner.returns;
+                        block.note_loop_exits(within, exits);
                     }
                 }
             }
         }
-        exits
     }
 
     /// Whether a statement of the block, or of a block within it, is a

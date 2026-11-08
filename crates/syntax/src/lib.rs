@@ -302,6 +302,9 @@ pub enum SyntaxKind {
     /// rest of its block. `iterate` is a contextual keyword, an identifier
     /// elsewhere.
     IterateStmt,
+    /// `as name` after a loop's `loop`: the loop's name, which `leave` and
+    /// `iterate` in it can name.
+    LoopName,
     /// `fail e;`: the program fails with the error `e`. `fail` is a
     /// contextual keyword, an identifier elsewhere.
     FailStmt,
@@ -491,7 +494,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 190] = [
+    pub const ALL: [SyntaxKind; 191] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -615,6 +618,7 @@ impl SyntaxKind {
         SyntaxKind::ReturnStmt,
         SyntaxKind::LeaveStmt,
         SyntaxKind::IterateStmt,
+        SyntaxKind::LoopName,
         SyntaxKind::FailStmt,
         SyntaxKind::WarnStmt,
         SyntaxKind::IfStmt,
@@ -1174,6 +1178,7 @@ impl SyntaxKind {
             SyntaxKind::ReturnStmt => "`return` statement",
             SyntaxKind::LeaveStmt => "`leave` statement",
             SyntaxKind::IterateStmt => "`iterate` statement",
+            SyntaxKind::LoopName => "loop's name",
             SyntaxKind::FailStmt => "`fail` statement",
             SyntaxKind::WarnStmt => "`warn` statement",
             SyntaxKind::IfStmt => "`if` statement",

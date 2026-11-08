@@ -162,8 +162,8 @@ impl Sites {
                 hir::Statement::Transaction(_, body) => self.block(body, site),
                 hir::Statement::Declare(_)
                 | hir::Statement::Return(None)
-                | hir::Statement::Leave
-                | hir::Statement::Iterate => {}
+                | hir::Statement::Leave(_)
+                | hir::Statement::Iterate(_) => {}
             }
         }
     }

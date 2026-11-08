@@ -331,6 +331,7 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::OPERATOR,
             SemanticTokenType::COMMENT,
             SemanticTokenType::NAMESPACE,
+            SemanticTokenType::new("label"),
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -355,6 +356,7 @@ fn token_type(class: Class) -> u32 {
         Class::Comment => 9,
         // Units are trendy's namespaces.
         Class::Unit => 10,
+        Class::Label => 11,
     }
 }
 
@@ -749,6 +751,7 @@ mod tests {
         assert_eq!(named(Class::Attribute), "property");
         assert_eq!(named(Class::Parameter), "parameter");
         assert_eq!(named(Class::Unit), "namespace");
+        assert_eq!(named(Class::Label), "label");
     }
 
     #[test]

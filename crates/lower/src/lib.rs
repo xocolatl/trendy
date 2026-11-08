@@ -2790,8 +2790,8 @@ impl<'a> FunctionBuilder<'a> {
                 self.scoped(|this| this.constraints_checked(&assigns, cx));
             }
             hir::Statement::Return(value) => self.early_return(value.as_ref(), cx),
-            hir::Statement::Leave => self.loop_exit(false, cx),
-            hir::Statement::Iterate => self.loop_exit(true, cx),
+            hir::Statement::Leave(out) => self.loop_exit(false, *out, cx),
+            hir::Statement::Iterate(out) => self.loop_exit(true, *out, cx),
         }
     }
 
@@ -3192,14 +3192,20 @@ impl<'a> FunctionBuilder<'a> {
         self.exit_to(depth + 1, given, landing, cx);
     }
 
-    /// `leave;` or, if `next`, `iterate;`: what is between it and the innermost
-    /// loop's block's end ended, then on to after the loop, or its next run.
-    fn loop_exit(&mut self, next: bool, cx: &mut Lowering) {
+    /// `leave` or, if `next`, `iterate`, of the loop `out` loops out from the
+    /// innermost, 0 for that: what is between it and that loop's block's end
+    /// ended, the loops within it too, then on to after the loop, or its next
+    /// run.
+    fn loop_exit(&mut self, next: bool, out: usize, cx: &mut Lowering) {
         let depth = self
             .exits
             .iter()
-            .rposition(|exit| matches!(exit, Exit::Loop { .. }))
-            .expect("sema leaves only loops");
+            .enumerate()
+            .rev()
+            .filter(|(_, exit)| matches!(exit, Exit::Loop { .. }))
+            .nth(out)
+            .map(|(depth, _)| depth)
+            .expect("sema leaves only loops it is in");
         let Exit::Loop { next: again, after } = self.exits[depth].clone() else {
             unreachable!("found as one");
         };
@@ -5648,8 +5654,8 @@ impl<'a> FunctionBuilder<'a> {
                 hir::Statement::Declare(_)
                 | hir::Statement::Transaction(..)
                 | hir::Statement::Return(None)
-                | hir::Statement::Leave
-                | hir::Statement::Iterate => true,
+                | hir::Statement::Leave(_)
+                | hir::Statement::Iterate(_) => true,
             };
             own && statement
                 .blocks()
