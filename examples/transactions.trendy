@@ -69,7 +69,7 @@ operator main{} [
        the calls they make (A0066), since nothing undoes a read. */
     var moves: array tuple { origin: text, destination: text, n: integer };
     call load_csv{
-        path: "examples/moves.csv",
+        path: file_path{text: "examples/moves.csv"},
         header: true,
         columns: tuple { origin: 1, destination: 2, n: 3 },
         out rows: moves,

@@ -39,7 +39,7 @@ operator starts_with{data: array byte, start: array byte}: boolean [
 
 /* Which of `formats` the file at `path` is, by its first bytes, whatever else they
    are: none for text, and for a file that can't be read, why. */
-operator identify{path: text} [
+operator identify{path: file_path} [
     var data: array byte;
     var errors: relation { error: error };
     call load_binary_file{path, out bytes: data, out errors};
@@ -65,7 +65,7 @@ operator main{} [
     call debug_value{v: header < x"8a"};
     call debug_table{r: formats where starts_with{data: header, start: magic}};
     call debug_value{v: to_text{from: x"7F45"}};
-    call identify{path: "examples/rivers.txt.gz"};
-    call identify{path: "examples/rivers.txt"};
-    call identify{path: "examples/kente.png"};
+    call identify{path: file_path{text: "examples/rivers.txt.gz"}};
+    call identify{path: file_path{text: "examples/rivers.txt"}};
+    call identify{path: file_path{text: "examples/kente.png"}};
 ];

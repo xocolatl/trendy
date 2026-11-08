@@ -67,7 +67,7 @@ operator main{out errors: relation transaction_collection} [
     var rows: array tuple { city: text, people: integer };
     var skipped: relation { error: error };
     call load_csv{
-        path: "cities.csv",
+        path: file_path{text: "cities.csv"},
         header: true,
         columns: tuple { city: 1, people: 2 },
         out rows: rows,
@@ -2047,16 +2047,24 @@ that uses it sees:
    gives. A unit that reads or writes one uses it, `uses { trendy.files };`. */
 interface
 
+/* The path of a file, where it is: relative to the directory the program
+   runs in, as `file_path{text: "rivers.txt"}`, unless it is absolute, as
+   `file_path{text: "/tmp/rivers.txt"}`. Its text is the path as the system
+   takes it, so it isn't empty, which names no file, and has no U+0000,
+   which no system's path can hold. */
+type file_path { { text: text }, constraint is_path_text{text} };
+
+/* Whether `text` can be a file's path: it isn't empty, and has no U+0000. */
+operator is_path_text{text: text}: boolean;
+
 /* Read the lines of the text file at `path` into `lines`, in the file's
-   order, so that its first line is the array's element 1. `path` is
-   relative to the directory the program runs in, unless it is absolute.
-   A line ends at a line feed, or a carriage return and a line feed,
+   order, so that its first line is the array's element 1. A line ends at a line feed, or a carriage return and a line feed,
    which aren't part of it; the last needs neither. Each call reads the
    file as it is when the program runs: the compiler never opens it, so
    it needn't exist until then, and two calls can read different lines,
    so it is an update operator, which `call` invokes. A file that can't
    be read fails (R0012), as does one that isn't UTF-8 text (R0013). */
-builtin operator load_text_file{path: text, out lines: array text};
+builtin operator load_text_file{path: file_path, out lines: array text};
 
 /* Read the lines of the text file at `path` into `lines`, as the other
    `load_text_file` does, but rather than stopping the program for a file
@@ -2064,22 +2072,21 @@ builtin operator load_text_file{path: text, out lines: array text};
    an `unreadable_file` or a `not_utf8`, in `errors`, which is empty when
    the file is read. */
 builtin operator load_text_file{
-    path: text,
+    path: file_path,
     out lines: array text,
     out errors: relation { error: error },
 };
 
 /* Write `lines` to the text file at `path`, in order, each ending in a
-   line feed, so that `load_text_file` reads the same lines back. `path` is
-   relative to the directory the program runs in, unless it is absolute. A
-   file is made if there is none, in a directory that must exist, and what
+   line feed, so that `load_text_file` reads the same lines back. A file is
+   made if there is none, in a directory that must exist, and what
    one holds is replaced. Each call writes the file when the program runs,
    so it is an update operator, which `call` invokes. A file that can't be
    written fails (R0026), and can be left with part of `lines` if that
    happens partway, as on a full disk. A line with a line feed in it, or
    that ends in a carriage return, wouldn't read back as one line, and fails
    before anything is written (R0027). */
-builtin operator save_text_file{path: text, lines: array text};
+builtin operator save_text_file{path: file_path, lines: array text};
 
 /* Write `lines` to the text file at `path`, as the other `save_text_file`
    does, but rather than stopping the program for a file that can't be
@@ -2087,25 +2094,24 @@ builtin operator save_text_file{path: text, lines: array text};
    when the file is written. A line that wouldn't read back as one still
    stops the program, as that is a mistake in the call and not the file's. */
 builtin operator save_text_file{
-    path: text,
+    path: file_path,
     lines: array text,
     out errors: relation { error: error },
 };
 
 /* Read the bytes of the file at `path` into `bytes`, whatever they are, in
-   the file's order, so that its first byte is the array's element 1. `path`
-   is relative to the directory the program runs in, unless it is absolute.
-   Each call reads the file as it is when the program runs, as
+   the file's order, so that its first byte is the array's element 1. Each
+   call reads the file as it is when the program runs, as
    `load_text_file` does, so it is an update operator, which `call`
    invokes. A file that can't be read fails (R0012). */
-builtin operator load_binary_file{path: text, out bytes: array byte};
+builtin operator load_binary_file{path: file_path, out bytes: array byte};
 
 /* Read the bytes of the file at `path` into `bytes`, as the other
    `load_binary_file` does, but rather than stopping the program for a file
    that can't be read, give no bytes, and its error, an `unreadable_file`,
    in `errors`, which is empty when the file is read. */
 builtin operator load_binary_file{
-    path: text,
+    path: file_path,
     out bytes: array byte,
     out errors: relation { error: error },
 };
@@ -2133,7 +2139,7 @@ builtin operator load_binary_file{
    CSV (R0015), or hasn't a column `columns` gives, which two attributes
    can't share (R0016), or that has a field its attribute's type can't
    read (R0014). */
-builtin operator load_csv{path: text, header: boolean, columns: C, out rows: array T}
+builtin operator load_csv{path: file_path, header: boolean, columns: C, out rows: array T}
     types { C: any tuple, T: any tuple };
 
 /* Read the records of the CSV file at `path` into `rows`, as the other
@@ -2147,7 +2153,7 @@ builtin operator load_csv{path: text, header: boolean, columns: C, out rows: arr
    `overlapping_subtypes_in_file`. A quoted field that isn't closed ends
    the records read. `errors` is empty when every record is read. */
 builtin operator load_csv{
-    path: text,
+    path: file_path,
     header: boolean,
     columns: C,
     out rows: array T,
@@ -2242,7 +2248,37 @@ type overlapping_subtypes_in_file is error {
 };
 ```
 
-**`load_text_file{path: text, out lines: array text}`** reads input: the
+**A path is a `file_path`,** a value of `trendy.files`' own type, not a text,
+as a date is a `date` and not the text of one: `file_path{text: "rivers.txt"}`.
+Its text is the path the system takes, relative to the directory the program
+runs in unless it is absolute, so it isn't empty, which names no file, and has
+no U+0000, which no system's path can hold; a text that breaks either fails to
+be selected (R0017). A text where a path goes is an error (A0004) whose fix
+selects one of it, as it does for any type with a possible representation of
+one component of the value's type, `uuid{text: …}` among them.
+
+```trendy
+uses { trendy.files };
+
+const rivers := file_path{text: "rivers.txt"};
+
+operator main{} [
+    var lines: array text;
+    call load_text_file{path: rivers, out lines};
+    call debug_value{v: rivers.text};
+];
+```
+
+```trendy,error
+uses { trendy.files };
+
+operator main{} [
+    var lines: array text;
+    call load_text_file{path: "rivers.txt", out lines};
+];
+```
+
+**`load_text_file{path: file_path, out lines: array text}`** reads input: the
 lines of a text file, into the variable its call gives `lines`.
 
 ```trendy
@@ -2250,7 +2286,7 @@ uses { trendy.files };
 
 operator main{} [
     var lines: array text;
-    call load_text_file{path: "rivers.txt", out lines: lines};
+    call load_text_file{path: file_path{text: "rivers.txt"}, out lines: lines};
     call debug_value{v: length{a: lines}};
     for line in lines loop [
         if line <> "" then [
@@ -2296,7 +2332,7 @@ operator main{} [
 ```trendy
 uses { trendy.files };
 
-operator count_lines{path: text} [
+operator count_lines{path: file_path} [
     var lines: array text;
     var errors: relation { error: error };
     call load_text_file{path: path, out lines: lines, out errors: errors};
@@ -2308,7 +2344,7 @@ operator count_lines{path: text} [
 ];
 
 operator main{} [
-    call count_lines{path: "rivers.txt"};
+    call count_lines{path: file_path{text: "rivers.txt"}};
 ];
 ```
 
@@ -2316,19 +2352,19 @@ operator main{} [
 uses { trendy.files };
 
 operator main{} [
-    var lines := load_text_file{path: "rivers.txt"};
+    var lines := load_text_file{path: file_path{text: "rivers.txt"}};
 ];
 ```
 
 ```trendy,error
 uses { trendy.files };
 
-var lines := load_text_file{path: "rivers.txt"};
+var lines := load_text_file{path: file_path{text: "rivers.txt"}};
 
 operator main{} [];
 ```
 
-**`save_text_file{path: text, lines: array text}`** writes output: the
+**`save_text_file{path: file_path, lines: array text}`** writes output: the
 lines of an array to a text file, each ending in a line feed.
 
 ```trendy
@@ -2336,8 +2372,8 @@ uses { trendy.files };
 
 operator main{} [
     var rivers: array text;
-    call load_text_file{path: "rivers.txt", out lines: rivers};
-    call save_text_file{path: "copy.txt", lines: rivers};
+    call load_text_file{path: file_path{text: "rivers.txt"}, out lines: rivers};
+    call save_text_file{path: file_path{text: "copy.txt"}, lines: rivers};
 ];
 ```
 
@@ -2357,7 +2393,7 @@ operator main{} [
   reason }`. A failure partway, as on a full disk, can leave part of the lines in
   the file, and what it held before is gone.
 
-**`load_binary_file{path: text, out bytes: array byte}`** reads input: the
+**`load_binary_file{path: file_path, out bytes: array byte}`** reads input: the
 bytes of any file, into the variable its call gives `bytes`, an `array byte`
 (see [Bytes](#bytes)).
 
@@ -2366,7 +2402,7 @@ uses { trendy.files };
 
 operator main{} [
     var bytes: array byte;
-    call load_binary_file{path: "kente.png", out bytes};
+    call load_binary_file{path: file_path{text: "kente.png"}, out bytes};
     call debug_value{v: length{a: bytes}};
     call debug_value{v: bytes[1] = x'89'};
 ];
@@ -2385,7 +2421,7 @@ operator main{} [
   that can't be read gives no bytes, and its `unreadable_file` in `errors`, which
   is empty when the file is read.
 
-**`load_csv{path: text, header: boolean, columns: C, out rows: array T}`**,
+**`load_csv{path: file_path, header: boolean, columns: C, out rows: array T}`**,
 where `C` and `T` are any tuples, reads the records of a CSV file into the
 variable its call gives `rows`, each a tuple of the columns `columns` gives
 its attributes.
@@ -2398,7 +2434,7 @@ heading city := { name: text, people: integer, km2: approximate, capital: boolea
 operator main{} [
     var rows: array tuple city;
     call load_csv{
-        path: "cities.csv",
+        path: file_path{text: "cities.csv"},
         header: true,
         columns: tuple { name: 1, capital: 2, km2: 4, people: 5 },
         out rows: rows,
@@ -2486,7 +2522,7 @@ operator main{} [
 ```trendy
 uses { trendy.files };
 
-operator load_cities{path: text} [
+operator load_cities{path: file_path} [
     var rows: array tuple { city: text, people: integer };
     var errors: relation { error: error };
     call load_csv{
@@ -2501,7 +2537,7 @@ operator load_cities{path: text} [
 ];
 
 operator main{} [
-    call load_cities{path: "cities.csv"};
+    call load_cities{path: file_path{text: "cities.csv"}};
 ];
 ```
 
@@ -2511,7 +2547,7 @@ uses { trendy.files };
 operator main{} [
     var rows: array tuple { city: text, people: integer };
     call load_csv{
-        path: "cities.csv",
+        path: file_path{text: "cities.csv"},
         header: true,
         columns: tuple { city: 1, people: 1 },
         out rows: rows,
@@ -2539,6 +2575,8 @@ interface:
    writes to one uses it, `uses { trendy.streams };`. */
 interface
 
+uses { trendy.files };
+
 /* Where a program reads or writes, a piece at a time. */
 type stream union;
 
@@ -2548,9 +2586,8 @@ type standard_stream is stream {
     constraint name = "input" or name = "output" or name = "error",
 };
 
-/* The file at `path`, relative to the directory the program runs in, unless
-   it is absolute, as `trendy.files` takes a path. */
-type file is stream { { path: text } };
+/* The file at `path`. */
+type file is stream { { path: file_path } };
 
 /* What the program is given to read. */
 const standard_input := standard_stream{name: "input"};
@@ -2605,14 +2642,14 @@ type unwritable_output is error { { reason: text } };
 the stream `to` names, and to standard output if a call names none.
 
 ```trendy
-uses { trendy.streams };
+uses { trendy.streams, trendy.files };
 
 operator main{} [
     call write{text: "Habari, "};
     call write{line: "dunia!"};
     call write{lines: array ["Nile", "Paraná"]};
     call write{line: "wrote three lines", to: standard_error};
-    call write{line: "greeted", to: file{path: "greetings.log"}};
+    call write{line: "greeted", to: file{path: file_path{text: "greetings.log"}}};
 ];
 ```
 
@@ -5268,7 +5305,7 @@ uses { trendy.files };
 
 operator main{} [
     var texts: array text;
-    call load_text_file{path: "rivers.txt", out lines: texts};
+    call load_text_file{path: file_path{text: "rivers.txt"}, out lines: texts};
     var lines: relation { line: text, n: integer };
     load lines from texts as line numbered n where n > 1 and line <> "";
     var rivers: relation { river: text };

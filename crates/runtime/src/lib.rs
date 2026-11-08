@@ -10514,10 +10514,7 @@ unsafe fn try_read_field(
 /// Fails only if the memory can't be allocated.
 #[cfg(not(test))]
 fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
-    let c_path = match c_string(path)? {
-        Ok(c_path) => c_path,
-        Err(reason) => return Ok(Err(reason)),
-    };
+    let c_path = c_string(path)?;
     // SAFETY: the path ends in a NUL; the descriptor is read, then closed, and
     // `read` writes at most the room left in the memory.
     unsafe {
@@ -10555,13 +10552,13 @@ fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
     }
 }
 
-/// `path` as `open` takes it, a C string, which ends at the first NUL, so that
-/// one with a NUL in it is no path, for that reason. Fails if there is no memory
-/// for it.
+/// `path` as `open` takes it, a C string, which ends at the first NUL, which a
+/// `file_path`'s constraint keeps out of the text compiled code gives. Fails if
+/// there is no memory for it.
 #[cfg(not(test))]
-fn c_string(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
+fn c_string(path: &str) -> Fallible<Temp<u8>> {
     if path.contains('\0') {
-        return Ok(Err("a path can't contain the character U+0000"));
+        internal_error("a path with U+0000 in it, which no `file_path` has");
     }
     let Some(terminated) = path.len().checked_add(1) else {
         return Err(out_of_memory());
@@ -10572,7 +10569,7 @@ fn c_string(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
         core::ptr::copy_nonoverlapping(path.as_ptr(), c_path.ptr(), path.len());
         *c_path.ptr().add(path.len()) = 0;
     }
-    Ok(Ok(c_path))
+    Ok(c_path)
 }
 
 /// How much of a file [`FileOut`] holds before it writes it.
@@ -10644,10 +10641,7 @@ fn try_write_file(
     writing: Writing,
     fill: impl FnOnce(&mut FileOut) -> Result<(), &'static str>,
 ) -> Fallible<Result<(), &'static str>> {
-    let c_path = match c_string(path)? {
-        Ok(c_path) => c_path,
-        Err(reason) => return Ok(Err(reason)),
-    };
+    let c_path = c_string(path)?;
     let buffer = Temp::<u8>::new(FILE_BUFFER)?;
     // SAFETY: the path ends in a NUL, and the descriptor is closed once.
     unsafe {

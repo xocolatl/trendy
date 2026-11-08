@@ -3770,7 +3770,7 @@ impl<'a> FunctionBuilder<'a> {
             | hir::UpdateBuiltin::AppendLines => self.written_out(builtin, call, cx),
             hir::UpdateBuiltin::SaveTextFile => {
                 let args = vec![
-                    self.place(&call.args["path"], cx),
+                    self.path_text(call, cx),
                     self.place(&call.args["lines"], cx),
                 ];
                 self.insts.push(lir::Inst::CallRuntime {
@@ -3782,7 +3782,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::UpdateBuiltin::SaveTextFileWithErrors => {
                 let errors = self.errors(cx);
                 let args = vec![
-                    self.place(&call.args["path"], cx),
+                    self.path_text(call, cx),
                     self.place(&call.args["lines"], cx),
                     errors.given.clone(),
                 ];
@@ -3918,6 +3918,14 @@ impl<'a> FunctionBuilder<'a> {
         self.store(&call.updated["errors"], errors.value, cx);
     }
 
+    /// The text of the `file_path` that `call` names its `path`, which the
+    /// runtime takes, where compiled code reads it, by its own type, in a
+    /// hierarchy or out of one.
+    fn path_text(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
+        let path = hir::Expr::Components(Box::new(call.args["path"].clone()));
+        self.place(&hir::Expr::Extract(Box::new(path), "text".to_string()), cx)
+    }
+
     /// `call`, of `load_text_file` or `load_csv`: what the runtime function
     /// `function` reads from the file at the path, as the arguments `given`
     /// after it say, into an array the statement holds, of type `ty`, given
@@ -3930,7 +3938,7 @@ impl<'a> FunctionBuilder<'a> {
         given: Vec<lir::Place>,
         cx: &mut Lowering,
     ) -> (lir::Place, lir::Place) {
-        let path = self.place(&call.args["path"], cx);
+        let path = self.path_text(call, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
         let array = self.slot(cx.layout(ty));
         let args = [array.clone(), path.clone()]
@@ -10324,25 +10332,35 @@ mod tests {
         }
     }
 
-    /// The library's types as sema gives them: `code_point`, of its
-    /// stored components alone, and `error`.
+    /// The library's types as sema gives them: `code_point`, `byte` and
+    /// `file_path`, of their stored components alone, and `error`.
     fn library() -> hir::Library {
         hir::Library {
             error: Box::new(hir::Dummy {
                 name: hir::Library::ERROR.to_string(),
                 supertypes: Vec::new(),
             }),
-            code_point: Box::new(number_type(hir::Library::CODE_POINT)),
-            byte: Box::new(number_type(hir::Library::BYTE)),
+            code_point: Box::new(library_type(
+                hir::Library::CODE_POINT,
+                hir::Library::number_components(),
+            )),
+            byte: Box::new(library_type(
+                hir::Library::BYTE,
+                hir::Library::number_components(),
+            )),
+            file_path: Box::new(library_type(
+                hir::Library::FILE_PATH,
+                hir::Library::path_components(),
+            )),
         }
     }
 
     /// The type `name` of the library, of a number alone.
-    fn number_type(name: &str) -> hir::Defined {
+    fn library_type(name: &str, components: hir::Heading) -> hir::Defined {
         hir::Defined {
             name: name.to_string(),
             unit: String::new(),
-            components: hir::Library::number_components(),
+            components,
             representations: Vec::new(),
             constraints: Vec::new(),
             keys: BTreeMap::new(),

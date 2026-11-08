@@ -368,8 +368,30 @@ pub(crate) fn kinds(
 /// `byte`, whose values the compiler makes with the components
 /// [`hir::Library::number_components`]. See [`made_by_the_compiler`].
 pub(crate) fn library(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagnostic>) {
-    let code_point = made_by_the_compiler(hir::Library::CODE_POINT, files, namespaces, errors);
-    let byte = made_by_the_compiler(hir::Library::BYTE, files, namespaces, errors);
+    let number = || hir::Library::number_components();
+    let prelude = &trendy_prelude::PRELUDE;
+    let code_point = made_by_the_compiler(
+        (prelude, hir::Library::CODE_POINT, number()),
+        files,
+        namespaces,
+        errors,
+    );
+    let byte = made_by_the_compiler(
+        (prelude, hir::Library::BYTE, number()),
+        files,
+        namespaces,
+        errors,
+    );
+    let file_path = made_by_the_compiler(
+        (
+            &trendy_prelude::FILES,
+            hir::Library::FILE_PATH,
+            hir::Library::path_components(),
+        ),
+        files,
+        namespaces,
+        errors,
+    );
     // A missing `error` is reported with what a failure needs
     // (`failures`), and one of its name stands for it.
     let error = namespaces.prelude_identity(hir::Library::ERROR);
@@ -383,24 +405,24 @@ pub(crate) fn library(files: &Files, namespaces: &mut Namespaces, errors: &mut V
     namespaces.library = Some(hir::Library {
         code_point: Box::new(code_point),
         byte: Box::new(byte),
+        file_path: Box::new(file_path),
         error: Box::new(error),
     });
 }
 
-/// The prelude's type `name`, whose values the compiler makes with the
-/// components [`hir::Library::number_components`], as a type of its own, no
-/// subtype. One that isn't is an internal error, at the prelude's end, and so
-/// is one missing, which a type of just those components stands for, so that the
-/// built-ins are checked against what they name, and nothing else is reported for
-/// it.
+/// The type `name` of `unit`, one that comes with the compiler, whose values the
+/// compiler makes or reads with the components `components`, as a type of its
+/// own, no subtype. One that isn't is an internal error, at the unit's end, and
+/// so is one missing, which a type of just those components stands for, so that
+/// the built-ins are checked against what they name, and nothing else is reported
+/// for it.
 fn made_by_the_compiler(
-    name: &str,
+    (unit, name, components): (&trendy_prelude::Unit, &str, hir::Heading),
     files: &Files,
     namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> hir::Defined {
-    let identity = namespaces.prelude_identity(name);
-    let components = hir::Library::number_components();
+    let identity = namespaces.library_identity(unit.name, name);
     let declared = namespaces.defined_named(&identity).cloned();
     let as_made = declared.as_ref().is_some_and(|defined| {
         defined.components == components
@@ -411,15 +433,16 @@ fn made_by_the_compiler(
         errors.push(Diagnostic::error(
             Code::Internal,
             format!(
-                "the prelude doesn't declare `type {name} {{ {{ value: integer }}, … }};`, of no supertype, as the compiler makes its values"
+                "`{}` doesn't declare `type {name} {{ {components}, … }};`, of no supertype, as the compiler makes and reads its values",
+                unit.name
             ),
-            Span::empty(files.prelude().span().end),
+            Span::empty(files.unit_named(unit.name).span().end),
             "missing",
         ));
     }
     declared.unwrap_or_else(|| hir::Defined {
         name: identity,
-        unit: trendy_prelude::PRELUDE.name.to_string(),
+        unit: unit.name.to_string(),
         components,
         representations: Vec::new(),
         constraints: Vec::new(),

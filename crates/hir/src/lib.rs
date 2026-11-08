@@ -1155,6 +1155,9 @@ pub struct Library {
     /// The prelude's `byte`, which a literal makes, stored as
     /// [`Library::number_components`] says.
     pub byte: Box<Defined>,
+    /// `trendy.files`' `file_path`, the path of a file, which the built-ins that
+    /// read and write files take, as [`Library::path_components`] says.
+    pub file_path: Box<Defined>,
     /// The prelude's union type `error`, a root, whose subtypes are what a
     /// program fails or warns with, the errors the language makes among
     /// them ([`LanguageError`]).
@@ -1189,6 +1192,9 @@ impl Library {
     /// The name of the prelude's type of bytes.
     pub const BYTE: &'static str = "byte";
 
+    /// The name of `trendy.files`' type of a file's path.
+    pub const FILE_PATH: &'static str = "file_path";
+
     /// Whether `identity` is what the program calls the prelude's `byte`:
     /// its name, if no other unit declares a type of that name, in which case
     /// it is qualified, as that one's is.
@@ -1214,6 +1220,19 @@ impl Library {
     #[must_use]
     pub fn number_components() -> Heading {
         Heading::new([("value".to_string(), Type::Scalar(Scalar::Integer))].into())
+    }
+
+    /// The components of a `file_path`, its text, which the built-ins that read
+    /// and write files take a path's text from.
+    #[must_use]
+    pub fn path_components() -> Heading {
+        Heading::new([("text".to_string(), Type::Scalar(Scalar::Text))].into())
+    }
+
+    /// The type `file_path`.
+    #[must_use]
+    pub fn file_path_type(&self) -> Type {
+        Type::Defined(self.file_path.clone())
     }
 
     /// The type `array code_point`.
@@ -1334,13 +1353,13 @@ impl UpdateBuiltin {
             UpdateBuiltin::DebugValue => [constant("v", parameter(0))].into(),
             UpdateBuiltin::DebugTable => [constant("r", parameter(0))].into(),
             UpdateBuiltin::LoadTextFile => [
-                constant("path", text()),
+                constant("path", library.file_path_type()),
                 out("lines", Type::Array(Box::new(text()))),
             ]
             .into(),
             UpdateBuiltin::LoadTextFileWithErrors => with_errors(UpdateBuiltin::LoadTextFile),
             UpdateBuiltin::LoadBinaryFile => [
-                constant("path", text()),
+                constant("path", library.file_path_type()),
                 out(
                     "bytes",
                     Type::Array(Box::new(Type::Defined(library.byte.clone()))),
@@ -1359,7 +1378,12 @@ impl UpdateBuiltin {
                 ),
             ]
             .into(),
-            UpdateBuiltin::SaveTextFile | UpdateBuiltin::AppendLines => [
+            UpdateBuiltin::SaveTextFile => [
+                constant("path", library.file_path_type()),
+                constant("lines", Type::Array(Box::new(text()))),
+            ]
+            .into(),
+            UpdateBuiltin::AppendLines => [
                 constant("path", text()),
                 constant("lines", Type::Array(Box::new(text()))),
             ]
@@ -1390,7 +1414,7 @@ impl UpdateBuiltin {
             .into(),
             UpdateBuiltin::SaveTextFileWithErrors => with_errors(UpdateBuiltin::SaveTextFile),
             UpdateBuiltin::LoadCsv => [
-                constant("path", text()),
+                constant("path", library.file_path_type()),
                 constant("header", Type::Scalar(Scalar::Boolean)),
                 constant("columns", parameter(0)),
                 out("rows", Type::Array(Box::new(parameter(1)))),

@@ -569,7 +569,7 @@ mod tests {
         // A declaration the compiler doesn't implement is an internal error,
         // in the document, though the prelude comes after it.
         let wrong = files.source.replacen(
-            "load_text_file{path: text, out lines: array text}",
+            "load_text_file{path: file_path, out lines: array text}",
             "load_text_file{path: integer, out lines: array text}",
             1,
         );

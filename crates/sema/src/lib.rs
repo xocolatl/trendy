@@ -325,6 +325,15 @@ impl Files {
         &self.units[self.prelude.0].1
     }
 
+    /// The file of the unit `name`, one that comes with the compiler, as every
+    /// program has them.
+    pub(crate) fn unit_named(&self, name: &str) -> &SourceFile {
+        self.named()
+            .find(|(unit, _)| *unit == name)
+            .map(|(_, file)| file)
+            .expect("every program has the units that come with the compiler")
+    }
+
     /// Each file, with what it is checked as, the prelude first, then the
     /// others in the program's order.
     pub(crate) fn each(&self) -> impl Iterator<Item = (Source, &SourceFile)> {
@@ -1313,6 +1322,17 @@ impl Namespaces {
     /// another unit declares one of its name.
     pub(crate) fn prelude_identity(&self, name: &str) -> String {
         self.type_identity(name, self.units.prelude())
+    }
+
+    /// What the type or heading the unit `unit`, one that comes with the
+    /// compiler, declares as `name` is called in the program, as for
+    /// [`Namespaces::prelude_identity`].
+    pub(crate) fn library_identity(&self, unit: &str, name: &str) -> String {
+        let id = self
+            .units
+            .id(unit)
+            .expect("every program has the units that come with the compiler");
+        self.type_identity(name, id)
     }
 
     /// The prelude's heading `name`, as a fix writes it at `at`: plain, if
@@ -4068,7 +4088,7 @@ operator stamp{s: square, out at: timestamp} [ at := timestamp{date: date{days: 
             format!(
                 "uses {{ trendy.files }};
 
-operator read{{out lines: array text}} [ call load_text_file{{path: \"notes.txt\", out lines: lines}}; ];
+operator read{{out lines: array text}} [ call load_text_file{{path: file_path{{text: \"notes.txt\"}}, out lines: lines}}; ];
 operator twice{{out lines: array text}} [ call read{{out lines: lines}}; ];
 operator main{{}} [ var lines: array text; {main} ];"
             )
@@ -4077,9 +4097,9 @@ operator main{{}} [ var lines: array text; {main} ];"
         let writes = errors(
             "uses { trendy.files };
 
-operator write{} [ call save_text_file{path: \"notes.txt\", lines: array [\"Nile\"]}; ];
+operator write{} [ call save_text_file{path: file_path{text: \"notes.txt\"}, lines: array [\"Nile\"]}; ];
 operator main{} [
-    transaction [ call save_text_file{path: \"notes.txt\", lines: array [\"Nile\"]}; ];
+    transaction [ call save_text_file{path: file_path{text: \"notes.txt\"}, lines: array [\"Nile\"]}; ];
     transaction [ call write{}; ];
 ];",
         );
@@ -4122,7 +4142,7 @@ operator main{} [
         // and a read outside any, are allowed.
         for (main, failing) in [
             (
-                "transaction [ transaction [ call load_text_file{path: \"a\", out lines: lines}; ]; ];",
+                "transaction [ transaction [ call load_text_file{path: file_path{text: \"a\"}, out lines: lines}; ]; ];",
                 true,
             ),
             (
@@ -5138,7 +5158,7 @@ operator main{} [
     fn a_unit_reads_files_with_trendy_files() {
         // Its operators and errors are its interface's, which a unit sees
         // once it uses it, as the fix does.
-        let source = "operator main{} [\n    var lines: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: lines};\n];\n";
+        let source = "operator main{} [\n    var lines: array text;\n    call load_text_file{path: file_path{text: \"rivers.txt\"}, out lines: lines};\n];\n";
         let unused = errors(source);
         assert_eq!(unused.len(), 1, "{unused:#?}");
         assert_eq!(unused[0].code, Code::UnknownName);
@@ -10710,14 +10730,59 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
             let source = format!(
                 "operator main{{}} [\n    call {written}{{path: \"a.txt\", lines: array [\"Nile\"]}};\n];\n"
             );
-            let fixed = fix(&source);
+            // Then the path, a text, is selected as one.
+            let fixed = fix(&fix(&source));
             assert_eq!(
                 fixed,
-                "uses { trendy.files };\n\noperator main{} [\n    call save_text_file{path: \"a.txt\", lines: array [\"Nile\"]};\n];\n",
+                "uses { trendy.files };\n\noperator main{} [\n    call save_text_file{path: file_path{text: \"a.txt\"}, lines: array [\"Nile\"]};\n];\n",
                 "{written}"
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         }
+    }
+
+    #[test]
+    fn a_path_is_a_file_path() {
+        // Selected from its text, which isn't empty and has no U+0000, as no
+        // system's path can be or have.
+        let files = "uses { trendy.files };\n";
+        assert!(
+            analyze_str(&format!(
+                "{files}var p := file_path{{text: \"rivers.txt\"}};{MAIN}"
+            ))
+            .is_ok()
+        );
+        for text in ["", "a\\u{0}b.txt"] {
+            let source = format!("{files}var p := file_path{{text: \"{text}\"}};{MAIN}");
+            assert_eq!(codes(&source), [Code::BrokenConstraint], "{text:?}");
+        }
+        // A text where one goes is selected, a name alone keeping its name, as
+        // the conversion and the array of one do.
+        let source = format!(
+            "{files}\noperator read{{path: text}} [\n    var lines: array text;\n    call load_text_file{{path, out lines}};\n    call load_text_file{{path: \"rivers.txt\", out lines}};\n];\n{MAIN}"
+        );
+        let fixed = fix(&source);
+        assert!(
+            fixed.contains("call load_text_file{path: file_path{text: path}, out lines};"),
+            "{fixed}"
+        );
+        assert!(
+            fixed
+                .contains("call load_text_file{path: file_path{text: \"rivers.txt\"}, out lines};"),
+            "{fixed}"
+        );
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        let source = "uses { trendy.streams };\n\noperator say{line: integer, lines: text} [\n    call write{line};\n    call write{lines};\n];\n\noperator main{} [];\n";
+        let fixed = fix(source);
+        assert!(
+            fixed.contains("call write{line: to_text{from: line}};"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("call write{lines: array [lines]};"),
+            "{fixed}"
+        );
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
     }
 
     #[test]
@@ -10754,7 +10819,7 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
     fn a_write_is_to_a_stream_outside_the_program() {
         // A transaction writes to none, whichever, as a file is one too.
         let found = errors(
-            "uses { trendy.streams };\n\noperator main{} [\n    transaction [ call write{line: \"Habari\"}; ];\n    transaction [ call write{line: \"x\", to: file{path: \"log.txt\"}}; ];\n];\n",
+            "uses { trendy.streams, trendy.files };\n\noperator main{} [\n    transaction [ call write{line: \"Habari\"}; ];\n    transaction [ call write{line: \"x\", to: file{path: file_path{text: \"log.txt\"}}}; ];\n];\n",
         );
         let said: Vec<&str> = found.iter().map(|e| e.message.as_str()).collect();
         assert_eq!(said, ["`write` writes to a stream, in a transaction"; 2]);
@@ -10769,7 +10834,7 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
         // But any other stream can, by a value of `stream`.
         assert!(
             analyze_str(
-                "uses { trendy.streams };\n\noperator say{to: stream} [ call write{line: \"x\", to}; ];\noperator main{} [\n    call say{to: standard_error};\n    call say{to: file{path: \"log.txt\"}};\n];\n"
+                "uses { trendy.streams, trendy.files };\n\noperator say{to: stream} [ call write{line: \"x\", to}; ];\noperator main{} [\n    call say{to: standard_error};\n    call say{to: file{path: file_path{text: \"log.txt\"}}};\n];\n"
             )
             .is_ok()
         );
@@ -10777,7 +10842,7 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
 
     #[test]
     fn one_value_where_an_array_goes_is_made_an_array_of_one() {
-        let source = "uses { trendy.files };\n\noperator main{} [\n    call save_text_file{path: \"a.txt\", lines: \"Nile\"};\n];\n";
+        let source = "uses { trendy.files };\n\noperator main{} [\n    call save_text_file{path: file_path{text: \"a.txt\"}, lines: \"Nile\"};\n];\n";
         let fixed = fix(source);
         assert_eq!(
             fixed,
@@ -10826,10 +10891,11 @@ operator main{{}} [
                 "uses { trendy.files };\n\noperator main{} [\n    var lines := load_text_file{path: \"rivers.txt\"};\n];\n",
                 "{written}"
             );
-            let fixed = fix(&fixed);
+            // Then the path, a text, is selected as one.
+            let fixed = fix(&fix(&fixed));
             assert_eq!(
                 fixed,
-                "uses { trendy.files };\n\noperator main{} [\n    var lines: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: lines};\n];\n"
+                "uses { trendy.files };\n\noperator main{} [\n    var lines: array text;\n    call load_text_file{path: file_path{text: \"rivers.txt\"}, out lines: lines};\n];\n"
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         }
@@ -10848,10 +10914,10 @@ operator main{{}} [
         ] {
             let source =
                 format!("operator main{{}} [\n    var data := {written}{{\"kente.png\"}};\n];\n");
-            let fixed = fix(&fix(&source));
+            let fixed = fix(&fix(&fix(&source)));
             assert_eq!(
                 fixed,
-                "uses { trendy.files };\n\noperator main{} [\n    var data: array byte;\n    call load_binary_file{path: \"kente.png\", out bytes: data};\n];\n",
+                "uses { trendy.files };\n\noperator main{} [\n    var data: array byte;\n    call load_binary_file{path: file_path{text: \"kente.png\"}, out bytes: data};\n];\n",
                 "{written}"
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
@@ -10900,7 +10966,7 @@ operator main{{}} [
     fn a_file_is_read_into_an_out_variable() {
         // A call, which reads the file when the program runs, into the
         // variable for `lines`.
-        let source = "uses { trendy.files };\n\noperator main{} [\n    var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};\n];\n";
+        let source = "uses { trendy.files };\n\noperator main{} [\n    var rivers: array text;\n    call load_text_file{path: file_path{text: \"rivers.txt\"}, out lines: rivers};\n];\n";
         let body = main_body(source);
         let (_, hir::Statement::Call(call)) = &body[1] else {
             panic!("{body:#?}");
@@ -10910,12 +10976,12 @@ operator main{{}} [
         // with the variable its `out` argument.
         for (written, fixed) in [
             (
-                "var rivers := load_text_file{path: \"rivers.txt\"};",
-                "var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};",
+                "var rivers := load_text_file{path: file_path{text: \"rivers.txt\"}};",
+                "var rivers: array text;\n    call load_text_file{path: file_path{text: \"rivers.txt\"}, out lines: rivers};",
             ),
             (
-                "var rivers: array text;\n    rivers := load_text_file{path: \"rivers.txt\"};",
-                "var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};",
+                "var rivers: array text;\n    rivers := load_text_file{path: file_path{text: \"rivers.txt\"}};",
+                "var rivers: array text;\n    call load_text_file{path: file_path{text: \"rivers.txt\"}, out lines: rivers};",
             ),
         ] {
             let source =
@@ -10931,10 +10997,10 @@ operator main{{}} [
         // computed when compiling, or a read-only operator's value.
         for source in [
             format!(
-                "uses {{ trendy.files }};\n\nvar lines := load_text_file{{path: \"rivers.txt\"}};{MAIN}"
+                "uses {{ trendy.files }};\n\nvar lines := load_text_file{{path: file_path{{text: \"rivers.txt\"}}}};{MAIN}"
             ),
             format!(
-                "uses {{ trendy.files }};\n\noperator rivers{{}}: array text [ load_text_file{{path: \"rivers.txt\"}} ];{MAIN}"
+                "uses {{ trendy.files }};\n\noperator rivers{{}}: array text [ load_text_file{{path: file_path{{text: \"rivers.txt\"}}}} ];{MAIN}"
             ),
         ] {
             assert_eq!(codes(&source), [Code::OperatorAsValue], "{source}");
@@ -10946,7 +11012,7 @@ operator main{{}} [
     fn a_csv_file_is_read_into_tuples_of_types_it_can_read() {
         let call = |declared: &str| {
             format!(
-                "uses {{ trendy.files }};\n\noperator main{{}} [\n    var rows: {declared};\n    call load_csv{{path: \"cities.csv\", header: true, columns: tuple {{ city: 1 }}, out rows: rows}};\n];\n"
+                "uses {{ trendy.files }};\n\noperator main{{}} [\n    var rows: {declared};\n    call load_csv{{path: file_path{{text: \"cities.csv\"}}, header: true, columns: tuple {{ city: 1 }}, out rows: rows}};\n];\n"
             )
         };
         // Of text, integers, approximate numbers and booleans, read when
@@ -10971,7 +11037,7 @@ operator main{{}} [
         );
         // Nor of a type parameter, whose attributes, the columns, aren't
         // known here.
-        let generic = "uses { trendy.files };\n\noperator read{out rows: array T} types { T: any tuple } [\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\noperator main{} [];";
+        let generic = "uses { trendy.files };\n\noperator read{out rows: array T} types { T: any tuple } [\n    call load_csv{path: file_path{text: \"cities.csv\"}, header: true, columns: tuple { city: 1 }, out rows: rows};\n];\noperator main{} [];";
         assert_eq!(codes(generic), [Code::UnreadableAttribute]);
         // Tuples, which an array of other values hasn't.
         let texts = errors(&call("array text"));
@@ -10989,7 +11055,7 @@ operator main{{}} [
     fn a_csv_files_columns_are_given_each_attribute() {
         let call = |columns: &str| {
             format!(
-                "uses {{ trendy.files }};\n\noperator main{{}} [\n    var rows: array tuple {{ city: text, people: integer }};\n    call load_csv{{path: \"cities.csv\", header: false, columns: {columns}, out rows: rows}};\n];\n"
+                "uses {{ trendy.files }};\n\noperator main{{}} [\n    var rows: array tuple {{ city: text, people: integer }};\n    call load_csv{{path: file_path{{text: \"cities.csv\"}}, header: false, columns: {columns}, out rows: rows}};\n];\n"
             )
         };
         analyze_str(&call("tuple { people: 3, city: 1 }")).unwrap();
@@ -11028,10 +11094,10 @@ operator main{{}} [
             "`city` and `people` are both read from column 2"
         );
         // Other languages' names for the parameters.
-        let source = "uses { trendy.files };\n\noperator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", has_header: true, usecols: tuple { city: 1 }, out rows: rows};\n];\n";
+        let source = "uses { trendy.files };\n\noperator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: file_path{text: \"cities.csv\"}, has_header: true, usecols: tuple { city: 1 }, out rows: rows};\n];\n";
         assert_eq!(
             fix(source),
-            "uses { trendy.files };\n\noperator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\n"
+            "uses { trendy.files };\n\noperator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: file_path{text: \"cities.csv\"}, header: true, columns: tuple { city: 1 }, out rows: rows};\n];\n"
         );
     }
 
@@ -11474,7 +11540,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
     fn a_csv_file_is_read_into_values_of_a_programs_own_types() {
         let call = |declared: &str, columns: &str| {
             format!(
-                "uses {{ trendy.files }};\n\ntype position {{ {{ latitude: approximate, longitude: approximate }} }};\ntype area {{ {{ name: text, parts: relation {{ part: text }} }} }};\n\noperator main{{}} [\n    var rows: array tuple {{ {declared} }};\n    call load_csv{{path: \"places.csv\", header: true, columns: {columns}, out rows: rows}};\n];\n"
+                "uses {{ trendy.files }};\n\ntype position {{ {{ latitude: approximate, longitude: approximate }} }};\ntype area {{ {{ name: text, parts: relation {{ part: text }} }} }};\n\noperator main{{}} [\n    var rows: array tuple {{ {declared} }};\n    call load_csv{{path: file_path{{text: \"places.csv\"}}, header: true, columns: {columns}, out rows: rows}};\n];\n"
             )
         };
         // A value's components are read from columns of their own, given
@@ -11516,7 +11582,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
     fn a_csv_file_is_read_in_any_representation() {
         let call = |columns: &str| {
             format!(
-                "uses {{ trendy.files }};\n\n{TEMPERATURE}type bag {{\n    {{ items: relation {{ item: text }} }},\n    {{ item: text }}\n        to {{ items := relation {{ {{ item: item }} }} }}\n        from {{ item := value from items }},\n}};\n\noperator main{{}} [\n    var rows: array tuple {{ city: text, mean: temperature, contents: bag }};\n    call load_csv{{path: \"climate.csv\", header: true, columns: {columns}, out rows: rows}};\n];\n"
+                "uses {{ trendy.files }};\n\n{TEMPERATURE}type bag {{\n    {{ items: relation {{ item: text }} }},\n    {{ item: text }}\n        to {{ items := relation {{ {{ item: item }} }} }}\n        from {{ item := value from items }},\n}};\n\noperator main{{}} [\n    var rows: array tuple {{ city: text, mean: temperature, contents: bag }};\n    call load_csv{{path: file_path{{text: \"climate.csv\"}}, header: true, columns: {columns}, out rows: rows}};\n];\n"
             )
         };
         // A value's components are those of any of its possible

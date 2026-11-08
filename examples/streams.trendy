@@ -13,7 +13,7 @@ var greetings := relation {
 key { language };
 
 /* Where the program notes what it did. */
-const log := file{path: "target/streams.log"};
+const log := file{path: file_path{text: "target/streams.log"}};
 
 operator main{} [
     call write{text: "Greetings in "};
@@ -32,10 +32,10 @@ operator main{} [
     call write{lines: logged, to: standard_error};
     /* A file's bytes, whatever they are, copied a piece at a time. */
     var gzipped: array byte;
-    call load_binary_file{path: "examples/rivers.txt.gz", out bytes: gzipped};
-    call save_text_file{path: "target/rivers_copy.txt.gz", lines: array []};
-    call write{bytes: gzipped, to: file{path: "target/rivers_copy.txt.gz"}};
+    call load_binary_file{path: file_path{text: "examples/rivers.txt.gz"}, out bytes: gzipped};
+    call save_text_file{path: file_path{text: "target/rivers_copy.txt.gz"}, lines: array []};
+    call write{bytes: gzipped, to: file{path: file_path{text: "target/rivers_copy.txt.gz"}}};
     var copied: array byte;
-    call load_binary_file{path: "target/rivers_copy.txt.gz", out bytes: copied};
+    call load_binary_file{path: file_path{text: "target/rivers_copy.txt.gz"}, out bytes: copied};
     call write{line: "copied: " || to_text{from: copied = gzipped}, to: standard_error};
 ];

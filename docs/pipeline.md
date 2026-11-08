@@ -80,9 +80,15 @@ or `load_csv`, points to the runtime's own bytes for it (`ASCII_CHARACTERS`),
 after a header that says they are never released, as a buffer compiled into
 a program is, so that an array of them takes no memory but its own. A built-in's signature can name a type the
 prelude defines in trendy, whose values the compiler makes, as theirs
-name `code_point`: sema checks the prelude declares it as the compiler
-makes its values (`builtins::library`, X0000), and the signatures take
-it (`hir::Library`, which `hir::Program::library` keeps). A built-in that
+name `code_point`, or another unit that comes with the compiler does, as
+the file built-ins name `trendy.files`' `file_path`: sema checks the unit
+declares it as the compiler makes or reads its values (`builtins::library`,
+`Namespaces::library_identity`, X0000), and the signatures take it
+(`hir::Library`, which `hir::Program::library` keeps). The runtime takes a
+path's text, which lowering reads of the `file_path` by its own type, in a
+hierarchy or out of one (`FunctionBuilder::path_text`), so that the
+constraint that keeps U+0000 out of it is the type's, and the runtime's
+check of it an internal error. A built-in that
 makes values of it (`hir::Builtin::makes`) makes each as selecting it
 would, of its most specific type: a call checks the selection's checks
 first, folding gives each value its type (`ops::specialized`), and when

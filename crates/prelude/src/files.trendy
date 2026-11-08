@@ -4,16 +4,24 @@
    gives. A unit that reads or writes one uses it, `uses { trendy.files };`. */
 interface
 
+/* The path of a file, where it is: relative to the directory the program
+   runs in, as `file_path{text: "rivers.txt"}`, unless it is absolute, as
+   `file_path{text: "/tmp/rivers.txt"}`. Its text is the path as the system
+   takes it, so it isn't empty, which names no file, and has no U+0000,
+   which no system's path can hold. */
+type file_path { { text: text }, constraint is_path_text{text} };
+
+/* Whether `text` can be a file's path: it isn't empty, and has no U+0000. */
+operator is_path_text{text: text}: boolean;
+
 /* Read the lines of the text file at `path` into `lines`, in the file's
-   order, so that its first line is the array's element 1. `path` is
-   relative to the directory the program runs in, unless it is absolute.
-   A line ends at a line feed, or a carriage return and a line feed,
+   order, so that its first line is the array's element 1. A line ends at a line feed, or a carriage return and a line feed,
    which aren't part of it; the last needs neither. Each call reads the
    file as it is when the program runs: the compiler never opens it, so
    it needn't exist until then, and two calls can read different lines,
    so it is an update operator, which `call` invokes. A file that can't
    be read fails (R0012), as does one that isn't UTF-8 text (R0013). */
-builtin operator load_text_file{path: text, out lines: array text};
+builtin operator load_text_file{path: file_path, out lines: array text};
 
 /* Read the lines of the text file at `path` into `lines`, as the other
    `load_text_file` does, but rather than stopping the program for a file
@@ -21,22 +29,21 @@ builtin operator load_text_file{path: text, out lines: array text};
    an `unreadable_file` or a `not_utf8`, in `errors`, which is empty when
    the file is read. */
 builtin operator load_text_file{
-    path: text,
+    path: file_path,
     out lines: array text,
     out errors: relation { error: error },
 };
 
 /* Write `lines` to the text file at `path`, in order, each ending in a
-   line feed, so that `load_text_file` reads the same lines back. `path` is
-   relative to the directory the program runs in, unless it is absolute. A
-   file is made if there is none, in a directory that must exist, and what
+   line feed, so that `load_text_file` reads the same lines back. A file is
+   made if there is none, in a directory that must exist, and what
    one holds is replaced. Each call writes the file when the program runs,
    so it is an update operator, which `call` invokes. A file that can't be
    written fails (R0026), and can be left with part of `lines` if that
    happens partway, as on a full disk. A line with a line feed in it, or
    that ends in a carriage return, wouldn't read back as one line, and fails
    before anything is written (R0027). */
-builtin operator save_text_file{path: text, lines: array text};
+builtin operator save_text_file{path: file_path, lines: array text};
 
 /* Write `lines` to the text file at `path`, as the other `save_text_file`
    does, but rather than stopping the program for a file that can't be
@@ -44,25 +51,24 @@ builtin operator save_text_file{path: text, lines: array text};
    when the file is written. A line that wouldn't read back as one still
    stops the program, as that is a mistake in the call and not the file's. */
 builtin operator save_text_file{
-    path: text,
+    path: file_path,
     lines: array text,
     out errors: relation { error: error },
 };
 
 /* Read the bytes of the file at `path` into `bytes`, whatever they are, in
-   the file's order, so that its first byte is the array's element 1. `path`
-   is relative to the directory the program runs in, unless it is absolute.
-   Each call reads the file as it is when the program runs, as
+   the file's order, so that its first byte is the array's element 1. Each
+   call reads the file as it is when the program runs, as
    `load_text_file` does, so it is an update operator, which `call`
    invokes. A file that can't be read fails (R0012). */
-builtin operator load_binary_file{path: text, out bytes: array byte};
+builtin operator load_binary_file{path: file_path, out bytes: array byte};
 
 /* Read the bytes of the file at `path` into `bytes`, as the other
    `load_binary_file` does, but rather than stopping the program for a file
    that can't be read, give no bytes, and its error, an `unreadable_file`,
    in `errors`, which is empty when the file is read. */
 builtin operator load_binary_file{
-    path: text,
+    path: file_path,
     out bytes: array byte,
     out errors: relation { error: error },
 };
@@ -90,7 +96,7 @@ builtin operator load_binary_file{
    CSV (R0015), or hasn't a column `columns` gives, which two attributes
    can't share (R0016), or that has a field its attribute's type can't
    read (R0014). */
-builtin operator load_csv{path: text, header: boolean, columns: C, out rows: array T}
+builtin operator load_csv{path: file_path, header: boolean, columns: C, out rows: array T}
     types { C: any tuple, T: any tuple };
 
 /* Read the records of the CSV file at `path` into `rows`, as the other
@@ -104,7 +110,7 @@ builtin operator load_csv{path: text, header: boolean, columns: C, out rows: arr
    `overlapping_subtypes_in_file`. A quoted field that isn't closed ends
    the records read. `errors` is empty when every record is read. */
 builtin operator load_csv{
-    path: text,
+    path: file_path,
     header: boolean,
     columns: C,
     out rows: array T,
@@ -199,6 +205,12 @@ type overlapping_subtypes_in_file is error {
 };
 
 implementation
+
+operator is_path_text{text: text}: boolean [
+    var points: relation { point: code_point };
+    load points from to_code_points{from: text} as point;
+    text <> "" and is_empty{r: points where point.value = 0x00}
+];
 
 operator message{error: unreadable_file}: text [
     "can't read " || to_text{from: error.path} || ": " || error.reason

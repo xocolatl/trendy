@@ -7,6 +7,8 @@
    writes to one uses it, `uses { trendy.streams };`. */
 interface
 
+uses { trendy.files };
+
 /* Where a program reads or writes, a piece at a time. */
 type stream union;
 
@@ -16,9 +18,8 @@ type standard_stream is stream {
     constraint name = "input" or name = "output" or name = "error",
 };
 
-/* The file at `path`, relative to the directory the program runs in, unless
-   it is absolute, as `trendy.files` takes a path. */
-type file is stream { { path: text } };
+/* The file at `path`. */
+type file is stream { { path: file_path } };
 
 /* What the program is given to read. */
 const standard_input := standard_stream{name: "input"};
@@ -92,7 +93,7 @@ operator write{text: text, to: standard_stream} [
 ];
 
 operator write{text: text, to: file} [
-    call append{path: to.path, text};
+    call append{path: to.path.text, text};
 ];
 
 operator write{text: text} [
@@ -106,7 +107,7 @@ operator write{line: text, to: standard_stream} [
 ];
 
 operator write{line: text, to: file} [
-    call append{path: to.path, lines: array [line]};
+    call append{path: to.path.text, lines: array [line]};
 ];
 
 operator write{line: text} [
@@ -120,7 +121,7 @@ operator write{lines: array text, to: standard_stream} [
 ];
 
 operator write{lines: array text, to: file} [
-    call append{path: to.path, lines};
+    call append{path: to.path.text, lines};
 ];
 
 operator write{lines: array text} [
@@ -132,7 +133,7 @@ operator write{bytes: array byte, to: standard_stream} [
 ];
 
 operator write{bytes: array byte, to: file} [
-    call append{path: to.path, bytes};
+    call append{path: to.path.text, bytes};
 ];
 
 operator write{bytes: array byte} [

@@ -241,6 +241,11 @@ impl Units {
         self.prelude
     }
 
+    /// The unit named `name`, if the program has one.
+    pub(crate) fn id(&self, name: &str) -> Option<hir::FileId> {
+        self.ids.get(name).copied()
+    }
+
     /// The unit `span` is in.
     pub(crate) fn at(&self, span: Span) -> hir::FileId {
         hir::FileId(

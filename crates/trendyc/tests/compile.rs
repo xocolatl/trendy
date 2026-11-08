@@ -2192,7 +2192,7 @@ fn loaded_csv(name: &str, contents: &str, header: bool, columns: &str) -> (i32, 
 operator main{{}} [
     var rows: array tuple {{ city: text, people: integer, km2: approximate, capital: boolean }};
     var columns := tuple {{ {columns} }};
-    call load_csv{{path: {:?}, header: {header}, columns: columns, out rows: rows}};
+    call load_csv{{path: file_path{{text: {:?}}}, header: {header}, columns: columns, out rows: rows}};
     call debug_value{{v: rows}};
     call debug_value{{v: length{{a: rows}}}};
 ];
@@ -2227,7 +2227,7 @@ fn loaded_rows(
 operator main{{}} [
     var rows: array tuple {heading};
     var columns := {columns};
-    call load_csv{{path: {:?}, header: true, columns: columns, out rows: rows}};
+    call load_csv{{path: file_path{{text: {:?}}}, header: true, columns: columns, out rows: rows}};
     call debug_value{{v: rows}};
 ];
 ",
@@ -3090,7 +3090,7 @@ fn a_text_file_gives_its_errors_when_asked() {
     let source = format!(
         "uses {{ trendy.files }};
 
-operator show{{path: text}} [
+operator show{{path: file_path}} [
     var lines: array text;
     var errors: relation {{ error: error }};
     call load_text_file{{path: path, out lines: lines, out errors: errors}};
@@ -3102,8 +3102,8 @@ operator show{{path: text}} [
 ];
 
 operator main{{}} [
-    call show{{path: {good:?}}};
-    call show{{path: {bad:?}}};
+    call show{{path: file_path{{text: {good:?}}}}};
+    call show{{path: file_path{{text: {bad:?}}}}};
 ];
 "
     );
@@ -3140,7 +3140,7 @@ fn a_binary_file_is_read_whatever_its_bytes() {
     let source = format!(
         "uses {{ trendy.files }};
 
-operator show{{path: text}} [
+operator show{{path: file_path}} [
     var bytes: array byte;
     var errors: relation {{ error: error }};
     call load_binary_file{{path, out bytes, out errors}};
@@ -3150,14 +3150,14 @@ operator show{{path: text}} [
 
 operator main{{}} [
     var bytes: array byte;
-    call load_binary_file{{path: {data:?}, out bytes}};
+    call load_binary_file{{path: file_path{{text: {data:?}}}, out bytes}};
     call debug_value{{v: bytes}};
     call debug_value{{v: length{{a: bytes}}}};
     call debug_value{{v: bytes[5]}};
-    call show{{path: {empty:?}}};
-    call show{{path: {missing:?}}};
-    call show{{path: {dir:?}}};
-    call load_binary_file{{path: {missing:?}, out bytes}};
+    call show{{path: file_path{{text: {empty:?}}}}};
+    call show{{path: file_path{{text: {missing:?}}}}};
+    call show{{path: file_path{{text: {dir:?}}}}};
+    call load_binary_file{{path: file_path{{text: {missing:?}}}, out bytes}};
 ];
 "
     );
@@ -3328,11 +3328,11 @@ fn a_write_to_a_file_adds_to_its_end() {
     let log = dir.join("log.bin");
     drop(std::fs::remove_file(&log));
     let source = format!(
-        r#"uses {{ trendy.streams }};
+        r#"uses {{ trendy.streams, trendy.files }};
 
 type ascii is byte {{ constraint value < 128 }};
 
-const log := file{{path: {log:?}}};
+const log := file{{path: file_path{{text: {log:?}}}}};
 
 operator say{{line: text, to: stream}} [
     call write{{line, to}};
@@ -3369,7 +3369,7 @@ operator main{{}} [
     let ran = ran_source(
         "unappendable",
         &format!(
-            "uses {{ trendy.streams }};\n\noperator main{{}} [\n    call write{{line: \"x\", to: file{{path: {:?}}}}};\n];\n",
+            "uses {{ trendy.streams, trendy.files }};\n\noperator main{{}} [\n    call write{{line: \"x\", to: file{{path: file_path{{text: {:?}}}}}}};\n];\n",
             dir.join("missing").join("log.txt")
         ),
     );
@@ -3449,7 +3449,7 @@ uses { trendy.files };
 operator read{path: text} [
     var lines: array text;
     var errors: relation { error: error };
-    call load_text_file{path: path, out lines: lines, out errors: errors};
+    call load_text_file{path: file_path{text: path}, out lines: lines, out errors: errors};
     call debug_value{v: errors};
 ];
 ",
@@ -3488,7 +3488,7 @@ fn a_csv_file_gives_its_errors_when_asked() {
 
 heading city := {{ city: text, people: integer }};
 
-operator show{{path: text, header: boolean}} [
+operator show{{path: file_path, header: boolean}} [
     var rows: array tuple city;
     var errors: relation {{ error: error }};
     call load_csv{{
@@ -3503,8 +3503,8 @@ operator show{{path: text, header: boolean}} [
 ];
 
 operator main{{}} [
-    call show{{path: {cities:?}, header: true}};
-    call show{{path: {narrow:?}, header: false}};
+    call show{{path: file_path{{text: {cities:?}}}, header: true}};
+    call show{{path: file_path{{text: {narrow:?}}}, header: false}};
 ];
 "
     );
@@ -3555,7 +3555,7 @@ type span {{
         from {{ first := min{{r: days, of: label}}, second := max{{r: days, of: label}} }},
 }};
 
-operator show{{shapes: text, spans: text}} [
+operator show{{shapes: file_path, spans: file_path}} [
     var shaped: array tuple {{ shape: shape }};
     var errors: relation {{ error: error }};
     call load_csv{{
@@ -3580,7 +3580,7 @@ operator show{{shapes: text, spans: text}} [
 ];
 
 operator main{{}} [
-    call show{{shapes: {shapes:?}, spans: {spans:?}}};
+    call show{{shapes: file_path{{text: {shapes:?}}}, spans: file_path{{text: {spans:?}}}}};
 ];
 "
     );
@@ -3888,7 +3888,7 @@ error[{overlapping}]: ellipse{{a: 5e-1, b: 5e-1}} is of both `circle` and `small
 operator main{{}} [
     var rows: array tuple {{ name: text, e: ellipse }};
     var columns := tuple {{ name: 1, e: tuple {{ a: 2, b: 3 }} }};
-    call load_csv{{path: {:?}, header: true, columns: columns, out rows: rows}};
+    call load_csv{{path: file_path{{text: {:?}}}, header: true, columns: columns, out rows: rows}};
     call debug_value{{v: array [rows[1].e is circle, rows[2].e is circle]}};
 ];
 ",
@@ -4492,7 +4492,7 @@ fn what_the_work_on_each_tuple_makes_is_freed_but_what_it_gives() {
     let path = dir.join("lines.txt");
     std::fs::write(&path, "a\nb\n").unwrap();
     let source = format!(
-        "uses {{ trendy.files }};\n\noperator shout{{t: text}}: text [\n    var loud := t || \"!\";\n    var same := loud;\n    same\n];\n\noperator echoes{{t: text}}: relation {{ e: text }} [\n    var first := shout{{t: t}} || \"1\";\n    var both := relation {{ {{ e: first }}, {{ e: t || \"2\" }} }};\n    var unused := both union both;\n    both\n];\n\noperator main{{}} [\n    var lines: array text;\n    call load_text_file{{path: {:?}, out lines: lines}};\n    var listed: relation {{ n: integer, line: text }};\n    load listed from lines as line numbered n;\n    call debug_value{{v: listed extend {{ loud := shout{{t: line}} || \"?\" }}}};\n    call debug_value{{v: (listed where shout{{t: line}} = \"b!\"){{n}}}};\n    call debug_value{{v: (listed extend {{ heard := echoes{{t: line}} }}){{n, heard}}}};\n];\n",
+        "uses {{ trendy.files }};\n\noperator shout{{t: text}}: text [\n    var loud := t || \"!\";\n    var same := loud;\n    same\n];\n\noperator echoes{{t: text}}: relation {{ e: text }} [\n    var first := shout{{t: t}} || \"1\";\n    var both := relation {{ {{ e: first }}, {{ e: t || \"2\" }} }};\n    var unused := both union both;\n    both\n];\n\noperator main{{}} [\n    var lines: array text;\n    call load_text_file{{path: file_path{{text: {:?}}}, out lines: lines}};\n    var listed: relation {{ n: integer, line: text }};\n    load listed from lines as line numbered n;\n    call debug_value{{v: listed extend {{ loud := shout{{t: line}} || \"?\" }}}};\n    call debug_value{{v: (listed where shout{{t: line}} = \"b!\"){{n}}}};\n    call debug_value{{v: (listed extend {{ heard := echoes{{t: line}} }}){{n, heard}}}};\n];\n",
         path.to_str().unwrap()
     );
     let (code, stderr) = run_source("tuple_scopes", &source);
@@ -4522,7 +4522,7 @@ fn load_text_file_reads_a_files_lines() {
     let literal = |path: &Path| format!("{:?}", path.to_str().unwrap());
     let lines = |path: &Path| {
         let source = format!(
-            "uses {{ trendy.files }};\n\noperator main{{}} [\n    var lines: array text;\n    call load_text_file{{path: {}, out lines: lines}};\n    call debug_value{{v: lines}};\n];\n",
+            "uses {{ trendy.files }};\n\noperator main{{}} [\n    var lines: array text;\n    call load_text_file{{path: file_path{{text: {}}}, out lines: lines}};\n    call debug_value{{v: lines}};\n];\n",
             literal(path)
         );
         let stem = path.file_stem().unwrap().to_str().unwrap();
@@ -4589,7 +4589,7 @@ fn loads_make_relations_of_arrays_when_running() {
 
 operator main{{}} [
     var lines: array text;
-    call load_text_file{{path: {:?}, out lines: lines}};
+    call load_text_file{{path: file_path{{text: {:?}}}, out lines: lines}};
     var numbered: relation {{ line: text, n: integer }};
     load numbered from lines as line numbered n;
     var distinct: relation {{ line: text }};
@@ -9782,9 +9782,9 @@ fn saved_lines_read_back_as_they_were() {
 
 operator main{{}} [
     const lines := {lines};
-    call save_text_file{{path: "{path}", lines}};
+    call save_text_file{{path: file_path{{text: "{path}"}}, lines}};
     var read: array text;
-    call load_text_file{{path: "{path}", out lines: read}};
+    call load_text_file{{path: file_path{{text: "{path}"}}, out lines: read}};
     call debug_value{{v: read = lines}};
     call debug_value{{v: length{{a: read}}}};
 ];
@@ -9817,9 +9817,9 @@ operator main{{}} [
         long := long || long || "river ";
         i := i + 1;
     ];
-    call save_text_file{{path: "{path}", lines: array [long] || lines || array [long]}};
+    call save_text_file{{path: file_path{{text: "{path}"}}, lines: array [long] || lines || array [long]}};
     var read: array text;
-    call load_text_file{{path: "{path}", out lines: read}};
+    call load_text_file{{path: file_path{{text: "{path}"}}, out lines: read}};
     call debug_value{{v: length{{a: read}}}};
     call debug_value{{v: read[2] || read[50001]}};
     call debug_value{{v: read[1] = long and read[50002] = long}};
@@ -9856,17 +9856,12 @@ fn a_file_that_cant_be_written_says_why() {
             format!("{dir}/a_file/below.txt"),
             "Not a directory",
         ),
-        (
-            "with_a_nul",
-            format!(r"{dir}/a\u{{0}}b.txt"),
-            "a path can't contain the character U+0000",
-        ),
     ] {
         let stops = format!(
             r#"uses {{ trendy.files }};
 
 operator main{{}} [
-    call save_text_file{{path: "{path}", lines: array ["Nile"]}};
+    call save_text_file{{path: file_path{{text: "{path}"}}, lines: array ["Nile"]}};
     call debug_value{{v: "after"}};
 ];
 "#
@@ -9885,7 +9880,7 @@ operator main{{}} [
 
 operator main{{}} [
     var errors: relation {{ error: error }};
-    call save_text_file{{path: "{path}", lines: array ["Nile"], out errors}};
+    call save_text_file{{path: file_path{{text: "{path}"}}, lines: array ["Nile"], out errors}};
     call debug_value{{v: count{{r: errors}}}};
     call debug_value{{v: errors}};
     call debug_value{{v: "after"}};
@@ -9918,7 +9913,7 @@ fn a_file_written_gives_no_errors() {
 
 operator main{{}} [
     var errors: relation {{ error: error }};
-    call save_text_file{{path: "{path}", lines: array ["Nile"], out errors}};
+    call save_text_file{{path: file_path{{text: "{path}"}}, lines: array ["Nile"], out errors}};
     call debug_value{{v: count{{r: errors}}}};
 ];
 "#,
@@ -9957,7 +9952,7 @@ fn a_line_that_wouldnt_read_back_as_one_writes_nothing() {
 
 operator main{{}} [
     var errors: relation {{ error: error }};
-    call save_text_file{{path: "{path}", lines: {lines}{errors}}};
+    call save_text_file{{path: file_path{{text: "{path}"}}, lines: {lines}{errors}}};
     call debug_value{{v: "after"}};
 ];
 "#,
@@ -11784,7 +11779,7 @@ type level {{ {{ value: integer, constraint value >= 0 and value <= 0xFF }} }};
 operator main{{}} [
     var rows: array tuple {{ id: integer, level: level }};
     var columns := tuple {{ id: 1, level: tuple {{ value: 2 }} }};
-    call load_csv{{path: {path:?}, header: true, columns: columns, out rows: rows}};
+    call load_csv{{path: file_path{{text: {path:?}}}, header: true, columns: columns, out rows: rows}};
 ];
 "
         ),
@@ -11806,7 +11801,7 @@ type level {{ {{ value: integer, constraint value >= 0 and value <= 0xFF }} }};
 operator main{{}} [
     var rows: array tuple {{ id: integer, level: level }};
     var columns := tuple {{ id: 1, level: tuple {{ value: 2 }} }};
-    call load_csv{{path: {path:?}, header: true, columns: columns, out rows: rows}};
+    call load_csv{{path: file_path{{text: {path:?}}}, header: true, columns: columns, out rows: rows}};
     call debug_value{{v: rows}};
     call debug_value{{v: rows[2].level.value + 1}};
 ];
@@ -11842,11 +11837,11 @@ type range {{
 operator main{{}} [
     var rows: array tuple {{ high: level, low: level }};
     var columns := tuple {{ high: tuple {{ value: 2 }}, low: tuple {{ value: 1 }} }};
-    call load_csv{{path: {path:?}, header: true, columns: columns, out rows: rows}};
+    call load_csv{{path: file_path{{text: {path:?}}}, header: true, columns: columns, out rows: rows}};
     call debug_value{{v: rows}};
     var ranges: array tuple {{ r: range }};
     var of_a_range := tuple {{ r: tuple {{ low: 1, high: 2 }} }};
-    call load_csv{{path: {path:?}, header: true, columns: of_a_range, out rows: ranges}};
+    call load_csv{{path: file_path{{text: {path:?}}}, header: true, columns: of_a_range, out rows: ranges}};
     call debug_value{{v: ranges}};
 ];
 "
@@ -12056,7 +12051,7 @@ operator main{} [
     call debug_value{v: id.text};
     call debug_value{v: id < uuid{text: "ff112233-4455-6677-8899-aabbccddeeff"}};
     var read: array byte;
-    call load_binary_file{path: "examples/rivers.txt.gz", out bytes: read};
+    call load_binary_file{path: file_path{text: "examples/rivers.txt.gz"}, out bytes: read};
     call debug_value{v: read[1] is ascii};
     call debug_value{v: read[2] is ascii};
     call debug_value{v: array [read[1], read[2]] = x"1f8b"};
@@ -12995,13 +12990,13 @@ operator main{{}} [
             utc_offset: 9,
         }},
     }};
-    call load_csv{{path: {path:?}, header: true, columns, out rows}};
+    call load_csv{{path: file_path{{text: {path:?}}}, header: true, columns, out rows}};
     call debug_value{{v: rows[1].at.timestamp = rows[2].at.timestamp}};
     call debug_value{{v: rows[1].at = rows[2].at}};
     call debug_value{{v: rows[2].at.timestamp.date.day}};
     var days: array tuple {{ on: date }};
     var of_days := tuple {{ on: tuple {{ year: 2, month: 3, day: 4 }} }};
-    call load_csv{{path: {path:?}, header: true, columns: of_days, out rows: days}};
+    call load_csv{{path: file_path{{text: {path:?}}}, header: true, columns: of_days, out rows: days}};
     call debug_value{{v: days[2].on.days}};
 ];
 "

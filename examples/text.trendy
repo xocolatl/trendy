@@ -33,7 +33,7 @@ operator spell{word: text} [
    can differ. */
 operator list_rivers{} [
     var rivers: array text;
-    call load_text_file{path: "examples/rivers.txt", out lines: rivers};
+    call load_text_file{path: file_path{text: "examples/rivers.txt"}, out lines: rivers};
     call debug_value{v: rivers};
     call debug_value{v: length{a: rivers}};
     for river in rivers loop [
@@ -49,7 +49,11 @@ operator list_rivers{} [
 operator list_missing{} [
     var rivers: array text;
     var errors: relation { error: error };
-    call load_text_file{path: "examples/lakes.txt", out lines: rivers, out errors: errors};
+    call load_text_file{
+        path: file_path{text: "examples/lakes.txt"},
+        out lines: rivers,
+        out errors: errors,
+    };
     call debug_value{v: length{a: rivers}};
     call debug_value{v: errors};
 ];
@@ -61,15 +65,19 @@ operator list_missing{} [
    errors`. */
 operator save_rivers{} [
     var rivers: array text;
-    call load_text_file{path: "examples/rivers.txt", out lines: rivers};
-    call save_text_file{path: "target/saved_rivers.txt", lines: rivers};
+    call load_text_file{path: file_path{text: "examples/rivers.txt"}, out lines: rivers};
+    call save_text_file{path: file_path{text: "target/saved_rivers.txt"}, lines: rivers};
 
     var saved: array text;
-    call load_text_file{path: "target/saved_rivers.txt", out lines: saved};
+    call load_text_file{path: file_path{text: "target/saved_rivers.txt"}, out lines: saved};
     call debug_value{v: saved = rivers};
 
     var errors: relation { error: error };
-    call save_text_file{path: "target/no/such/directory.txt", lines: rivers, out errors: errors};
+    call save_text_file{
+        path: file_path{text: "target/no/such/directory.txt"},
+        lines: rivers,
+        out errors: errors,
+    };
     call debug_value{v: errors};
 ];
 
@@ -89,7 +97,7 @@ heading lake := { name: text, native: text, depth: metres };
 operator lake_table{out skipped: relation { error: error }} [
     var lakes: array tuple lake;
     call load_csv{
-        path: "examples/lakes.csv",
+        path: file_path{text: "examples/lakes.csv"},
         header: true,
         columns: tuple { name: 1, native: 2, depth: tuple { m: 3 } },
         out rows: lakes,
@@ -141,7 +149,7 @@ heading river := {
 operator river_table{} [
     var rivers: array tuple river;
     call load_csv{
-        path: "examples/rivers.csv",
+        path: file_path{text: "examples/rivers.csv"},
         header: true,
         columns: tuple {
             name: 1,

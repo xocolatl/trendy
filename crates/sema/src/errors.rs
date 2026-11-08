@@ -1172,7 +1172,7 @@ fn with_array_expected(
             format!("make it an array of one: `{one}`"),
             vec![Edit {
                 span: expr.span(),
-                replacement: one,
+                replacement: format!("{}{one}", named_alone(expr)),
             }],
         );
     }
@@ -1222,34 +1222,8 @@ pub(crate) fn type_mismatch(
         ));
     }
 
-    // Rewriting the literal is the likelier fix when it is mechanical, so it
-    // comes first, and then converting the value; changing the declared type
-    // comes last.
-    let rewritten = match (declared, written_literal(expr), value) {
-        (hir::Type::Scalar(scalar), Some(written), Some(value)) => {
-            rewrite_literal(*scalar, value, &written)
-        }
-        (declared, Some(_), Some(hir::Value::Text(text))) => {
-            crate::written_times::selection(declared, text)
-        }
-        (declared, Some(_), Some(value)) => rewrite_as_bytes(declared, value),
-        _ => None,
-    };
-    if let Some(replacement) = rewritten {
-        d = d.with_suggestion(
-            format!("write it as `{declared}`: `{replacement}`"),
-            vec![Edit {
-                span: expr.span(),
-                replacement,
-            }],
-        );
-    } else if let Some(conversion) = conversion(found, declared)
-        && (value.is_none() || !conversion.parses)
-    {
-        // A text known when compiling is one parsing reads, rewritten
-        // above as the value's literal, or one it would fail for.
-        d = with_conversion(d, "it", conversion, expr);
-    }
+    // Fixing the value comes first, and changing the declared type last.
+    d = with_value_fixed(d, declared, found, value, expr);
     d = with_array_expected(d, declared, found, expr);
     // `n * x`, of an integer and an approximate number: the first operand
     // set the type, and as an approximate number it takes the rest.
@@ -1313,6 +1287,89 @@ pub(crate) fn type_mismatch(
         | Origin::Operator(_)
         | Origin::Operand(..) => d,
     }
+}
+
+/// `d`, of a value written as `expr`, of type `found`, where `declared` is
+/// expected, with the fix that makes the value one of `declared`, if one is
+/// mechanical: its literal rewritten, a value of `declared` selected of it, or
+/// it converted. `value` is the value, if it is a constant.
+fn with_value_fixed(
+    d: Diagnostic,
+    declared: &hir::Type,
+    found: &hir::Type,
+    value: Option<&hir::Value>,
+    expr: &Expr,
+) -> Diagnostic {
+    // Rewriting the literal is the likelier fix when it is mechanical, so it
+    // comes first, then selecting a value of it, then converting it.
+    let rewritten = match (declared, written_literal(expr), value) {
+        (hir::Type::Scalar(scalar), Some(written), Some(value)) => {
+            rewrite_literal(*scalar, value, &written)
+        }
+        (declared, Some(_), Some(hir::Value::Text(text))) => {
+            crate::written_times::selection(declared, text)
+        }
+        (declared, Some(_), Some(value)) => rewrite_as_bytes(declared, value),
+        _ => None,
+    };
+    if let Some(replacement) = rewritten {
+        return d.with_suggestion(
+            format!("write it as `{declared}`: `{replacement}`"),
+            vec![Edit {
+                span: expr.span(),
+                replacement,
+            }],
+        );
+    }
+    if let Some(selected) = selection_of(declared, found, expr) {
+        return d.with_suggestion(
+            format!("select a `{declared}` of it: `{selected}`"),
+            vec![Edit {
+                span: expr.span(),
+                replacement: format!("{}{selected}", named_alone(expr)),
+            }],
+        );
+    }
+    match conversion(found, declared) {
+        // A text known when compiling is one parsing reads, rewritten above as
+        // the value's literal, or one it would fail for.
+        Some(conversion) if value.is_none() || !conversion.parses => {
+            with_conversion(d, "it", conversion, expr)
+        }
+        _ => d,
+    }
+}
+
+/// What a fix that replaces the value written `expr` writes before it: its
+/// name and `:`, if it is a name alone, `a`, which is `a: a`, as the name is
+/// then the argument's or the attribute's, which stays, and nothing otherwise.
+fn named_alone(expr: &Expr) -> String {
+    match expr.syntax().kind() {
+        trendy_syntax::SyntaxKind::Name => format!("{}: ", expr.syntax().text()),
+        _ => String::new(),
+    }
+}
+
+/// The selection of `declared`, a type of the program's own, from the value
+/// written `expr`, of type `found`, if one of its possible representations is
+/// one component of that type: `file_path{text: "rivers.txt"}` of a text, as
+/// the value is all a selector of it needs.
+fn selection_of(declared: &hir::Type, found: &hir::Type, expr: &Expr) -> Option<String> {
+    let hir::Type::Defined(defined) = declared else {
+        return None;
+    };
+    let component = std::iter::once(&defined.components)
+        .chain(defined.representations.iter().map(|r| &r.components))
+        .find_map(
+            |components| match components.attributes().collect::<Vec<_>>()[..] {
+                [(name, ty)] if ty == found => Some(name),
+                _ => None,
+            },
+        )?;
+    Some(format!(
+        "{declared}{{{component}: {}}}",
+        expr.syntax().text()
+    ))
 }
 
 /// The fix for a load of `expr`, a relation of type `found`, into an array
@@ -1429,7 +1486,7 @@ fn with_conversion(
         vec![
             Edit {
                 span: Span::empty(span.start),
-                replacement: format!("{name}{{from: "),
+                replacement: format!("{}{name}{{from: ", named_alone(expr)),
             },
             Edit {
                 span: Span::empty(span.end),

@@ -42,7 +42,7 @@ var plan: relation meal key { recipe };
 operator load_week{} [
     var recipe_rows: array tuple recipe;
     call load_csv{
-        path: "recipes.csv",
+        path: file_path{text: "recipes.csv"},
         header: true,
         columns: tuple { recipe: 1, native_name: 2, serves: 3 },
         out rows: recipe_rows,
@@ -50,7 +50,7 @@ operator load_week{} [
     load recipes from recipe_rows;
     var need_rows: array tuple need;
     call load_csv{
-        path: "ingredients.csv",
+        path: file_path{text: "ingredients.csv"},
         header: true,
         columns: tuple { recipe: 1, ingredient: 2, quantity: 3, unit: 4 },
         out rows: need_rows,
@@ -58,7 +58,7 @@ operator load_week{} [
     load ingredients from need_rows;
     var meal_rows: array tuple meal;
     call load_csv{
-        path: "plan.csv",
+        path: file_path{text: "plan.csv"},
         header: true,
         columns: tuple { recipe: 1, people: 2 },
         out rows: meal_rows,
