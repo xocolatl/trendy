@@ -3,8 +3,8 @@
    started with three, its standard input, output and error, which the
    system connects to a terminal, a pipe or a file, and a file at a path is
    one too. A stream is outside the program: a value of `stream` names one,
-   and update operators, which `call` invokes, write to it. A unit that
-   writes to one uses it, `uses { trendy.streams };`. */
+   and update operators, which `call` invokes, read from it and write to
+   it. A unit that does uses it, `uses { trendy.streams };`. */
 interface
 
 uses { trendy.files };
@@ -65,9 +65,60 @@ operator write{bytes: array byte, to: stream, constraint to <> standard_input};
 /* Write `bytes` to standard output, as they are. */
 operator write{bytes: array byte};
 
+/* Read the next line of standard input into `line`, without the line feed,
+   or the carriage return and line feed, that ends it, as `load_text_file`
+   reads a file's lines: the last needs neither. What standard output holds
+   is written first, so that a prompt written with `write{text}` shows
+   before the program waits for its answer. Each call reads on from where
+   the last stopped, so it is an update operator. At the end of standard
+   input there is no line, which fails (R0031), as does a line that isn't
+   UTF-8 text (R0013), or standard input that can't be read (R0032). */
+builtin operator read{out line: text};
+
+/* Read the next line of standard input into `line`, as the other `read` of
+   a line does, but rather than stopping the program where it has none, give
+   no line, and its error, an `end_of_input`, a `not_utf8_input` or an
+   `unreadable_input`, in `errors`, which is empty when a line is read. */
+builtin operator read{out line: text, out errors: relation { error: error }};
+
+/* Read the rest of standard input, to its end, into `lines`, in order, each
+   as `read{out line}` reads one: none, if it has ended already. Input that
+   isn't UTF-8 text fails (R0013), and so does standard input that can't be
+   read (R0032). */
+builtin operator read{out lines: array text};
+
+/* Read the rest of standard input into `lines`, as the other `read` of lines
+   does, but rather than stopping the program for input it can't, give no
+   lines, and its error, a `not_utf8_input` or an `unreadable_input`, in
+   `errors`, which is empty when the lines are read. */
+builtin operator read{out lines: array text, out errors: relation { error: error }};
+
+/* Read the rest of standard input, to its end, into `bytes`, whatever they
+   are, in order: none, if it has ended already. Standard input that can't be
+   read fails (R0032). */
+builtin operator read{out bytes: array byte};
+
+/* Read the rest of standard input into `bytes`, as the other `read` of bytes
+   does, but rather than stopping the program for input it can't, give no
+   bytes, and its error, an `unreadable_input`, in `errors`, which is empty
+   when the bytes are read. */
+builtin operator read{out bytes: array byte, out errors: relation { error: error }};
+
 /* Standard output can't be written, for `reason`, the system's words for
    why, as "No space left on device" (R0030). */
 type unwritable_output is error { { reason: text } };
+
+/* Standard input has ended, after `lines` lines, so there is no line to read
+   (R0031). */
+type end_of_input is error { { lines: integer } };
+
+/* Standard input isn't UTF-8 text on its line `line`, counting from 1
+   (R0013). */
+type not_utf8_input is error { { line: integer } };
+
+/* Standard input can't be read, for `reason`, the system's words for why, as
+   "Bad file descriptor" (R0032). */
+type unreadable_input is error { { reason: text } };
 
 implementation
 
@@ -142,4 +193,18 @@ operator write{bytes: array byte} [
 
 operator message{error: unwritable_output}: text [
     "can't write standard output: " || error.reason
+];
+
+operator message{error: end_of_input}: text [
+    var lines := if error.lines = 1 then " line" else " lines";
+    "standard input has ended, "
+        || (if error.lines = 0 then "before any line" else "after " || to_text{from: error.lines} || lines)
+];
+
+operator message{error: not_utf8_input}: text [
+    "line " || to_text{from: error.line} || " of standard input isn't UTF-8 text"
+];
+
+operator message{error: unreadable_input}: text [
+    "can't read standard input: " || error.reason
 ];

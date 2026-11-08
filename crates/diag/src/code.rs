@@ -220,6 +220,8 @@ codes! {
     NotUtf8Argument => "R0028",
     NotUtf8Environment => "R0029",
     UnwritableOutput => "R0030",
+    EndOfInput => "R0031",
+    UnreadableInput => "R0032",
     Internal => "X0000",
 }
 
@@ -274,6 +276,8 @@ impl Code {
                 | Code::NotUtf8Argument
                 | Code::NotUtf8Environment
                 | Code::UnwritableOutput
+                | Code::EndOfInput
+                | Code::UnreadableInput
                 | Code::MalformedCsv
                 | Code::Warned
                 | Code::Internal

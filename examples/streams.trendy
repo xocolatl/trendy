@@ -38,4 +38,11 @@ operator main{} [
     var copied: array byte;
     call load_binary_file{path: file_path{text: "target/rivers_copy.txt.gz"}, out bytes: copied};
     call write{line: "copied: " || to_text{from: copied = gzipped}, to: standard_error};
+    /* The names standard input gives, one a line, each greeted: none, if it gives
+       none. */
+    var names: array text;
+    call read{out lines: names};
+    for name in names loop [
+        call write{line: "Habari, " || name || "!"};
+    ];
 ];

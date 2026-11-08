@@ -217,7 +217,15 @@ then if it was found writing for standard error, fails as `main`'s would, an
 `unwritable_output` (R0030). A pipe whose reader has gone ends the program by
 the system's `SIGPIPE`, which nothing changes. Bytes of an `array byte` are
 written as one run, or, in a hierarchy, one by one, each by its own type's
-descriptor (`take_bytes`).
+descriptor (`take_bytes`). `read` of standard input is six built-ins of the
+unit's interface, a line, lines to the end, or bytes to the end, each with an
+overload with `out errors` (`hir::UpdateBuiltin::ReadLine` and the others,
+`hir::Io::ReadsStream`), lowered as a load is (`FunctionBuilder::read_in`). The
+runtime holds what it has been given and not read (`Input`), from blocks the
+system gives, in a buffer that grows to hold a line, and writes what standard
+output holds before each wait on the system, so that a prompt shows; a line ends
+as `str::lines` ends a file's, and is checked as UTF-8 alone, numbered by the
+lines read before it.
 
 **`trendy_runtime`** is a `no_std` library linked into every executable. It
 links only the C library, from which it reads files (`open`, `read`) and

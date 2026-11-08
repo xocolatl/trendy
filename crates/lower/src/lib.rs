@@ -3246,6 +3246,44 @@ impl<'a> FunctionBuilder<'a> {
         self.scoped = true;
     }
 
+    /// What `call`, of `trendy.streams`' `read`, reads of standard input, by the
+    /// runtime function for `builtin`, given to its `out` parameter, `line`,
+    /// `lines` or `bytes`, which the runtime makes as [`made_by_runtime`] says,
+    /// given its descriptor if it is an array, and the errors, if `call` names
+    /// `out errors`, given to that.
+    fn read_in(&mut self, builtin: hir::UpdateBuiltin, call: &hir::Call, cx: &mut Lowering) {
+        let (function, read) = match builtin {
+            hir::UpdateBuiltin::ReadLine => (lir::RuntimeFn::ReadLine, "line"),
+            hir::UpdateBuiltin::ReadLineWithErrors => (lir::RuntimeFn::ReadLineWithErrors, "line"),
+            hir::UpdateBuiltin::ReadLines => (lir::RuntimeFn::ReadLines, "lines"),
+            hir::UpdateBuiltin::ReadLinesWithErrors => {
+                (lir::RuntimeFn::ReadLinesWithErrors, "lines")
+            }
+            hir::UpdateBuiltin::ReadBytes => (lir::RuntimeFn::ReadBytes, "bytes"),
+            hir::UpdateBuiltin::ReadBytesWithErrors => {
+                (lir::RuntimeFn::ReadBytesWithErrors, "bytes")
+            }
+            _ => unreachable!("only `read` reads standard input"),
+        };
+        let target = &call.updated[read];
+        let ty = self.assigned(target).0.clone();
+        let made = made_by_runtime(&ty);
+        let dst = self.slot(cx.layout(&made));
+        let errors = call.updated.contains_key("errors").then(|| self.errors(cx));
+        let mut args = vec![dst.clone()];
+        args.extend(errors.as_ref().map(|errors| errors.given.clone()));
+        if matches!(made, hir::Type::Array(_)) {
+            args.push(lir::Place::whole(lir::Base::Data(cx.descriptor(&made))));
+        }
+        self.insts.push(lir::Inst::CallRuntime { function, args });
+        self.scoped = true;
+        let value = self.made_of_components(dst, &ty, cx);
+        self.store(target, value, cx);
+        if let Some(errors) = errors {
+            self.store(&call.updated["errors"], errors.value, cx);
+        }
+    }
+
     /// The random bytes `call` asks for, given to its `out` parameter, which
     /// the runtime makes as [`made_by_runtime`] says.
     fn random_bytes(&mut self, call: &hir::Call, cx: &mut Lowering) {
@@ -3768,6 +3806,12 @@ impl<'a> FunctionBuilder<'a> {
             | hir::UpdateBuiltin::AppendText
             | hir::UpdateBuiltin::AppendBytes
             | hir::UpdateBuiltin::AppendLines => self.written_out(builtin, call, cx),
+            hir::UpdateBuiltin::ReadLine
+            | hir::UpdateBuiltin::ReadLineWithErrors
+            | hir::UpdateBuiltin::ReadLines
+            | hir::UpdateBuiltin::ReadLinesWithErrors
+            | hir::UpdateBuiltin::ReadBytes
+            | hir::UpdateBuiltin::ReadBytesWithErrors => self.read_in(builtin, call, cx),
             hir::UpdateBuiltin::SaveTextFile => {
                 let args = vec![
                     self.path_text(call, cx),

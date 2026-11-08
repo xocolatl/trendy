@@ -685,6 +685,21 @@ pub enum UpdateBuiltin {
     /// As [`UpdateBuiltin::AppendText`], of the texts of an array, each followed by
     /// a line feed, all at once.
     AppendLines,
+    /// Read the next line of standard input into its `out` parameter, after
+    /// writing what standard output holds: an `end_of_input` at its end.
+    ReadLine,
+    /// As [`UpdateBuiltin::ReadLine`], but no line gives its error in the `out`
+    /// parameter `errors` rather than stopping the program.
+    ReadLineWithErrors,
+    /// Read the rest of standard input, to its end, as lines, as
+    /// [`UpdateBuiltin::ReadLine`] reads each.
+    ReadLines,
+    /// As [`UpdateBuiltin::ReadLines`], giving its error in `errors`.
+    ReadLinesWithErrors,
+    /// Read the rest of standard input, to its end, as bytes.
+    ReadBytes,
+    /// As [`UpdateBuiltin::ReadBytes`], giving its error in `errors`.
+    ReadBytesWithErrors,
 }
 
 /// What a built-in does that a transaction's statements can't, at any depth of
@@ -694,6 +709,7 @@ pub enum UpdateBuiltin {
 pub enum Io {
     ReadsFile,
     WritesFile,
+    ReadsStream,
     WritesStream,
     ReadsClock,
 }
@@ -726,6 +742,12 @@ impl UpdateBuiltin {
             | UpdateBuiltin::AppendText
             | UpdateBuiltin::AppendBytes
             | UpdateBuiltin::AppendLines => Some(Io::WritesStream),
+            UpdateBuiltin::ReadLine
+            | UpdateBuiltin::ReadLineWithErrors
+            | UpdateBuiltin::ReadLines
+            | UpdateBuiltin::ReadLinesWithErrors
+            | UpdateBuiltin::ReadBytes
+            | UpdateBuiltin::ReadBytesWithErrors => Some(Io::ReadsStream),
             UpdateBuiltin::ReadClock => Some(Io::ReadsClock),
         }
     }
@@ -784,6 +806,12 @@ pub enum LanguageError {
     NotUtf8Environment,
     /// Standard output can't be written (R0030).
     UnwritableOutput,
+    /// Standard input has no line left to read (R0031).
+    EndOfInput,
+    /// Standard input isn't UTF-8 text (R0013).
+    NotUtf8Input,
+    /// Standard input can't be read (R0032).
+    UnreadableInput,
     /// A CSV file's field isn't a value of its attribute's type (R0014).
     UnreadableField,
     /// A value a CSV file's record gives breaks its type's constraint
@@ -854,7 +882,7 @@ pub enum LanguageError {
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 36] = [
+    pub const ALL: [LanguageError; 39] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -891,6 +919,9 @@ impl LanguageError {
         LanguageError::NotUtf8Argument,
         LanguageError::NotUtf8Environment,
         LanguageError::UnwritableOutput,
+        LanguageError::EndOfInput,
+        LanguageError::NotUtf8Input,
+        LanguageError::UnreadableInput,
     ];
 
     /// The code a failure with it is written with, when nothing takes it.
@@ -898,12 +929,14 @@ impl LanguageError {
     pub fn code(self) -> Code {
         match self {
             LanguageError::UnreadableFile => Code::UnreadableFile,
-            LanguageError::NotUtf8 => Code::NotUtf8,
+            LanguageError::NotUtf8 | LanguageError::NotUtf8Input => Code::NotUtf8,
             LanguageError::UnwritableFile => Code::UnwritableFile,
             LanguageError::NotOneLine => Code::NotOneLine,
             LanguageError::NotUtf8Argument => Code::NotUtf8Argument,
             LanguageError::NotUtf8Environment => Code::NotUtf8Environment,
             LanguageError::UnwritableOutput => Code::UnwritableOutput,
+            LanguageError::EndOfInput => Code::EndOfInput,
+            LanguageError::UnreadableInput => Code::UnreadableInput,
             LanguageError::MalformedCsv => Code::MalformedCsv,
             LanguageError::MissingColumn
             | LanguageError::ColumnShared
@@ -950,6 +983,9 @@ impl LanguageError {
             LanguageError::NotUtf8Argument => "not_utf8_argument",
             LanguageError::NotUtf8Environment => "not_utf8_environment",
             LanguageError::UnwritableOutput => "unwritable_output",
+            LanguageError::EndOfInput => "end_of_input",
+            LanguageError::NotUtf8Input => "not_utf8_input",
+            LanguageError::UnreadableInput => "unreadable_input",
             LanguageError::MalformedCsv => "malformed_csv",
             LanguageError::MissingColumn => "missing_column",
             LanguageError::UnreadableField => "unreadable_field",
@@ -1110,7 +1146,9 @@ impl LanguageError {
             LanguageError::TooDeep => &[("bytes", Integer)],
             LanguageError::NotUtf8Argument => &[("position", Integer)],
             LanguageError::NotUtf8Environment => &[("name", Text)],
-            LanguageError::UnwritableOutput => &[("reason", Text)],
+            LanguageError::UnwritableOutput | LanguageError::UnreadableInput => &[("reason", Text)],
+            LanguageError::EndOfInput => &[("lines", Integer)],
+            LanguageError::NotUtf8Input => &[("line", Integer)],
             LanguageError::ColumnShared => {
                 &[("first", Text), ("second", Text), ("column", Integer)]
             }
@@ -1388,6 +1426,16 @@ impl UpdateBuiltin {
                 constant("lines", Type::Array(Box::new(text()))),
             ]
             .into(),
+            UpdateBuiltin::ReadLine => [out("line", text())].into(),
+            UpdateBuiltin::ReadLineWithErrors => with_errors(UpdateBuiltin::ReadLine),
+            UpdateBuiltin::ReadLines => [out("lines", Type::Array(Box::new(text())))].into(),
+            UpdateBuiltin::ReadLinesWithErrors => with_errors(UpdateBuiltin::ReadLines),
+            UpdateBuiltin::ReadBytes => [out(
+                "bytes",
+                Type::Array(Box::new(Type::Defined(library.byte.clone()))),
+            )]
+            .into(),
+            UpdateBuiltin::ReadBytesWithErrors => with_errors(UpdateBuiltin::ReadBytes),
             UpdateBuiltin::PutText => [
                 constant("text", text()),
                 constant("error", Type::Scalar(Scalar::Boolean)),
@@ -1477,7 +1525,7 @@ impl ReadOnlyBuiltin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 37] = [
+    pub const ALL: [Builtin; 43] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -1515,6 +1563,12 @@ impl Builtin {
         Builtin::Update(UpdateBuiltin::AppendText),
         Builtin::Update(UpdateBuiltin::AppendBytes),
         Builtin::Update(UpdateBuiltin::AppendLines),
+        Builtin::Update(UpdateBuiltin::ReadLine),
+        Builtin::Update(UpdateBuiltin::ReadLineWithErrors),
+        Builtin::Update(UpdateBuiltin::ReadLines),
+        Builtin::Update(UpdateBuiltin::ReadLinesWithErrors),
+        Builtin::Update(UpdateBuiltin::ReadBytes),
+        Builtin::Update(UpdateBuiltin::ReadBytesWithErrors),
     ];
 
     #[must_use]
@@ -1541,6 +1595,14 @@ impl Builtin {
             Builtin::Update(
                 UpdateBuiltin::AppendText | UpdateBuiltin::AppendBytes | UpdateBuiltin::AppendLines,
             ) => "append",
+            Builtin::Update(
+                UpdateBuiltin::ReadLine
+                | UpdateBuiltin::ReadLineWithErrors
+                | UpdateBuiltin::ReadLines
+                | UpdateBuiltin::ReadLinesWithErrors
+                | UpdateBuiltin::ReadBytes
+                | UpdateBuiltin::ReadBytesWithErrors,
+            ) => "read",
             Builtin::ReadOnly(builtin) => builtin.name(),
         }
     }
@@ -1617,7 +1679,13 @@ impl Builtin {
                 | UpdateBuiltin::PutBytes
                 | UpdateBuiltin::AppendText
                 | UpdateBuiltin::AppendBytes
-                | UpdateBuiltin::AppendLines,
+                | UpdateBuiltin::AppendLines
+                | UpdateBuiltin::ReadLine
+                | UpdateBuiltin::ReadLineWithErrors
+                | UpdateBuiltin::ReadLines
+                | UpdateBuiltin::ReadLinesWithErrors
+                | UpdateBuiltin::ReadBytes
+                | UpdateBuiltin::ReadBytesWithErrors,
             ) => Vec::new(),
             Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
                 of_kind("ordered", &[Requirement::Order])

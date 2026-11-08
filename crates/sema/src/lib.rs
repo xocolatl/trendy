@@ -10786,6 +10786,40 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
     }
 
     #[test]
+    fn other_languages_reads_of_a_line_say_how_to_read_one() {
+        // Python's, Ruby's and C's, Pascal's, Node's and Kotlin's, Rust's, C's and
+        // Java's, which return the line, or take a prompt, explained.
+        for written in [
+            "input",
+            "gets",
+            "readln",
+            "readLine",
+            "read_line",
+            "getline",
+            "nextLine",
+        ] {
+            let found = errors(&format!(
+                "operator main{{}} [\n    var name := {written}{{\"Name? \"}};\n];\n"
+            ));
+            assert_eq!(found.len(), 1, "{written}: {found:#?}");
+            assert_eq!(found[0].code, Code::UnknownName, "{written}");
+            assert!(
+                found[0]
+                    .help
+                    .iter()
+                    .any(|help| help.contains("call read{out line: name};")),
+                "{written}: {found:#?}"
+            );
+        }
+        // A transaction reads no stream.
+        let found = errors(
+            "uses { trendy.streams };\n\noperator main{} [\n    var name: text;\n    transaction [ call read{out line: name}; ];\n];\n",
+        );
+        let said: Vec<&str> = found.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(said, ["`read` reads a stream, in a transaction"]);
+    }
+
+    #[test]
     fn other_languages_names_for_printing_are_fixed() {
         // Python's, Java's and Rust's, Ruby's and C's, Pascal's and the shell's,
         // in any case, fixed to `write` of a line, from `trendy.streams`, which

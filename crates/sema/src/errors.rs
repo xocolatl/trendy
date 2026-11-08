@@ -2712,6 +2712,19 @@ const ABSENT: &[(&[&str], &str, &str)] = &[
         "use `trendy.process`, and assign `environment`: `insert`, `update` and `delete` change its variables, which changes nothing outside the program",
     ),
     (
+        &[
+            "input",
+            "gets",
+            "readln",
+            "readline",
+            "read_line",
+            "getline",
+            "nextline",
+        ],
+        "standard input is read a line at a time by `read{out line}`, of `trendy.streams`, an update operator, which `call` invokes and gives the line through its `out` parameter, as two reads give two lines; a prompt is written before it with `write{text: …}`, which shows before the program waits",
+        "use `trendy.streams`, and write `call write{text: \"Name? \"}; var name: text; call read{out line: name};`, or read the rest at once with `read{out lines}`",
+    ),
+    (
         CLOCK_NAMES,
         "the clock isn't a function of anything, so no read-only operator reads it: `now`, of `trendy.time`, is an update operator, which gives what it reads through an `out` parameter (RM Prescription 3)",
         "`var at: timestamp; call now{out at};`, whose `.date` is today, and in a transaction, whose statements read nothing, `call transaction_start{out at};`",
@@ -5296,6 +5309,11 @@ pub(crate) fn io_in_transaction(
             "writes a file",
             "writing a file",
             "keep what to write in a variable the transaction assigns, which its rollback undoes too, and write it after the transaction",
+        ),
+        hir::Io::ReadsStream => (
+            "reads a stream",
+            "reading a stream",
+            "read it before the transaction, and pass what it gives to the statements in it",
         ),
         hir::Io::WritesStream => (
             "writes to a stream",

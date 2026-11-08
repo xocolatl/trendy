@@ -91,7 +91,7 @@ fn build_and_run_in(
     arguments: &[&std::ffi::OsStr],
     environment: &[(&str, Option<&std::ffi::OsStr>)],
 ) -> (i32, String) {
-    let ran = run_program(input, output, dir, arguments, environment);
+    let ran = run_program(input, output, dir, arguments, environment, b"");
     assert_eq!(ran.stdout, "", "the program wrote to standard output");
     (ran.code, ran.stderr)
 }
@@ -104,33 +104,35 @@ struct Ran {
     stderr: String,
 }
 
-/// Compile `name`'s example and run it, as [`run_example`] does, keeping what it
-/// writes to standard output too.
-fn ran_example(name: &str) -> Ran {
+/// Compile `name`'s example and run it, as [`run_example`] does, given `given` on
+/// standard input, keeping what it writes to standard output too.
+fn ran_example(name: &str, given: &[u8]) -> Ran {
     let root = workspace_root();
     let run = RUNS.fetch_add(1, Ordering::Relaxed);
     let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{run}"));
     let input = root.join("examples").join(format!("{name}.trendy"));
-    run_program(&input, &output, &root, &[], &[])
+    run_program(&input, &output, &root, &[], &[], given)
 }
 
-/// Compile `source` and run it, as [`run_source`] does, keeping what it writes to
-/// standard output too.
-fn ran_source(name: &str, source: &str) -> Ran {
+/// Compile `source` and run it, as [`run_source`] does, given `given` on standard
+/// input, keeping what it writes to standard output too.
+fn ran_source(name: &str, source: &str, given: &[u8]) -> Ran {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let input = dir.join(format!("{name}.trendy"));
     std::fs::write(&input, source).unwrap();
-    run_program(&input, &dir.join(name), &workspace_root(), &[], &[])
+    run_program(&input, &dir.join(name), &workspace_root(), &[], &[], given)
 }
 
 /// Compile `input` to `output`, and run it in `dir`, as [`build_and_run_in`]
-/// does, keeping what it writes to standard output.
+/// does, given `given` on standard input, and none if it is empty, keeping what it
+/// writes to standard output.
 fn run_program(
     input: &Path,
     output: &Path,
     dir: &Path,
     arguments: &[&std::ffi::OsStr],
     environment: &[(&str, Option<&std::ffi::OsStr>)],
+    given: &[u8],
 ) -> Ran {
     let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
         .arg(input)
@@ -157,7 +159,19 @@ fn run_program(
             None => command.env_remove(name),
         };
     }
-    let run = command.output().unwrap();
+    let run = if given.is_empty() {
+        command.output().unwrap()
+    } else {
+        let mut child = command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Given whole, then ended, as a pipe from a file would be.
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), given).unwrap();
+        child.wait_with_output().unwrap()
+    };
     let path = input.to_str().unwrap();
     let file = input.file_name().unwrap().to_str().unwrap();
     let stderr = String::from_utf8_lossy(&run.stderr).replace(path, file);
@@ -3192,7 +3206,7 @@ operator main{{}} [
 /// runs on standard error, with a file it writes the end of.
 #[test]
 fn streams() {
-    let ran = ran_example("streams");
+    let ran = ran_example("streams", b"Amani\nMei Ling\n");
     assert_eq!(ran.code, 0, "{}", ran.stderr);
     assert_eq!(
         ran.stdout.lines().collect::<Vec<_>>(),
@@ -3202,6 +3216,8 @@ fn streams() {
             "Māori: Kia ora",
             "Quechua: Allillanchu",
             "Swahili: Habari",
+            "Habari, Amani!",
+            "Habari, Mei Ling!",
         ]
     );
     assert_eq!(
@@ -3349,7 +3365,7 @@ operator main{{}} [
 ];
 "#
     );
-    let ran = ran_source("appended", &source);
+    let ran = ran_source("appended", &source, b"");
     assert_eq!(ran.code, 0, "{}", ran.stderr);
     assert_eq!(ran.stdout, "Hi\nsaid\n");
     let written = [
@@ -3359,7 +3375,7 @@ operator main{{}} [
     ]
     .concat();
     assert_eq!(std::fs::read(&log).unwrap(), written);
-    let ran = ran_source("appended_again", &source);
+    let ran = ran_source("appended_again", &source, b"");
     assert_eq!(ran.code, 0, "{}", ran.stderr);
     assert_eq!(
         std::fs::read(&log).unwrap(),
@@ -3372,12 +3388,123 @@ operator main{{}} [
             "uses {{ trendy.streams, trendy.files }};\n\noperator main{{}} [\n    call write{{line: \"x\", to: file{{path: file_path{{text: {:?}}}}}}};\n];\n",
             dir.join("missing").join("log.txt")
         ),
+        b"",
     );
     assert_eq!(ran.code, 1);
     assert!(
         ran.stderr.starts_with("error[R0026]: can't write "),
         "{}",
         ran.stderr
+    );
+}
+
+#[test]
+fn standard_input_is_read_a_line_at_a_time() {
+    // The next line, without its line feed, or its carriage return and line feed,
+    // the last needing neither, then the rest, as lines or bytes; at the end there
+    // is no line, which stops the program, unless the call names `out errors`.
+    let source = r"uses { trendy.streams };
+
+operator main{} [
+    var name: text;
+    call read{out line: name};
+    call write{line: name};
+    var errors: relation { error: error };
+    call read{out line: name, out errors};
+    call write{line: name};
+    call write{line: to_text{from: errors}};
+    var rest: array text;
+    call read{out lines: rest};
+    call write{line: to_text{from: rest}};
+    var none: array byte;
+    call read{out bytes: none};
+    call write{line: to_text{from: none}};
+    call read{out line: name, out errors};
+    call write{line: to_text{from: errors}};
+    call read{out line: name};
+];
+";
+    let ran = ran_source("read_a_line", source, b"Amani\r\nMei Ling\nNile\nlast");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        ran.stdout.lines().collect::<Vec<_>>(),
+        [
+            "Amani",
+            "Mei Ling",
+            "relation { error: error } {}",
+            r#"array ["Nile", "last"]"#,
+            r#"x"""#,
+            "relation { error: error } { { error: end_of_input{lines: 4} } }",
+        ]
+    );
+    assert!(
+        ran.stderr
+            .starts_with("error[R0031]: standard input has ended, after 4 lines\n"),
+        "{}",
+        ran.stderr
+    );
+    // With nothing given, there is no line at all.
+    let ran = ran_source("read_nothing", source, b"");
+    assert_eq!((ran.code, ran.stdout.as_str()), (1, ""));
+    assert!(
+        ran.stderr
+            .starts_with("error[R0031]: standard input has ended, before any line\n"),
+        "{}",
+        ran.stderr
+    );
+}
+
+#[test]
+fn standard_input_that_isnt_text_is_read_as_bytes() {
+    // A line that isn't UTF-8 text is an error, numbered by the lines before it, and
+    // bytes are read whatever they are, a byte subtype's among them; lines that
+    // aren't text stop the program (R0013), and standard input that is closed
+    // (R0032).
+    let ran = ran_source(
+        "read_bytes",
+        r"uses { trendy.streams };
+
+type ascii is byte { constraint value < 128 };
+
+operator main{} [
+    var line: text;
+    var errors: relation { error: error };
+    call read{out line, out errors};
+    call write{line};
+    call read{out line, out errors};
+    call write{line: to_text{from: errors}};
+    var rest: array byte;
+    call read{out bytes: rest};
+    call write{line: to_text{from: rest}};
+    call write{line: to_text{from: rest[1] is ascii}};
+];
+",
+        b"ok\n\xff\xfe\nA\xff",
+    );
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stdout.lines().collect::<Vec<_>>(),
+        [
+            "ok",
+            "relation { error: error } { { error: not_utf8_input{line: 2} } }",
+            r#"x"41ff""#,
+            "true",
+        ]
+    );
+    let source = "uses { trendy.streams };\n\noperator main{} [\n    var lines: array text;\n    call read{out lines};\n    call write{line: to_text{from: length{a: lines}}};\n];\n";
+    let ran = ran_source("read_not_text", source, b"a\n\xff\n");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert!(
+        ran.stderr
+            .starts_with("error[R0013]: line 2 of standard input isn't UTF-8 text\n"),
+        "{}",
+        ran.stderr
+    );
+    let (code, stdout, stderr) = shell(r#"exec "$0" <&-"#, &compiled("read_closed", source));
+    assert_eq!((code, stdout.as_str()), (1, ""));
+    assert!(
+        stderr.starts_with("error[R0032]: can't read standard input: Bad file descriptor\n"),
+        "{stderr}"
     );
 }
 

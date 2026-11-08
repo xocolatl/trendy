@@ -7759,6 +7759,249 @@ unsafe fn take_bytes<E>(
     }
 }
 
+/// Store at `dst` the next line of standard input, as `Input::next_line` reads it, a
+/// text in memory the statement owns. Fails at the end of standard input (R0031), for
+/// a line that isn't UTF-8 text (R0013), for standard input that can't be read
+/// (R0032), or if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `dst` must have room for a text. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_read_line(dst: *mut Text) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let line = read_line(None)?;
+        dst.write_unaligned(line);
+        Ok(())
+    })
+}
+
+/// As [`trendy_rt_read_line`], but rather than failing where there is no line, store
+/// an empty text at `dst`, and at `errors` its one error, an `end_of_input`, a
+/// `not_utf8_input` or an `unreadable_input`, and none if a line is read.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_read_line`], and `errors` must point to a valid [`Errors`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_read_line_with_errors(
+    dst: *mut Text,
+    errors: *mut Errors,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let mut found = Found::new((*errors).relation);
+        let line = read_line(Some(&mut found))?;
+        let found = found.finish()?;
+        dst.write_unaligned(line);
+        (&raw mut (*errors).found).write_unaligned(found);
+        Ok(())
+    })
+}
+
+/// Store at `dst` the array of the rest of standard input's lines, to its end, each
+/// as [`trendy_rt_read_line`] reads one, of the type `desc` describes, `array text`,
+/// in memory the statement owns. Fails for input that isn't UTF-8 text (R0013), or
+/// standard input that can't be read (R0032), or if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `dst` must have room for an array, and `desc` be its. The statement must have
+/// begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_read_lines(dst: *mut Text, desc: *const TypeDesc) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let lines = read_lines(&*desc, None)?;
+        dst.write_unaligned(lines);
+        Ok(())
+    })
+}
+
+/// As [`trendy_rt_read_lines`], but rather than failing for input it can't read,
+/// store no lines at `dst`, and at `errors` its one error, a `not_utf8_input` or an
+/// `unreadable_input`, and none if the lines are read.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_read_lines`], and `errors` must point to a valid [`Errors`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_read_lines_with_errors(
+    dst: *mut Text,
+    errors: *mut Errors,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let mut found = Found::new((*errors).relation);
+        let lines = read_lines(&*desc, Some(&mut found))?;
+        let found = found.finish()?;
+        dst.write_unaligned(lines);
+        (&raw mut (*errors).found).write_unaligned(found);
+        Ok(())
+    })
+}
+
+/// Store at `dst` the array of the rest of standard input's bytes, to its end, of the
+/// type `desc` describes, as `byte_array` makes it, in memory the statement owns.
+/// Fails for standard input that can't be read (R0032), or if the memory can't be
+/// allocated.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_read_lines`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_read_bytes(dst: *mut Text, desc: *const TypeDesc) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let bytes = read_bytes(&*desc, None)?;
+        dst.write_unaligned(bytes);
+        Ok(())
+    })
+}
+
+/// As [`trendy_rt_read_bytes`], but rather than failing for standard input that can't
+/// be read, store no bytes at `dst`, and at `errors` its one error, an
+/// `unreadable_input`, and none if the bytes are read.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_read_bytes`], and `errors` must point to a valid [`Errors`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_read_bytes_with_errors(
+    dst: *mut Text,
+    errors: *mut Errors,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let mut found = Found::new((*errors).relation);
+        let bytes = read_bytes(&*desc, Some(&mut found))?;
+        let found = found.finish()?;
+        dst.write_unaligned(bytes);
+        (&raw mut (*errors).found).write_unaligned(found);
+        Ok(())
+    })
+}
+
+/// What [`trendy_rt_read_line`] and [`trendy_rt_read_line_with_errors`] do: with
+/// `found`, why there is no line goes there, and the line is empty; without it, that
+/// fails.
+///
+/// # Safety
+///
+/// `found`'s descriptor must be valid. The statement must have begun a scope.
+#[cfg(not(test))]
+unsafe fn read_line(found: Option<&mut Found>) -> Fallible<Text> {
+    let input = standard_input();
+    let (start, end) = match input.next_line()? {
+        Ok(Some(line)) => line,
+        Ok(None) => {
+            let lines = input.lines;
+            // SAFETY: guaranteed by the caller; an `end_of_input`'s one component.
+            unsafe { give(found, END_OF_INPUT, &[("lines", (&raw const lines).cast())])? };
+            return scope_text("");
+        }
+        // SAFETY: guaranteed by the caller.
+        Err(reason) => {
+            return unsafe { unreadable_input(reason, found) }.and_then(|()| scope_text(""));
+        }
+    };
+    input.lines += 1;
+    // SAFETY: the line is of what the input holds.
+    let bytes = unsafe { core::slice::from_raw_parts(input.bytes.add(start), end - start) };
+    if let Ok(line) = core::str::from_utf8(bytes) {
+        return scope_text(line);
+    }
+    let line = input.lines;
+    // SAFETY: guaranteed by the caller; a `not_utf8_input`'s one component.
+    unsafe { give(found, NOT_UTF8_INPUT, &[("line", (&raw const line).cast())])? };
+    scope_text("")
+}
+
+/// What [`trendy_rt_read_lines`] and [`trendy_rt_read_lines_with_errors`] do, as
+/// [`read_line`] does for one.
+///
+/// # Safety
+///
+/// As for [`read_line`], with `desc` describing an `array text`.
+#[cfg(not(test))]
+unsafe fn read_lines(desc: &TypeDesc, found: Option<&mut Found>) -> Fallible<Text> {
+    let input = standard_input();
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (start, end) = match input.rest()? {
+            Ok(rest) => rest,
+            Err(reason) => {
+                unreadable_input(reason, found)?;
+                return lines_of("", desc);
+            }
+        };
+        let bytes = core::slice::from_raw_parts(input.bytes.add(start), end - start);
+        match try_file_text(bytes) {
+            Ok(text) => {
+                let lines = lines_of(text, desc)?;
+                input.lines += i64::try_from(lines.len).unwrap_or(i64::MAX);
+                Ok(lines)
+            }
+            Err(line) => {
+                let line = input.lines + i64::try_from(line).unwrap_or(i64::MAX);
+                give(found, NOT_UTF8_INPUT, &[("line", (&raw const line).cast())])?;
+                lines_of("", desc)
+            }
+        }
+    }
+}
+
+/// What [`trendy_rt_read_bytes`] and [`trendy_rt_read_bytes_with_errors`] do, as
+/// [`read_line`] does for a line.
+///
+/// # Safety
+///
+/// As for [`read_line`], with `desc` describing an `array byte`, or its components'.
+#[cfg(not(test))]
+unsafe fn read_bytes(desc: &TypeDesc, found: Option<&mut Found>) -> Fallible<Text> {
+    let input = standard_input();
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (start, end) = match input.rest()? {
+            Ok(rest) => rest,
+            Err(reason) => {
+                unreadable_input(reason, found)?;
+                return byte_array(core::iter::empty(), desc);
+            }
+        };
+        let bytes = core::slice::from_raw_parts(input.bytes.add(start), end - start);
+        byte_array(bytes.iter().copied(), desc)
+    }
+}
+
+/// Give `found` that standard input can't be read, for `reason`, an
+/// `unreadable_input` (R0032), which, with no `found`, it fails with ([`give`]).
+///
+/// # Safety
+///
+/// `found`'s descriptor must be valid. The statement must have begun a scope.
+#[cfg(not(test))]
+unsafe fn unreadable_input(reason: &str, found: Option<&mut Found>) -> Fallible {
+    let reason = scope_text(reason)?;
+    // SAFETY: guaranteed by the caller; an `unreadable_input`'s one component.
+    unsafe {
+        give(
+            found,
+            UNREADABLE_INPUT,
+            &[("reason", (&raw const reason).cast())],
+        )
+    }
+}
+
 /// Write what standard output holds, as the program ends. Fails if that fails,
 /// or a write before it did whose failure no write has failed with yet (R0030).
 ///
@@ -8989,7 +9232,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 36] = [
+pub const KINDS: [&str; 39] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -9026,6 +9269,9 @@ pub const KINDS: [&str; 36] = [
     "not_utf8_argument",
     "not_utf8_environment",
     "unwritable_output",
+    "end_of_input",
+    "not_utf8_input",
+    "unreadable_input",
 ];
 
 /// The place in [`KINDS`] of the kind named `name`, found when the runtime
@@ -9071,6 +9317,12 @@ pub const NOT_UTF8_ARGUMENT: usize = place("not_utf8_argument");
 pub const NOT_UTF8_ENVIRONMENT: usize = place("not_utf8_environment");
 /// `unwritable_output`'s, as [`UNREADABLE_FILE`] is.
 pub const UNWRITABLE_OUTPUT: usize = place("unwritable_output");
+/// `end_of_input`'s, as [`UNREADABLE_FILE`] is.
+pub const END_OF_INPUT: usize = place("end_of_input");
+/// `not_utf8_input`'s, as [`UNREADABLE_FILE`] is.
+pub const NOT_UTF8_INPUT: usize = place("not_utf8_input");
+/// `unreadable_input`'s, as [`UNREADABLE_FILE`] is.
+pub const UNREADABLE_INPUT: usize = place("unreadable_input");
 /// `malformed_csv`'s, as [`UNREADABLE_FILE`] is.
 pub const MALFORMED_CSV: usize = place("malformed_csv");
 /// `missing_column`'s, as [`UNREADABLE_FILE`] is.
@@ -11312,6 +11564,157 @@ unsafe fn read_slice(value: *const u8) -> (*const u8, usize) {
 #[cfg(not(test))]
 trait Sink {
     fn hold(&mut self, bytes: &[u8]);
+}
+
+/// How many bytes standard input's buffer holds at first, which grows to hold a line.
+#[cfg(not(test))]
+const INPUT_BYTES: usize = 16 * 1024;
+
+/// What the program has been given on standard input, file descriptor 0, that it
+/// hasn't read yet: what `read` takes lines and bytes from, read from the system in
+/// blocks, as many as a line needs.
+#[cfg(not(test))]
+struct Input {
+    /// From `malloc`, with room for `capacity` bytes, or null before the first read.
+    bytes: *mut u8,
+    capacity: usize,
+    /// What it holds that hasn't been read: from `start` to `end`.
+    start: usize,
+    end: usize,
+    /// Whether the system has said standard input has ended.
+    ended: bool,
+    /// How many lines have been read.
+    lines: i64,
+}
+
+#[cfg(not(test))]
+struct SharedInput(core::cell::UnsafeCell<Input>);
+
+// SAFETY: the program runs on one thread.
+#[cfg(not(test))]
+unsafe impl Sync for SharedInput {}
+
+#[cfg(not(test))]
+static INPUT: SharedInput = SharedInput(core::cell::UnsafeCell::new(Input {
+    bytes: core::ptr::null_mut(),
+    capacity: 0,
+    start: 0,
+    end: 0,
+    ended: false,
+    lines: 0,
+}));
+
+/// Standard input, which the program runs on one thread to read.
+#[cfg(not(test))]
+fn standard_input() -> &'static mut Input {
+    // SAFETY: the program runs on one thread, and each runtime function that reads
+    // standard input has it alone while it does.
+    unsafe { &mut *INPUT.0.get() }
+}
+
+#[cfg(not(test))]
+impl Input {
+    /// Read more of standard input after what it holds, after writing what standard
+    /// output holds, so that a prompt shows before the program waits for its answer:
+    /// whether there was more, or why the system can't give it. Fails if there is no
+    /// memory for it.
+    fn more(&mut self) -> Fallible<Result<bool, &'static str>> {
+        if self.ended {
+            return Ok(Ok(false));
+        }
+        // SAFETY: the program runs on one thread, and nothing else has the output
+        // while this does.
+        unsafe { (*OUTPUT.0.get()).flush() };
+        // SAFETY: what it holds is `start..end` of `capacity` bytes, moved to the
+        // start, and the buffer grown, if it is full, before `read` writes after it.
+        unsafe {
+            if self.start > 0 {
+                core::ptr::copy(
+                    self.bytes.add(self.start),
+                    self.bytes,
+                    self.end - self.start,
+                );
+                self.end -= self.start;
+                self.start = 0;
+            }
+            if self.end == self.capacity {
+                let Some(grown) = self.capacity.checked_mul(2).map(|c| c.max(INPUT_BYTES)) else {
+                    return Err(out_of_memory());
+                };
+                let bytes = realloc(self.bytes.cast(), grown).cast::<u8>();
+                if bytes.is_null() {
+                    return Err(out_of_memory());
+                }
+                (self.bytes, self.capacity) = (bytes, grown);
+            }
+            let n = read(0, self.bytes.add(self.end), self.capacity - self.end);
+            match usize::try_from(n) {
+                Err(_) => Ok(Err(reason())),
+                Ok(0) => {
+                    self.ended = true;
+                    Ok(Ok(false))
+                }
+                Ok(n) => {
+                    self.end += n;
+                    Ok(Ok(true))
+                }
+            }
+        }
+    }
+
+    /// The next line, which it has then read, from where it starts in what it holds
+    /// to where it ends, before the line feed, or the carriage return and line feed,
+    /// that ends it, as `str::lines` splits a file's: the last needs neither. `None`
+    /// at the end of standard input, or why the system can't give it. Fails if there
+    /// is no memory for it.
+    fn next_line(&mut self) -> Fallible<Result<Option<(usize, usize)>, &'static str>> {
+        // How much after the start has no line feed, as the start can move.
+        let mut searched = 0;
+        loop {
+            // SAFETY: what it holds is `start..end`.
+            let held = unsafe {
+                core::slice::from_raw_parts(self.bytes.add(self.start), self.end - self.start)
+            };
+            if let Some(i) = held[searched..].iter().position(|&b| b == b'\n') {
+                let feed = searched + i;
+                let line_end = if feed > 0 && held[feed - 1] == b'\r' {
+                    feed - 1
+                } else {
+                    feed
+                };
+                let line = (self.start, self.start + line_end);
+                self.start += feed + 1;
+                return Ok(Ok(Some(line)));
+            }
+            searched = held.len();
+            match self.more()? {
+                Ok(true) => {}
+                Ok(false) if self.start == self.end => return Ok(Ok(None)),
+                Ok(false) => {
+                    let line = (self.start, self.end);
+                    self.start = self.end;
+                    return Ok(Ok(Some(line)));
+                }
+                Err(reason) => return Ok(Err(reason)),
+            }
+        }
+    }
+
+    /// The rest of standard input, to its end, from where it starts in what it holds
+    /// to where it ends, which it has then read, or why the system can't give it.
+    /// Fails if there is no memory for it.
+    fn rest(&mut self) -> Fallible<Result<(usize, usize), &'static str>> {
+        loop {
+            match self.more()? {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(reason) => return Ok(Err(reason)),
+            }
+        }
+        let rest = (self.start, self.end);
+        self.start = self.end;
+        Ok(Ok(rest))
+    }
 }
 
 /// How many bytes standard output holds before it writes them.

@@ -549,6 +549,28 @@ runtime_functions! {
     /// `trendy_rt_append_lines(path, lines)`: as [`RuntimeFn::AppendText`], of each
     /// text of an array, followed by a line feed, all at once.
     AppendLines => "trendy_rt_append_lines", true;
+    /// `trendy_rt_read_line(dst)`: store at `dst` the next line of standard input, a
+    /// text, in memory the statement owns, after writing what standard output holds.
+    /// It fails at the end of standard input, for a line that isn't UTF-8 text, for
+    /// standard input that can't be read, or if the memory can't be allocated.
+    ReadLine => "trendy_rt_read_line", true;
+    /// `trendy_rt_read_line_with_errors(dst, errors)`: as [`RuntimeFn::ReadLine`],
+    /// but where there is no line, store no text at `dst`, and its error at
+    /// `errors`, as for [`RuntimeFn::LoadTextFileWithErrors`].
+    ReadLineWithErrors => "trendy_rt_read_line_with_errors", true;
+    /// `trendy_rt_read_lines(dst, descriptor)`: store at `dst` the rest of standard
+    /// input's lines, an array of the type the descriptor describes, `array text`.
+    ReadLines => "trendy_rt_read_lines", true;
+    /// `trendy_rt_read_lines_with_errors(dst, errors, descriptor)`: as
+    /// [`RuntimeFn::ReadLines`], giving its error at `errors`.
+    ReadLinesWithErrors => "trendy_rt_read_lines_with_errors", true;
+    /// `trendy_rt_read_bytes(dst, descriptor)`: store at `dst` the rest of standard
+    /// input's bytes, an array of the type the descriptor describes, as for
+    /// [`RuntimeFn::RandomBytes`].
+    ReadBytes => "trendy_rt_read_bytes", true;
+    /// `trendy_rt_read_bytes_with_errors(dst, errors, descriptor)`: as
+    /// [`RuntimeFn::ReadBytes`], giving its error at `errors`.
+    ReadBytesWithErrors => "trendy_rt_read_bytes_with_errors", true;
     /// `trendy_rt_output_ends()`: write what standard output holds, as the program
     /// ends. It fails if that, or a write before it whose failure was found only as
     /// it was written, fails.
@@ -1083,6 +1105,12 @@ impl RuntimeFn {
                 | RuntimeFn::LoadBinaryFileWithErrors
                 | RuntimeFn::LoadCsv
                 | RuntimeFn::LoadCsvWithErrors
+                | RuntimeFn::ReadLine
+                | RuntimeFn::ReadLineWithErrors
+                | RuntimeFn::ReadLines
+                | RuntimeFn::ReadLinesWithErrors
+                | RuntimeFn::ReadBytes
+                | RuntimeFn::ReadBytesWithErrors
                 | RuntimeFn::Sum
                 | RuntimeFn::Product
                 | RuntimeFn::TcloseOf
