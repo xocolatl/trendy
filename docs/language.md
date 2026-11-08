@@ -5830,7 +5830,10 @@ operator main{} [
   are fixed to each other (A0004).
 - **Written in lowercase,** whichever case a literal's digits are in, so a value is
   written as `x'7f'` and an array of them `x"deadbeef"`, as `to_text` writes them too.
-  The empty one is `x""`.
+  The empty one is `x""`. A program's subtype of `byte`, as `type ascii is byte {
+  constraint value < 128 };`, changes nothing of this: an `array byte` is written
+  `x"61ff"` whichever type each element is most specifically of. An `array ascii` is
+  of another type, and written as one, `array [x'61']`.
 
 ### Comparisons
 

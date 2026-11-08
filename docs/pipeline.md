@@ -2770,7 +2770,9 @@ sema selects one for a literal (`Checker::byte_literal`, `bytes_literal`), and
 writes `and`, `or`, `xor` and `not` of bytes as those of their numbers
 (`Checker::bytes_bits`, `not_byte`), so that nothing here knows of them. The
 runtime and `hir::Value` write one as its literal, knowing it by its name
-(`hir::Library::is_byte`).
+(`hir::Library::is_byte`), and an `array byte` as one literal of them, by the
+array's type, whatever its elements' most specific types: in a hierarchy, the
+runtime reads each one's number by its own type's descriptor.
 
 A value's components are stored in as few bytes as its type allows
 (`Families::stored`): an integer component that the type's constraints

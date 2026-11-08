@@ -5492,12 +5492,14 @@ pub struct ArrayValue {
 }
 
 impl ArrayValue {
-    /// Its bytes, if it is an `array byte` out of a hierarchy, which is written
-    /// as bytes, as the runtime writes one.
+    /// Its bytes, if it is an `array byte`, which is written as bytes, as the
+    /// runtime writes one: whatever its elements' most specific types, and so
+    /// whether or not a subtype of `byte` puts them in a hierarchy, each is a
+    /// byte.
     #[must_use]
     pub fn bytes(&self) -> Option<Vec<u8>> {
-        let is_bytes = self.element.root().is_none()
-            && matches!(&self.element, Type::Defined(element) if Library::is_byte(&element.name));
+        let is_bytes =
+            matches!(&self.element, Type::Defined(element) if Library::is_byte(&element.name));
         if !is_bytes {
             return None;
         }

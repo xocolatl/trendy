@@ -10583,12 +10583,19 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
             KIND_ARRAY => {
                 let (elements, count) = read_slice(value);
                 let element = desc.element();
-                // Bytes, of an `array byte` out of a hierarchy, as a literal
-                // writes them.
-                if element.kind == KIND_DEFINED && is_byte(type_name(element)) {
+                // Bytes, of an `array byte`, as a literal writes them, whatever
+                // their most specific types: in a hierarchy, by each one's own.
+                if matches!(element.kind, KIND_DEFINED | KIND_UNION) && is_byte(type_name(element))
+                {
                     out.write_str("x\"")?;
                     for i in 0..count {
-                        let byte = byte_number(elements.add(i * element.size), element);
+                        let at = elements.add(i * element.size);
+                        let (own, components) = if element.kind == KIND_UNION {
+                            own_type(at, element)
+                        } else {
+                            (element, at)
+                        };
+                        let byte = byte_number(components, own);
                         write!(out, "{:02x}", byte.ok_or(fmt::Error)?)?;
                     }
                     return out.write_char('"');

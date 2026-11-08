@@ -11750,8 +11750,9 @@ x"01c8"
 }
 
 /// A program's own subtype of `byte` puts it in a hierarchy, which changes how its
-/// values are stored but not what they are, and leaves another unit's `uuid` as it is,
-/// and the bytes the runtime makes, read or random, are each of its most specific type.
+/// values are stored but not what they are, nor how they are written, an `array byte`
+/// as bytes; it leaves another unit's `uuid` as it is, and the bytes the runtime makes,
+/// read or random, are each of its most specific type.
 #[test]
 fn bytes_of_a_subtype_when_the_program_runs() {
     let (code, stderr) = run_source(
@@ -11786,6 +11787,8 @@ operator main{} [
     call debug_value{v: read[1] is ascii};
     call debug_value{v: read[2] is ascii};
     call debug_value{v: array [read[1], read[2]] = x"1f8b"};
+    call debug_value{v: to_text{from: array [read[1], read[2]]}};
+    call debug_value{v: array [treat read[1] as ascii]};
     var random: uuid_v4;
     call generate{out v4: random};
     call debug_value{v: to_characters{from: random.text}[15]};
@@ -11801,8 +11804,8 @@ operator main{} [
             "x'9e'",
             "false",
             "true",
-            "array [x'61', x'c5']",
-            "\"array [x'61', x'c5']\"",
+            "x\"61c5\"",
+            "\"x\\\"61c5\\\"\"",
             "true",
             "relation { a: byte } { { a: x'61' }, { a: x'ff' } }",
             "\"00112233-4455-6677-8899-aabbccddeeff\"",
@@ -11810,6 +11813,8 @@ operator main{} [
             "true",
             "false",
             "true",
+            "\"x\\\"1f8b\\\"\"",
+            "array [x'1f']",
             "'4'",
         ]
     );

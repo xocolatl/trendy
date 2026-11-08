@@ -4335,12 +4335,17 @@ operator main{} [
             "relation { b: byte } { { b: x'01' }, { b: x'ff' } }"
         );
         assert_eq!(vars[1].init.to_string(), "true");
-        // Written as a byte, but an array of a subtype's is not bytes.
+        // Written as a byte, and an array of them as bytes, whichever each is
+        // of, as without the subtype; an array of the subtype's is of another
+        // type, written as one.
         let vars = variables(
-            "type ascii is byte { constraint value < 128 };\nvar a := to_text{from: x'61'};\nvar b := to_text{from: x\"61\"};",
+            "type ascii is byte { constraint value < 128 };\nvar a := to_text{from: x'61'};\nvar b := to_text{from: x\"61ff\"};\nvar c := to_text{from: array [treat x'61' as ascii]};",
         );
         let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
-        assert_eq!(values, [r#""x'61'""#, r#""array [x'61']""#]);
+        assert_eq!(
+            values,
+            [r#""x'61'""#, r#""x\"61ff\"""#, r#""array [x'61']""#]
+        );
     }
 
     #[test]
