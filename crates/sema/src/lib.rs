@@ -10721,6 +10721,61 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
     }
 
     #[test]
+    fn other_languages_names_for_printing_are_fixed() {
+        // Python's, Java's and Rust's, Ruby's and C's, Pascal's and the shell's,
+        // in any case, fixed to `write` of a line, from `trendy.streams`, which
+        // the unit then uses.
+        for written in ["print", "println", "PrintLn", "puts", "writeln", "echo"] {
+            let source = format!("operator main{{}} [\n    call {written}{{\"Habari\"}};\n];\n");
+            let fixed = fix(&source);
+            assert_eq!(
+                fixed,
+                "uses { trendy.streams };\n\noperator main{} [\n    call write{line: \"Habari\"};\n];\n",
+                "{written}"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
+        // Rust's to standard error, which the fix names too.
+        for (written, param) in [("eprintln", "line"), ("eprint", "text")] {
+            let source = format!("operator main{{}} [\n    call {written}{{\"oops\"}};\n];\n");
+            let fixed = fix(&source);
+            assert_eq!(
+                fixed,
+                format!(
+                    "uses {{ trendy.streams }};\n\noperator main{{}} [\n    call write{{{param}: \"oops\", to: standard_error}};\n];\n"
+                ),
+                "{written}"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
+    }
+
+    #[test]
+    fn a_write_is_to_a_stream_outside_the_program() {
+        // A transaction writes to none, whichever, as a file is one too.
+        let found = errors(
+            "uses { trendy.streams };\n\noperator main{} [\n    transaction [ call write{line: \"Habari\"}; ];\n    transaction [ call write{line: \"x\", to: file{path: \"log.txt\"}}; ];\n];\n",
+        );
+        let said: Vec<&str> = found.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(said, ["`write` writes to a stream, in a transaction"; 2]);
+        assert!(found.iter().all(|e| e.code == Code::IoInTransaction));
+        // Standard input can't be written to, as is known when compiling.
+        assert_eq!(
+            codes(
+                "uses { trendy.streams };\n\noperator main{} [\n    call write{line: \"x\", to: standard_input};\n];\n"
+            ),
+            [Code::BrokenCallConstraint]
+        );
+        // But any other stream can, by a value of `stream`.
+        assert!(
+            analyze_str(
+                "uses { trendy.streams };\n\noperator say{to: stream} [ call write{line: \"x\", to}; ];\noperator main{} [\n    call say{to: standard_error};\n    call say{to: file{path: \"log.txt\"}};\n];\n"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn one_value_where_an_array_goes_is_made_an_array_of_one() {
         let source = "uses { trendy.files };\n\noperator main{} [\n    call save_text_file{path: \"a.txt\", lines: \"Nile\"};\n];\n";
         let fixed = fix(source);

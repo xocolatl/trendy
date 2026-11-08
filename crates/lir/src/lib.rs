@@ -532,6 +532,27 @@ runtime_functions! {
     /// `{ value: integer }`, in memory the statement owns. It fails if the memory
     /// can't be allocated.
     RandomBytes => "trendy_rt_random_bytes", true;
+    /// `trendy_rt_put_text(text, error)`: write the text to standard output, or, if
+    /// the boolean `error` is true, to standard error, after what was written to either
+    /// before it. Standard output is held until it is written all at once, as when it
+    /// is full: it fails if writing what it holds fails.
+    PutText => "trendy_rt_put_text", true;
+    /// `trendy_rt_put_bytes(bytes, error, descriptor)`: as [`RuntimeFn::PutText`], of
+    /// the bytes of an array the descriptor describes, an `array byte`.
+    PutBytes => "trendy_rt_put_bytes", true;
+    /// `trendy_rt_append_text(path, text)`: write the text at the end of the file at
+    /// `path`, a text, made if there is none. It fails if the file can't be written.
+    AppendText => "trendy_rt_append_text", true;
+    /// `trendy_rt_append_bytes(path, bytes, descriptor)`: as [`RuntimeFn::AppendText`],
+    /// of the bytes of an array the descriptor describes, an `array byte`.
+    AppendBytes => "trendy_rt_append_bytes", true;
+    /// `trendy_rt_append_lines(path, lines)`: as [`RuntimeFn::AppendText`], of each
+    /// text of an array, followed by a line feed, all at once.
+    AppendLines => "trendy_rt_append_lines", true;
+    /// `trendy_rt_output_ends()`: write what standard output holds, as the program
+    /// ends. It fails if that, or a write before it whose failure was found only as
+    /// it was written, fails.
+    OutputEnds => "trendy_rt_output_ends", true;
     /// `trendy_rt_join(dst, relations, operands, count, result, joined, orders)`: if the
     /// largest of the `count` relations whose addresses are at `relations` is large enough
     /// for it to matter, store at `dst` their join, of the type `result` describes, in an

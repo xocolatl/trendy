@@ -7613,6 +7613,197 @@ unsafe fn byte_array(bytes: impl ExactSizeIterator<Item = u8>, desc: &TypeDesc) 
     }
 }
 
+/// Write the text at `text` to standard output, or, if the boolean at `error` is
+/// true, to standard error, as `put` does. Fails if writing to standard output
+/// fails (R0030).
+///
+/// # Safety
+///
+/// `text` must point to a valid text value, and `error` to a boolean. The statement
+/// must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_put_text(text: *const Text, error: *const u8) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let text = read_text(text.cast());
+        put(*error != 0, |sink| sink.hold(text.as_bytes()))
+    })
+}
+
+/// As [`trendy_rt_put_text`], of the bytes of the array at `bytes`, of the type
+/// `desc` describes, an `array byte`, in a hierarchy or out of one.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_put_text`], with `bytes` pointing to a valid array of that
+/// type.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_put_bytes(
+    bytes: *const Text,
+    error: *const u8,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        put(*error != 0, |sink| {
+            let Ok(()) = take_bytes(bytes, &*desc, |run| {
+                sink.hold(run);
+                Ok::<(), core::convert::Infallible>(())
+            });
+        })
+    })
+}
+
+/// Write the text at `text` at the end of the file at `path`, made if there is
+/// none. Fails if the file can't be written (R0026).
+///
+/// # Safety
+///
+/// `path` and `text` must point to valid text values. The statement must have
+/// begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_append_text(path: *const Text, text: *const Text) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        let text = read_text(text.cast());
+        appended(read_text(path.cast()), |out| out.put(text.as_bytes()))
+    })
+}
+
+/// As [`trendy_rt_append_text`], of the bytes of the array at `bytes`, of the type
+/// `desc` describes, an `array byte`, in a hierarchy or out of one.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_append_text`], with `bytes` pointing to a valid array of that
+/// type.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_append_bytes(
+    path: *const Text,
+    bytes: *const Text,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        appended(read_text(path.cast()), |out| {
+            take_bytes(bytes, &*desc, |run| out.put(run))
+        })
+    })
+}
+
+/// As [`trendy_rt_append_text`], of each text of the array at `lines`, followed by
+/// a line feed, all at once.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_append_text`], with `lines` pointing to a valid array of
+/// texts.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_append_lines(path: *const Text, lines: *const Text) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe { appended(read_text(path.cast()), |out| put_lines(out, lines)) })
+}
+
+/// Write what `fill` puts at the end of the file at `path`, made if there is
+/// none. Fails if the file can't be written (R0026), or there is no memory for
+/// why.
+///
+/// # Safety
+///
+/// The statement must have begun a scope.
+#[cfg(not(test))]
+unsafe fn appended(
+    path: &str,
+    fill: impl FnOnce(&mut FileOut) -> Result<(), &'static str>,
+) -> Fallible {
+    match try_write_file(path, Writing::AtEnd, fill)? {
+        Ok(()) => Ok(()),
+        // SAFETY: guaranteed by the caller.
+        Err(reason) => unsafe { unwritable(path, reason, None) },
+    }
+}
+
+/// Give `take` the bytes of the array at `bytes`, of the type `desc` describes, an
+/// `array byte`, in a hierarchy or out of one, in order, in as few runs as their
+/// layout allows, until it fails.
+///
+/// # Safety
+///
+/// `bytes` must point to a valid array of that type.
+#[cfg(not(test))]
+unsafe fn take_bytes<E>(
+    bytes: *const Text,
+    desc: &TypeDesc,
+    mut take: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    // SAFETY: guaranteed by the caller; an array's elements are one after another,
+    // each of its element's size.
+    unsafe {
+        let (elements, count) = read_slice(bytes.cast());
+        let element = desc.element();
+        // Each a byte of memory, as out of a hierarchy, they are one run.
+        if element.size == 1 && !element.points {
+            return take(array(elements, count));
+        }
+        for i in 0..count {
+            let byte = byte_at(elements.add(i * element.size), element)
+                .expect("an array of bytes holds bytes");
+            take(&[byte])?;
+        }
+        Ok(())
+    }
+}
+
+/// Write what standard output holds, as the program ends. Fails if that fails,
+/// or a write before it did whose failure no write has failed with yet (R0030).
+///
+/// # Safety
+///
+/// The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_output_ends() -> bool {
+    status(|| {
+        // SAFETY: the program runs on one thread, and nothing else has the
+        // output while this does.
+        let output = unsafe { &mut *OUTPUT.0.get() };
+        output.flush();
+        output.failure()
+    })
+}
+
+/// Write the bytes `each` gives, to standard error, if `error`, and otherwise to
+/// standard output, after what was written to either before them. Standard error
+/// is written at once, after what standard output holds; standard output holds
+/// what it is given, and writes it when it is full, before anything is written
+/// to standard error, and as the program ends, or at once, on a terminal, where
+/// someone reads it as the program runs. Fails if writing to standard output
+/// fails, now or when it last wrote what it held, if no write has failed with that
+/// yet (R0030). A failure to write to standard error has nowhere to be reported.
+#[cfg(not(test))]
+fn put(error: bool, each: impl FnOnce(&mut dyn Sink)) -> Fallible {
+    if error {
+        let mut out = Stderr::default();
+        each(&mut out);
+        out.flush();
+        return Ok(());
+    }
+    // SAFETY: the program runs on one thread, and nothing else has the output while
+    // this does.
+    let output = unsafe { &mut *OUTPUT.0.get() };
+    output.failure()?;
+    each(output);
+    if output.on_terminal() {
+        output.flush();
+    }
+    output.failure()
+}
+
 /// Stop the program because the compiler and the runtime disagree, a
 /// compiler bug, which nothing should catch, writing `message`.
 #[cfg(not(test))]
@@ -8497,25 +8688,53 @@ unsafe fn save_text_file(path: &str, lines: *const Text, found: Option<&mut Foun
                 ],
             ));
         }
-        let written = try_write_file(path, |out| {
-            for i in 0..count {
-                out.put(line(i).as_bytes())?;
-                out.put(b"\n")?;
-            }
-            Ok(())
-        })?;
-        if let Err(reason) = written {
-            let (path, reason) = (scope_text(path)?, scope_text(reason)?);
-            give(
-                found,
-                UNWRITABLE_FILE,
-                &[
-                    ("path", (&raw const path).cast()),
-                    ("reason", (&raw const reason).cast()),
-                ],
-            )?;
+        match try_write_file(path, Writing::Anew, |out| put_lines(out, lines))? {
+            Ok(()) => Ok(()),
+            Err(reason) => unwritable(path, reason, found),
+        }
+    }
+}
+
+/// Give `out` each text of the array at `lines`, followed by a line feed, or say
+/// why it can't take one.
+///
+/// # Safety
+///
+/// `lines` must point to a valid array of texts.
+#[cfg(not(test))]
+unsafe fn put_lines(out: &mut FileOut, lines: *const Text) -> Result<(), &'static str> {
+    // SAFETY: guaranteed by the caller: an array of texts has them one after
+    // another, each a `Text`, as the compiler lays them out.
+    unsafe {
+        let (elements, count) = read_slice(lines.cast());
+        for i in 0..count {
+            out.put(read_text(elements.add(i * size_of::<Text>())).as_bytes())?;
+            out.put(b"\n")?;
         }
         Ok(())
+    }
+}
+
+/// Give `found` that the file at `path` can't be written, for `reason`, an
+/// `unwritable_file` (R0026), which, with no `found`, it fails with ([`give`]).
+///
+/// # Safety
+///
+/// `found`'s descriptor must be valid. The statement must have begun a scope.
+#[cfg(not(test))]
+unsafe fn unwritable(path: &str, reason: &str, found: Option<&mut Found>) -> Fallible {
+    let (path, reason) = (scope_text(path)?, scope_text(reason)?);
+    // SAFETY: guaranteed by the caller; the components are an
+    // `unwritable_file`'s.
+    unsafe {
+        give(
+            found,
+            UNWRITABLE_FILE,
+            &[
+                ("path", (&raw const path).cast()),
+                ("reason", (&raw const reason).cast()),
+            ],
+        )
     }
 }
 
@@ -8770,7 +8989,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 35] = [
+pub const KINDS: [&str; 36] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -8806,6 +9025,7 @@ pub const KINDS: [&str; 35] = [
     "not_one_line",
     "not_utf8_argument",
     "not_utf8_environment",
+    "unwritable_output",
 ];
 
 /// The place in [`KINDS`] of the kind named `name`, found when the runtime
@@ -8849,6 +9069,8 @@ pub const NOT_ONE_LINE: usize = place("not_one_line");
 pub const NOT_UTF8_ARGUMENT: usize = place("not_utf8_argument");
 /// `not_utf8_environment`'s, as [`UNREADABLE_FILE`] is.
 pub const NOT_UTF8_ENVIRONMENT: usize = place("not_utf8_environment");
+/// `unwritable_output`'s, as [`UNREADABLE_FILE`] is.
+pub const UNWRITABLE_OUTPUT: usize = place("unwritable_output");
 /// `malformed_csv`'s, as [`UNREADABLE_FILE`] is.
 pub const MALFORMED_CSV: usize = place("malformed_csv");
 /// `missing_column`'s, as [`UNREADABLE_FILE`] is.
@@ -10405,12 +10627,21 @@ impl FileOut {
     }
 }
 
-/// Write the file at `path`, made if there is none and emptied if there is,
-/// with what `fill` puts in it, or say why it can't be: as far as `fill` got,
-/// if it can't partway. Fails if there is no memory for that.
+/// How a file is written: emptied first, or at its end, after what it holds.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+enum Writing {
+    Anew,
+    AtEnd,
+}
+
+/// Write the file at `path`, made if there is none, as `writing` says, with what
+/// `fill` puts in it, or say why it can't be: as far as `fill` got, if it can't
+/// partway. Fails if there is no memory for that.
 #[cfg(not(test))]
 fn try_write_file(
     path: &str,
+    writing: Writing,
     fill: impl FnOnce(&mut FileOut) -> Result<(), &'static str>,
 ) -> Fallible<Result<(), &'static str>> {
     let c_path = match c_string(path)? {
@@ -10420,7 +10651,11 @@ fn try_write_file(
     let buffer = Temp::<u8>::new(FILE_BUFFER)?;
     // SAFETY: the path ends in a NUL, and the descriptor is closed once.
     unsafe {
-        let fd = open(c_path.ptr(), O_WRITE_ANEW, NEW_FILE_MODE);
+        let flags = match writing {
+            Writing::Anew => O_WRITE_ANEW,
+            Writing::AtEnd => O_WRITE_AT_END,
+        };
+        let fd = open(c_path.ptr(), flags, NEW_FILE_MODE);
         if fd < 0 {
             return Ok(Err(reason()));
         }
@@ -10589,13 +10824,7 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
                 {
                     out.write_str("x\"")?;
                     for i in 0..count {
-                        let at = elements.add(i * element.size);
-                        let (own, components) = if element.kind == KIND_UNION {
-                            own_type(at, element)
-                        } else {
-                            (element, at)
-                        };
-                        let byte = byte_number(components, own);
+                        let byte = byte_at(elements.add(i * element.size), element);
                         write!(out, "{:02x}", byte.ok_or(fmt::Error)?)?;
                     }
                     return out.write_char('"');
@@ -10895,6 +11124,24 @@ unsafe fn byte_number(value: *const u8, desc: &TypeDesc) -> Option<u8> {
     }
 }
 
+/// The number of the byte at `value`, of the type `desc` describes, `byte`, in a
+/// hierarchy or out of one, as [`byte_number`] reads it, by its own type.
+///
+/// # Safety
+///
+/// As for [`write_value`], with `desc` describing a `byte`.
+unsafe fn byte_at(value: *const u8, desc: &TypeDesc) -> Option<u8> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (own, components) = if desc.kind == KIND_UNION {
+            own_type(value, desc)
+        } else {
+            (desc, value)
+        };
+        byte_number(components, own)
+    }
+}
+
 /// `{ name: value, … }` or `{}`, for the tuple at `value`.
 ///
 /// # Safety
@@ -11067,7 +11314,102 @@ unsafe fn read_slice(value: *const u8) -> (*const u8, usize) {
     }
 }
 
-/// Buffered output to file descriptor 2.
+/// What [`put`] writes bytes to, which holds them until it writes them.
+#[cfg(not(test))]
+trait Sink {
+    fn hold(&mut self, bytes: &[u8]);
+}
+
+/// How many bytes standard output holds before it writes them.
+#[cfg(not(test))]
+const OUTPUT_BYTES: usize = 16 * 1024;
+
+/// What the program has written to standard output, file descriptor 1, that the
+/// system hasn't been given yet, which it is given all at once, as one system call
+/// for many writes.
+#[cfg(not(test))]
+struct Output {
+    bytes: [u8; OUTPUT_BYTES],
+    len: usize,
+    /// Whether standard output is a terminal, once a write has asked.
+    terminal: Option<bool>,
+    /// Why the system didn't take what it was last given, the system's words, until
+    /// a write fails with it.
+    failed: Option<&'static str>,
+}
+
+#[cfg(not(test))]
+struct SharedOutput(core::cell::UnsafeCell<Output>);
+
+// SAFETY: the program runs on one thread.
+#[cfg(not(test))]
+unsafe impl Sync for SharedOutput {}
+
+#[cfg(not(test))]
+static OUTPUT: SharedOutput = SharedOutput(core::cell::UnsafeCell::new(Output {
+    bytes: [0; OUTPUT_BYTES],
+    len: 0,
+    terminal: None,
+    failed: None,
+}));
+
+#[cfg(not(test))]
+impl Output {
+    /// Give the system what it holds, which it then holds none of, keeping why the
+    /// system didn't take it all, if it didn't.
+    fn flush(&mut self) {
+        let mut written = 0;
+        while written < self.len {
+            let rest = &self.bytes[written..self.len];
+            // SAFETY: `rest` is a valid buffer of its length.
+            let n = unsafe { write(1, rest.as_ptr(), rest.len()) };
+            let Ok(n) = usize::try_from(n) else {
+                self.failed = Some(reason());
+                break;
+            };
+            written += n;
+        }
+        self.len = 0;
+    }
+
+    /// Whether standard output is a terminal, asked of the system once.
+    fn on_terminal(&mut self) -> bool {
+        // SAFETY: `isatty` has no preconditions.
+        *self
+            .terminal
+            .get_or_insert_with(|| unsafe { isatty(1) } == 1)
+    }
+
+    /// Fail with why the system last didn't take what it was given, if no write has
+    /// failed with it yet (R0030).
+    fn failure(&mut self) -> Fallible {
+        let Some(reason) = self.failed.take() else {
+            return Ok(());
+        };
+        let reason = scope_text(reason)?;
+        // SAFETY: the reason is an `unwritable_output`'s one component, a text.
+        Err(unsafe { fail_as(UNWRITABLE_OUTPUT, &[("reason", (&raw const reason).cast())]) })
+    }
+}
+
+#[cfg(not(test))]
+impl Sink for Output {
+    fn hold(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            if self.len == OUTPUT_BYTES {
+                self.flush();
+            }
+            let n = rest.len().min(OUTPUT_BYTES - self.len);
+            self.bytes[self.len..self.len + n].copy_from_slice(&rest[..n]);
+            self.len += n;
+            rest = &rest[n..];
+        }
+    }
+}
+
+/// Buffered output to file descriptor 2, written after what standard output holds,
+/// so that the two are in the order the program wrote them.
 #[derive(Default)]
 struct Stderr {
     buffer: Buffer,
@@ -11089,6 +11431,12 @@ impl Default for Buffer {
 
 impl Stderr {
     fn flush(&mut self) {
+        // SAFETY: the program runs on one thread, and nothing that writes to stderr
+        // has the output.
+        #[cfg(not(test))]
+        unsafe {
+            (*OUTPUT.0.get()).flush();
+        }
         let mut written = 0;
         while written < self.buffer.len {
             let rest = &self.buffer.bytes[written..self.buffer.len];
@@ -11103,15 +11451,29 @@ impl Stderr {
     }
 }
 
-impl Write for Stderr {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for &byte in s.as_bytes() {
+impl Stderr {
+    /// Hold `bytes` after what it holds, writing them when it is full.
+    fn put(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
             if self.buffer.len == self.buffer.bytes.len() {
                 self.flush();
             }
             self.buffer.bytes[self.buffer.len] = byte;
             self.buffer.len += 1;
         }
+    }
+}
+
+#[cfg(not(test))]
+impl Sink for Stderr {
+    fn hold(&mut self, bytes: &[u8]) {
+        self.put(bytes);
+    }
+}
+
+impl Write for Stderr {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.put(s.as_bytes());
         Ok(())
     }
 }
@@ -11127,6 +11489,14 @@ const O_WRITE_ANEW: i32 = 0x0001 | 0x0200 | 0x0400;
 /// As for Apple's systems.
 #[cfg(all(not(test), target_os = "linux"))]
 const O_WRITE_ANEW: i32 = 0o1 | 0o100 | 0o1000;
+
+/// `open`'s flags to write a file at its end, made if there is none:
+/// `O_WRONLY | O_CREAT | O_APPEND`.
+#[cfg(all(not(test), target_vendor = "apple"))]
+const O_WRITE_AT_END: i32 = 0x0001 | 0x0200 | 0x0008;
+/// As for Apple's systems.
+#[cfg(all(not(test), target_os = "linux"))]
+const O_WRITE_AT_END: i32 = 0o1 | 0o100 | 0o2000;
 
 /// The permissions of a file made, which the process's umask narrows.
 #[cfg(not(test))]
@@ -11157,6 +11527,8 @@ unsafe extern "C" {
     fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
     #[cfg(not(test))]
     fn close(fd: i32) -> i32;
+    #[cfg(not(test))]
+    fn isatty(fd: i32) -> i32;
     #[cfg(not(test))]
     fn strerror(errnum: i32) -> *const core::ffi::c_char;
     /// The address of the calling thread's `errno`, which C reaches

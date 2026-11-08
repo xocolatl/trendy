@@ -108,7 +108,7 @@ statement, which nothing evaluates when compiling, and which lowering
 makes a runtime call (`trendy_rt_load_text_file`) and an assignment of
 its result. `load_binary_file` is one too (`trendy_rt_load_binary_file`),
 which reads a file's bytes as they are, sharing the reading of them with
-the loaders of text (`contents_or_error`). Its overload with `out errors`, `relation { error: error }`,
+the loaders of text (`contents_or_error`). `load_text_file`'s overload with `out errors`, `relation { error: error }`,
 gives a file's failures as values rather than stopping the program
 (`trendy_rt_load_text_file_with_errors`): the errors the language makes
 are the compiler's (`hir::LanguageError`, each a name, components and a
@@ -174,7 +174,7 @@ in an operator one defines as it would be in a program. The language
 server checks the file at a unit's `source_path`, where it was when the
 server was built, as that unit, with the rest of the library, not as a
 program. A built-in is added in three places: its declaration in the
-unit it belongs to, `prelude.trendy` or `files.trendy`, its
+unit it belongs to, `prelude.trendy` or another of `trendy_prelude::UNITS`, its
 `hir::Builtin` entry, and its implementation, which is usually in the
 runtime. Built-ins are kept as
 few as possible: an operator that can be written in trendy is defined in
@@ -187,6 +187,31 @@ as a load gives its errors (`trendy_rt_save_text_file_with_errors`). A line that
 wouldn't read back as one fails first, so that nothing is written, and the rest
 goes through a buffer of its own (`FileOut`), with `open`'s flags as each system
 numbers them (`O_WRITE_ANEW`).
+
+`trendy.streams` writes to streams a piece at a time, in trendy: `write`'s
+overloads, told apart by their parameters' names, `text`, `line`, `lines` and
+`bytes`, are each a specification of `to: stream`, a union type, whose
+versions, of `to: standard_stream` and `to: file`, dispatch chooses (IM
+Prescription 17), and each without `to` calls its specification with
+`standard_output`. The versions call built-ins the implementation declares,
+where no other unit sees them: `put`, of a text or bytes, to standard output,
+or, if its `error`, to standard error (`hir::UpdateBuiltin::PutText`,
+`PutBytes`), and `append`, of a text, bytes or lines, at the end of the file
+at a path (`AppendText`, `AppendBytes`, `AppendLines`, `Writing::AtEnd`). Each is an
+update operator that writes to a stream (`hir::Io::WritesStream`), a file too,
+which a transaction's statements call at no depth (A0066). That a call can't
+write to standard input is a constraint of the call (R0024), and two overloads'
+constraints, which can be the same, are told apart by their operator's
+parameters' names, as the overloads are (`Operators::identity`). The runtime
+holds standard output in a buffer (`Output`), and writes it when it is full,
+before anything goes to standard error, which every write to it does through
+`Stderr`, and at once on a terminal (`isatty`). The entry writes what it holds
+after `main` (`trendy_rt_output_ends`), and a failure to write it, kept until
+then if it was found writing for standard error, fails as `main`'s would, an
+`unwritable_output` (R0030). A pipe whose reader has gone ends the program by
+the system's `SIGPIPE`, which nothing changes. Bytes of an `array byte` are
+written as one run, or, in a hierarchy, one by one, each by its own type's
+descriptor (`take_bytes`).
 
 **`trendy_runtime`** is a `no_std` library linked into every executable. It
 links only the C library, from which it reads files (`open`, `read`) and

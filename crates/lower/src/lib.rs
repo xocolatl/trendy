@@ -96,6 +96,15 @@ fn entry(
             args: args.clone(),
             result: None,
         });
+        // What it wrote to standard output and is still held, whose failure is
+        // as any of main's, in a scope for its reason.
+        b.scoped(|b| {
+            b.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::OutputEnds,
+                args: Vec::new(),
+            });
+            b.scoped = true;
+        });
         if let Some(main_errors) = &main_errors {
             main_errors.write(b, cx);
         }
@@ -3212,6 +3221,31 @@ impl<'a> FunctionBuilder<'a> {
         self.exit_to(depth + 1, None, if next { again } else { after }, cx);
     }
 
+    /// `call`, of `trendy.streams`' `put` or `append`: the runtime function that
+    /// writes what it is given, the call's arguments, in the order it takes them,
+    /// and the descriptor of its bytes, if it writes bytes.
+    fn written_out(&mut self, builtin: hir::UpdateBuiltin, call: &hir::Call, cx: &mut Lowering) {
+        let (function, named): (lir::RuntimeFn, &[&str]) = match builtin {
+            hir::UpdateBuiltin::PutText => (lir::RuntimeFn::PutText, &["text", "error"]),
+            hir::UpdateBuiltin::PutBytes => (lir::RuntimeFn::PutBytes, &["bytes", "error"]),
+            hir::UpdateBuiltin::AppendText => (lir::RuntimeFn::AppendText, &["path", "text"]),
+            hir::UpdateBuiltin::AppendBytes => (lir::RuntimeFn::AppendBytes, &["path", "bytes"]),
+            hir::UpdateBuiltin::AppendLines => (lir::RuntimeFn::AppendLines, &["path", "lines"]),
+            _ => unreachable!("only `put` and `append` write out"),
+        };
+        let mut args: Vec<lir::Place> = named
+            .iter()
+            .map(|name| self.place(&call.args[*name], cx))
+            .collect();
+        if let Some(bytes) = call.args.get("bytes") {
+            let ty = self.type_of(bytes);
+            args.push(lir::Place::whole(lir::Base::Data(cx.descriptor(&ty))));
+        }
+        self.insts.push(lir::Inst::CallRuntime { function, args });
+        // For why the stream can't be written, and a file's path, if it can't.
+        self.scoped = true;
+    }
+
     /// The random bytes `call` asks for, given to its `out` parameter, which
     /// the runtime makes as [`made_by_runtime`] says.
     fn random_bytes(&mut self, call: &hir::Call, cx: &mut Lowering) {
@@ -3729,6 +3763,11 @@ impl<'a> FunctionBuilder<'a> {
                 self.clock_read(lir::RuntimeFn::ReadTransactionStart, call, cx);
             }
             hir::UpdateBuiltin::RandomBytes => self.random_bytes(call, cx),
+            hir::UpdateBuiltin::PutText
+            | hir::UpdateBuiltin::PutBytes
+            | hir::UpdateBuiltin::AppendText
+            | hir::UpdateBuiltin::AppendBytes
+            | hir::UpdateBuiltin::AppendLines => self.written_out(builtin, call, cx),
             hir::UpdateBuiltin::SaveTextFile => {
                 let args = vec![
                     self.place(&call.args["path"], cx),

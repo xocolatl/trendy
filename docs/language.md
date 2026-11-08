@@ -1672,7 +1672,9 @@ order, and can't change the terminal it is written to. For example:
 `relation { a: boolean, b: integer } { { a: false, b: 25 }, { a: true, b: 3 } }`.
 The one exception is the attribute a `per` parameter's relation wraps its
 tuples' own attributes in, which no source can name: it is written `…`,
-as in `relation { of: text, … } { { of: "Nyeri", … } }`.
+as in `relation { of: text, … } { { of: "Nyeri", … } }`. It writes for the
+programmer: what a program gives is written to standard output, with
+`write` (see [Streams](#streams)).
 
 **`debug_table{r: any relation}`** writes `r` to stderr as a table, for
 reading rather than as source: a column for each attribute, in name order,
@@ -2348,7 +2350,8 @@ operator main{} [
   is written (R0027). `out errors` doesn't take that: it is a mistake in the call.
 - **A file is made if there is none, and what one holds is replaced.** The
   directory it is in must exist. A relative path is from the directory the program
-  runs in.
+  runs in. `write`, of `trendy.streams`, adds to what a file holds instead (see
+  [Streams](#streams)).
 - **A file that can't be written stops the program** (R0026), unless the call
   names `out errors`, which is then empty, or holds its `unwritable_file { path,
   reason }`. A failure partway, as on a full disk, can leave part of the lines in
@@ -2513,6 +2516,159 @@ operator main{} [
         columns: tuple { city: 1, people: 1 },
         out rows: rows,
     };
+];
+```
+
+### Streams
+
+A stream is where a program reads or writes a piece at a time, as against the
+whole of a file, which `trendy.files` loads and saves. A program is started
+with three, its standard input, output and error, which the system connects
+to a terminal, a pipe or a file, and a file at a path is one too. Writing to
+one is the work of `trendy.streams`, a unit that comes with the compiler,
+which a unit uses as it does `trendy.files`, `uses { trendy.streams };`. Its
+interface:
+
+```
+/* Streams: where a program reads and writes a piece at a time, as against
+   the whole of a file, which `trendy.files` loads and saves. A program is
+   started with three, its standard input, output and error, which the
+   system connects to a terminal, a pipe or a file, and a file at a path is
+   one too. A stream is outside the program: a value of `stream` names one,
+   and update operators, which `call` invokes, write to it. A unit that
+   writes to one uses it, `uses { trendy.streams };`. */
+interface
+
+/* Where a program reads or writes, a piece at a time. */
+type stream union;
+
+/* One of the three streams a program is started with, by its name. */
+type standard_stream is stream {
+    { name: text },
+    constraint name = "input" or name = "output" or name = "error",
+};
+
+/* The file at `path`, relative to the directory the program runs in, unless
+   it is absolute, as `trendy.files` takes a path. */
+type file is stream { { path: text } };
+
+/* What the program is given to read. */
+const standard_input := standard_stream{name: "input"};
+
+/* Where the program writes what it gives, and where `write` writes unless a
+   call says otherwise. */
+const standard_output := standard_stream{name: "output"};
+
+/* Where the program writes what it says of how it runs, as it writes its
+   failures. */
+const standard_error := standard_stream{name: "error"};
+
+/* Write `text` to `to`, as it is: what is written next goes on from where
+   it ends, on its line, as an answer to a prompt does. What a call writes
+   to standard output or error follows what earlier ones wrote to either, in
+   the order they ran. Writing to standard output can fail, as when a disk is
+   full (R0030), and when what reads it has stopped, as `head` does after its
+   lines, the program ends there. A file is written at its end, after what it
+   holds, and made if there is none, in a directory that must exist: each
+   call opens it and closes it, and a file that can't be written fails
+   (R0026). */
+operator write{text: text, to: stream, constraint to <> standard_input};
+
+/* Write `text` to standard output, as the other `write` does. */
+operator write{text: text};
+
+/* Write `line` to `to`, then a line feed, which ends it. */
+operator write{line: text, to: stream, constraint to <> standard_input};
+
+/* Write `line` to standard output, then a line feed. */
+operator write{line: text};
+
+/* Write each of `lines` to `to`, in order, each followed by a line feed: to
+   a file, all at once. */
+operator write{lines: array text, to: stream, constraint to <> standard_input};
+
+/* Write each of `lines` to standard output, each followed by a line feed. */
+operator write{lines: array text};
+
+/* Write `bytes` to `to`, as they are. */
+operator write{bytes: array byte, to: stream, constraint to <> standard_input};
+
+/* Write `bytes` to standard output, as they are. */
+operator write{bytes: array byte};
+
+/* Standard output can't be written, for `reason`, the system's words for
+   why, as "No space left on device" (R0030). */
+type unwritable_output is error { { reason: text } };
+```
+
+**`write`** writes text, a line, lines or bytes, each its parameter's name, to
+the stream `to` names, and to standard output if a call names none.
+
+```trendy
+uses { trendy.streams };
+
+operator main{} [
+    call write{text: "Habari, "};
+    call write{line: "dunia!"};
+    call write{lines: array ["Nile", "Paraná"]};
+    call write{line: "wrote three lines", to: standard_error};
+    call write{line: "greeted", to: file{path: "greetings.log"}};
+];
+```
+
+- **The program never holds a stream.** A stream is outside it, as a file's
+  bytes are, and a value of `stream` names one, as a path names a file:
+  `standard_input`, `standard_output` and `standard_error`, constants of
+  `standard_stream`, or `file{path: p}`. Nothing in the program points to
+  one, as a handle would, since what a pointer points to is a variable (*The
+  Third Manifesto*, OO Proscription 2), and nothing opens or closes one: a
+  write to a file opens it and closes it. Tutorial D has no I/O at all
+  (chapter 5).
+- **What is written is in the order it was written,** whichever of standard
+  output and standard error each call wrote to, so a terminal or a file that
+  both go to shows them as the program wrote them, `debug_value`'s and the
+  program's failures among them. Standard output holds what it is given, and
+  writes it all at once, when it is full, before anything is written to
+  standard error, and as the program ends, or after each write, on a
+  terminal, where someone reads it as the program runs: the program never
+  says when.
+- **It is an update operator,** which `call` invokes, as anything that
+  changes what is outside the program is (TTM RM Prescription 3), and a
+  transaction's statements call it at no depth (A0066): nothing undoes a
+  write. `debug_value` and `debug_table` write for the programmer, to
+  standard error, and are exempt.
+- **`text` is written as it is,** so what is written next goes on from where
+  it ends, as an answer to a prompt does; **`line`** ends it with a line feed,
+  and **`lines`** writes each so. Text is written as UTF-8, and **`bytes`**, an
+  `array byte`, as they are.
+- **A file is written at its end,** after what it holds, and made if there is
+  none, in a directory that must exist, so `write` adds to what
+  `save_text_file` replaces. A file that can't be written stops the program
+  (R0026). Each call opens the file and closes it, so `lines` writes them all
+  at once.
+- **Standard input can't be written:** a call that names it breaks the
+  constraint `to <> standard_input` (R0024), an error when compiling.
+- **Standard output can fail,** as when a disk fills, which stops the program
+  (R0030): the write that finds it out can be a later one than the one whose
+  bytes the system didn't take, as it holds them first. A pipe whose reader
+  has stopped, as `head` does once it has its lines, ends the program there,
+  quietly, as the system ends it.
+- **Other languages' names are fixed to it:** Python's `print`, Java's and
+  Rust's `println`, Ruby's and C's `puts`, Pascal's `writeln` and the shell's
+  `echo` to `write{line: …}`, and Rust's `eprintln` to `write{line: …, to:
+  standard_error}`, each with its unit used.
+
+```trendy,error
+operator main{} [
+    call println{"Habari"};
+];
+```
+
+```trendy,error
+uses { trendy.streams };
+
+operator main{} [
+    call write{line: "Habari", to: standard_input};
 ];
 ```
 

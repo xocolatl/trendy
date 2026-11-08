@@ -4,7 +4,8 @@
 //! compiler implements, and defines others in trendy; the catalog
 //! ([`CATALOG`]), which describes the program's units, and whose
 //! constraints are the rules between them; `trendy.files` ([`FILES`]), which
-//! reads files; `trendy.uuid` ([`UUID`]) and `trendy.time` ([`TIME`]), of
+//! reads and writes files; `trendy.streams` ([`STREAMS`]), which writes to the
+//! streams the program was started with, and at the ends of files; `trendy.uuid` ([`UUID`]) and `trendy.time` ([`TIME`]), of
 //! ordinary trendy but for reading the clock and giving random bits; and
 //! `trendy.process` ([`PROCESS`]), the arguments and environment the program
 //! was started with, for the units that use them.
@@ -56,6 +57,15 @@ pub const FILES: Unit = Unit {
     source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/files.trendy"),
 };
 
+/// `trendy.streams`, the streams a program writes to a piece at a time: its
+/// standard output and standard error, and files.
+pub const STREAMS: Unit = Unit {
+    name: "trendy.streams",
+    path: "<streams>",
+    source: include_str!("streams.trendy"),
+    source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/streams.trendy"),
+};
+
 /// `trendy.uuid`, RFC 9562's universally unique identifiers.
 pub const UUID: Unit = Unit {
     name: "trendy.uuid",
@@ -83,4 +93,4 @@ pub const PROCESS: Unit = Unit {
 
 /// Every unit that comes with the compiler, in the order their texts
 /// follow a program's units' in its spans: the prelude last.
-pub const UNITS: [Unit; 6] = [PROCESS, TIME, UUID, FILES, CATALOG, PRELUDE];
+pub const UNITS: [Unit; 7] = [PROCESS, TIME, UUID, STREAMS, FILES, CATALOG, PRELUDE];

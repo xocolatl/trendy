@@ -82,7 +82,8 @@ fn build_and_run_with(
 }
 
 /// As [`build_and_run_with`], with the environment the program is started with
-/// changed as `environment` says: each variable set, or removed, for `None`.
+/// changed as `environment` says: each variable set, or removed, for `None`. A
+/// program run this way writes nothing to standard output.
 fn build_and_run_in(
     input: &Path,
     output: &Path,
@@ -90,6 +91,47 @@ fn build_and_run_in(
     arguments: &[&std::ffi::OsStr],
     environment: &[(&str, Option<&std::ffi::OsStr>)],
 ) -> (i32, String) {
+    let ran = run_program(input, output, dir, arguments, environment);
+    assert_eq!(ran.stdout, "", "the program wrote to standard output");
+    (ran.code, ran.stderr)
+}
+
+/// What a program did: its exit code, and what it wrote to standard output and
+/// to standard error.
+struct Ran {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+/// Compile `name`'s example and run it, as [`run_example`] does, keeping what it
+/// writes to standard output too.
+fn ran_example(name: &str) -> Ran {
+    let root = workspace_root();
+    let run = RUNS.fetch_add(1, Ordering::Relaxed);
+    let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{run}"));
+    let input = root.join("examples").join(format!("{name}.trendy"));
+    run_program(&input, &output, &root, &[], &[])
+}
+
+/// Compile `source` and run it, as [`run_source`] does, keeping what it writes to
+/// standard output too.
+fn ran_source(name: &str, source: &str) -> Ran {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let input = dir.join(format!("{name}.trendy"));
+    std::fs::write(&input, source).unwrap();
+    run_program(&input, &dir.join(name), &workspace_root(), &[], &[])
+}
+
+/// Compile `input` to `output`, and run it in `dir`, as [`build_and_run_in`]
+/// does, keeping what it writes to standard output.
+fn run_program(
+    input: &Path,
+    output: &Path,
+    dir: &Path,
+    arguments: &[&std::ffi::OsStr],
+    environment: &[(&str, Option<&std::ffi::OsStr>)],
+) -> Ran {
     let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
         .arg(input)
         .arg("-o")
@@ -123,7 +165,11 @@ fn build_and_run_in(
         .status
         .code()
         .unwrap_or_else(|| panic!("the program crashed ({}): {stderr}", run.status));
-    (code, stderr)
+    Ran {
+        code,
+        stdout: String::from_utf8_lossy(&run.stdout).into_owned(),
+        stderr,
+    }
 }
 
 #[test]
@@ -3139,6 +3185,233 @@ operator main{{}} [
     assert_eq!(
         stderr.lines().take(expected.len()).collect::<Vec<_>>(),
         expected
+    );
+}
+
+/// The streams example: what it gives on standard output, and what it says of how it
+/// runs on standard error, with a file it writes the end of.
+#[test]
+fn streams() {
+    let ran = ran_example("streams");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stdout.lines().collect::<Vec<_>>(),
+        [
+            "Greetings in 4 languages:",
+            "Hindi: Namaste",
+            "Māori: Kia ora",
+            "Quechua: Allillanchu",
+            "Swahili: Habari",
+        ]
+    );
+    assert_eq!(
+        ran.stderr.lines().collect::<Vec<_>>(),
+        ["greeted", "started", "greeted 4", "copied: true"]
+    );
+}
+
+/// Compile `source` to an executable of its own, which a test runs as it needs.
+fn compiled(name: &str, source: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let (input, output) = (dir.join(format!("{name}.trendy")), dir.join(name));
+    std::fs::write(&input, source).unwrap();
+    let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "trendyc failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    output
+}
+
+/// What the shell's `script` does with the program at `program`, `$0` in it: its
+/// exit code and what it writes to standard output and to standard error.
+fn shell(script: &str, program: &Path) -> (i32, String, String) {
+    let run = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg(program)
+        .output()
+        .unwrap();
+    (
+        run.status.code().unwrap(),
+        String::from_utf8_lossy(&run.stdout).into_owned(),
+        String::from_utf8_lossy(&run.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn what_is_written_is_in_the_order_it_was_written() {
+    // Standard output and standard error into one pipe, as a terminal would show
+    // them, `debug_value`'s and a failure's among them, standard output's held
+    // until each goes to standard error.
+    let program = compiled(
+        "written_in_order",
+        r#"uses { trendy.streams, trendy.process };
+
+operator main{} [
+    call write{text: "Habari, "};
+    call write{line: "dunia"};
+    call write{line: "to standard error", to: standard_error};
+    call debug_value{v: "debugged"};
+    call write{lines: array ["Nile", "Paraná"]};
+    call write{bytes: x"e29c93_0a"};
+    call write{line: to_text{from: 1 div length{a: arguments}}};
+];
+"#,
+    );
+    let (code, stdout, stderr) = shell(r#""$0" 2>&1"#, &program);
+    assert_eq!((code, stderr.as_str()), (1, ""));
+    let name = program.file_name().unwrap().to_str().unwrap();
+    let path = program.with_extension("trendy");
+    let shown = stdout.replace(path.to_str().unwrap(), &format!("{name}.trendy"));
+    assert_eq!(
+        shown.lines().collect::<Vec<_>>(),
+        [
+            "Habari, dunia",
+            "to standard error",
+            "\"debugged\"",
+            "Nile",
+            "Paraná",
+            "✓",
+            "error[R0002]: division by zero: 1 div 0 has no result",
+            " --> written_in_order.trendy:10:5",
+        ]
+    );
+}
+
+#[test]
+fn a_pipe_whose_reader_has_gone_ends_the_program_quietly() {
+    // `head` stops reading after its line, and the program ends then, as the
+    // system ends it, with nothing on standard error; standard output that is
+    // closed can't be written, which stops the program (R0030).
+    let program = compiled(
+        "closed_pipe",
+        r"uses { trendy.streams };
+
+operator main{} [
+    for n in series_array{from: 1, to: 200000} loop [
+        call write{line: to_text{from: n}};
+    ];
+];
+
+operator series_array{from: integer, to: integer}: array integer [
+    var all: array integer;
+    load all value from series{from, to} order [asc value];
+    all
+];
+",
+    );
+    let (code, stdout, stderr) = shell(r#""$0" | head -1"#, &program);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "1\n", ""));
+    let (code, stdout, stderr) = shell(r#"exec "$0" >&-"#, &program);
+    assert_eq!((code, stdout.as_str()), (1, ""));
+    assert!(
+        stderr.starts_with("error[R0030]: can't write standard output: Bad file descriptor\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_write_to_a_file_adds_to_its_end() {
+    // Text, lines and bytes, a byte subtype's among them, each after what the
+    // file holds, which is made if there is none; bytes to standard output are
+    // as they are too, in a hierarchy or out of one; and a stream known only as
+    // the program runs is written as it is, by its version of `write`.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("appended_files");
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("log.bin");
+    drop(std::fs::remove_file(&log));
+    let source = format!(
+        r#"uses {{ trendy.streams }};
+
+type ascii is byte {{ constraint value < 128 }};
+
+const log := file{{path: {log:?}}};
+
+operator say{{line: text, to: stream}} [
+    call write{{line, to}};
+];
+
+operator main{{}} [
+    call write{{text: "Nile", to: log}};
+    call write{{line: ", Volga", to: log}};
+    call write{{lines: array ["Paraná", "Mekong"], to: log}};
+    call write{{bytes: x"ff00", to: log}};
+    call write{{bytes: x"48690a"}};
+    call say{{line: "said", to: standard_output}};
+    call say{{line: "said", to: log}};
+];
+"#
+    );
+    let ran = ran_source("appended", &source);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(ran.stdout, "Hi\nsaid\n");
+    let written = [
+        "Nile, Volga\nParaná\nMekong\n".as_bytes(),
+        &[0xff, 0x00],
+        b"said\n",
+    ]
+    .concat();
+    assert_eq!(std::fs::read(&log).unwrap(), written);
+    let ran = ran_source("appended_again", &source);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        std::fs::read(&log).unwrap(),
+        [&written[..], &written].concat()
+    );
+    // A file that can't be written stops the program (R0026).
+    let ran = ran_source(
+        "unappendable",
+        &format!(
+            "uses {{ trendy.streams }};\n\noperator main{{}} [\n    call write{{line: \"x\", to: file{{path: {:?}}}}};\n];\n",
+            dir.join("missing").join("log.txt")
+        ),
+    );
+    assert_eq!(ran.code, 1);
+    assert!(
+        ran.stderr.starts_with("error[R0026]: can't write "),
+        "{}",
+        ran.stderr
+    );
+}
+
+/// Operators of one name, told apart by their parameters' names, can each have
+/// the same constraint, which is its own.
+#[test]
+fn overloads_can_have_the_same_constraint() {
+    let (code, stderr) = run_source(
+        "same_constraint",
+        r"
+uses { trendy.process };
+
+operator share{total: integer, people: integer, constraint people > 0}: integer [
+    total div people
+];
+
+operator share{weight: integer, people: integer, constraint people > 0}: integer [
+    weight div people
+];
+
+operator main{} [
+    var people := length{a: arguments} + 2;
+    call debug_value{v: share{total: 10, people}};
+    call debug_value{v: share{weight: 9, people}};
+    call debug_value{v: share{weight: 9, people: people - 2}};
+];
+",
+    );
+    assert_eq!(code, 1);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[..2], ["5", "4"], "{stderr}");
+    assert!(
+        lines[2].starts_with("error[R0024]: share{people: 0} can't be called"),
+        "{stderr}"
     );
 }
 

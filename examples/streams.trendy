@@ -1,0 +1,41 @@
+/* Streams: a program writes what it gives to standard output, and what it says of how
+   it runs to standard error, a piece at a time, in the order it writes them, and a file
+   is a stream too, which a write adds to the end of. */
+uses { trendy.streams, trendy.files };
+
+/* A greeting in each of a few languages, in Latin script. */
+var greetings := relation {
+    { language: "Swahili", greeting: "Habari" },
+    { language: "Hindi", greeting: "Namaste" },
+    { language: "Quechua", greeting: "Allillanchu" },
+    { language: "Māori", greeting: "Kia ora" },
+}
+key { language };
+
+/* Where the program notes what it did. */
+const log := file{path: "target/streams.log"};
+
+operator main{} [
+    call write{text: "Greetings in "};
+    call write{text: to_text{from: count{r: greetings}}};
+    call write{line: " languages:"};
+    var lines: array text;
+    load lines value from (greetings extend { line := language || ": " || greeting }){line}
+        order [asc line];
+    call write{lines};
+    call write{line: "greeted", to: standard_error};
+    /* `save_text_file` replaces what a file holds, and `write` adds to it. */
+    call save_text_file{path: log.path, lines: array ["started"]};
+    call write{line: "greeted " || to_text{from: length{a: lines}}, to: log};
+    var logged: array text;
+    call load_text_file{path: log.path, out lines: logged};
+    call write{lines: logged, to: standard_error};
+    /* A file's bytes, whatever they are, copied a piece at a time. */
+    var gzipped: array byte;
+    call load_binary_file{path: "examples/rivers.txt.gz", out bytes: gzipped};
+    call save_text_file{path: "target/rivers_copy.txt.gz", lines: array []};
+    call write{bytes: gzipped, to: file{path: "target/rivers_copy.txt.gz"}};
+    var copied: array byte;
+    call load_binary_file{path: "target/rivers_copy.txt.gz", out bytes: copied};
+    call write{line: "copied: " || to_text{from: copied = gzipped}, to: standard_error};
+];

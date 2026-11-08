@@ -673,6 +673,18 @@ pub enum UpdateBuiltin {
     /// the first of them in a run reads anything, to seed what computes them, and the
     /// seed has no bearing on what the program does.
     RandomBytes,
+    /// Write a text, as it is, to standard output, or, if its `error`, to standard
+    /// error, after what the program wrote to either before it.
+    PutText,
+    /// As [`UpdateBuiltin::PutText`], of an `array byte`'s bytes.
+    PutBytes,
+    /// Write a text at the end of the file at a path, made if there is none.
+    AppendText,
+    /// As [`UpdateBuiltin::AppendText`], of an `array byte`'s bytes.
+    AppendBytes,
+    /// As [`UpdateBuiltin::AppendText`], of the texts of an array, each followed by
+    /// a line feed, all at once.
+    AppendLines,
 }
 
 /// What a built-in does that a transaction's statements can't, at any depth of
@@ -682,6 +694,7 @@ pub enum UpdateBuiltin {
 pub enum Io {
     ReadsFile,
     WritesFile,
+    WritesStream,
     ReadsClock,
 }
 
@@ -707,6 +720,12 @@ impl UpdateBuiltin {
             UpdateBuiltin::SaveTextFile | UpdateBuiltin::SaveTextFileWithErrors => {
                 Some(Io::WritesFile)
             }
+            // A file is a stream too, to `trendy.streams`, which writes at its end.
+            UpdateBuiltin::PutText
+            | UpdateBuiltin::PutBytes
+            | UpdateBuiltin::AppendText
+            | UpdateBuiltin::AppendBytes
+            | UpdateBuiltin::AppendLines => Some(Io::WritesStream),
             UpdateBuiltin::ReadClock => Some(Io::ReadsClock),
         }
     }
@@ -763,6 +782,8 @@ pub enum LanguageError {
     /// A variable of the environment the program was started with isn't
     /// UTF-8 text, its name or its value (R0029).
     NotUtf8Environment,
+    /// Standard output can't be written (R0030).
+    UnwritableOutput,
     /// A CSV file's field isn't a value of its attribute's type (R0014).
     UnreadableField,
     /// A value a CSV file's record gives breaks its type's constraint
@@ -833,7 +854,7 @@ pub enum LanguageError {
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 35] = [
+    pub const ALL: [LanguageError; 36] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -869,6 +890,7 @@ impl LanguageError {
         LanguageError::NotOneLine,
         LanguageError::NotUtf8Argument,
         LanguageError::NotUtf8Environment,
+        LanguageError::UnwritableOutput,
     ];
 
     /// The code a failure with it is written with, when nothing takes it.
@@ -881,6 +903,7 @@ impl LanguageError {
             LanguageError::NotOneLine => Code::NotOneLine,
             LanguageError::NotUtf8Argument => Code::NotUtf8Argument,
             LanguageError::NotUtf8Environment => Code::NotUtf8Environment,
+            LanguageError::UnwritableOutput => Code::UnwritableOutput,
             LanguageError::MalformedCsv => Code::MalformedCsv,
             LanguageError::MissingColumn
             | LanguageError::ColumnShared
@@ -926,6 +949,7 @@ impl LanguageError {
             LanguageError::NotOneLine => "not_one_line",
             LanguageError::NotUtf8Argument => "not_utf8_argument",
             LanguageError::NotUtf8Environment => "not_utf8_environment",
+            LanguageError::UnwritableOutput => "unwritable_output",
             LanguageError::MalformedCsv => "malformed_csv",
             LanguageError::MissingColumn => "missing_column",
             LanguageError::UnreadableField => "unreadable_field",
@@ -1086,6 +1110,7 @@ impl LanguageError {
             LanguageError::TooDeep => &[("bytes", Integer)],
             LanguageError::NotUtf8Argument => &[("position", Integer)],
             LanguageError::NotUtf8Environment => &[("name", Text)],
+            LanguageError::UnwritableOutput => &[("reason", Text)],
             LanguageError::ColumnShared => {
                 &[("first", Text), ("second", Text), ("column", Integer)]
             }
@@ -1334,9 +1359,33 @@ impl UpdateBuiltin {
                 ),
             ]
             .into(),
-            UpdateBuiltin::SaveTextFile => [
+            UpdateBuiltin::SaveTextFile | UpdateBuiltin::AppendLines => [
                 constant("path", text()),
                 constant("lines", Type::Array(Box::new(text()))),
+            ]
+            .into(),
+            UpdateBuiltin::PutText => [
+                constant("text", text()),
+                constant("error", Type::Scalar(Scalar::Boolean)),
+            ]
+            .into(),
+            UpdateBuiltin::PutBytes => [
+                constant(
+                    "bytes",
+                    Type::Array(Box::new(Type::Defined(library.byte.clone()))),
+                ),
+                constant("error", Type::Scalar(Scalar::Boolean)),
+            ]
+            .into(),
+            UpdateBuiltin::AppendText => {
+                [constant("path", text()), constant("text", text())].into()
+            }
+            UpdateBuiltin::AppendBytes => [
+                constant("path", text()),
+                constant(
+                    "bytes",
+                    Type::Array(Box::new(Type::Defined(library.byte.clone()))),
+                ),
             ]
             .into(),
             UpdateBuiltin::SaveTextFileWithErrors => with_errors(UpdateBuiltin::SaveTextFile),
@@ -1404,7 +1453,7 @@ impl ReadOnlyBuiltin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 32] = [
+    pub const ALL: [Builtin; 37] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -1437,6 +1486,11 @@ impl Builtin {
         Builtin::Update(UpdateBuiltin::ReadClock),
         Builtin::Update(UpdateBuiltin::ReadTransactionStart),
         Builtin::Update(UpdateBuiltin::RandomBytes),
+        Builtin::Update(UpdateBuiltin::PutText),
+        Builtin::Update(UpdateBuiltin::PutBytes),
+        Builtin::Update(UpdateBuiltin::AppendText),
+        Builtin::Update(UpdateBuiltin::AppendBytes),
+        Builtin::Update(UpdateBuiltin::AppendLines),
     ];
 
     #[must_use]
@@ -1459,6 +1513,10 @@ impl Builtin {
             Builtin::Update(UpdateBuiltin::ReadClock) => "read_clock",
             Builtin::Update(UpdateBuiltin::ReadTransactionStart) => "read_transaction_start",
             Builtin::Update(UpdateBuiltin::RandomBytes) => "random_bytes",
+            Builtin::Update(UpdateBuiltin::PutText | UpdateBuiltin::PutBytes) => "put",
+            Builtin::Update(
+                UpdateBuiltin::AppendText | UpdateBuiltin::AppendBytes | UpdateBuiltin::AppendLines,
+            ) => "append",
             Builtin::ReadOnly(builtin) => builtin.name(),
         }
     }
@@ -1530,7 +1588,12 @@ impl Builtin {
                 | UpdateBuiltin::SaveTextFileWithErrors
                 | UpdateBuiltin::ReadClock
                 | UpdateBuiltin::ReadTransactionStart
-                | UpdateBuiltin::RandomBytes,
+                | UpdateBuiltin::RandomBytes
+                | UpdateBuiltin::PutText
+                | UpdateBuiltin::PutBytes
+                | UpdateBuiltin::AppendText
+                | UpdateBuiltin::AppendBytes
+                | UpdateBuiltin::AppendLines,
             ) => Vec::new(),
             Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
                 of_kind("ordered", &[Requirement::Order])

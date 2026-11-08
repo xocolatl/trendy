@@ -1,0 +1,144 @@
+/* Streams: where a program reads and writes a piece at a time, as against
+   the whole of a file, which `trendy.files` loads and saves. A program is
+   started with three, its standard input, output and error, which the
+   system connects to a terminal, a pipe or a file, and a file at a path is
+   one too. A stream is outside the program: a value of `stream` names one,
+   and update operators, which `call` invokes, write to it. A unit that
+   writes to one uses it, `uses { trendy.streams };`. */
+interface
+
+/* Where a program reads or writes, a piece at a time. */
+type stream union;
+
+/* One of the three streams a program is started with, by its name. */
+type standard_stream is stream {
+    { name: text },
+    constraint name = "input" or name = "output" or name = "error",
+};
+
+/* The file at `path`, relative to the directory the program runs in, unless
+   it is absolute, as `trendy.files` takes a path. */
+type file is stream { { path: text } };
+
+/* What the program is given to read. */
+const standard_input := standard_stream{name: "input"};
+
+/* Where the program writes what it gives, and where `write` writes unless a
+   call says otherwise. */
+const standard_output := standard_stream{name: "output"};
+
+/* Where the program writes what it says of how it runs, as it writes its
+   failures. */
+const standard_error := standard_stream{name: "error"};
+
+/* Write `text` to `to`, as it is: what is written next goes on from where
+   it ends, on its line, as an answer to a prompt does. What a call writes
+   to standard output or error follows what earlier ones wrote to either, in
+   the order they ran. Writing to standard output can fail, as when a disk is
+   full (R0030), and when what reads it has stopped, as `head` does after its
+   lines, the program ends there. A file is written at its end, after what it
+   holds, and made if there is none, in a directory that must exist: each
+   call opens it and closes it, and a file that can't be written fails
+   (R0026). */
+operator write{text: text, to: stream, constraint to <> standard_input};
+
+/* Write `text` to standard output, as the other `write` does. */
+operator write{text: text};
+
+/* Write `line` to `to`, then a line feed, which ends it. */
+operator write{line: text, to: stream, constraint to <> standard_input};
+
+/* Write `line` to standard output, then a line feed. */
+operator write{line: text};
+
+/* Write each of `lines` to `to`, in order, each followed by a line feed: to
+   a file, all at once. */
+operator write{lines: array text, to: stream, constraint to <> standard_input};
+
+/* Write each of `lines` to standard output, each followed by a line feed. */
+operator write{lines: array text};
+
+/* Write `bytes` to `to`, as they are. */
+operator write{bytes: array byte, to: stream, constraint to <> standard_input};
+
+/* Write `bytes` to standard output, as they are. */
+operator write{bytes: array byte};
+
+/* Standard output can't be written, for `reason`, the system's words for
+   why, as "No space left on device" (R0030). */
+type unwritable_output is error { { reason: text } };
+
+implementation
+
+/* Write `text` to standard output, or, if `error`, to standard error, after
+   what is written to either before it. */
+builtin operator put{text: text, error: boolean};
+
+/* Write `bytes` as `put` writes text. */
+builtin operator put{bytes: array byte, error: boolean};
+
+/* Write `text` at the end of the file at `path`, made if there is none. */
+builtin operator append{path: text, text: text};
+
+/* Write `bytes` as `append` writes text. */
+builtin operator append{path: text, bytes: array byte};
+
+/* Write each of `lines`, followed by a line feed, as `append` writes text,
+   all at once. */
+builtin operator append{path: text, lines: array text};
+
+operator write{text: text, to: standard_stream} [
+    call put{text, error: to = standard_error};
+];
+
+operator write{text: text, to: file} [
+    call append{path: to.path, text};
+];
+
+operator write{text: text} [
+    call write{text, to: standard_output};
+];
+
+operator write{line: text, to: standard_stream} [
+    var error := to = standard_error;
+    call put{text: line, error};
+    call put{text: "\n", error};
+];
+
+operator write{line: text, to: file} [
+    call append{path: to.path, lines: array [line]};
+];
+
+operator write{line: text} [
+    call write{line, to: standard_output};
+];
+
+operator write{lines: array text, to: standard_stream} [
+    for line in lines loop [
+        call write{line, to};
+    ];
+];
+
+operator write{lines: array text, to: file} [
+    call append{path: to.path, lines};
+];
+
+operator write{lines: array text} [
+    call write{lines, to: standard_output};
+];
+
+operator write{bytes: array byte, to: standard_stream} [
+    call put{bytes, error: to = standard_error};
+];
+
+operator write{bytes: array byte, to: file} [
+    call append{path: to.path, bytes};
+];
+
+operator write{bytes: array byte} [
+    call write{bytes, to: standard_output};
+];
+
+operator message{error: unwritable_output}: text [
+    "can't write standard output: " || error.reason
+];

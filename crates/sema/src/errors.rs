@@ -2886,9 +2886,13 @@ fn spelled_like(
 /// Java's `codePoints` give a text's code points, and JavaScript's
 /// `String.fromCodePoint` the text of some; `sine`, `cosine` and NumPy's
 /// `arctan2` are `sin`, `cos` and `atan2`; Postgres's `generate_series`
-/// is `series`; and R's and Kotlin's `writeLines` write a file's lines, as
+/// is `series`; R's and Kotlin's `writeLines` write a file's lines, as
 /// Python's `writelines` and .NET's `WriteAllLines` do, and Node's and Go's
-/// `writeFile` a file, as `save_text_file` does.
+/// `writeFile` a file, as `save_text_file` does; and Python's `print`, Java's,
+/// Kotlin's, Go's and Rust's `println`, Ruby's and C's `puts`, Pascal's and
+/// Delphi's `writeln`, and PHP's and the shell's `echo` write a line to
+/// standard output, as `write` does, and Rust's `eprintln` and `eprint` to
+/// standard error.
 const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("len", "count", Some("length")),
     ("size", "count", Some("length")),
@@ -2928,6 +2932,13 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("cosine", "cos", None),
     ("arctan2", "atan2", None),
     ("generate_series", "series", None),
+    ("print", "write", None),
+    ("println", "write", None),
+    ("puts", "write", None),
+    ("writeln", "write", None),
+    ("echo", "write", None),
+    ("eprintln", "write", None),
+    ("eprint", "write", None),
 ];
 
 /// The prelude's operators that other languages call `name`, in any case:
@@ -2969,23 +2980,37 @@ pub(crate) fn parameter_elsewhere(operator: &str, name: &str) -> Option<&'static
 
 /// Other languages' operators whose arguments are told apart by their
 /// order, with the names trendy's gives them in that order, so that a call
-/// written their way can name them: Postgres's `generate_series(start,
-/// stop, step)` has the order of `series`'s.
-const ORDER_ELSEWHERE: &[(&str, &[&str])] = &[("generate_series", &["from", "to", "step"])];
+/// written their way can name them, and an argument trendy's takes that
+/// theirs says by its name: Postgres's `generate_series(start, stop, step)`
+/// has the order of `series`'s; what `print` and the others that write a line
+/// are given is `write`'s `line`; and Rust's `eprintln` and `eprint` write a
+/// line, and text, `to: standard_error`.
+const ORDER_ELSEWHERE: &[(&str, &[&str], Option<&str>)] = &[
+    ("generate_series", &["from", "to", "step"], None),
+    ("print", &["line"], None),
+    ("println", &["line"], None),
+    ("puts", &["line"], None),
+    ("writeln", &["line"], None),
+    ("echo", &["line"], None),
+    ("eprintln", &["line"], Some("to: standard_error")),
+    ("eprint", &["text"], Some("to: standard_error")),
+];
 
 /// The edits naming the arguments of a call of the operator another language
-/// calls `name`, each by its place, if that language's order for them is
-/// known and none of them has a name, or more of them than it has.
+/// calls `name`, each by its place, and adding the one its name says, if that
+/// language's order for them is known and none of them has a name, or more of
+/// them than it has.
 fn named_in_order(name: &str, written: Written) -> Option<Vec<Edit>> {
     let lowercase = name.to_lowercase();
-    let &(_, order) = ORDER_ELSEWHERE
+    let &(_, order, added) = ORDER_ELSEWHERE
         .iter()
-        .find(|(other, _)| *other == lowercase)?;
+        .find(|(other, ..)| *other == lowercase)?;
     let spans: Vec<Span> = match written {
         Written::Arguments(args) => args.unnamed_in_order()?,
         Written::Nothing(list) => list.names().map(|name| name.span()).collect(),
     };
-    (!spans.is_empty() && spans.len() <= order.len()).then(|| {
+    let last = spans.last()?.end;
+    (spans.len() <= order.len()).then(|| {
         spans
             .into_iter()
             .zip(order)
@@ -2993,6 +3018,10 @@ fn named_in_order(name: &str, written: Written) -> Option<Vec<Edit>> {
                 span: Span::empty(span.start),
                 replacement: format!("{param}: "),
             })
+            .chain(added.map(|added| Edit {
+                span: Span::empty(last),
+                replacement: format!(", {added}"),
+            }))
             .collect()
     })
 }
@@ -5209,6 +5238,11 @@ pub(crate) fn io_in_transaction(
         hir::Io::WritesFile => (
             "writes a file",
             "writing a file",
+            "keep what to write in a variable the transaction assigns, which its rollback undoes too, and write it after the transaction",
+        ),
+        hir::Io::WritesStream => (
+            "writes to a stream",
+            "writing to a stream",
             "keep what to write in a variable the transaction assigns, which its rollback undoes too, and write it after the transaction",
         ),
         hir::Io::ReadsFile => (

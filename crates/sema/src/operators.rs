@@ -82,6 +82,8 @@ pub(crate) struct CallConstraint {
     /// The operator it is a constraint of.
     pub(crate) of: hir::OperatorId,
     pub(crate) constraint: ast::Constraint,
+    /// Which of the operator's constraints it is, counting from 1.
+    pub(crate) place: usize,
 }
 
 /// What an operator is among those of its name and its parameters' names
@@ -429,17 +431,34 @@ impl Operators {
 
     /// What the operator `id` is called in the program, of `namespaces`: a
     /// selector as its type is, a type's constraint or conversion as it is
-    /// named after its type already, and another operator as its family
-    /// is, by its name, or, if another family, built-in or selector of its
-    /// name and parameters' names is another unit's, the prelude's among
-    /// them, qualified by its specification's unit's name.
+    /// named after its type already, a constraint of a call as the operator it
+    /// is a constraint of, with that operator's parameters' names if another
+    /// operator has its name, as their parameters' names tell them apart, and
+    /// another operator as its family is, by its name, or, if another family,
+    /// built-in or selector of its name and parameters' names is another
+    /// unit's, the prelude's among them, qualified by its specification's
+    /// unit's name.
     pub(crate) fn identity(&self, id: hir::OperatorId, namespaces: &Namespaces) -> String {
         let signature = self.get(id);
-        match &signature.from_type {
-            Some(from) if from.selects().is_some() => return from.defined.name.clone(),
-            Some(_) => return signature.name.clone(),
-            None if signature.constrains_call.is_some() => return signature.name.clone(),
-            None => {}
+        match (&signature.from_type, &signature.constrains_call) {
+            (Some(from), _) if from.selects().is_some() => return from.defined.name.clone(),
+            (Some(_), _) => return signature.name.clone(),
+            (None, Some(call)) => {
+                let of = self.get(call.of);
+                let mut operator = self.identity(call.of, namespaces);
+                let overloaded = self.list.iter().any(|s| {
+                    s.name == of.name
+                        && s.constrains_call.is_none()
+                        && s.from_type.is_none()
+                        && !s.written.keys().eq(of.written.keys())
+                });
+                if overloaded {
+                    let names: Vec<&str> = of.written.keys().map(String::as_str).collect();
+                    operator = format!("{operator}{{{}}}", names.join(", "));
+                }
+                return format!("{operator} constraint {}", call.place);
+            }
+            (None, None) => {}
         }
         let family = self.get(self.family_of(id));
         let named = |s: &&Signature| {
@@ -1003,6 +1022,7 @@ fn call_constraints(list: &mut Vec<Signature>, errors: &mut Vec<Diagnostic>) {
                 constrains_call: Some(CallConstraint {
                     of: parent.id,
                     constraint,
+                    place: place + 1,
                 }),
                 family: Family::Own,
                 versions: Vec::new(),

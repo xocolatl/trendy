@@ -425,6 +425,7 @@ mod tests {
                 "trendy.process",
                 "trendy.time",
                 "trendy.uuid",
+                "trendy.streams",
                 "trendy.files",
                 "trendy.catalog",
                 "trendy.prelude"
