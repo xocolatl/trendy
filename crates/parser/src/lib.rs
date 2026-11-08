@@ -2128,10 +2128,10 @@ impl<'a> Parser<'a> {
         let call_like = self
             .found_after(1)
             .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
-        // `break;` and `LEAVE name;`: names, before what no statement
-        // starting with a name has after it.
+        // `leave;`, `iterate;`, and `break;` and `LEAVE name;`: names, before
+        // what no statement starting with a name has after it.
         let exit = found.kind == SyntaxKind::Ident
-            && ["break", "continue", "leave"]
+            && ["break", "continue", "leave", "iterate"]
                 .iter()
                 .any(|word| found.text.eq_ignore_ascii_case(word))
             && self
@@ -2317,10 +2317,7 @@ impl<'a> Parser<'a> {
                 self.skip_statement(&STATEMENT_STOPS);
                 self.errors.push(errors::assertion(found));
             }
-            Some(StatementStart::Exit) => {
-                self.errors.push(errors::loop_exit(found));
-                self.skip_statement(&STATEMENT_STOPS);
-            }
+            Some(StatementStart::Exit) => self.exit_stmt(found),
             Some(StatementStart::Call) => self.call_stmt(),
             Some(StatementStart::Var) => self.var_decl(),
             Some(StatementStart::MiscasedVar(keyword)) => {
@@ -3357,6 +3354,37 @@ impl<'a> Parser<'a> {
         };
         self.builder.finish_node();
         self.errors.push(errors::begin_end(begin, opening, closing));
+    }
+
+    /// `leave;` or `iterate;`, whose words are contextual keywords, at
+    /// `found`: leaving the innermost loop, or going on to its next run.
+    /// Other languages' `break` and `continue` are fixed to them, and a loop's
+    /// name after either, as Tutorial D's `LEAVE name` and SQL's `ITERATE name`
+    /// write it, is reported, as each is of the innermost loop.
+    fn exit_stmt(&mut self, found: Found) {
+        let lowercase = found.text.to_ascii_lowercase();
+        let (kind, word) = match lowercase.as_str() {
+            "break" | "leave" => (SyntaxKind::LeaveStmt, "leave"),
+            _ => (SyntaxKind::IterateStmt, "iterate"),
+        };
+        self.start_node(kind);
+        self.bump();
+        if found.text != word {
+            self.errors.push(if lowercase == word {
+                errors::miscased_keyword(found, word)
+            } else {
+                errors::loop_exit(found, word)
+            });
+        }
+        if self.at(SyntaxKind::Ident) {
+            let name = self.found().expect("at the loop's name");
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            self.builder.finish_node();
+            self.errors.push(errors::named_exit(name, word));
+        }
+        self.end_statement();
+        self.builder.finish_node();
     }
 
     /// `return;` or `return value;`, with `return` in any case, as Tutorial
@@ -8506,8 +8534,32 @@ SourceFile
             fix(&body("WHILE n < 5; n := n + 1; END WHILE;")),
             body("while n < 5 loop [ n := n + 1; ];")
         );
-        // No early exits.
-        assert_eq!(messages(&body("break;")), ["trendy has no `break`"]);
+        // Other languages' early exits, as trendy writes them, which name no loop.
+        assert_eq!(fix(&body("break;")), body("leave;"));
+        assert_eq!(fix(&body("continue;")), body("iterate;"));
+        assert_eq!(fix(&body("LEAVE;")), body("leave;"));
+        assert_eq!(
+            messages(&body("LEAVE outer;")),
+            [
+                "`LEAVE` is not a keyword; write `leave`",
+                "`leave` names no loop"
+            ]
+        );
+        assert_eq!(
+            messages(&body("iterate rows;")),
+            ["`iterate` names no loop"]
+        );
+        // As trendy writes them, and as names elsewhere.
+        let parse = parse_str(&body("leave; iterate; var leave := 1; iterate := leave;"));
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let kinds: Vec<SyntaxKind> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .map(|node| node.kind())
+            .filter(|kind| matches!(kind, SyntaxKind::LeaveStmt | SyntaxKind::IterateStmt))
+            .collect();
+        assert_eq!(kinds, [SyntaxKind::LeaveStmt, SyntaxKind::IterateStmt]);
     }
 
     #[test]
@@ -10733,6 +10785,8 @@ type rule { { constraint: text } };",
                     .collect(),
                 Statement::Call(_)
                 | Statement::Return(_)
+                | Statement::Leave(_)
+                | Statement::Iterate(_)
                 | Statement::Fail(_)
                 | Statement::Warn(_)
                 | Statement::Var(_)

@@ -65,15 +65,14 @@ pub(crate) fn value(
             | ast::Statement::Loop(_)
             | ast::Statement::For(_)
             | ast::Statement::Transaction(_)
-            | ast::Statement::Fail(_) => {
+            | ast::Statement::Fail(_)
+            | ast::Statement::Return(_)
+            | ast::Statement::Leave(_)
+            | ast::Statement::Iterate(_) => {
                 unreachable!("a block with them has its statements run")
             }
             ast::Statement::Warn(stmt) => {
                 errors.push(errors::warn_for_value(stmt, "a value block"));
-                ok = false;
-            }
-            ast::Statement::Return(stmt) => {
-                errors.push(errors::return_in_block(stmt));
                 ok = false;
             }
         }

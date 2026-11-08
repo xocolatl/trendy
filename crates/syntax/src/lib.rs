@@ -295,6 +295,13 @@ pub enum SyntaxKind {
     AssignBlock,
     /// `return;` or `return value;`: leaving an operator early.
     ReturnStmt,
+    /// `leave;`: leaving the innermost loop early. `leave` is a contextual
+    /// keyword, an identifier elsewhere.
+    LeaveStmt,
+    /// `iterate;`: going on to the innermost loop's next run, skipping the
+    /// rest of its block. `iterate` is a contextual keyword, an identifier
+    /// elsewhere.
+    IterateStmt,
     /// `fail e;`: the program fails with the error `e`. `fail` is a
     /// contextual keyword, an identifier elsewhere.
     FailStmt,
@@ -484,7 +491,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 188] = [
+    pub const ALL: [SyntaxKind; 190] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -606,6 +613,8 @@ impl SyntaxKind {
         SyntaxKind::AssignStmt,
         SyntaxKind::AssignBlock,
         SyntaxKind::ReturnStmt,
+        SyntaxKind::LeaveStmt,
+        SyntaxKind::IterateStmt,
         SyntaxKind::FailStmt,
         SyntaxKind::WarnStmt,
         SyntaxKind::IfStmt,
@@ -1163,6 +1172,8 @@ impl SyntaxKind {
             SyntaxKind::AssignStmt => "assignment statement",
             SyntaxKind::AssignBlock => "`assign` block",
             SyntaxKind::ReturnStmt => "`return` statement",
+            SyntaxKind::LeaveStmt => "`leave` statement",
+            SyntaxKind::IterateStmt => "`iterate` statement",
             SyntaxKind::FailStmt => "`fail` statement",
             SyntaxKind::WarnStmt => "`warn` statement",
             SyntaxKind::IfStmt => "`if` statement",

@@ -5045,18 +5045,22 @@ pub(crate) fn pointless_if_statement(stmt: &trendy_syntax::ast::IfStmt) -> Optio
 }
 
 /// What a loop does, for notes.
-const LOOP: &str = "a loop runs its block again and again while its condition is true, so it ends only once its block makes the condition false: no loop leaves early";
+const LOOP: &str = "a loop runs its block again and again while its condition is true, so it ends once its block makes the condition false, or leaves it, with `leave` or `return`";
 
 /// A loop, at `span`, whose condition, `condition`, is checked as `check`
-/// says, and whose block is `body`, if it does nothing or never ends: a
-/// condition written `true`, which never ends; one written `false`, which
-/// never runs a `while`'s block, and runs a `loop`'s once; or an empty
-/// block, which does nothing, or never ends.
+/// says, and whose block is `body`, which can leave it as `exits` says, if
+/// it is known, if it does nothing or never ends: a condition written
+/// `true`, which never ends, unless its block leaves it; one written
+/// `false`, which never runs a `while`'s block, and runs a `loop`'s once,
+/// whose statements the fix keeps, unless they leave it or go on to its next
+/// run, which needs the loop; or an empty block, which does nothing, or never
+/// ends.
 pub(crate) fn pointless_loop(
     span: Span,
     condition: &Expr,
     body: &trendy_syntax::ast::Body,
     check: hir::Check,
+    exits: Option<hir::LoopExits>,
 ) -> Option<Diagnostic> {
     let d = |message: &str, at: Span, label: &str| {
         Diagnostic::error(
@@ -5075,14 +5079,17 @@ pub(crate) fn pointless_loop(
         _ => None,
     };
     let replaced = |replacement: String| vec![Edit { span, replacement }];
+    let exits = exits.unwrap_or_default();
     match (written, check) {
+        (Some(true), _) if exits.leaves || exits.returns => None,
+        (Some(false), hir::Check::After) if exits.leaves || exits.iterates => None,
         (Some(true), _) => Some(
             d(
                 "the condition is always `true`",
                 condition.span(),
                 "so the loop never ends",
             )
-            .with_help("write a condition that its block makes false, as in `while n > 0 loop [ n := n - 1; ];`"),
+            .with_help("write a condition that its block makes false, as in `while n > 0 loop [ n := n - 1; ];`, or leave the loop from its block, with `leave;`"),
         ),
         (Some(false), hir::Check::Before) => Some(
             d(
@@ -5131,7 +5138,7 @@ pub(crate) fn endless_loop(condition: &Expr) -> Diagnostic {
     )
     .with_note(LOOP)
     .with_help(
-        "write a condition that its block makes false, as in `while n > 0 loop [ n := n - 1; ];`",
+        "write a condition that its block makes false, as in `while n > 0 loop [ n := n - 1; ];`, or leave the loop from its block, with `leave;`",
     )
 }
 
@@ -7303,48 +7310,45 @@ pub(crate) fn return_in_update(name: &str, stmt: &trendy_syntax::ast::ReturnStmt
     let span = stmt
         .keyword()
         .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()));
-    if stmt.value().is_none() {
-        return Diagnostic::error(
-            Code::Return,
-            format!("`{name}` can't return early"),
-            span,
-            "an early exit",
-        )
-        .with_note(EARLY_EXIT)
-        .with_help("put what the rest does in an `if` statement's `else`");
-    }
-    Diagnostic::error(
+    let d = Diagnostic::error(
         Code::Return,
         format!("`{name}` is an update operator, which returns no value"),
         span,
         "returns a value",
     )
     .with_note(
-        "only a read-only operator, which has a result type, has a value, which its body ends with: `operator name{params}: type [value];`",
+        "only a read-only operator, which has a result type, has a value, which its body ends with, or a `return` gives: `operator name{params}: type [value];`",
     )
     .with_help(format!(
-        "give `{name}` a result type to make it read-only, or delete the `return`"
-    ))
+        "give `{name}` a result type to make it read-only, or return without a value, `return;`"
+    ));
+    match stmt.value() {
+        Some(value) => d.with_secondary(value.span(), "the value"),
+        None => d,
+    }
 }
 
-/// `stmt`, a `return` in a read-only operator before the end of its body:
-/// an early exit, which no operator has yet.
-pub(crate) fn early_return(stmt: &trendy_syntax::ast::ReturnStmt) -> Diagnostic {
+/// `stmt`, a `return` without a value in the read-only operator `name`, before
+/// the end of its body, where it would leave the operator without one.
+pub(crate) fn return_without_value(
+    name: &str,
+    stmt: &trendy_syntax::ast::ReturnStmt,
+) -> Diagnostic {
     let span = stmt
         .keyword()
         .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()));
     Diagnostic::error(
         Code::Return,
-        "a read-only operator can't return early",
+        format!("a `return` in the read-only operator `{name}` gives its value"),
         span,
-        "an early exit",
+        "no value",
     )
     .with_note(EARLY_EXIT)
-    .with_help("choose between values with an `if` expression, and end the body with it")
+    .with_help("write the value it returns after `return`, as in `return x;`")
 }
 
-/// Why there are no early exits, for notes.
-const EARLY_EXIT: &str = "`return` leaves an operator before the end of its body, which no operator does yet: a body runs to its end, where a read-only operator's value is";
+/// What an early exit is, for notes.
+const EARLY_EXIT: &str = "`return` leaves an operator from anywhere in its body, with its value, `return x;`, if it is read-only, and else without, `return;`; a value block's statements are the block's, which a `return` there would leave instead";
 
 /// A read-only operator's body, for notes.
 const BODY_VALUE: &str = "a read-only operator's body declares and assigns its local variables, if it has any, then ends with its value, an expression of its result type, without `;`";
@@ -8985,12 +8989,141 @@ pub(crate) fn return_in_block(stmt: &trendy_syntax::ast::ReturnStmt) -> Diagnost
         .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()));
     Diagnostic::error(
         Code::Return,
-        "a value block can't return early",
+        "a value block can't return",
         span,
         "an early exit",
     )
     .with_note(EARLY_EXIT)
-    .with_help("end the block with its value, without `return`")
+    .with_help(
+        "end the block with its value, which an `if` expression can choose, without `return`",
+    )
+}
+
+/// What `leave` and `iterate` are, for notes.
+const LOOP_EXITS: &str = "`leave;` leaves the innermost loop it is in, and `iterate;` goes on to its next run, past the rest of its block, the loop's condition checked first, as after each run";
+
+/// `word`, `leave` or `iterate`, at `span`, in no loop of the body or value
+/// block it is in.
+pub(crate) fn exit_outside_loop(word: &str, span: Span, in_block: bool) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::Exit,
+        format!("`{word}` is in no loop"),
+        span,
+        "outside any loop",
+    )
+    .with_note(LOOP_EXITS);
+    if in_block {
+        return d.with_note("a value block's statements are its own, and a loop around the block is no loop of theirs, as they compute its value").with_help("compute the value, then leave the loop after the statement that the block is in");
+    }
+    d.with_help("put it in the loop it is to leave, or leave the operator with `return`")
+}
+
+/// `word`, an early exit at `span`, whose removal is `removal`, which skips
+/// nothing, as nothing would run between it and where it goes: `iterate` at
+/// the end of its loop's block, and `return` at the end of an update
+/// operator's body.
+pub(crate) fn pointless_exit(word: &str, span: Span, removal: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::Exit,
+        format!("this `{word}` skips nothing"),
+        span,
+        "at the end already",
+    )
+    .with_note(if word == "iterate" {
+        LOOP_EXITS
+    } else {
+        EARLY_EXIT
+    })
+    .with_note("nothing would run between it and where it goes, which the block comes to as it ends anyway")
+    .with_suggestion(
+        format!("delete the `{word}`"),
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// The statements from `first` to `last`, after `exit`, which always leaves
+/// the block, as an early exit or a `fail` does, so that they never run.
+pub(crate) fn unreachable(
+    exit: &trendy_syntax::ast::Statement,
+    first: &trendy_syntax::ast::Statement,
+    last: &trendy_syntax::ast::Statement,
+) -> Diagnostic {
+    let span = Span::new(first.span().start, last.span().end);
+    Diagnostic::error(
+        Code::Unreachable,
+        "these statements never run",
+        span,
+        "after the block is left",
+    )
+    .with_secondary(exit.span(), "the block always leaves here")
+    .with_note("a `return`, a `leave`, an `iterate` and a `fail` leave the block they are in, and so does an `if` whose branches all do, so nothing after them in the block runs")
+    .with_suggestion(
+        "delete them",
+        vec![Edit {
+            span: Span::new(first.removal().start, span.end),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// `value`, a body's or a value block's, after `exit`, which always leaves
+/// it, so that it is never computed: the fix makes the value of `last`, the
+/// last statement, if it is that `return`, the body's.
+pub(crate) fn unreachable_value(
+    exit: &trendy_syntax::ast::Statement,
+    last: Option<&trendy_syntax::ast::Statement>,
+    value: &Expr,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::Unreachable,
+        "this value is never computed",
+        value.span(),
+        "after the body is left",
+    )
+    .with_secondary(exit.span(), "the body always leaves here")
+    .with_note("a `return`, a `fail`, and an `if` whose branches all leave theirs, leave the body, so a value after them is never its own");
+    match last {
+        Some(trendy_syntax::ast::Statement::Return(stmt)) if stmt.syntax() == exit.syntax() => {
+            let Some(returned) = stmt.value() else {
+                return d.with_help("end the body with what it returns");
+            };
+            d.with_suggestion(
+                "end the body with what the `return` gives",
+                vec![Edit {
+                    span: Span::new(stmt.span().start, value.span().end),
+                    replacement: returned.syntax().text().to_string(),
+                }],
+            )
+        }
+        _ => d.with_help(
+            "end the body with what it comes to, which an `if` expression, or `fail e`, can choose",
+        ),
+    }
+}
+
+/// The `out` parameter `name` of the update operator `operator`, declared at
+/// `ident`, unassigned on a path to the `return` at `span`, which leaves the
+/// operator.
+pub(crate) fn unassigned_at_return(
+    name: &str,
+    operator: &str,
+    span: Span,
+    ident: &SyntaxToken,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Unassigned,
+        format!("the `out` parameter `{name}` isn't assigned on every path to this `return`"),
+        span,
+        "leaves the operator",
+    )
+    .with_secondary(trendy_syntax::span(ident.text_range()), "the parameter")
+    .with_note(OUT_RULE)
+    .with_help(format!(
+        "assign `{name}` before the `return`, or make it `var` if `{operator}` may leave its variable as it is"
+    ))
 }
 
 /// `name`, at `span`, assigned in a value block, which isn't one of its

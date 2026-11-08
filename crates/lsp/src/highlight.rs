@@ -97,8 +97,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // `desc`, `keep` and `numbered`, a `for` loop's `in`, `heading`, `type`,
     // a supertype's `is`, a type's `constraint` and `order`, a
     // conversion's `to` and `from`, a type test's `is`, a treat's
-    // `treat`, a failure's `fail`, a warning's `warn`, a transaction's
-    // `collecting`, a unit's `interface` and `implementation`, a
+    // `treat`, a failure's `fail`, a warning's `warn`, `leave` and `iterate`,
+    // a transaction's `collecting`, a unit's `interface` and `implementation`, a
     // constraint's declaration's `constraint`, a database's
     // declaration's `database`, and `uses`.
     let keyword = match parent {
@@ -126,6 +126,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::FailExpr
             | SyntaxKind::FailStmt
             | SyntaxKind::WarnStmt
+            | SyntaxKind::LeaveStmt
+            | SyntaxKind::IterateStmt
             | SyntaxKind::SectionHeader
             | SyntaxKind::Constraint
             | SyntaxKind::TypeOrder
@@ -960,6 +962,25 @@ mod tests {
                 ("r", Class::Attribute, false),
                 (">", Class::ExprOperator, false),
                 ("0e0", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn early_exits() {
+        // The words, before `;`, and names elsewhere.
+        assert_eq!(
+            highlight("operator f{} [ while true loop [ var leave := 1; iterate; ]; ];"),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("while", Class::Keyword, false),
+                ("true", Class::Keyword, false),
+                ("loop", Class::Keyword, false),
+                ("var", Class::Keyword, false),
+                ("leave", Class::Variable, true),
+                ("1", Class::Number, false),
+                ("iterate", Class::Keyword, false),
             ]
         );
     }

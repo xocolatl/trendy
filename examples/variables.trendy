@@ -74,9 +74,14 @@ operator check_out{name: text} [
    `while` checks it before each run, and a `loop` after, so that its
    block runs at least once. A `for` loop runs it for each element of an
    array, in order, which doesn't change while it runs. Each run's local
-   variables are its own. Here, the guests in turn, from an array of their
-   names. */
+   variables are its own. `return` leaves an operator from wherever it is
+   in its body, and `iterate` goes on to a loop's next run, past the rest of
+   its block. Here, the guests in turn, from an array of their names, if
+   there are any, and three knocks, a call of "hodi" at the last. */
 operator roll_call{} [
+    if is_empty{r: rooms} then [
+        return;
+    ];
     var guests: array text;
     load guests value from rooms{guest} order [asc guest];
     var i := 1;
@@ -88,11 +93,28 @@ operator roll_call{} [
     var knocks := 0;
     loop [
         knocks := knocks + 1;
+        if knocks < 3 then [
+            iterate;
+        ];
+        call debug_value{v: "hodi"};
     ] while knocks < 3;
     call debug_value{v: knocks};
     for guest in guests loop [
         call debug_value{v: "kwaheri, " || guest};
     ];
+];
+
+/* The first room from 1 up that no guest has: `leave` leaves the innermost
+   loop, so its condition can always be true. */
+operator first_free{taken: relation { room: integer, guest: text }}: integer [
+    var candidate := 1;
+    while true loop [
+        if is_empty{r: taken where room = candidate} then [
+            leave;
+        ];
+        candidate := candidate + 1;
+    ];
+    candidate
 ];
 
 operator main{} [
@@ -144,6 +166,7 @@ operator main{} [
     call check_out{name: "Bashō"};
     call debug_table{r: rooms};
     call roll_call{};
+    call debug_value{v: first_free{taken: rooms}};
 
     /* Two changes that touch the same tuple conflict, since neither
        order is the right one: this stops the program, writing

@@ -411,12 +411,16 @@ fn variables() {
             "│ Wanjiru │    3 │",
             "└─────────┴──────┘",
             // A roll call, by a `while` over the guests' positions, three
-            // knocks, by a `loop`, and goodbyes, by a `for` over the guests.
+            // knocks, by a `loop`, the last calling, as the others go on to
+            // the next, and goodbyes, by a `for` over the guests; then the
+            // first room free, which a `loop` leaves at.
             r#""1. Amara""#,
             r#""2. Wanjiru""#,
+            r#""hodi""#,
             "3",
             r#""kwaheri, Amara""#,
             r#""kwaheri, Wanjiru""#,
+            "1",
             "┌──────┬──────┐",
             "│ born │ name │",
             "├──────┼──────┤",
@@ -11057,6 +11061,151 @@ operator main{} [
     let (code, stderr) = build_and_run(&main, &dir.join("constant_units"), &workspace_root());
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stderr.lines().collect::<Vec<_>>(), ["6", "2", "6"]);
+}
+
+/// `return` leaves an operator from inside its loops and transactions, which
+/// commit, with a value made in a `for` loop's scope, or by a tail call, a
+/// million deep; `leave` and `iterate` leave a loop, or go on to its next run,
+/// from inside a transaction too.
+#[test]
+fn early_exits_end_what_they_leave() {
+    let (code, stderr) = run_source(
+        "early_exits",
+        r#"var stock := relation { { item: "maize", sacks: 10 } } key { item };
+var log: relation transaction_collection;
+
+type low is error { { item: text } };
+
+operator message{error: low}: text [
+    "running low on " || error.item
+];
+
+/* Leaves a transaction early: what it did is kept. */
+operator restock{sacks: integer} [
+    transaction collecting log [
+        update stock { sacks := sacks + sacks } where item = "maize";
+        warn low{item: "maize"};
+        if sacks > 0 then [
+            return;
+        ];
+        update stock { sacks := 0 };
+    ];
+];
+
+/* The items with more than `least` sacks, built in a loop over a computed array. */
+operator over{stock: relation { item: text, sacks: integer }, least: integer}: relation { item: text } [
+    var kept: relation { item: text } := relation {};
+    var items: array tuple { item: text, sacks: integer };
+    load items from stock order [asc item];
+    for each in items loop [
+        if each.sacks > least then [
+            return (stock where sacks > least){item};
+        ];
+        kept := kept union relation { { item: each.item } };
+    ];
+    kept
+];
+
+/* Counts down by tail calls, a million deep. */
+operator down{n: integer}: integer [
+    if n = 0 then [
+        return 0;
+    ];
+    down{n: n - 1}
+];
+
+operator pick{wanted: text, out found: text} [
+    for name in array ["Amani", "Kofi", "Wanjiru"] loop [
+        if name = wanted then [
+            found := name;
+            return;
+        ];
+    ];
+    found := "nobody";
+];
+
+operator main{} [
+    call restock{sacks: 5};
+    call debug_value{v: stock};
+    call debug_value{v: count{r: log}};
+    call debug_value{v: over{stock, least: 3}};
+    call debug_value{v: over{stock, least: 30}};
+    call debug_value{v: down{n: 1000000}};
+    var found: text;
+    call pick{wanted: "Kofi", out found};
+    call debug_value{v: found};
+    call pick{wanted: "Ama", out found};
+    call debug_value{v: found};
+    var tries := 0;
+    var done := false;
+    loop [
+        tries := tries + 1;
+        if tries < 3 then [
+            iterate;
+        ];
+        done := true;
+    ] while not done;
+    call debug_value{v: tries};
+    var outer := 0;
+    for i in array [1, 2, 3] loop [
+        transaction [
+            outer := outer + i;
+            if i = 2 then [
+                leave;
+            ];
+        ];
+    ];
+    call debug_value{v: outer};
+];
+"#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            // What the transaction did before it returned, its warning taken.
+            "relation { item: text, sacks: integer } { { item: \"maize\", sacks: 20 } }",
+            "1",
+            "relation { item: text } { { item: \"maize\" } }",
+            "relation { item: text } { { item: \"maize\" } }",
+            "0",
+            "\"Kofi\"",
+            "\"nobody\"",
+            "3",
+            "3",
+        ]
+    );
+}
+
+/// A `return` of a call that closes a cycle of calls is a tail call, two
+/// million deep, from in a `for` loop too, whose array's scope it ends.
+#[test]
+fn a_return_can_be_a_tail_call() {
+    let (code, stderr) = run_source(
+        "early_tail_calls",
+        r"operator down{n: integer}: integer [
+    if n > 0 then [
+        return down{n: n - 1};
+    ];
+    7
+];
+
+operator gather{n: integer, kept: relation { k: integer }}: relation { k: integer } [
+    for i in array [n] loop [
+        if i > 0 then [
+            return gather{n: n - 1, kept: kept union relation { { k: n mod 10 } }};
+        ];
+    ];
+    kept
+];
+
+operator main{} [
+    call debug_value{v: down{n: 2000000}};
+    call debug_value{v: count{r: gather{n: 100000, kept: relation {}}}};
+];
+",
+    );
+    assert_eq!((code, stderr.as_str()), (0, "7\n10\n"));
 }
 
 /// Other units read and assign the variables a unit's interface declares, by

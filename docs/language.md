@@ -428,7 +428,8 @@ body in square brackets `[]`, and a closing `;`.
 - **A body is a list of statements,** each ending with `;`: calls,
   assignments (see [Assignment](#assignment)), local variables'
   declarations (see [Local variables](#local-variables)), `if` statements
-  (see [`if` statements](#if-statements)) and loops (see [Loops](#loops)). A
+  (see [`if` statements](#if-statements)), loops (see [Loops](#loops)) and
+  early exits (see [Early exits](#early-exits)). A
   read-only operator's ends with its value, an expression without `;`
   (see [Read-only operators](#read-only-operators)). An expression alone
   isn't a statement, as its value would go unused (P0035).
@@ -743,9 +744,11 @@ operator main{} [
   operators, as `call` of a read-only one would lose its value (A0037),
   and only read-only operators are called in expressions, as an update
   operator has no value (A0016).
-- **`return` is for leaving an operator early,** which no operator does
-  yet: a body runs to its end (A0035). So a body's value is written alone,
-  and `return x;` at its end is fixed to `x` (P0031).
+- **`return x;` leaves the operator from anywhere in its body with the
+  value `x`,** of its result type, as a loop's or an `if`'s block can (see
+  [Early exits](#early-exits)). The body still ends with its value, which
+  is written alone, so `return x;` at its end is fixed to `x` (P0031), and a
+  `return` without a value is an error (A0035).
 - **Its statements can decide what runs next:** an `if` statement, a loop,
   a transaction and a `fail` statement are what they are in an update
   operator, on its parameters, which it reads, and its local variables,
@@ -966,9 +969,10 @@ operator main{} [
   its caller gives up what it holds, its local variables and what its statement
   made, keeping only what the new arguments hold, and it returns to where its
   caller would have.
-- **A tail position is** a read-only operator's value, a branch of an `if` in a
-  tail position, and the value of a value block in one; and an update operator's
-  last statement, and the last statement of a branch of an `if` statement in one.
+- **A tail position is** a read-only operator's value, a `return`'s value, but in
+  a transaction, which commits after it, a branch of an `if` in a tail position,
+  and the value of a value block in one; and an update operator's last statement,
+  and the last statement of a branch of an `if` statement in one.
 - **These hold for read-only and update operators, directly or through others:**
   in each of the operators below, whose calls would use up any stack otherwise.
 - **A call with work left after it returns isn't a tail call:** an operand, as in
@@ -3326,11 +3330,11 @@ operator main{} [
 ];
 ```
 
-- **A loop ends once its block makes its condition false.** No loop
-  leaves early: trendy has no `break`, `continue` or Tutorial D's `LEAVE`
-  (P0032), as it has no early `return`. A condition written `true`, or
-  known when compiling to be true, never ends, and is an error, and so is
-  one written `false`, and an empty block (A0046).
+- **A loop ends once its block makes its condition false,** or leaves it
+  (see [Early exits](#early-exits)). A condition written `true`, or known
+  when compiling to be true, never ends, and is an error, unless the block
+  can leave, with `leave` or `return`; and so is one written `false`, and an
+  empty block (A0046).
 - **Its block is a block in brackets,** even of one statement, as an `if`
   statement's branches are (P0029), with the same fixes for other
   languages' blocks (P0003). Each run's local variables are its own,
@@ -3388,6 +3392,108 @@ operator serve{} [
     for name in queue loop [
         queue := array ["Wanjiru"];
     ];
+];
+
+operator main{} [];
+```
+
+### Early exits
+
+`return` leaves the operator it is in, `leave;` leaves the innermost loop
+it is in, and `iterate;` goes on to that loop's next run, past the rest of
+its block, from wherever each is, inside `if` statements, transactions and
+other loops too. Tutorial D's `RETURN` and `LEAVE` are the first two
+(chapter 5), and its "variant of `<leave>` that merely terminates the current
+iteration of the loop and begins the next" the third.
+
+```trendy
+operator first_negative{a: array integer}: integer [
+    for n in a loop [
+        if n < 0 then [
+            return n;
+        ];
+    ];
+    0
+];
+
+operator odd_sum{a: array integer}: integer [
+    var total := 0;
+    for n in a loop [
+        if n mod 2 = 0 then [
+            iterate;
+        ];
+        total := total + n;
+    ];
+    total
+];
+
+operator greet{names: array text} [
+    var i := 0;
+    while true loop [
+        i := i + 1;
+        if i > length{a: names} then [
+            leave;
+        ];
+        call debug_value{v: "karibu, " || names[i]};
+    ];
+];
+
+operator main{} [
+    call debug_value{v: first_negative{a: array [3, -4, -1]}};
+    call debug_value{v: odd_sum{a: array [1, 2, 3, 4, 5]}};
+    call greet{names: array ["Amara", "Kofi"]};
+];
+```
+
+- **A read-only operator's `return` gives its value,** `return x;`, and an
+  update operator's gives none, `return;` (A0035), once each of its `out`
+  parameters is assigned, on every path to there (A0054). A value block
+  can't return, as it would leave the block, not the operator (A0035).
+  `return f{…};` of an operator that calls itself, directly or through
+  others, is a tail call, as one at the body's end is (see
+  [Recursion](#recursion)).
+- **Each goes past the end of what it is in,** as that would end: a block's
+  local variables are gone, and a transaction it leaves commits, as at its
+  block's end, collecting its warnings (see [Transactions](#transactions)).
+  So `leave` or `return` from a transaction keeps what its statements did.
+- **`leave` and `iterate` are of the innermost loop,** which a loop's name
+  can't choose (P0032), and of one of the body, or the value block, they are
+  in: a value block's statements compute its value, and a loop around it is
+  no loop of theirs, so one in no loop is an error (A0084). `iterate` checks
+  a loop's condition first, as after each run, so it can end a `loop [ … ]
+  while c;` too. After `leave` or `iterate` in a `loop` that runs once,
+  nothing its block assigns after them is assigned for sure.
+- **Nothing after an exit in its block runs,** nor after a `fail`, or an
+  `if` whose branches all leave theirs, so a statement there is an error,
+  which the fix deletes (A0085). An exit that skips nothing is one too,
+  which the fix deletes (A0084): `iterate;` at the end of its loop's block,
+  and `return;` at the end of an update operator's body, which the block
+  comes to anyway, in an `if` there too.
+- **`leave` and `iterate` are contextual keywords,** names elsewhere, and
+  other languages' `break` and `continue` are fixed to them (P0032).
+
+```trendy,error
+operator first_over{a: array integer, limit: integer} [
+    for n in a loop [
+        if n > limit then [
+            call debug_value{v: n};
+            break;
+        ];
+    ];
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator sign{n: integer}: integer [
+    if n < 0 then [
+        return -1;
+    ] else [
+        return 1;
+    ];
+    var zero := n = 0;
+    0
 ];
 
 operator main{} [];
@@ -7250,7 +7356,8 @@ is a name, leaving what uses it as the keyword as it is.
 `type` is a keyword only after `builtin` and before a type's name, `key`
 only where a variable's keys go, `value` and `from` only in `tuple from` and `value from`, and
 `load`, `from`, `order`, `asc` and `desc` only in a load, `in` only
-in a `for` loop, `collecting` only after `transaction`, `heading`
+in a `for` loop, `leave` and `iterate` only before a statement's `;`,
+`collecting` only after `transaction`, `heading`
 only before a heading's name, `constraint` only before a constraint's
 name or condition, and `database` only before a database's name.
 
@@ -7398,10 +7505,12 @@ line after a comment on its own line, such as a file's header, is kept.
 | `fn`, `def`, `function`, `void main()` | `operator main{} [];` |
 | `fn f(x: i64) -> i64 { x + 1 }`, `RETURNS INTEGER` | `operator f{x: integer}: integer [x + 1];` |
 | `return x;`, `RETURN x` at the end of a body | `x` |
+| `return x;`, `RETURN x` before the end of a body | `return x;` |
 | `{ let x = 1; x * 2 }`, Rust's block, in an expression | `[ var x := 1; x * 2 ]` |
 | `while (c) { … }`, `while c do … end`, `WHILE c; … END WHILE` | `while c loop [ … ];` |
 | `do { … } while (c);`, `repeat … until c` | `loop [ … ] while c;`, `loop [ … ] while not (c);` |
-| `break`, `continue`, `LEAVE` | none: a loop ends when its condition is false |
+| `break`, `LEAVE name` | `leave;`, of the innermost loop |
+| `continue`, `ITERATE name` | `iterate;`, of the innermost loop |
 | `foreach (x in a) { … }`, `for x of a`, `for x in a:` | `for x in a loop [ … ];` |
 | `for (i = 0; i < n; i++)` | `var i := 1; while i <= n loop [ …; i := i + 1; ];` |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |

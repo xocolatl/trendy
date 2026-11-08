@@ -1691,16 +1691,42 @@ pub(crate) fn loop_until(until: Found, condition: Span) -> Diagnostic {
     )
 }
 
-/// `break`, `continue` or Tutorial D's `LEAVE`, `found`: an early exit.
-pub(crate) fn loop_exit(found: Found) -> Diagnostic {
+/// What leaves a loop early, for notes.
+const LOOP_EXITS: &str = "`leave;` leaves the innermost loop the statement is in, and `iterate;` skips the rest of its block, going on to its next run, which a `while` loop's condition decides, as it does each";
+
+/// `break` or `continue`, `found`: the early exit trendy writes `word`,
+/// `leave` or `iterate`.
+pub(crate) fn loop_exit(found: Found, word: &str) -> Diagnostic {
     Diagnostic::error(
         Code::LoopSpelling,
-        format!("trendy has no `{}`", found.text),
+        format!("`{}` is written `{word}`", found.text),
         found.span,
-        "an early exit",
+        "another language's early exit",
     )
-    .with_note("a loop ends once its condition is false, checked before or after each run of its block: no loop leaves early, or skips the rest of its block")
-    .with_help("make the condition false, as by assigning a variable it reads, or run the rest of the block in an `if` statement")
+    .with_note(LOOP_EXITS)
+    .with_suggestion(
+        format!("write `{word}`"),
+        vec![Edit {
+            span: found.span,
+            replacement: word.to_string(),
+        }],
+    )
+}
+
+/// `name`, a loop's name after `word`, `leave` or `iterate`, as Tutorial D's
+/// `LEAVE` and SQL's `ITERATE` name the loop they are of.
+pub(crate) fn named_exit(name: Found, word: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        format!("`{word}` names no loop"),
+        name.span,
+        "a loop's name",
+    )
+    .with_note(LOOP_EXITS)
+    .with_note("loops have no names: each `leave` and `iterate` is of the innermost loop it is in")
+    .with_help(format!(
+        "remove the name, if the loop it names is the innermost, or else end the inner loops with `{word};` too, as by a variable each tests after it"
+    ))
 }
 
 /// `elif`, `elsif` or `elseif`, `found`, in an `if`: `else if`.

@@ -758,7 +758,7 @@ impl<'a> Globals<'a> {
         let mut lets: Vec<(hir::LocalId, hir::Expr)> = Vec::new();
         let statements: Vec<ast::Statement> = body.statements().collect();
         let written_value = body.value();
-        for (i, statement) in statements.iter().enumerate() {
+        for statement in &statements {
             // Where each value it gives a local variable is computed.
             let site = self
                 .sites
@@ -769,16 +769,6 @@ impl<'a> Globals<'a> {
                 locals: &mut locals,
             };
             match statement {
-                ast::Statement::Return(stmt) => {
-                    // `return;` at the end, with no value, is the body
-                    // without one, reported below; the parser makes
-                    // `return x;` there the value.
-                    let last = i + 1 == statements.len() && written_value.is_none();
-                    if !last {
-                        errors.push(errors::early_return(stmt));
-                    }
-                    valid = false;
-                }
                 ast::Statement::Var(decl) => {
                     let checked = locals::local(decl, &signature.types, &mut names, errors);
                     let (local, value) = checked.unzip();
@@ -805,7 +795,10 @@ impl<'a> Globals<'a> {
                 | ast::Statement::While(_)
                 | ast::Statement::Loop(_)
                 | ast::Statement::For(_)
-                | ast::Statement::Transaction(_) => {
+                | ast::Statement::Transaction(_)
+                | ast::Statement::Return(_)
+                | ast::Statement::Leave(_)
+                | ast::Statement::Iterate(_) => {
                     unreachable!("a body with them has its statements run")
                 }
                 ast::Statement::Warn(stmt) => {
@@ -1643,6 +1636,15 @@ impl Around for ReadOnlyNames<'_, '_, '_> {
         Declaring::Operator(self.signature())
     }
 
+    fn result(&self) -> Option<Expected> {
+        let signature = self.signature();
+        let written = signature.decl.as_ref()?.result()?;
+        Some(Expected {
+            ty: signature.result.clone()?,
+            origin: Origin::Type(written),
+        })
+    }
+
     fn refused(&self, statement: &ast::Statement) -> Option<Diagnostic> {
         let signature = self.signature();
         match statement {
@@ -1653,7 +1655,7 @@ impl Around for ReadOnlyNames<'_, '_, '_> {
             }
             // `return;` at the end, with no value, is the body without one,
             // reported then; the parser makes `return x;` there the value.
-            ast::Statement::Return(stmt) => {
+            ast::Statement::Return(stmt) if stmt.value().is_none() => {
                 let body = signature.decl.as_ref().and_then(ast::Operator::body);
                 let last = body.as_ref().is_some_and(|body| {
                     body.value().is_none()
@@ -1662,7 +1664,7 @@ impl Around for ReadOnlyNames<'_, '_, '_> {
                             .last()
                             .is_some_and(|last| last.syntax() == statement.syntax())
                 });
-                (!last).then(|| errors::early_return(stmt))
+                (!last).then(|| errors::return_without_value(&signature.name, stmt))
             }
             _ => None,
         }

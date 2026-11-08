@@ -154,11 +154,16 @@ impl Sites {
                     self.expr(array, site);
                     self.block(body, repeated);
                 }
-                hir::Statement::Fail(value) | hir::Statement::Warn(value) => {
+                hir::Statement::Fail(value)
+                | hir::Statement::Warn(value)
+                | hir::Statement::Return(Some(value)) => {
                     self.expr(value, site);
                 }
                 hir::Statement::Transaction(_, body) => self.block(body, site),
-                hir::Statement::Declare(_) => {}
+                hir::Statement::Declare(_)
+                | hir::Statement::Return(None)
+                | hir::Statement::Leave
+                | hir::Statement::Iterate => {}
             }
         }
     }

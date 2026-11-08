@@ -417,8 +417,13 @@ fn collect_exprs<'e>(statement: &'e hir::Statement, exprs: &mut Vec<&'e hir::Exp
         | hir::Statement::Loop(condition, ..)
         | hir::Statement::For(_, condition, _)
         | hir::Statement::Fail(condition)
-        | hir::Statement::Warn(condition) => exprs.push(condition),
-        hir::Statement::Declare(_) | hir::Statement::Transaction(..) => {}
+        | hir::Statement::Warn(condition)
+        | hir::Statement::Return(Some(condition)) => exprs.push(condition),
+        hir::Statement::Declare(_)
+        | hir::Statement::Transaction(..)
+        | hir::Statement::Return(None)
+        | hir::Statement::Leave
+        | hir::Statement::Iterate => {}
     }
     for block in statement.blocks() {
         for (_, inner) in &block.statements {

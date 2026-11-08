@@ -188,6 +188,8 @@ codes! {
     ComparedWithItself => "A0081",
     OutsideAnyTransaction => "A0082",
     ForeignConstraint => "A0083",
+    Exit => "A0084",
+    Unreachable => "A0085",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

@@ -2153,6 +2153,111 @@ mod tests {
     }
 
     #[test]
+    fn leave_and_iterate_are_of_the_innermost_loop() {
+        let update = |body: &str| format!("operator f{{n: integer}} [\n{body}\n];{MAIN}");
+        // In a loop, of each kind, through `if`s and transactions.
+        for body in [
+            "var i := 0; while i < n loop [ i := i + 1; if i = 3 then [ leave; ]; call debug_value{v: i}; ];",
+            "for x in array [1, 2] loop [ transaction [ if x = n then [ iterate; ]; call debug_value{v: x}; ]; ];",
+            "var i := 0; loop [ i := i + 1; if i > n then [ leave; ]; ] while true;",
+            "while true loop [ if n > 0 then [ return; ]; leave; ];",
+        ] {
+            let source = update(body);
+            assert!(
+                analyze_str(&source).is_ok(),
+                "{body}: {:#?}",
+                analyze_str(&source).err()
+            );
+        }
+        // In none, which a value block's statements aren't in, though the
+        // block is.
+        assert_eq!(codes(&update("leave;")), [Code::Exit]);
+        let source = update("for x in array [1] loop [ var v := [ iterate; 1 ]; ];");
+        let found = errors(&source);
+        assert_eq!(found[0].code, Code::Exit);
+        assert!(found[0].notes[1].contains("value block"), "{found:#?}");
+        // One that skips nothing, at its block's end, in an `if` there too.
+        for (body, fixed) in [
+            (
+                "for x in array [1] loop [ call debug_value{v: x}; iterate; ];",
+                "for x in array [1] loop [ call debug_value{v: x}; ];",
+            ),
+            (
+                "for x in array [1] loop [ if x = 1 then [ call debug_value{v: x}; iterate; ]; ];",
+                "for x in array [1] loop [ if x = 1 then [ call debug_value{v: x}; ]; ];",
+            ),
+        ] {
+            assert_eq!(codes(&update(body)), [Code::Exit], "{body}");
+            assert_eq!(fix(&update(body)), update(fixed), "{body}");
+        }
+        // What follows one never runs, which the fix deletes.
+        let body =
+            "for x in array [1] loop [ leave; call debug_value{v: x}; call debug_value{v: n}; ];";
+        assert_eq!(codes(&update(body)), [Code::Unreachable]);
+        assert_eq!(
+            fix(&update(body)),
+            update("for x in array [1] loop [ leave; ];")
+        );
+        // An always true condition with no way out, but `return`, never ends.
+        assert_eq!(
+            codes(&update(
+                "while true loop [ for x in array [1] loop [ leave; ]; ];"
+            )),
+            [Code::PointlessCondition]
+        );
+        // A block run once that leaves needs its loop, and keeps it.
+        assert!(
+            analyze_str(&update(
+                "loop [ if n = 1 then [ leave; ]; call debug_value{v: n}; ] while false;"
+            ))
+            .is_ok()
+        );
+        // An `out` parameter is assigned on every path to a `return`, and
+        // what a branch that returns doesn't assign is assigned after it.
+        let out =
+            |body: &str| format!("operator g{{n: integer, out r: integer}} [ {body} ];{MAIN}");
+        assert_eq!(
+            codes(&out("if n > 0 then [ return; ]; r := 1;")),
+            [Code::Unassigned]
+        );
+        assert!(analyze_str(&out("if n > 0 then [ r := 0; return; ]; r := 1;")).is_ok());
+        assert!(
+            analyze_str(&out(
+                "if n > 0 then [ return; ] else [ r := 1; ]; r := r + 1;"
+            ))
+            .is_err()
+        );
+        assert!(
+            analyze_str(&out(
+                "if n > 0 then [ r := 0; return; ] else [ r := 1; ]; r := r + 1;"
+            ))
+            .is_ok()
+        );
+        // A loop run at least once assigns nothing for sure, if it can leave
+        // or go on to its next run first.
+        let declared = |body: &str| {
+            format!(
+                "type positive {{ {{ p: integer, constraint p > 0 }} }};\n{}",
+                update(&format!(
+                    "var v: positive; {body} call debug_value{{v: v}};"
+                ))
+            )
+        };
+        let assigned = "loop [ v := positive{p: 1}; ] while n > 5;";
+        assert!(
+            analyze_str(&declared(assigned)).is_ok(),
+            "{:#?}",
+            analyze_str(&declared(assigned)).err()
+        );
+        for body in [
+            "loop [ if n > 0 then [ leave; ]; v := positive{p: 1}; ] while n > 5;",
+            "loop [ if n > 0 then [ iterate; ]; v := positive{p: 1}; ] while n > 5;",
+        ] {
+            assert_eq!(codes(&declared(body)), [Code::Unassigned], "{body}");
+        }
+    }
+
+    #[test]
     fn read_only_operators_change_nothing_and_end_with_their_value() {
         let codes_of = |body: &str| {
             codes(&format!(
@@ -2165,19 +2270,34 @@ mod tests {
         );
         assert_eq!(codes_of(""), [Code::Return]);
         assert_eq!(codes_of("var y := x;"), [Code::Return]);
-        // There are no early exits yet.
-        let early = errors("operator f{x: integer}: integer [ return x; 1 ];\noperator main{} [];");
-        assert_eq!(early[0].code, Code::Return);
-        assert_eq!(early[0].message, "a read-only operator can't return early");
-        assert!(early[0].suggestions.is_empty());
-        // A `return` in an update operator, of a value or not.
+        // An early return gives its value, wherever it is, and its body still
+        // ends with one.
+        let early = "operator f{x: integer}: integer [ if x > 0 then [ return x; ]; 1 ];";
+        assert!(analyze_str(&format!("{early}{MAIN}")).is_ok());
+        assert_eq!(
+            messages(&format!(
+                "operator f{{x: integer}}: integer [ if x > 0 then [ return; ]; 1 ];{MAIN}"
+            )),
+            ["a `return` in the read-only operator `f` gives its value"]
+        );
+        assert_eq!(
+            codes(&format!(
+                "operator f{{x: integer}}: integer [ if x > 0 then [ return \"x\"; ]; 1 ];{MAIN}"
+            )),
+            [Code::TypeMismatch]
+        );
+        // An update operator's has no value, and one at its body's end skips
+        // nothing.
         assert_eq!(
             codes("operator f{} [ return 1; ];\noperator main{} [];"),
             [Code::Return]
         );
+        assert!(analyze_str("operator f{n: integer} [ if n > 0 then [ return; ]; call debug_value{v: n}; ];\noperator main{} [];").is_ok());
+        let source = "operator f{} [ call debug_value{v: 1}; return; ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::Exit]);
         assert_eq!(
-            messages("operator f{} [ return; ];\noperator main{} [];"),
-            ["`f` can't return early"]
+            fix(source),
+            "operator f{} [ call debug_value{v: 1}; ];\noperator main{} [];"
         );
         // A value of the wrong type, reported at the value.
         let errors = errors("operator f{}: integer [ \"one\" ];\noperator main{} [];");
@@ -3568,12 +3688,19 @@ var zero := seg{{len: 0}};{MAIN}"
         assert_eq!(errors[0].code, Code::TypeMismatch);
         assert!(errors[0].suggestions.is_empty());
         assert!(errors[0].help[0].contains("failure{message:"));
-        // One in a value block runs when the program does.
+        // One in a value block runs when the program does, and the block's value
+        // after it is never computed.
+        assert_eq!(
+            codes(&format!(
+                "var a: integer := [ var n := 1; if n > 0 then [ fail failure{{message: \"no\"}}; ]; n ];{MAIN}"
+            )),
+            [Code::InitialValueWhenRunning]
+        );
         assert_eq!(
             codes(&format!(
                 "var a: integer := [ fail failure{{message: \"no\"}}; 1 ];{MAIN}"
             )),
-            [Code::InitialValueWhenRunning]
+            [Code::Unreachable]
         );
     }
 
@@ -11460,7 +11587,10 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
                 | hir::Statement::For(..)
                 | hir::Statement::Fail(_)
                 | hir::Statement::Warn(_)
-                | hir::Statement::Transaction(..) => None,
+                | hir::Statement::Transaction(..)
+                | hir::Statement::Return(_)
+                | hir::Statement::Leave
+                | hir::Statement::Iterate => None,
             })
             .collect();
         let local = |i| vec![hir::Target::Local(hir::LocalId(i))];
@@ -11989,8 +12119,9 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
         // Its parameters are given to it, as an update operator's `const`
         // ones are.
         assert_eq!(codes(&in_loop("n := 1;")), [Code::NotAssignable]);
-        // It has no early exit, as an update operator hasn't.
-        assert_eq!(codes(&in_loop("return i;")), [Code::Return]);
+        // It returns from the loop, and then nothing after the `return` runs.
+        assert_eq!(codes(&in_loop("return i;")), [Code::Unreachable]);
+        assert!(analyze_str(&in_loop("if i = 2 then [ return i; ];")).is_ok());
         // And it ends with its value.
         let source = format!(
             "operator f{{n: integer}}: integer [ while n > 0 loop [ var i := 1; ]; ];{MAIN}"
@@ -12694,10 +12825,9 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             called[0].message,
             "a read-only operator can't call an operator"
         );
-        // Its value is last.
+        // Nothing runs after a `return`.
         let after = read_only("return n; var later := 1;");
-        assert_eq!(after[0].code, Code::Return);
-        assert_eq!(after[0].message, "a read-only operator can't return early");
+        assert_eq!(after[0].code, Code::Unreachable);
         // A local variable can't be computed from itself.
         let own = read_only("var m := m + 1; n");
         assert_eq!(own[0].code, Code::LocalBeforeDeclaration);

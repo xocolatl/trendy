@@ -424,9 +424,13 @@ assignment meant and fixed to `:=`, and SQL's and Tutorial D's `value as name` t
 since the name can't be guessed.
 
 A statement is a call, an assignment statement (`AssignStmt`), an
-`assign` block (`AssignBlock`) of assignment statements, made at once, or a
-`return` (`ReturnStmt`), for leaving an operator early, which sema
-rejects until there are early exits. An
+`assign` block (`AssignBlock`) of assignment statements, made at once, or an
+early exit: a `return` (`ReturnStmt`), with a value or without, and
+`leave;` and `iterate;` (`LeaveStmt`, `IterateStmt`), whose words are
+contextual keywords before `;`, to which other languages' `break` and
+`continue` are fixed, and after which a loop's name is reported, as
+Tutorial D's `LEAVE` and SQL's `ITERATE` write one (P0032,
+`Parser::exit_stmt`). An
 assignment is `target := value` (`Assignment`) or a shorthand starting
 with its keyword:
 `insert` and `d_insert` (`Insertion`), `delete` and `i_delete`
@@ -863,8 +867,20 @@ parameter is assigned before (A0054). A transaction checks its block as a block 
 its own.
 An `if` statement whose condition is known when compiling runs only one
 block, and the other's failures aren't reported (`body::Statements`). A
-loop whose condition is known to be true would never end, since nothing
-leaves a loop early, and is reported (A0046). A `for` loop's variable is
+loop whose condition is known to be true would never end, unless its block
+can leave it (`hir::Block::loop_exits`: a `leave` of it, of no loop within
+it, or a `return`), and is reported (A0046). The early exits are
+`hir::Statement::Return`, `Leave` and `Iterate`: a `return`'s value is of
+the result type a read-only operator's names give (`Around::result`), and
+an update operator's has none (A0035, `Around::refused`); `leave` and
+`iterate` are of a loop of the statements checked (`Statements::loops`),
+which a value block's statements, checked on their own, never start in
+(A0084). A statement after one that always leaves its block
+(`hir::Statement::always_exits`: an exit, a `fail`, or an `if` whose
+branches all do) never runs (A0085, `Statements::each_sited`), and nor does
+a body's value after one (`errors::unreachable_value`); an `iterate` at the
+end of its loop's block, and a `return;` at an update operator's body's,
+skip nothing (A0084, `pointless_exits_at_end`). A `for` loop's variable is
 declared by the loop (`locals::Declaration::Loop`), and can't be
 assigned; nor can a variable its array is computed from, while the loop
 runs: `body::Statements` keeps a stack of what each loop it is in keeps
@@ -887,12 +903,15 @@ statement it checks (`body::Outs`): each statement's reads of them, which
 names collect as they resolve, and a change that reads its target, such
 as `insert`, are reported if they come before (A0054), and then what the
 statement assigns, an assignment's target or an `out` argument, counts
-as assigned; an `if` assigns what both its branches do, `while` and
-`for` loops nothing, since their blocks may not run, a transaction with
-`collecting` nothing, since a failure it takes undoes its block, one
-without what its block does, and a `loop … while` what its block does,
-before its condition. One not assigned when
-the body ends is reported too (A0054), unless its reads already are.
+as assigned; an `if` assigns what both its branches do, or what one does
+if the other always leaves its block, `while` and `for` loops nothing,
+since their blocks may not run, a transaction with `collecting` nothing,
+since a failure it takes undoes its block, one without what its block
+does, and a `loop … while` what its block does, before its condition,
+unless it can leave or go on to its next run first. One not assigned when
+the body ends is reported too (A0054), unless its reads already are, and
+so is one not assigned where a `return` leaves the body
+(`Statements::returned_assigned`).
 `Combination::DisjointChanges` is the union of the tuples changes remove,
 which conflict (R0009) if two remove the same one. An element's
 assignment, `a[i] := x`, is a pseudovariable's, which TTM makes shorthand
@@ -2309,6 +2328,23 @@ warnings, checked against its keys (`FunctionBuilder::collect`), and
 Without `collecting`, or for a failure with no error, running out of
 memory's, the rollback ends in `Terminator::Raise`, and the failure
 goes on, to the transaction around it, or the function's failure exit.
+
+An early exit goes past the end of what it is in as that would end
+(`FunctionBuilder::exits`, innermost last, each an `Exit`): a block's local
+variables release their references, as at its end; the runtime's scope a
+`for` loop's array is made in ends, which a `return`'s value is handed out
+of first; and a transaction commits, as its block's end does
+(`FunctionBuilder::committed`, of a `Commit`: the clock read no more, the
+kept values released, and its warnings collected), in a block whose
+failures go where the transaction's own would (`FunctionBuilder::exit_to`).
+`leave` and `iterate` then go to the innermost loop's end or its next run,
+its condition, or its next element (`Exit::Loop`), and a `return` to what
+the body comes to as it ends (`Exit::Return`, `FunctionBuilder::returning`),
+having given its value to where the body's goes: in a tail position, as the
+body's value is (`FunctionBuilder::returned`), unless it leaves a
+transaction, which commits after it. The code after an exit is in a block
+nothing reaches. A loop whose condition is known to be true runs its block
+until it leaves.
 
 A warning goes to the innermost transaction with `collecting` running,
 in whatever function: the warnings it has collected so far are in a

@@ -40,23 +40,21 @@ type not_utf8_environment is error { { name: text } };
 
 implementation
 
-/* Each loop stops at the first code point that can't be given, as no loop
-   leaves early. */
 operator can_be_given{name: text, value: text}: boolean [
-    var points := to_code_points{from: name};
-    var given := length{a: points} > 0;
-    var at := 1;
-    while given and at <= length{a: points} loop [
-        given := points[at].value <> 0x3D and points[at].value <> 0x00;
-        at := at + 1;
+    if name = "" then [
+        return false;
     ];
-    points := to_code_points{from: value};
-    at := 1;
-    while given and at <= length{a: points} loop [
-        given := points[at].value <> 0;
-        at := at + 1;
+    for point in to_code_points{from: name} loop [
+        if point.value = 0x3D or point.value = 0x00 then [
+            return false;
+        ];
     ];
-    given
+    for point in to_code_points{from: value} loop [
+        if point.value = 0x00 then [
+            return false;
+        ];
+    ];
+    true
 ];
 
 operator message{error: not_utf8_argument}: text [

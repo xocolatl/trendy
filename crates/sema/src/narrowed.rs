@@ -295,6 +295,8 @@ impl Assigns {
             }
             ast::Statement::Var(_)
             | ast::Statement::Return(_)
+            | ast::Statement::Leave(_)
+            | ast::Statement::Iterate(_)
             | ast::Statement::Fail(_)
             | ast::Statement::Warn(_) => {}
         }

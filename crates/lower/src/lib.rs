@@ -370,6 +370,7 @@ struct Collection {
 /// What a transaction puts aside as it begins: the warnings collected so
 /// far, with their references, and whether a transaction with
 /// `collecting` was running.
+#[derive(Clone)]
 struct Aside {
     warnings: lir::Place,
     collecting: lir::Place,
@@ -568,7 +569,9 @@ fn function(
     let (lowered, makes) = match kind {
         hir::OperatorKind::Update { locals, body } => {
             builder.declare(locals, cx);
-            builder.tail_block(&body, cx);
+            builder.returning(body.returns(), None, |builder| {
+                builder.tail_block(&body, cx);
+            });
             builder.give_up_arguments(cx);
             (builder.finish(None, cx), false)
         }
@@ -1343,6 +1346,9 @@ struct FunctionBuilder<'a> {
     arguments: Option<lir::Place>,
     /// The blocks that end in a tail call, which end the scopes it has begun.
     tail_blocks: Vec<lir::BlockId>,
+    /// What an early exit, `return`, `leave` or `iterate`, goes out of from
+    /// where the code is, innermost last.
+    exits: Vec<Exit>,
     /// The slot of the innermost scope as the function starts, once what ends
     /// the scopes it has begun needs it.
     outer_scope: Option<lir::Place>,
@@ -1448,8 +1454,46 @@ struct View<'e> {
     shape: Shape,
 }
 
+/// What an early exit goes out of, which it ends as it would end itself.
+#[derive(Clone)]
+enum Exit {
+    /// A loop, whose next run `iterate` goes to, its condition checked
+    /// first, and whose end `leave` goes to.
+    Loop {
+        next: lir::BlockId,
+        after: lir::BlockId,
+    },
+    /// A block, whose local variables give up their references as it ends.
+    Block(Vec<hir::LocalId>),
+    /// The runtime's scope a `for` loop's array is made in, which ends after
+    /// the loop.
+    Scope(lir::Place),
+    /// A transaction, which commits as its block ends.
+    Transaction(Box<Commit>),
+    /// What an operator's body comes to as it ends, where a `return` goes,
+    /// with where the body's value goes, and its type, if it has one.
+    Return {
+        landing: lir::BlockId,
+        result: Option<(lir::Place, hir::Type)>,
+    },
+}
+
+/// What a transaction does as its block ends, and it commits: it reads the
+/// clock no more, if it did, gives up the values it kept, and, with
+/// `collecting`, takes back the warnings it put aside, adding its own to the
+/// variable. `catches` is how many blocks took failures around it.
+#[derive(Clone)]
+struct Commit {
+    clocked: bool,
+    kept: Vec<Kept>,
+    collecting: Option<(hir::Target, Aside)>,
+    collection: Collection,
+    catches: usize,
+}
+
 /// A variable a transaction keeps as it begins: where it is, the slot its
 /// value is kept in, and its type.
+#[derive(Clone)]
 struct Kept {
     variable: lir::Place,
     value: lir::Place,
@@ -1660,6 +1704,7 @@ impl<'a> FunctionBuilder<'a> {
             cycle: None,
             arguments: None,
             tail_blocks: Vec::new(),
+            exits: Vec::new(),
             outer_scope: None,
             last_read: Vec::new(),
             loose_locals: Vec::new(),
@@ -1958,6 +2003,7 @@ impl<'a> FunctionBuilder<'a> {
     /// one, then the release of the references its local variables hold.
     fn tail_block(&mut self, block: &hir::Block, cx: &mut Lowering) {
         self.note_loose_locals(block, None);
+        self.exits.push(Exit::Block(block.locals.clone()));
         if let Some(((site, last), statements)) = block.statements.split_last() {
             let last_mentioned = last_mentioned(block, None);
             for (at, (site, statement)) in statements.iter().enumerate() {
@@ -1976,6 +2022,7 @@ impl<'a> FunctionBuilder<'a> {
                 statement => self.statement(statement, cx),
             }
         }
+        self.exits.pop();
         self.release_locals_of(block, cx);
     }
 
@@ -1986,7 +2033,9 @@ impl<'a> FunctionBuilder<'a> {
     /// again, has none to give up.
     fn block(&mut self, block: &hir::Block, cx: &mut Lowering) {
         self.note_loose_locals(block, None);
+        self.exits.push(Exit::Block(block.locals.clone()));
         self.statements_of(block, None, cx);
+        self.exits.pop();
         self.release_locals_of(block, cx);
     }
 
@@ -2141,8 +2190,11 @@ impl<'a> FunctionBuilder<'a> {
         }
         let (outer_scope, outer_site) = (self.scope.take(), self.site);
         self.nested_scope(cx, |this, cx| {
-            this.statements_of(block, Some(end), cx);
-            value(this, cx);
+            // An operator's body, whose value `return` can give too.
+            this.returning(block.returns(), Some((result, ty)), |this| {
+                this.statements_of(block, Some(end), cx);
+                value(this, cx);
+            });
             this.scoped |= cx.points(ty);
             vec![(result.clone(), ty.clone())]
         });
@@ -2737,6 +2789,9 @@ impl<'a> FunctionBuilder<'a> {
                 self.transaction(collecting.as_ref(), body, cx);
                 self.scoped(|this| this.constraints_checked(&assigns, cx));
             }
+            hir::Statement::Return(value) => self.early_return(value.as_ref(), cx),
+            hir::Statement::Leave => self.loop_exit(false, cx),
+            hir::Statement::Iterate => self.loop_exit(true, cx),
         }
     }
 
@@ -2944,15 +2999,19 @@ impl<'a> FunctionBuilder<'a> {
         clock(self, lir::RuntimeFn::TransactionBegins);
         let (rollback, after) = (self.new_block(), self.new_block());
         let lets = self.lets.len();
+        let commit = Commit {
+            clocked,
+            kept: kept.clone(),
+            collecting: collecting
+                .as_ref()
+                .map(|(target, aside)| ((*target).clone(), aside.clone())),
+            collection: collection.clone(),
+            catches: self.catches.len(),
+        };
+        self.exits.push(Exit::Transaction(Box::new(commit.clone())));
         self.catching(rollback, |this| this.block(body, cx));
-        clock(self, lir::RuntimeFn::TransactionEnds);
-        for kept in &kept {
-            kept.give_up(self, cx);
-        }
-        if let Some((target, aside)) = &collecting {
-            let own = collection.take_back(self, aside, cx);
-            self.collect(&collection, target, own, None, cx);
-        }
+        self.exits.pop();
+        self.committed(&commit, cx);
         self.end_block(lir::Terminator::Jump(after), rollback);
 
         clock(self, lir::RuntimeFn::TransactionEnds);
@@ -3002,6 +3061,149 @@ impl<'a> FunctionBuilder<'a> {
         self.end_block(lir::Terminator::Jump(after), raise);
         self.collect(&collection, target, own, None, cx);
         self.end_block(lir::Terminator::Raise, after);
+    }
+
+    /// What `lower` adds, an operator's body, which a `return` in it, if
+    /// `returns`, leaves, to come to what the body comes to as it ends, with
+    /// its value, at the place `result` says, of its type, if it has one.
+    fn returning(
+        &mut self,
+        returns: bool,
+        result: Option<(&lir::Place, &hir::Type)>,
+        lower: impl FnOnce(&mut Self),
+    ) {
+        if !returns {
+            lower(self);
+            return;
+        }
+        let landing = self.new_block();
+        self.exits.push(Exit::Return {
+            landing,
+            result: result.map(|(held, ty)| (held.clone(), ty.clone())),
+        });
+        lower(self);
+        self.exits.pop();
+        self.end_block(lir::Terminator::Jump(landing), landing);
+    }
+
+    /// What a transaction does as its block ends, as `commit` says, which its
+    /// block's end and an early exit from it both do.
+    fn committed(&mut self, commit: &Commit, cx: &mut Lowering) {
+        if commit.clocked {
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::TransactionEnds,
+                args: Vec::new(),
+            });
+        }
+        for kept in &commit.kept {
+            kept.give_up(self, cx);
+        }
+        if let Some((target, aside)) = &commit.collecting {
+            let own = commit.collection.take_back(self, aside, cx);
+            self.collect(&commit.collection, target, own, None, cx);
+        }
+    }
+
+    /// End what the exits from the one at `depth` on are, the innermost
+    /// first, as each would end: a block's local variables give up their
+    /// references, a scope ends, after handing `value`, with its type, to the
+    /// one around it, if a `return` is giving it, and a transaction commits,
+    /// its failures no longer its own. Then go to `to`, the code after this
+    /// being unreachable, as an exit is the last its block runs.
+    fn exit_to(
+        &mut self,
+        depth: usize,
+        value: Option<(&lir::Place, &hir::Type)>,
+        to: lir::BlockId,
+        cx: &mut Lowering,
+    ) {
+        let catches = self.catches.clone();
+        let exited: Vec<Exit> = self.exits[depth..].iter().rev().cloned().collect();
+        for exit in exited {
+            match exit {
+                Exit::Block(locals) => {
+                    for id in locals {
+                        self.release_local(id, cx);
+                    }
+                }
+                Exit::Scope(scope) => {
+                    if let Some((value, ty)) = value.filter(|(_, ty)| cx.points(ty)) {
+                        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+                        self.insts.push(lir::Inst::CallRuntime {
+                            function: lir::RuntimeFn::HandOut,
+                            args: vec![value.clone(), descriptor],
+                        });
+                    }
+                    self.insts.push(lir::Inst::CallRuntime {
+                        function: lir::RuntimeFn::End,
+                        args: vec![scope],
+                    });
+                }
+                Exit::Transaction(commit) => {
+                    // Its commit fails as the code around it does.
+                    let committing = self.new_block();
+                    self.end_block(lir::Terminator::Jump(committing), committing);
+                    self.catches.truncate(commit.catches);
+                    self.committed(&commit, cx);
+                }
+                Exit::Loop { .. } | Exit::Return { .. } => {}
+            }
+        }
+        let unreachable = self.new_block();
+        self.end_block(lir::Terminator::Jump(to), unreachable);
+        self.catches = catches;
+    }
+
+    /// `return;`, or `return value;`: the value given to the function's result,
+    /// as the body's own would be, unless a tail call ends the function first,
+    /// then what is between it and the body's end ended, and on to what the body
+    /// comes to as it ends. A transaction it leaves commits first, so the call
+    /// of a value is never a tail call out of one.
+    fn early_return(&mut self, value: Option<&hir::Expr>, cx: &mut Lowering) {
+        let depth = self
+            .exits
+            .iter()
+            .rposition(|exit| matches!(exit, Exit::Return { .. }))
+            .expect("sema returns only from an operator's body");
+        let Exit::Return { landing, result } = self.exits[depth].clone() else {
+            unreachable!("found as one");
+        };
+        let given = match (value, &result) {
+            (Some(value), Some((held, ty))) => {
+                // In a tail position, if the body's value is the function's.
+                let commits = self.exits[depth..]
+                    .iter()
+                    .any(|exit| matches!(exit, Exit::Transaction(_)));
+                if !commits && *held == lir::Place::whole(lir::Base::Result) {
+                    self.returned(value, ty, cx);
+                } else {
+                    let src = self.place(value, cx);
+                    self.insts.push(lir::Inst::Copy {
+                        dst: held.clone(),
+                        src,
+                        layout: cx.layout(ty),
+                    });
+                }
+                self.scoped |= cx.points(ty);
+                Some((held, ty))
+            }
+            _ => None,
+        };
+        self.exit_to(depth + 1, given, landing, cx);
+    }
+
+    /// `leave;` or, if `next`, `iterate;`: what is between it and the innermost
+    /// loop's block's end ended, then on to after the loop, or its next run.
+    fn loop_exit(&mut self, next: bool, cx: &mut Lowering) {
+        let depth = self
+            .exits
+            .iter()
+            .rposition(|exit| matches!(exit, Exit::Loop { .. }))
+            .expect("sema leaves only loops");
+        let Exit::Loop { next: again, after } = self.exits[depth].clone() else {
+            unreachable!("found as one");
+        };
+        self.exit_to(depth + 1, None, if next { again } else { after }, cx);
     }
 
     /// The random bytes `call` asks for, given to its `out` parameter.
@@ -3248,15 +3450,9 @@ impl<'a> FunctionBuilder<'a> {
         };
         let start = self.position();
         let src = self.place(array, cx);
-        let makes = std::mem::take(&mut self.scoped);
-        self.each_tuple(&src, cx.layout(&element), cx, |this, at_hand, _, cx| {
-            this.local_places[variable.0] = Some(LocalPlace {
-                value: at_hand,
-                holds: false,
-            });
-            this.block(body, cx);
-        });
-        if makes {
+        // The scope the array is made in, if it makes one, which an exit from
+        // the loop's block past the loop ends.
+        let scope = std::mem::take(&mut self.scoped).then(|| {
             let scope = self.new_scope();
             self.insert(
                 start,
@@ -3265,6 +3461,24 @@ impl<'a> FunctionBuilder<'a> {
                     args: vec![scope.clone()],
                 },
             );
+            self.exits.push(Exit::Scope(scope.clone()));
+            scope
+        });
+        let after = self.new_block();
+        self.each_tuple(&src, cx.layout(&element), cx, |this, at_hand, _, cx| {
+            this.local_places[variable.0] = Some(LocalPlace {
+                value: at_hand,
+                holds: false,
+            });
+            let next = this.new_block();
+            this.exits.push(Exit::Loop { next, after });
+            this.block(body, cx);
+            this.exits.pop();
+            this.end_block(lir::Terminator::Jump(next), next);
+        });
+        self.end_block(lir::Terminator::Jump(after), after);
+        if let Some(scope) = scope {
+            self.exits.pop();
             self.insts.push(lir::Inst::CallRuntime {
                 function: lir::RuntimeFn::End,
                 args: vec![scope],
@@ -3276,8 +3490,8 @@ impl<'a> FunctionBuilder<'a> {
     /// says: a block that computes the condition, in a scope of its own,
     /// each time, and branches to the body's block, which jumps back to
     /// it, or on to one after the loop. A condition known to be false when
-    /// compiling runs a `loop`'s block once, and a `while`'s never; sema
-    /// reports one known to be true, which would never end.
+    /// compiling runs a `loop`'s block once, and a `while`'s never, and one
+    /// known to be true runs it until it leaves, which sema says it can.
     fn loop_statement(
         &mut self,
         condition: &hir::Expr,
@@ -3286,10 +3500,16 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) {
         if let hir::Expr::Constant(hir::Value::Boolean(runs)) = condition {
-            assert!(!runs, "sema reports a loop that never ends");
-            if check == hir::Check::After {
-                self.block(body, cx);
+            if !runs && check == hir::Check::Before {
+                return;
             }
+            let (run, after) = (self.new_block(), self.new_block());
+            self.end_block(lir::Terminator::Jump(run), run);
+            let next = if *runs { run } else { after };
+            self.exits.push(Exit::Loop { next, after });
+            self.block(body, cx);
+            self.exits.pop();
+            self.end_block(lir::Terminator::Jump(next), after);
             return;
         }
         let (test, run, after) = (self.new_block(), self.new_block(), self.new_block());
@@ -3319,7 +3539,9 @@ impl<'a> FunctionBuilder<'a> {
             },
             run,
         );
+        self.exits.push(Exit::Loop { next: test, after });
         self.block(body, cx);
+        self.exits.pop();
         self.end_block(lir::Terminator::Jump(test), after);
     }
 
@@ -5410,10 +5632,12 @@ impl<'a> FunctionBuilder<'a> {
                     reads(&assignment.value, Around { in_order, ..around })
                 }),
                 hir::Statement::Call(call) => call.args.values().all(|arg| reads(arg, around)),
+                // What a `return` gives is the operator's value, in its order.
                 hir::Statement::If(condition, ..)
                 | hir::Statement::For(_, condition, _)
                 | hir::Statement::Fail(condition)
-                | hir::Statement::Warn(condition) => reads(condition, around),
+                | hir::Statement::Warn(condition)
+                | hir::Statement::Return(Some(condition)) => reads(condition, around),
                 hir::Statement::Loop(condition, ..) => reads(
                     condition,
                     Around {
@@ -5421,7 +5645,11 @@ impl<'a> FunctionBuilder<'a> {
                         ..around
                     },
                 ),
-                hir::Statement::Declare(_) | hir::Statement::Transaction(..) => true,
+                hir::Statement::Declare(_)
+                | hir::Statement::Transaction(..)
+                | hir::Statement::Return(None)
+                | hir::Statement::Leave
+                | hir::Statement::Iterate => true,
             };
             own && statement
                 .blocks()

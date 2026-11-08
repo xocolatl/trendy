@@ -953,6 +953,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         // `- -a`, not `--a`.
         _ if sign(prev) && sign(next) => " ",
         (RBrace, LBracket | LBrace) => " ",
+        // `return;`, without a value.
+        (SyntaxKind::ReturnKw, Semicolon) => "",
         (prev, next) if spaced_after(prev) || spaced_before(next) => " ",
         _ => "",
     }
@@ -1266,6 +1268,18 @@ mod tests {
         assert_eq!(
             fmt("operator f{}[while n>0 loop[n:=n-1;];loop[n:=n+1;]while n<3;];"),
             "operator f{} [\n    while n > 0 loop [\n        n := n - 1;\n    ];\n    loop [\n        n := n + 1;\n    ] while n < 3;\n];\n"
+        );
+    }
+
+    #[test]
+    fn early_exits() {
+        assert_eq!(
+            fmt("operator f{}[while true loop[if n>0 then[leave  ;];iterate ;];return  ;];"),
+            "operator f{} [\n    while true loop [\n        if n > 0 then [\n            leave;\n        ];\n        iterate;\n    ];\n    return;\n];\n"
+        );
+        assert_eq!(
+            fmt("operator f{}:integer[if n>0 then[return   n;];0];"),
+            "operator f{}: integer [\n    if n > 0 then [\n        return n;\n    ];\n    0\n];\n"
         );
     }
 

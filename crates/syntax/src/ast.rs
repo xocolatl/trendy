@@ -66,6 +66,8 @@ ast_node!(Requirement);
 ast_node!(Body);
 ast_node!(CallStmt);
 ast_node!(ReturnStmt);
+ast_node!(LeaveStmt);
+ast_node!(IterateStmt);
 ast_node!(FailStmt);
 ast_node!(WarnStmt);
 ast_node!(IfStmt);
@@ -1074,6 +1076,8 @@ pub enum Statement {
     Assign(AssignStmt),
     Block(AssignBlock),
     Return(ReturnStmt),
+    Leave(LeaveStmt),
+    Iterate(IterateStmt),
     Fail(FailStmt),
     Warn(WarnStmt),
     If(IfStmt),
@@ -1086,8 +1090,9 @@ pub enum Statement {
 }
 
 /// Whether one of `statements` decides what runs next: an `if`, a loop, a
-/// transaction or a `fail`, so that they have to be run, where the others
-/// just name values one after another.
+/// transaction, a `fail`, or an early exit, `return`, `leave` or `iterate`,
+/// so that they have to be run, where the others just name values one after
+/// another.
 pub fn decides_what_runs(mut statements: impl Iterator<Item = Statement>) -> bool {
     statements.any(|statement| {
         matches!(
@@ -1098,6 +1103,9 @@ pub fn decides_what_runs(mut statements: impl Iterator<Item = Statement>) -> boo
                 | Statement::For(_)
                 | Statement::Transaction(_)
                 | Statement::Fail(_)
+                | Statement::Return(_)
+                | Statement::Leave(_)
+                | Statement::Iterate(_)
         )
     })
 }
@@ -1120,6 +1128,13 @@ impl ValueBlock {
 }
 
 impl Statement {
+    /// The span to delete to remove the statement, as for
+    /// [`AssignBlock::removal`].
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        statement_removal(self.syntax())
+    }
+
     /// The statement `node` is, if it is one. A variable's declaration is
     /// one where a body has it, and a program's definition elsewhere.
     #[must_use]
@@ -1129,6 +1144,8 @@ impl Statement {
             .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
             .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
             .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
+            .or_else(|| LeaveStmt::cast(node.clone()).map(Statement::Leave))
+            .or_else(|| IterateStmt::cast(node.clone()).map(Statement::Iterate))
             .or_else(|| FailStmt::cast(node.clone()).map(Statement::Fail))
             .or_else(|| WarnStmt::cast(node.clone()).map(Statement::Warn))
             .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
@@ -1146,6 +1163,8 @@ impl Statement {
             Statement::Assign(s) => s.syntax(),
             Statement::Block(s) => s.syntax(),
             Statement::Return(s) => s.syntax(),
+            Statement::Leave(s) => s.syntax(),
+            Statement::Iterate(s) => s.syntax(),
             Statement::Fail(s) => s.syntax(),
             Statement::Warn(s) => s.syntax(),
             Statement::If(s) => s.syntax(),
@@ -1316,6 +1335,36 @@ impl IfStmt {
                     .or_else(|| IfStmt::cast(node).map(ElseBranch::If))
             })
             .nth(1)
+    }
+}
+
+impl LeaveStmt {
+    /// The `leave` keyword, as written.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The span to delete to remove the statement, as for
+    /// [`AssignBlock::removal`].
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        statement_removal(&self.0)
+    }
+}
+
+impl IterateStmt {
+    /// The `iterate` keyword, as written.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The span to delete to remove the statement, as for
+    /// [`AssignBlock::removal`].
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        statement_removal(&self.0)
     }
 }
 
