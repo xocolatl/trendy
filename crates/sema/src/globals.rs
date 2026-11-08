@@ -349,6 +349,39 @@ impl<'a> Globals<'a> {
         }
     }
 
+    /// Reading the variable `id`, written `name` at `span`, in an initial
+    /// value: its own, which a constant's can't read, as what it is computed
+    /// from never changes.
+    fn variable_read(
+        &mut self,
+        id: hir::VariableId,
+        name: &str,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        if let Some(Pending {
+            global: Global::Constant(_),
+            name: constant,
+            ..
+        }) = self.stack.last()
+        {
+            errors.push(errors::variable_in_constant(
+                name,
+                span,
+                constant,
+                self.declared.decl(id),
+            ));
+            return Lookup::Reported;
+        }
+        match self.reach(id, span, errors) {
+            // Of its declared type, which can be a supertype of its value's.
+            Some(variable) => {
+                Lookup::Found(hir::Expr::Constant(variable.init).treated(&variable.ty))
+            }
+            None => Lookup::Reported,
+        }
+    }
+
     /// The variable `id`, referred to at `span`, evaluated if it isn't
     /// yet, or `None` after reporting why it has none, such as a cycle its
     /// reference closes.
@@ -372,13 +405,23 @@ impl<'a> Globals<'a> {
         self.variable(id, errors)
     }
 
-    /// The type of the variable `id`, as its declaration writes it, or
-    /// the named heading of the selector its initial value is, as in
-    /// `relation home { … }`, or else as its value has it, if that is
-    /// known: its initial value isn't evaluated here, as that could lose
-    /// its errors.
-    fn written_type(&self, id: hir::VariableId) -> Option<String> {
+    /// The type of the variable `id`, as `unit` writes it: as its
+    /// declaration writes it, or the named heading of the selector its
+    /// initial value is, as in `relation home { … }`, or else as its value
+    /// has it, if that is known: its initial value isn't evaluated here, as
+    /// that could lose its errors. Of another unit's variable, only as its
+    /// value has it, and only if no unit declares what that names, as what
+    /// another unit names can mean something else, or nothing, in `unit`.
+    fn written_type(&self, id: hir::VariableId, unit: hir::FileId) -> Option<String> {
         let decl = self.declared.decl(id);
+        if self.namespaces.unit_at(decl.span()) != unit {
+            return match &self.variables[id.0] {
+                Some(State::Done(Some(variable))) if built_in_only(&variable.ty) => {
+                    Some(variable.ty.to_string())
+                }
+                _ => None,
+            };
+        }
         if let Some(written) = decl.type_expr() {
             return Some(written.syntax().text().to_string());
         }
@@ -1173,29 +1216,7 @@ impl Names for Globals<'_> {
             return self.constant_read(constant, span, errors);
         }
         if let Some(id) = self.declared.find(name, span) {
-            // What a constant is computed from never changes.
-            if let Some(Pending {
-                global: Global::Constant(_),
-                name: constant,
-                ..
-            }) = self.stack.last()
-            {
-                errors.push(errors::variable_in_constant(
-                    name,
-                    span,
-                    constant,
-                    self.declared.decl(id),
-                ));
-                return Lookup::Reported;
-            }
-            return match self.reach(id, span, errors) {
-                // Of its declared type, which can be a supertype of its
-                // value's.
-                Some(variable) => {
-                    Lookup::Found(hir::Expr::Constant(variable.init).treated(&variable.ty))
-                }
-                None => Lookup::Reported,
-            };
+            return self.variable_read(id, name, span, errors);
         }
         if self.namespaces.operator(name, span).is_some() {
             errors.push(errors::operator_as_value(name, span, self.operators));
@@ -1204,13 +1225,16 @@ impl Names for Globals<'_> {
         Lookup::Unknown
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
+        if let Some(id) = self.declared.variable_in(name, unit, span) {
+            return self.variable_read(id, name, span, errors);
+        }
         self.declared
             .constant_in(name, unit, span)
             .map_or(Lookup::Unknown, |id| self.constant_read(id, span, errors))
@@ -1271,6 +1295,73 @@ struct ReadOnlyNames<'g, 'a, 'l> {
 impl ReadOnlyNames<'_, '_, '_> {
     fn signature(&self) -> &Signature {
         self.globals.operators.get(self.within)
+    }
+
+    /// The variable of the program's `id`, `read`: a read-only operator's
+    /// value depends on its arguments alone, so it is reported, once, with a
+    /// fix that passes it as a parameter, of its type as written, if that is
+    /// known, and, first, one that declares it a constant, if it is the
+    /// implementation's, which a fix can see all that assigns, and nothing
+    /// does (see [`crate::body::deferred_checks`]).
+    fn variable_read(
+        &mut self,
+        id: hir::VariableId,
+        read: &errors::ReadVariable,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Lookup {
+        let identity = self.globals.declared.identity(id).to_string();
+        if !self.globals.read.insert((self.within, identity)) {
+            return Lookup::Reported;
+        }
+        let unit = self.globals.namespaces.unit_at(read.span);
+        let ty = self.globals.written_type(id, unit);
+        let mut error =
+            errors::variable_in_read_only(read, self.signature(), self.globals.operators, ty);
+        let decl = self.globals.declared.decl(id);
+        if ast::section_of(decl.syntax()) == ast::Section::Implementation {
+            // Ahead of passing it, and withdrawn if something assigns it.
+            error
+                .suggestions
+                .splice(0..0, errors::declared_constant(decl));
+        }
+        errors.push(error);
+        self.globals.read_variables.push((id, read.span));
+        Lookup::Reported
+    }
+
+    /// The reads of the variable `id`, named `name`, that the operator's
+    /// declaration qualifies by its unit's name, unless something else there
+    /// has that name, which a parameter of it would hide, or clash with.
+    fn qualified_reads(&self, id: hir::VariableId, name: &str) -> Option<Vec<Span>> {
+        let decl = self.signature().decl.as_ref()?;
+        let mut reads = Vec::new();
+        for qualified in decl
+            .syntax()
+            .descendants()
+            .filter_map(ast::QualifiedName::cast)
+        {
+            let Some(ident) = qualified.ident().filter(|i| i.text() == name) else {
+                continue;
+            };
+            let written = self
+                .globals
+                .namespaces
+                .written_name_unreported(&ident, qualified.qualifier().as_ref())?;
+            let unit = written.unit?;
+            if self.globals.declared.variable_in(name, unit, written.at) != Some(id) {
+                return None;
+            }
+            reads.push(qualified.span());
+        }
+        let named = decl
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(trendy_syntax::SyntaxElement::into_token)
+            .filter(|token| {
+                token.kind() == trendy_syntax::SyntaxKind::Ident && token.text() == name
+            })
+            .count();
+        (named == reads.len()).then_some(reads)
     }
 }
 
@@ -1358,28 +1449,14 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             });
             return Lookup::Found(hir::Expr::Extract(Box::new(call), name.to_string()));
         }
-        // A read-only operator's value depends on its arguments alone, so
-        // a variable of the program's is reported, once, with a fix that
-        // passes it as a parameter, of its type as written, if it is.
         if let Some(id) = self.globals.declared.find(name, span) {
-            if self.globals.read.insert((self.within, name.to_string())) {
-                let ty = self.globals.written_type(id);
-                let mut error = errors::variable_in_read_only(
-                    name,
-                    span,
-                    self.signature(),
-                    self.globals.operators,
-                    ty,
-                );
-                // Ahead of passing it, and withdrawn if something assigns it.
-                error.suggestions.splice(
-                    0..0,
-                    errors::declared_constant(self.globals.declared.decl(id)),
-                );
-                errors.push(error);
-                self.globals.read_variables.push((id, span));
-            }
-            return Lookup::Reported;
+            let read = errors::ReadVariable {
+                name,
+                written: name.to_string(),
+                span,
+                qualified: Some(Vec::new()),
+            };
+            return self.variable_read(id, &read, errors);
         }
         if let Some(constant) = self.globals.declared.find_constant(name, span) {
             return self.globals.constant_read(constant, span, errors);
@@ -1399,13 +1476,23 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         Lookup::Unknown
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
+        if let Some(id) = self.globals.declared.variable_in(name, unit, span) {
+            let qualifier = self.globals.namespaces.qualifier_for(unit, span);
+            let read = errors::ReadVariable {
+                name,
+                written: format!("{qualifier}::{name}"),
+                span,
+                qualified: self.qualified_reads(id, name),
+            };
+            return self.variable_read(id, &read, errors);
+        }
         self.globals
             .declared
             .constant_in(name, unit, span)
@@ -1535,6 +1622,15 @@ impl Assigning for ReadOnlyNames<'_, '_, '_> {
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         self.assigned_around(name, span, &names, errors)
     }
+
+    fn assigned_in(
+        &mut self,
+        written: &ast::QualifiedName,
+        unit: hir::FileId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        self.assigned_in_around(written, unit, errors)
+    }
 }
 
 impl Around for ReadOnlyNames<'_, '_, '_> {
@@ -1583,7 +1679,7 @@ impl Around for ReadOnlyNames<'_, '_, '_> {
             let hidden = self.globals.declared.find(name, span).is_some();
             errors.push(errors::assigned_parameter(name, span, hidden));
         } else if self.globals.declared.find(name, span).is_some() {
-            errors.push(errors::assigned_in_read_only(name, span, &op.name));
+            errors.push(errors::assigned_in_read_only(name, name, span, &op.name));
         } else if let Some(id) = self.globals.declared.find_constant(name, span) {
             errors.push(errors::assigned_constant(
                 name,
@@ -1595,6 +1691,26 @@ impl Around for ReadOnlyNames<'_, '_, '_> {
         } else {
             errors.push(errors::unknown_name(name, span, "variable", locals));
         }
+        None
+    }
+
+    fn assigned_in_around(
+        &mut self,
+        written: &ast::QualifiedName,
+        unit: hir::FileId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        let declared = self.globals.declared;
+        crate::assign::qualified_variable(written, unit, declared, self, errors)?;
+        let name = written.ident()?;
+        let whole = written.syntax().text().to_string();
+        let op = &self.signature().name;
+        errors.push(errors::assigned_in_read_only(
+            &whole,
+            name.text(),
+            written.span(),
+            op,
+        ));
         None
     }
 }
@@ -1762,4 +1878,18 @@ pub(crate) fn read_of(id: hir::ConstantId, constant: &hir::Constant) -> hir::Exp
         return hir::Expr::Constant(value.clone()).treated(&constant.ty);
     }
     hir::Expr::ComputedConstant(id, Box::new(constant.ty.clone()))
+}
+
+/// Whether `ty` names nothing a unit declares: it is built of the built-in
+/// types alone, whose names no unit can declare, so that it is written alike
+/// in every unit.
+fn built_in_only(ty: &hir::Type) -> bool {
+    match ty {
+        hir::Type::Scalar(_) => true,
+        hir::Type::Tuple(heading) | hir::Type::Relation(heading) => {
+            heading.attributes().all(|(_, ty)| built_in_only(ty))
+        }
+        hir::Type::Array(element) => built_in_only(element),
+        hir::Type::Defined(_) | hir::Type::Dummy(_) | hir::Type::Parameter(_) => false,
+    }
 }

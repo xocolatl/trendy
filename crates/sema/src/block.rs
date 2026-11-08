@@ -10,7 +10,7 @@
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, VarDecl};
+use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{self, Assignee, Assigning};
 use crate::body::{self, Around};
@@ -133,14 +133,14 @@ impl Names for Outside<'_> {
         self.outer.resolve_variable(name, span, errors)
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
-        self.outer.constant_of(name, unit, span, errors)
+        self.outer.value_in(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
@@ -230,6 +230,18 @@ impl Around for Outside<'_> {
         } else {
             errors.push(errors::unknown_name(name, span, "variable", locals));
         }
+        None
+    }
+
+    /// A qualified name is never one of the block's local variables.
+    fn assigned_in_around(
+        &mut self,
+        written: &ast::QualifiedName,
+        _: hir::FileId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        let whole = written.syntax().text().to_string();
+        errors.push(errors::assigned_outside_block(&whole, written.span()));
         None
     }
 }
@@ -420,14 +432,14 @@ impl Names for BlockNames<'_> {
         }
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
-        self.outer.constant_of(name, unit, span, errors)
+        self.outer.value_in(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
@@ -535,6 +547,18 @@ impl Assigning for BlockNames<'_> {
             let variables: Vec<&str> = self.declared().collect();
             errors.push(errors::unknown_name(name, span, "variable", &variables));
         }
+        None
+    }
+
+    /// A qualified name is never one of the block's local variables.
+    fn assigned_in(
+        &mut self,
+        written: &ast::QualifiedName,
+        _: hir::FileId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        let whole = written.syntax().text().to_string();
+        errors.push(errors::assigned_outside_block(&whole, written.span()));
         None
     }
 }

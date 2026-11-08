@@ -118,15 +118,14 @@ type metres {
 
 heading lake := { name: text, native: text, depth: metres };
 
+/* The lakes recorded so far. */
+var known: relation lake key { name };
+
 operator deepest{lakes: relation lake}: relation lake;
 
 operator record{name: text, native: text, depth: integer};
 
-operator recorded{out lakes: relation lake};
-
 implementation
-
-var known: relation lake key { name };
 
 operator deepest{lakes: relation lake}: relation lake [
     lakes where depth.m = max{r: lakes, of: depth.m}
@@ -134,10 +133,6 @@ operator deepest{lakes: relation lake}: relation lake [
 
 operator record{name: text, native: text, depth: integer} [
     insert known relation { { name: name, native: native, depth: metres{m: depth} } };
-];
-
-operator recorded{out lakes: relation lake} [
-    lakes := known;
 ];
 
 operator main{} [];
@@ -150,30 +145,63 @@ operator main{} [];
   directory, too. `trendyc` makes a program, so it reports a unit without
   `main` however good its interface. `trendyc --check` checks either kind and
   makes nothing, as the language server does.
-- **The interface declares types, headings and operators, each operator
-  by its heading alone.** The implementation gives each such operator's
-  body, repeating its whole heading, its parameters with their modes and
-  types, and its result type, as the interface declares them (A0068). A
-  heading with a body nowhere is a specification, whose versions give
-  its bodies (see [Union types](#union-types)).
-- **A unit's variables are its implementation's** (A0067). Other units
-  reach them through its update operators, with an `out` parameter for
-  what they read, as `recorded` gives `known`, so that what is true of
-  them is the unit's to keep. A constant is its interface's to declare, as the
-  prelude's `pi` is, with its value or only its type (see
+- **The interface declares types, headings, operators and variables,
+  each operator by its heading alone.** The implementation gives each such
+  operator's body, repeating its whole heading, its parameters with their
+  modes and types, and its result type, as the interface declares them
+  (A0068). A heading with a body nowhere is a specification, whose
+  versions give its bodies (see [Union types](#union-types)).
+- **A variable the interface declares is other units' too.** They read and
+  assign it as the unit does, as the program below `insert`s into
+  `known`: by its name, or qualified, `lakes::known`, and pass it to `var`
+  and `out` parameters, and add a transaction's errors to it. So it is
+  declared there whole, with its initial value, which is no secret (A0001,
+  whose fix moves the implementation's value there). What holds of it is
+  said by the constraints on it, which are the interface's, where every
+  unit that assigns it sees them (A0067, whose fix moves one there), and
+  no other unit's (A0083; see [Constraints](#constraints)). A read-only
+  operator reads it no more than any other variable (A0050). The
+  implementation's variables are its own, which other units reach only
+  through its update operators. A constant is its interface's to declare,
+  as the prelude's `pi` is, with its value or only its type (see
   [Constants](#constants)).
+
+```trendy,unit lakes
+interface
+
+heading lake := { name: text, depth: integer };
+
+var known: relation lake key { name };
+
+/* Every lake recorded is deeper than its surface. */
+constraint deep := is_empty{r: known where depth <= 0};
+```
+
+```trendy
+uses { lakes };
+
+operator main{} [
+    insert known relation { { name: "Titicaca", depth: 281 } };
+    lakes::known := lakes::known union relation { { name: "Baikal", depth: 1642 } };
+    call debug_value{v: count{r: known}};
+];
+```
+
 - **Versions go in the implementation** (A0067): a call names a
   specification, and dispatch finds the version for its arguments'
   types, whatever unit calls it, so there is nothing about a version to
   export.
 - **The interface sees only interfaces, and the implementation sees both** (A0067):
   a name written in the interface, in an operator's heading, a heading's attributes,
-  a type's components, supertype and constraints, or a constant's value, means what
-  this unit's interface, the prelude's or that of a unit its `uses` names declares.
-  What the interface reads is what other units read, so nothing in it is a name they
-  can't look up, and a condition it states is one they can compute themselves. The
-  fix declares it there: an operator by its heading, leaving its body, and a type, a
-  heading or a constant whole. An operator's body and a type's conversions are in the
+  a type's components, supertype and constraints, a constant's value, a variable's
+  type and initial value, or a constraint's condition, means what this unit's
+  interface, the prelude's or that of a unit its `uses` names declares. What the
+  interface reads is what other units read, so nothing in it is a name they can't
+  look up, and a condition it states is one they can compute themselves. The fix
+  declares it there: an operator by its heading, leaving its body, and a type, a
+  heading, a constant or a variable whole, though a constraint on the
+  implementation's variables alone moves to the implementation instead, which
+  keeps them its own. An operator's body and a type's conversions are in the
   implementation, so they can use anything, and what is only in their way stays
   private. A unit's own implementation hides nothing from its interface: a name
   only the implementation declares, that the prelude also does, means the prelude's
@@ -300,8 +328,8 @@ operator main{} [
 ```
 
 - **It brings what the unit's interface declares:** its types, with their
-  possible representations, its headings, its operators and its
-  databases, each by its name, as the unit's own are. What the
+  possible representations, its headings, its operators, its variables,
+  its constants and its databases, each by its name, as the unit's own are. What the
   implementation keeps, the program doesn't see. A type, a heading or an
   operator the interface of a unit of the program declares, written where
   it isn't seen, gets a fix that names the unit in that section's `uses`,
@@ -332,11 +360,11 @@ operator main{} [
   and `seas.depths::metres{m: 281}` of a selector, and
   `trendy.prelude::count{r: r}` the prelude's `count`, though the unit
   writing it declares one of its own, which it hides there, and
-  `lakes.depths::shallow_limit`, without braces, its constant. Where a
-  value goes, a qualified name is a constant or a call, as a unit's
-  variables are its own: its operator's name alone is an error, fixed to
-  the call if it has no parameters (A0016), and nothing another unit
-  declares is assigned (A0026). The qualifier is
+  `lakes.depths::shallow_limit`, without braces, its constant, and
+  `lakes.depths::known` its variable. Where a value goes, a qualified name
+  is a variable, a constant or a call: its operator's name alone is an
+  error, fixed to the call if it has no parameters (A0016), and its
+  constant is never assigned (A0026). The qualifier is
   a unit the section uses, by the name its `uses` gives it after `as`, if
   it gives one, or else by its own, or the prelude, which every unit
   sees. A unit's own names are never qualified, as they hide every other
@@ -4396,10 +4424,14 @@ operator main{} [
   back their values, so no statement after it sees them broken; otherwise
   the program stops. Changes that only hold together are made in one
   statement, an `assign` block, as `add_quechua` below makes them.
-- **A unit's own.** A unit's variables are its implementation's, so its
-  constraints are too, and one in the interface is an error, whose fix
-  moves it (A0067). A constraint is a definition, at the top level, so one
-  in an operator's body is moved before it (P0034).
+- **A unit's own.** A constraint is on its unit's own variables, and one
+  on another unit's is an error (A0083), as it would fail that unit's
+  statements by a condition the unit never sees. One on a variable the
+  interface declares is the interface's, where every unit that assigns the
+  variable sees it, and one in the implementation is moved there (A0067);
+  one in the interface mentions only those, as the interface sees only
+  interfaces. A constraint is a definition, at the top level, so one in an
+  operator's body is moved before it (P0034).
 - **Names of their own:** no name refers to a constraint, so one can have
   a variable's or an operator's name, but no two constraints can share
   one (A0001).
@@ -6886,7 +6918,8 @@ given back the value it had as the transaction began, and the failure
 goes on, to the transaction around it, or else the program's end. With
 `collecting e`, the transaction takes the failure instead: it adds the
 failure's error to `e`, a variable of type `relation
-transaction_collection` declared before it, `failed` true, and the
+transaction_collection` declared before it, or another unit's, which
+can be qualified, as in `collecting lakes::refused`, `failed` true, and the
 statements after the transaction run. If none fails, what they did is
 kept. Either way, the transaction adds each warning its statements gave,
 with `warn`, `failed` false. The prelude declares the heading:

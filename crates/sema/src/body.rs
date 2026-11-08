@@ -198,6 +198,16 @@ pub(crate) trait Around: Names {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee>;
 
+    /// The variable of the program's `written`, qualified by the name of
+    /// `unit`, that an assignment assigns, or `None` after reporting why it
+    /// can't be assigned.
+    fn assigned_in_around(
+        &mut self,
+        written: &ast::QualifiedName,
+        unit: hir::FileId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee>;
+
     /// Whether `name` is an `out` parameter, of an update operator whose
     /// body the block is.
     fn is_out(&self, _name: &str) -> bool {
@@ -788,24 +798,30 @@ impl Statements<'_, '_> {
         collecting: &ast::Collecting,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Target> {
-        let ident = collecting.variable()?.ident()?;
-        let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+        let written = collecting.variable()?;
+        let (target, _) = crate::assign::target_path(&written)?;
+        let span = written.span();
         let errors_type = hir::Type::Relation(hir::transaction_collection(
             self.around.namespaces().library().error_type(),
         ));
-        let known = self.locals.find(name).is_some() || self.around.has_value(name, span);
-        if !known {
-            errors.push(errors::undeclared_collecting(
-                name,
-                span,
-                stmt,
-                self.around.namespaces(),
-            ));
-            return None;
+        if let crate::assign::TargetName::Plain(name) = &target {
+            let name = name.ident()?;
+            let name = name.text();
+            let known = self.locals.find(name).is_some() || self.around.has_value(name, span);
+            if !known {
+                errors.push(errors::undeclared_collecting(
+                    name,
+                    span,
+                    stmt,
+                    self.around.namespaces(),
+                ));
+                return None;
+            }
         }
-        let assignee = self.names().assigned(name, span, errors)?;
+        let assignee = crate::assign::assignee(&target, &mut self.names(), errors)?;
         if assignee.ty != errors_type {
-            errors.push(errors::collecting_mismatch(name, span, &assignee.ty));
+            let name = written.syntax().text().to_string();
+            errors.push(errors::collecting_mismatch(&name, span, &assignee.ty));
             return None;
         }
         let around = &*self.around;
@@ -1116,15 +1132,28 @@ impl Statements<'_, '_> {
             let cx = update.cx;
             let mode = cx.operators.get(callee).mode(ident.text());
             let param = format!("{} {}", mode.map_or("var", hir::Mode::word), ident.text());
-            let name = match target {
-                hir::Target::Variable(id) => cx.variables[id.0]
-                    .as_ref()
-                    .map_or_else(String::new, |v| v.name.clone()),
-                hir::Target::Local(id) => self.locals.get(*id).name.clone(),
-                hir::Target::Parameter(name) => name.clone(),
-            };
             let span = value.span();
-            if self.names().assigned(&name, span, errors).is_none() {
+            // A variable of the program's as the call writes it, which a name
+            // of another unit's can qualify, and which only a loop can keep
+            // from being assigned; a local variable or a parameter by its
+            // name, which is never qualified.
+            let (name, assignable) = match target {
+                hir::Target::Variable(_) => {
+                    let written = value.syntax().text().to_string();
+                    let unfrozen = self.names().unfrozen(target, &written, span, errors);
+                    (written, unfrozen)
+                }
+                hir::Target::Local(id) => {
+                    let name = self.locals.get(*id).name.clone();
+                    let assigned = self.names().assigned(&name, span, errors).is_some();
+                    (name, assigned)
+                }
+                hir::Target::Parameter(name) => {
+                    let assigned = self.names().assigned(name, span, errors).is_some();
+                    (name.clone(), assigned)
+                }
+            };
+            if !assignable {
                 ok = false;
                 continue;
             }
@@ -1746,14 +1775,14 @@ impl Names for BodyNames<'_> {
             .or_else(|| self.around.narrowing_ended(name))
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
-        self.around.constant_of(name, unit, span, errors)
+        self.around.value_in(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
@@ -1825,12 +1854,7 @@ impl Assigning for BodyNames<'_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee> {
         let assignee = self.variable(name, span, errors)?;
-        let frozen = self
-            .frozen
-            .iter()
-            .find(|frozen| frozen.targets.contains(&assignee.target));
-        if let Some(frozen) = frozen {
-            errors.push(errors::assigned_in_loop(name, span, frozen.array));
+        if !self.unfrozen(&assignee.target, name, span, errors) {
             return None;
         }
         let narrowed = self.narrowed.narrowed(name, &assignee.ty);
@@ -1839,9 +1863,45 @@ impl Assigning for BodyNames<'_> {
             ..assignee
         })
     }
+
+    /// The variable `written`, unless a `for` loop that the assignment is in
+    /// goes through an array computed from it. A qualified name is never
+    /// narrowed.
+    fn assigned_in(
+        &mut self,
+        written: &ast::QualifiedName,
+        unit: hir::FileId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        let assignee = self.around.assigned_in_around(written, unit, errors)?;
+        let whole = written.syntax().text().to_string();
+        self.unfrozen(&assignee.target, &whole, written.span(), errors)
+            .then_some(assignee)
+    }
 }
 
 impl BodyNames<'_> {
+    /// Whether `target`, written `name` at `span`, can be assigned where a
+    /// `for` loop goes through an array computed from it, which it can't,
+    /// after reporting that.
+    fn unfrozen(
+        &self,
+        target: &hir::Target,
+        name: &str,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let frozen = self
+            .frozen
+            .iter()
+            .find(|frozen| frozen.targets.contains(target));
+        if let Some(frozen) = frozen {
+            errors.push(errors::assigned_in_loop(name, span, frozen.array));
+            return false;
+        }
+        true
+    }
+
     /// The variable `name`, a local variable or else what's around them,
     /// that an assignment at `span` assigns, or `None` after reporting why
     /// it can't be.
@@ -1913,6 +1973,15 @@ impl UpdateNames<'_, '_> {
     fn signature(&self) -> &Signature {
         self.cx.operators.get(self.within)
     }
+
+    /// Reading the variable of the program's `id`.
+    fn variable_read(&self, id: hir::VariableId) -> Lookup {
+        // A variable with errors in its declaration is already reported.
+        match self.cx.variables[id.0] {
+            Some(_) => Lookup::Found(hir::Expr::Variable(id)),
+            None => Lookup::Reported,
+        }
+    }
 }
 
 impl Names for UpdateNames<'_, '_> {
@@ -1933,11 +2002,7 @@ impl Names for UpdateNames<'_, '_> {
             return lookup;
         }
         if let Some(id) = self.cx.declared.find(name, span) {
-            // A variable with errors in its declaration is already reported.
-            return match self.cx.variables[id.0] {
-                Some(_) => Lookup::Found(hir::Expr::Variable(id)),
-                None => Lookup::Reported,
-            };
+            return self.variable_read(id);
         }
         if let Some(id) = self.cx.declared.find_constant(name, span) {
             return self.cx.constant_read(id);
@@ -1971,13 +2036,16 @@ impl Names for UpdateNames<'_, '_> {
         None
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         _errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
+        if let Some(id) = self.cx.declared.variable_in(name, unit, span) {
+            return self.variable_read(id);
+        }
         self.cx
             .declared
             .constant_in(name, unit, span)
@@ -2070,17 +2138,7 @@ impl Around for UpdateNames<'_, '_> {
             return None;
         }
         if let Some(id) = cx.declared.find(name, span) {
-            // A variable with errors in its declaration is already reported.
-            let variable = cx.variables[id.0].as_ref()?;
-            return Some(Assignee {
-                target: hir::Target::Variable(id),
-                current: hir::Expr::Variable(id),
-                name: name.to_string(),
-                ty: variable.ty.clone(),
-                keys: variable.keys.clone(),
-                declaration: Declared::Variable(cx.declared.decl(id).clone()),
-                narrowed: None,
-            });
+            return program_variable(cx, id, name);
         }
         if let Some(id) = cx.declared.find_constant(name, span) {
             errors.push(errors::assigned_constant(
@@ -2100,6 +2158,31 @@ impl Around for UpdateNames<'_, '_> {
         }
         None
     }
+    fn assigned_in_around(
+        &mut self,
+        written: &ast::QualifiedName,
+        unit: hir::FileId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        let cx = self.cx;
+        let id = crate::assign::qualified_variable(written, unit, cx.declared, self, errors)?;
+        program_variable(cx, id, &written.syntax().text().to_string())
+    }
+}
+
+/// The variable of the program's `id`, written `name`, as an assignment
+/// assigns it: `None` if its declaration has errors, already reported.
+fn program_variable(cx: &Context, id: hir::VariableId, name: &str) -> Option<Assignee> {
+    let variable = cx.variables[id.0].as_ref()?;
+    Some(Assignee {
+        target: hir::Target::Variable(id),
+        current: hir::Expr::Variable(id),
+        name: name.to_string(),
+        ty: variable.ty.clone(),
+        keys: variable.keys.clone(),
+        declaration: Declared::Variable(cx.declared.decl(id).clone()),
+        narrowed: None,
+    })
 }
 
 /// The type `load_csv`'s `columns` has for values `read` as a record's

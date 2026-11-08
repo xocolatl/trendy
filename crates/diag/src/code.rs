@@ -187,6 +187,7 @@ codes! {
     ConstantWithoutValue => "A0080",
     ComparedWithItself => "A0081",
     OutsideAnyTransaction => "A0082",
+    ForeignConstraint => "A0083",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

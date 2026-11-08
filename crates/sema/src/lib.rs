@@ -1192,12 +1192,14 @@ impl Namespaces {
             .is_some()
     }
 
-    /// The names of the constants the unit `unit` declares that what is
-    /// written at `at` sees, qualifying them by that unit.
-    pub(crate) fn constant_names_in(&self, unit: hir::FileId, at: Span) -> Vec<&str> {
+    /// The names of the variables and the constants the unit `unit` declares
+    /// that what is written at `at` sees, qualifying them by that unit.
+    pub(crate) fn value_names_in(&self, unit: hir::FileId, at: Span) -> Vec<&str> {
+        let viewer = self.viewer(at);
         let mut names: Vec<&str> = self
-            .constants
-            .names_in(unit, self.viewer(at), &self.units)
+            .variables
+            .names_in(unit, viewer, &self.units)
+            .chain(self.constants.names_in(unit, viewer, &self.units))
             .collect();
         names.sort_unstable();
         names
@@ -1592,7 +1594,19 @@ fn collect_names(
         // clashes with another unit's where a unit that sees both writes
         // it.
         if let Some(first) = namespaces.declared_before(name, unit, kind) {
-            errors.push(errors::duplicate_name(name, (kind, span), first));
+            let completed = match &item {
+                Item::Variable(decl) if section == ast::Section::Implementation => files
+                    .variables()
+                    .find(|v| {
+                        v.name().map(|n| n.span()) == Some(first.1)
+                            && ast::section_of(v.syntax()) == ast::Section::Interface
+                    })
+                    .map(|first| errors::variable_completed(&first, decl)),
+                _ => None,
+            };
+            errors.push(
+                completed.unwrap_or_else(|| errors::duplicate_name(name, (kind, span), first)),
+            );
             continue;
         }
         match kind {
@@ -5487,13 +5501,24 @@ operator main{} [
         // it, are one operator, called by its name.
         let source = "interface\n\nheading lake := { name: text, depth: integer };\n\noperator deepest{lakes: relation lake}: relation lake;\n\noperator clear{var lakes: relation lake};\n\nimplementation\n\noperator deepest{lakes: relation lake}: relation lake [\n    lakes where depth = max{r: lakes, of: depth}\n];\n\noperator clear{var lakes: relation lake} [\n    lakes := relation {};\n];\n\noperator main{} [\n    var lakes := relation { { name: \"Baikal\", depth: 1642 } };\n    call debug_value{v: deepest{lakes: lakes}};\n    call clear{var lakes: lakes};\n];\n";
         assert!(analyze_str(source).is_ok(), "{:#?}", errors(source));
-        // What the interface can't have, each with its fix.
+        // What the interface can't have, or must, each with its fix.
         let main = "\noperator main{} [];\n";
         for (source, fixed, code) in [
             (
-                format!("interface\n\nvar total := 0;\n\nimplementation\n{main}"),
-                format!("interface\n\nimplementation\n{main}\nvar total := 0;\n"),
+                format!(
+                    "interface\n\nvar total := 0;\n\nimplementation\n\nconstraint counted := total >= 0;\n{main}"
+                ),
+                format!(
+                    "interface\n\nvar total := 0;\n\nconstraint counted := total >= 0;\n\nimplementation\n{main}"
+                ),
                 Code::InterfaceDeclaration,
+            ),
+            (
+                format!(
+                    "interface\n\nvar total: integer;\n\nimplementation\n\nvar total := 0;\n{main}"
+                ),
+                format!("interface\n\nvar total: integer := 0;\n\nimplementation\n{main}"),
+                Code::DuplicateName,
             ),
             (
                 format!(
@@ -14946,6 +14971,103 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         assert!(analyze_units(&[("program", source), ("a", EXPORTS), ("b", EXPORTS)]).is_ok());
     }
 
+    /// A unit whose interface declares variables, a constraint on them and a
+    /// constant, and whose implementation keeps a variable of its own.
+    const COUNTS: &str = "interface\n\nvar total := 0;\n\nvar found: relation transaction_collection;\n\nconstraint counted := total >= 0;\n\nconst limit := 3;\n\nimplementation\n\nvar kept := 0;";
+
+    /// The errors of the program `source`, with the unit `counts`, and
+    /// `source` with their first fixes in it applied.
+    fn with_counts(source: &str) -> (Vec<Code>, String) {
+        let Err(errors) = analyze_units(&[("program", source), ("counts", COUNTS)]) else {
+            return (Vec::new(), source.to_string());
+        };
+        let mut edits: Vec<_> = errors
+            .iter()
+            .filter_map(|d| d.suggestions.first())
+            .flat_map(|s| s.edits.clone())
+            .collect();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.span.start));
+        let mut fixed = source.to_string();
+        for edit in edits {
+            assert!(edit.span.end <= source.len(), "{source}: {errors:#?}");
+            fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+        }
+        (errors.iter().map(|e| e.code).collect(), fixed)
+    }
+
+    #[test]
+    fn a_unit_reads_and_assigns_the_variables_another_units_interface_declares() {
+        let main = |body: &str| {
+            format!(
+                "uses {{ counts }};\n\noperator take{{out n: integer}} [ n := 5; ];\n\noperator main{{}} [\n{body}\n];"
+            )
+        };
+        // By its name or qualified: read, assigned, passed and collected into,
+        // its unit's constraint checked as any other's.
+        let source = main(
+            "    total := total + 1;\n    counts::total := counts::total + 1;\n    call take{out n: total};\n    call take{out n: counts::total};\n    transaction collecting counts::found [\n        total := -1;\n    ];\n    call debug_value{v: found};",
+        );
+        let program = analyze_units(&[("program", &source), ("counts", COUNTS)]).unwrap();
+        assert_eq!(program.constraints[0].name, "counted");
+        // A unit's own variable of the name hides it, which is then qualified,
+        // and each is passed as itself.
+        let source = main("    call take{out n: total};\n    call take{out n: counts::total};")
+            .replace("uses { counts };", "uses { counts };\n\nvar total := 1;");
+        assert!(analyze_units(&[("program", &source), ("counts", COUNTS)]).is_ok());
+        // Not what its implementation keeps, nor its constant, nor in a value
+        // block.
+        for (body, code) in [
+            ("    kept := 1;", Code::UnknownName),
+            ("    counts::kept := 1;", Code::UnknownName),
+            ("    counts::limit := 4;", Code::NotAssignable),
+            (
+                "    var a := [ counts::total := 1; 2 ];",
+                Code::ReadOnlyEffect,
+            ),
+        ] {
+            assert_eq!(with_counts(&main(body)).0, [code], "{body}");
+        }
+        // A read-only operator is given it, qualified or not, as a parameter,
+        // which each call gives it as written.
+        for read in ["total", "counts::total"] {
+            let source = format!(
+                "uses {{ counts }};\n\noperator twice{{}}: integer [ {read} * 2 ];\n\noperator main{{}} [\n    call debug_value{{v: twice{{}}}};\n];"
+            );
+            let (codes, fixed) = with_counts(&source);
+            assert_eq!(codes, [Code::VariableInReadOnly], "{source}");
+            assert_eq!(
+                fixed,
+                format!(
+                    "uses {{ counts }};\n\noperator twice{{total: integer}}: integer [ total * 2 ];\n\noperator main{{}} [\n    call debug_value{{v: twice{{total: {read}}}}};\n];"
+                )
+            );
+        }
+        // Nor does a read-only operator assign it.
+        let source = "uses { counts };\n\noperator f{}: integer [\n    counts::total := 1;\n    1\n];\n\noperator main{} [];";
+        assert_eq!(with_counts(source).0, [Code::ReadOnlyEffect]);
+        // What holds of it is its own unit's to say, and no database's.
+        let source = main("").replace(
+            "uses { counts };",
+            "uses { counts };\n\nconstraint mine := counts::total < 9;",
+        );
+        assert_eq!(with_counts(&source).0, [Code::ForeignConstraint]);
+        let source = main("").replace(
+            "uses { counts };",
+            "uses { counts };\n\ndatabase kitchen;\nvar kitchen.pantry: relation { item: text } key { item };\nconstraint kitchen.c := count{r: pantry} < counts::total;",
+        );
+        assert_eq!(with_counts(&source).0, [Code::DatabasePart]);
+    }
+
+    #[test]
+    fn passing_a_variable_another_unit_has_one_of_the_name_of_passes_it() {
+        // Each unit's `count`, the program's called `program::count`, given to
+        // an `out` parameter by the name its unit writes.
+        let other = "interface\n\noperator touch{};\n\nimplementation\n\nvar count := 0;\n\noperator touch{} [ count := count + 1; ];";
+        let main = "uses { other };\n\nvar count := 0;\n\noperator take{out n: integer} [ n := 5; ];\n\noperator main{} [\n    call take{out n: count};\n    call touch{};\n];";
+        let program = analyze_units(&[("program", main), ("other", other)]);
+        assert!(program.is_ok(), "{:#?}", program.err());
+    }
+
     /// A unit that declares a type, a heading and operators in its
     /// interface, and an operator its implementation keeps.
     const DEPTHS: &str = "interface\n\ntype metres { { m: integer } };\n\nheading lake := { name: text, depth: metres };\n\noperator deepest{lakes: relation lake}: relation lake;\n\nimplementation\n\noperator deepest{lakes: relation lake}: relation lake [\n    lakes where depth.m = max{r: lakes, of: depth.m}\n];\n\noperator secret{}: integer [ 1 ];";
@@ -16267,7 +16389,8 @@ var a := duration{n: days{n: 1}};
         let found = errors(&overloads);
         assert!(found[0].suggestions.is_empty(), "{found:#?}");
         assert!(found[0].help[0].contains("by its heading"), "{found:#?}");
-        // A variable stays in the implementation.
+        // A variable stays in the implementation, if what reads it reads no
+        // variable anyway.
         let variable = sectioned(
             "type t { { a: integer, constraint a < kept } };",
             "var kept := 3;",
@@ -16275,6 +16398,31 @@ var a := duration{n: days{n: 1}};
         let found = errors(&variable);
         assert_eq!(found[0].code, Code::InterfaceDeclaration, "{found:#?}");
         assert!(found[0].suggestions.is_empty(), "{found:#?}");
+        // Otherwise it moves to the interface, but a constraint on it alone
+        // moves to the implementation.
+        for (interface, implementation, fixed) in [
+            (
+                "var total := kept;",
+                "var kept := 3;",
+                "var total := kept;\n\nvar kept := 3;",
+            ),
+            (
+                "constraint low := kept < 5;",
+                "var kept := 3;",
+                "implementation\n\nvar kept := 3;\n\noperator main{} [];\n\nconstraint low := kept < 5;",
+            ),
+            (
+                "var total := 0;\n\nconstraint low := kept > total;",
+                "var kept := 3;",
+                "var total := 0;\n\nconstraint low := kept > total;\n\nvar kept := 3;",
+            ),
+        ] {
+            let source = sectioned(interface, implementation);
+            assert_eq!(codes(&source), [Code::InterfaceDeclaration], "{source}");
+            let fixed_source = fix(&source);
+            assert!(analyze_str(&fixed_source).is_ok(), "{fixed_source}");
+            assert!(fixed_source.contains(fixed), "{fixed_source}");
+        }
         // What only the implementation declares hides nothing from the interface:
         // there, the name is the prelude's, and in the implementation, its own.
         let own = sectioned(

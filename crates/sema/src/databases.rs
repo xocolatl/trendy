@@ -320,13 +320,22 @@ impl Names for DatabaseNames<'_, '_> {
         Lookup::Unknown
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
-        _errors: &mut Vec<Diagnostic>,
+        errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
+        if self.cx.declared.variable_in(name, unit, span).is_some() {
+            let qualifier = self.cx.namespaces.qualifier_for(unit, span);
+            errors.push(errors::variable_in_database_constraint(
+                &format!("{qualifier}::{name}"),
+                span,
+                self.database,
+            ));
+            return Lookup::Reported;
+        }
         self.cx
             .declared
             .constant_in(name, unit, span)

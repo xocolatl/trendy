@@ -87,6 +87,65 @@ pub(crate) fn duplicate_name(name: &str, this: (Kind, Span), first: (Kind, Span)
         .with_help("delete the duplicate definition, or rename one of them")
 }
 
+/// The variable `decl` declares in its unit's implementation, which its
+/// interface declares already, `first`, as an interface can leave a
+/// constant's value to the implementation: a variable is declared whole
+/// where it is, as its value is no secret, which any unit that reads it
+/// sees. The fix gives the interface's declaration the implementation's
+/// value, and deletes the implementation's, if the two say nothing else
+/// that differs.
+pub(crate) fn variable_completed(first: &VarDecl, decl: &VarDecl) -> Diagnostic {
+    let name = decl
+        .name()
+        .map(|n| n.syntax().text().to_string())
+        .unwrap_or_default();
+    let d = Diagnostic::error(
+        Code::DuplicateName,
+        format!("`{name}` is defined more than once"),
+        declared_name_span(decl),
+        "redefined here as a variable",
+    )
+    .with_secondary(
+        declared_name_span(first),
+        format!("`{name}` is first defined here, in the interface"),
+    )
+    .with_note("a variable the interface declares is declared there whole, with its initial value: other units read and assign it, so its value is no secret, as a constant's can be, which the interface can leave to the implementation");
+    let help = format!("give the interface's `{name}` the value, and delete this declaration");
+    let written = |t: Option<ast::TypeExpr>| t.map(|t| t.syntax().text().to_string());
+    let keys = |d: &VarDecl| {
+        d.keys()
+            .map(|k| k.syntax().text().to_string())
+            .collect::<Vec<_>>()
+    };
+    let (Some(value), None, Some(written_type)) =
+        (decl.initializer(), first.initializer(), first.type_expr())
+    else {
+        return d.with_help(help);
+    };
+    let agrees = written(decl.type_expr()).is_none_or(|t| Some(t) == written(first.type_expr()))
+        && (decl.keys().next().is_none() || keys(decl) == keys(first));
+    let file = decl.syntax().ancestors().find_map(SourceFile::cast);
+    let (true, Some(file)) = (agrees, file) else {
+        return d.with_help(help);
+    };
+    let at = usize::from(written_type.syntax().text_range().end());
+    d.with_suggestion(
+        help,
+        vec![
+            Edit {
+                span: Span::new(at, at),
+                replacement: format!(" := {}", value.syntax().text()),
+            },
+            crate::sections::removal(&file, decl.syntax()),
+        ],
+    )
+}
+
+/// Where the name `decl` declares is, or all of it, if it has none.
+fn declared_name_span(decl: &VarDecl) -> Span {
+    decl.name().map_or_else(|| decl.span(), |n| n.span())
+}
+
 /// The type `name`, declared at `declared`, whose name is that of an
 /// operator its unit defines at `operator`: a type's name is its
 /// selector's, which no other operator of its unit can have.
@@ -3243,11 +3302,6 @@ fn variable_in_type_operator(name: &str, span: Span, operator: &Signature) -> Op
     None
 }
 
-/// The variable of the program's `name`, of type `ty` if it is known, read
-/// at `span` in the read-only operator `operator`, one of `operators`: the
-/// fix passes it as a parameter of that name, which each call of the
-/// operator in the file gives the variable, but not a call of another of
-/// its name.
 /// The fix of declaring the variable `decl` a constant, if it has a value to
 /// be one of.
 pub(crate) fn declared_constant(decl: &VarDecl) -> Option<trendy_diag::Suggestion> {
@@ -3265,31 +3319,56 @@ pub(crate) fn declared_constant(decl: &VarDecl) -> Option<trendy_diag::Suggestio
     })
 }
 
+/// A variable of the program's a read-only operator reads.
+pub(crate) struct ReadVariable<'a> {
+    /// Its name.
+    pub(crate) name: &'a str,
+    /// It as written where it is read: its name, or its name qualified by
+    /// its unit's.
+    pub(crate) written: String,
+    pub(crate) span: Span,
+    /// The reads of it the operator's declaration qualifies, which become
+    /// reads of a parameter of its name, or `None` if something else there
+    /// has that name.
+    pub(crate) qualified: Option<Vec<Span>>,
+}
+
+/// The variable of the program's `read`, of type `ty` if that is known as
+/// the operator's unit writes it, read in the read-only operator
+/// `operator`, one of `operators`: the fix passes it as a parameter of its
+/// name, which each call of the operator in the file gives the variable,
+/// but not a call of another of its name.
 pub(crate) fn variable_in_read_only(
-    name: &str,
-    span: Span,
+    read: &ReadVariable,
     operator: &Signature,
     operators: &Operators,
     ty: Option<String>,
 ) -> Diagnostic {
+    let ReadVariable {
+        name,
+        written,
+        span,
+        ..
+    } = read;
+    let span = *span;
     if let Some(call) = &operator.constrains_call {
-        return variable_in_call_constraint(name, span, &operators.get(call.of).name);
+        return variable_in_call_constraint(written, span, &operators.get(call.of).name);
     }
-    if let Some(d) = variable_in_type_operator(name, span, operator) {
+    if let Some(d) = variable_in_type_operator(written, span, operator) {
         return d;
     }
     let op = &operator.name;
     let d = Diagnostic::error(
         Code::VariableInReadOnly,
-        format!("the read-only operator `{op}` can't read the variable `{name}`"),
+        format!("the read-only operator `{op}` can't read the variable `{written}`"),
         span,
         "a variable of the program's",
     )
     .with_note(READ_ONLY_FUNCTION);
     let help = format!(
-        "pass `{name}` to `{op}` as a parameter, `{name}: …`, and give it `{name}: {name}` in each call"
+        "pass `{written}` to `{op}` as a parameter, `{name}: …`, and give it `{name}: {written}` in each call"
     );
-    let (Some(decl), Some(ty)) = (&operator.decl, ty) else {
+    let (Some(decl), Some(ty), Some(qualified)) = (&operator.decl, ty, &read.qualified) else {
         return d.with_help(help);
     };
     let Some(heading) = decl.params() else {
@@ -3300,6 +3379,10 @@ pub(crate) fn variable_in_read_only(
         span: Span::new(at, at),
         replacement: format!("{before}{name}: {ty}{after}"),
     }];
+    edits.extend(qualified.iter().map(|&read| Edit {
+        span: read,
+        replacement: (*name).to_string(),
+    }));
     // Each call, `f{…}`, or `f{}`, which the parser takes for a projection,
     // whose arguments' names choose this operator.
     let file = decl
@@ -3340,12 +3423,14 @@ pub(crate) fn variable_in_read_only(
         if let Some((at, before, after)) = insertion {
             edits.push(Edit {
                 span: Span::new(at, at),
-                replacement: format!("{before}{name}: {name}{after}"),
+                replacement: format!("{before}{name}: {written}{after}"),
             });
         }
     }
     d.with_suggestion(
-        format!("pass `{name}` to `{op}`, as a `const` parameter, which each call gives `{name}`"),
+        format!(
+            "pass `{written}` to `{op}`, as a `const` parameter, which each call gives `{written}`"
+        ),
         edits,
     )
 }
@@ -7293,7 +7378,7 @@ pub(crate) fn call_in_read_only(name: &str, stmt: &trendy_syntax::ast::CallStmt)
 
 /// The variable `name`, at `span`, of the program's, assigned in the
 /// read-only operator `op`.
-pub(crate) fn assigned_in_read_only(name: &str, span: Span, op: &str) -> Diagnostic {
+pub(crate) fn assigned_in_read_only(written: &str, name: &str, span: Span, op: &str) -> Diagnostic {
     Diagnostic::error(
         Code::ReadOnlyEffect,
         "a read-only operator can't assign a variable of the program's",
@@ -7302,7 +7387,7 @@ pub(crate) fn assigned_in_read_only(name: &str, span: Span, op: &str) -> Diagnos
     )
     .with_note(READ_ONLY)
     .with_help(format!(
-        "to compute a value, assign a local variable of `{op}`'s, as in `var new_{name} := …;`; to change `{name}`, make `{op}` an update operator, without a result type, invoked by `call`"
+        "to compute a value, assign a local variable of `{op}`'s, as in `var new_{name} := …;`; to change `{written}`, make `{op}` an update operator, without a result type, invoked by `call`"
     ))
 }
 
@@ -8961,26 +9046,27 @@ const FOR_UNCHANGED: &str = "a `for` loop goes through the elements of its array
 
 /// `name`, a `for` loop's variable, declared at `declared`, assigned at
 /// `span`.
-/// `written`, what one unit declares, as another unit writes it, assigned.
-pub(crate) fn assigned_qualified(written: &ast::QualifiedName) -> Diagnostic {
+/// `written`, a constant another unit declares, as this one writes it,
+/// assigned, which `first` declares.
+pub(crate) fn assigned_qualified_constant(
+    written: &ast::QualifiedName,
+    first: &VarDecl,
+) -> Diagnostic {
     let whole = written.syntax().text();
-    let d = Diagnostic::error(
+    Diagnostic::error(
         Code::NotAssignable,
-        format!("`{whole}` can't be assigned"),
+        format!("the constant `{whole}` can't be assigned"),
         written.span(),
-        "another unit's",
+        "another unit's constant",
     )
-    .with_note(
-        "a unit only reads what another unit declares: a constant never changes, and a unit's variables are its own, which its update operators assign",
-    );
-    let unit = written.qualifier().and_then(|q| q.unit());
-    match unit {
-        Some(unit) => d.with_help(format!(
-            "assign a variable of this unit's, or call an update operator of `{}`'s that assigns it",
-            unit.text()
-        )),
-        None => d,
-    }
+    .with_secondary(
+        first.name().map_or_else(|| first.span(), |n| n.span()),
+        "declared with `const`",
+    )
+    .with_note(CONSTANT_RULE)
+    .with_help(format!(
+        "assign a variable instead, or compute the new value in one of this unit's own: `var new_value := {whole};`"
+    ))
 }
 
 pub(crate) fn assigned_loop_variable(name: &str, span: Span, declared: Span) -> Diagnostic {
@@ -9018,7 +9104,8 @@ pub(crate) fn assigned_constant(name: &str, span: Span, declaration: &VarDecl) -
     let Some(keyword) = declaration.keyword() else {
         return d;
     };
-    // An interface declares no variable, and the prelude's is in one.
+    // Other units read an interface's constant, which it would change for
+    // them too, and the prelude's is in one.
     if declaration
         .syntax()
         .parent()
@@ -9593,7 +9680,7 @@ pub(crate) fn unchosen_operator(
 }
 
 /// What a unit's sections hold, for the notes of their errors.
-const SECTIONS_RULE: &str = "a unit's interface declares the types, headings and operators other units see, each operator by its heading alone, and its implementation gives each such operator's body, repeating its heading; the unit's variables, its versions and anything else no other unit sees are its implementation's; the interface sees only interfaces, and the implementation sees both";
+const SECTIONS_RULE: &str = "a unit's interface declares the types, headings, operators and variables other units see, each operator by its heading alone, and the constraints on its variables, and its implementation gives each such operator's body, repeating its heading; the unit's versions and anything else no other unit sees are its implementation's; the interface sees only interfaces, and the implementation sees both";
 
 /// The span of `decl`'s name, or of all of it if it has none.
 fn operator_name_span(decl: &ast::Operator) -> Span {
@@ -9825,18 +9912,18 @@ pub(crate) fn unknown_qualified_value(
         Code::UnknownName,
         format!("unknown value `{whole}`"),
         span,
-        format!("not a constant `{declaring}` declares"),
+        format!("not a variable or a constant `{declaring}` declares"),
     )
     .with_note(format!(
-        "`{declaring}`'s interface declares no constant `{name}`: a constant is the one value a unit's name qualifies, as a unit's variables are its own"
+        "`{declaring}`'s interface declares no variable or constant `{name}`, the values a unit's name qualifies"
     ))
     .with_note(trendy_syntax::unit::QUALIFIED_RULE);
     spelled_like(
         d,
         name,
         span,
-        &namespaces.constant_names_in(unit, span),
-        &format!("name one of the constants `{declaring}`'s interface declares"),
+        &namespaces.value_names_in(unit, span),
+        &format!("name one of the variables or constants `{declaring}`'s interface declares"),
     )
 }
 
@@ -10219,25 +10306,6 @@ pub(crate) fn second_uses(
     }
 }
 
-/// The variable `decl` declares in its unit's interface, which exports no
-/// variables. `moved` moves it to the implementation.
-pub(crate) fn interface_variable(decl: &ast::VarDecl, moved: Vec<Edit>) -> Diagnostic {
-    let at = decl.name().and_then(|n| n.ident()).map_or_else(
-        || trendy_syntax::span(decl.syntax().text_range()),
-        |ident| trendy_syntax::span(ident.text_range()),
-    );
-    Diagnostic::error(
-        Code::InterfaceDeclaration,
-        "a unit's interface exports no variables",
-        at,
-        "a variable",
-    )
-    .with_note(SECTIONS_RULE)
-    .with_note("a unit's variables are its own, which other units reach through its update operators, so that what is true of them is the unit's to keep")
-    .with_help("give an update operator that other units call, with an `out` parameter for what they read of it")
-    .with_suggestion("move it to the implementation", moved)
-}
-
 /// The selector of the type `t` in the possible representation written
 /// `representation`, quoted, with `…` for each argument, its components in
 /// name order.
@@ -10383,23 +10451,32 @@ pub(crate) fn representation_mismatch(
     }
 }
 
-/// The constraint `decl`, declared in its unit's interface, though the
-/// variables it mentions are the implementation's: what is true of them is
-/// the unit's to keep. `moved` moves it to the implementation.
-pub(crate) fn interface_constraint(decl: &ast::ConstraintDecl, moved: Vec<Edit>) -> Diagnostic {
-    let at = decl.name().and_then(|n| n.ident()).map_or_else(
+/// The constraint `decl`, declared in its unit's implementation, though it
+/// mentions `variable`, at `at`, which the interface declares: other units
+/// assign it, so what holds of it is said where they see it. `moved` moves it
+/// to the interface.
+pub(crate) fn implementation_constraint(
+    decl: &ast::ConstraintDecl,
+    variable: &str,
+    at: Span,
+    moved: Vec<Edit>,
+) -> Diagnostic {
+    let name = decl.name().and_then(|n| n.ident());
+    let span = name.as_ref().map_or_else(
         || trendy_syntax::span(decl.syntax().text_range()),
         |ident| trendy_syntax::span(ident.text_range()),
     );
+    let name = name.map_or_else(String::new, |ident| format!(" `{}`", ident.text()));
     Diagnostic::error(
         Code::InterfaceDeclaration,
-        "a unit's interface exports no constraints on its variables",
-        at,
-        "a constraint",
+        format!("the constraint{name} on `{variable}` is the interface's, which declares it"),
+        span,
+        "in the implementation",
     )
+    .with_secondary(at, "the interface's variable")
     .with_note(SECTIONS_RULE)
-    .with_note("a constraint is as visible as the variables it mentions: a unit's are its implementation's, and what is true of them is the unit's to keep")
-    .with_suggestion("move it to the implementation", moved)
+    .with_note("other units assign a variable the interface declares, so the constraints on it are where they see them, and the interface's are on its variables alone, as it sees only interfaces")
+    .with_suggestion("move it to the interface", moved)
 }
 
 /// What an attribute hides: how to say it, where it is declared, if that is known, and
@@ -10531,10 +10608,7 @@ pub(crate) fn implementation_only(
     .with_note(SECTIONS_RULE)
     .with_note("the interface sees only interfaces, as it is what other units read, and the implementation sees both, so what the interface uses is declared there");
     Some(match first {
-        // A variable is the implementation's, whatever reads it.
-        ast::Item::Variable(_) => {
-            d.with_help("a unit's variables are its implementation's, so read it there")
-        }
+        ast::Item::Variable(_) => interface_reads_variable(d, token, &file, first),
         ast::Item::Operator(op) => {
             match (declared.len(), sections::declared_in_interface(&file, op)) {
                 (1, Some(edits)) => {
@@ -10550,6 +10624,63 @@ pub(crate) fn implementation_only(
             sections::moved(&file, item.syntax(), ast::Section::Interface),
         ),
     })
+}
+
+/// `d`, of the variable `first`, of `file`'s implementation, which `token`, in
+/// its interface, names, with its fix. Of what the interface declares, only a
+/// constraint on the variables and a variable's initial value read variables.
+/// A constraint on the implementation's variables alone is the
+/// implementation's, which keeps them its own; otherwise the interface
+/// declares the variable, which other units then read and assign.
+fn interface_reads_variable(
+    d: Diagnostic,
+    token: &SyntaxToken,
+    file: &SourceFile,
+    first: &ast::Item,
+) -> Diagnostic {
+    let exported = || sections::moved(file, first.syntax(), ast::Section::Interface);
+    let export = "move its declaration to the interface, so that other units read and assign it";
+    if let Some(constraint) = token.parent_ancestors().find_map(ast::ConstraintDecl::cast) {
+        if mentions_interface_variable(file, &constraint) {
+            return d.with_suggestion(export, exported());
+        }
+        return d.with_suggestion(
+            "move the constraint to the implementation, where the variable is",
+            sections::moved(file, constraint.syntax(), ast::Section::Implementation),
+        );
+    }
+    let in_variable = token
+        .parent_ancestors()
+        .find_map(VarDecl::cast)
+        .is_some_and(|decl| {
+            !decl.is_const() && decl.syntax().parent().and_then(SourceFile::cast).is_some()
+        });
+    if in_variable {
+        return d.with_suggestion(export, exported());
+    }
+    d.with_help("what the interface declares here reads no variable, of either section: a type's constraint, a constant's value and a parameter's constraint are computed from values alone")
+}
+
+/// Whether `constraint`, of `file`, mentions a variable the interface of `file`
+/// declares, by its name.
+fn mentions_interface_variable(file: &SourceFile, constraint: &ast::ConstraintDecl) -> bool {
+    let exported: BTreeSet<String> = file
+        .items()
+        .filter_map(|item| match item {
+            ast::Item::Variable(decl)
+                if ast::section_of(decl.syntax()) == ast::Section::Interface =>
+            {
+                Some(decl.name()?.syntax().text().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    constraint
+        .syntax()
+        .descendants()
+        .filter_map(ast::NameRef::cast)
+        .filter_map(|name| name.ident())
+        .any(|ident| exported.contains(ident.text()))
 }
 
 /// The name `item` declares, unless it completes what the interface declares, which
@@ -10711,6 +10842,35 @@ pub(crate) fn tclose_operand(
 
 /// What a constraint on variables is, for the notes of its errors.
 const VARIABLE_CONSTRAINT_RULE: &str = "a constraint, `constraint name := condition;`, is a condition on the unit's variables that holds whenever a statement ends, and so of their initial values too, which are known when compiling (TTM RM Prescription 23)";
+
+/// The constraint `decl`, which mentions `variable`, at `at`, a variable of
+/// another unit's, `unit`: what holds of a unit's variables is that unit's
+/// to say.
+pub(crate) fn foreign_constraint(
+    decl: &ast::ConstraintDecl,
+    variable: &str,
+    at: Span,
+    unit: &str,
+) -> Diagnostic {
+    let name = decl.name().and_then(|n| n.ident());
+    let span = name.as_ref().map_or_else(
+        || trendy_syntax::span(decl.syntax().text_range()),
+        |ident| trendy_syntax::span(ident.text_range()),
+    );
+    let name = name.map_or_else(String::new, |ident| format!(" `{}`", ident.text()));
+    Diagnostic::error(
+        Code::ForeignConstraint,
+        format!("the constraint{name} is on `{variable}`, a variable of `{unit}`'s"),
+        span,
+        "declared by another unit",
+    )
+    .with_secondary(at, format!("`{unit}`'s variable"))
+    .with_note(VARIABLE_CONSTRAINT_RULE)
+    .with_note(format!("a unit declares the constraints on its own variables, and those on the variables its interface declares in the interface, where every unit that assigns them sees them; one here would fail `{unit}`'s own statements by a condition it never sees, as a unit never sees the units that use it"))
+    .with_help(format!(
+        "declare it in the interface of `{unit}`, if it is on that unit's variables alone, or keep the variables it relates in one unit"
+    ))
+}
 
 /// The constraint `name`, whose condition, `condition`, mentions no
 /// variable, so it is `holds` whatever their values: true, which says

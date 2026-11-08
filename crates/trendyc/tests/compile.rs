@@ -2168,17 +2168,22 @@ fn databases() {
 
 #[test]
 fn units() {
-    // The deepest lake's name, by the program's own `deepest`, which calls
-    // the one it hides, and the lakes shallower than 500 metres, given in
-    // centimetres, a representation whose conversions only `lakes.depths`
-    // sees, as the program's own `lake`, which hides that unit's.
+    // The lakes `lakes.depths` records, and the one the program adds to its
+    // variable itself; the deepest lake's name, by the program's own
+    // `deepest`, which calls the one it hides; the lakes shallower than 500
+    // metres, given in centimetres, a representation whose conversions only
+    // `lakes.depths` sees, as the program's own `lake`, which hides that
+    // unit's; and the lake that unit's constraint refuses.
     let (code, stderr) = run_example("units");
+    assert_eq!(code, 0, "{stderr}");
     assert_eq!(
-        (code, stderr.as_str()),
-        (
-            0,
-            "3\n\"Baikal\"\nrelation { name: text, shallow: boolean } { { name: \"Titicaca\", shallow: true } }\n"
-        )
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "4",
+            "\"Baikal\"",
+            "relation { name: text, shallow: boolean } { { name: \"Titicaca\", shallow: true } }",
+            "relation { error: error } { { error: constraint_violated_by{condition: \"is_empty{r: known where native = \\\"\\\"}\", constraint: \"named\", tuples: \"relation { depth: metres, name: text, native: text } { { depth: metres{m: 84}, name: \\\"Victoria\\\", native: \\\"\\\" } }\"} } }",
+        ]
     );
 }
 
@@ -10914,6 +10919,70 @@ operator main{} [
     assert_eq!(stderr.lines().collect::<Vec<_>>(), ["6", "2", "6"]);
 }
 
+/// Other units read and assign the variables a unit's interface declares, by
+/// their names or qualified, pass them to `out` parameters and collect errors
+/// into them, and the constraints its interface declares on them hold
+/// whichever unit assigns them. A unit's own variable of one of their names
+/// hides it, and each is passed as itself.
+#[test]
+fn units_assign_the_variables_another_units_interface_declares() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("variable_units");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("counts.trendy"),
+        "interface
+
+var total := 0;
+var refused: relation transaction_collection;
+
+constraint counted := total >= 0;
+
+operator bump{};
+
+implementation
+
+operator bump{} [
+    total := total + 1;
+];
+",
+    )
+    .unwrap();
+    let main = dir.join("variable_units.trendy");
+    std::fs::write(
+        &main,
+        "uses { counts };
+
+var total := 100;
+
+operator take{out n: integer} [
+    n := 5;
+];
+
+operator main{} [
+    call bump{};
+    counts::total := counts::total + 10;
+    call debug_value{v: counts::total};
+    call take{out n: counts::total};
+    call debug_value{v: counts::total};
+    call take{out n: total};
+    call debug_value{v: total};
+    transaction collecting counts::refused [
+        counts::total := -1;
+    ];
+    call debug_value{v: count{r: counts::refused}};
+    call debug_value{v: counts::total};
+];
+",
+    )
+    .unwrap();
+    let (code, stderr) = build_and_run(&main, &dir.join("variable_units"), &workspace_root());
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["11", "5", "5", "1", "5"]
+    );
+}
+
 /// A type's constraints keep each integer in a range that takes fewer bytes,
 /// which nothing a program can write can tell.
 #[test]
@@ -11466,7 +11535,7 @@ fn check_writes_nothing_and_needs_no_main_of_a_unit_with_an_interface() {
     );
     assert!(!dir.join("program").exists());
     // What is wrong with one is reported, as building reports it.
-    let (ok, stdout, stderr) = run("broken", "interface\n\nvar a := 1;\n");
+    let (ok, stdout, stderr) = run("broken", "interface\n\noperator f{} [];\n");
     assert!(!ok);
     assert_eq!(stdout, "");
     assert!(

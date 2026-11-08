@@ -1,12 +1,13 @@
 //! A unit's sections: what its interface may declare and mention, and
 //! where a declaration in the wrong one moves to, for the fixes.
 //!
-//! The interface declares the types, headings and operators other units
-//! see, each operator by its heading alone; the implementation repeats an
-//! interface operator's heading with its body, and keeps the unit's
-//! variables, its versions, and whatever else no other unit sees. What
-//! comes before either section's header is the implementation's. The interface
-//! sees only interfaces, and the implementation sees both.
+//! The interface declares the types, headings, operators and variables
+//! other units see, each operator by its heading alone, and the constraints
+//! on its variables; the implementation repeats an interface operator's
+//! heading with its body, and keeps the unit's versions, and whatever else
+//! no other unit sees. What comes before either section's header is the
+//! implementation's. The interface sees only interfaces, and the
+//! implementation sees both.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,32 +17,15 @@ use trendy_syntax::{SyntaxKind, SyntaxNode};
 
 use crate::errors;
 
-/// Report what `file`'s interface can't have: variables, which a unit never
-/// exports, and constraints on them (A0067). What it can see is lookup's to say
-/// (see [`crate::errors::implementation_only`]).
+/// Report what isn't in the section of `file` it belongs in: its `uses`, and
+/// what of a type the interface declares the implementation's says, or the
+/// other way round (A0071, A0067, A0068). What the interface can see is
+/// lookup's to say (see [`crate::errors::implementation_only`]), and where a
+/// constraint is, which the variables it mentions say, the constraints' (see
+/// [`crate::constraints`]).
 pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
     uses_placement(file, errors);
     types_completed(file, errors);
-    for item in file.items() {
-        if let Item::Variable(decl) = &item {
-            if ast::section_of(decl.syntax()) == Section::Interface {
-                errors.push(errors::interface_variable(
-                    decl,
-                    moved(file, decl.syntax(), Section::Implementation),
-                ));
-            }
-            continue;
-        }
-        if let Item::Constraint(decl) = &item {
-            // A database's constraints are part of it, as visible as it is.
-            if decl.part_of().is_none() && ast::section_of(decl.syntax()) == Section::Interface {
-                errors.push(errors::interface_constraint(
-                    decl,
-                    moved(file, decl.syntax(), Section::Implementation),
-                ));
-            }
-        }
-    }
 }
 
 /// Report what, of each type `file`'s interface declares, isn't where its

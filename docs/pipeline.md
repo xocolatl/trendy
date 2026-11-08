@@ -595,7 +595,9 @@ the words is fixed to `.`, and where a type goes, a name of words
 between `.`s alone, as Java and Python write a module's type, has its
 last `.` fixed to `::` (`Parser::type_qualifier_len`, P0058). Where a
 value goes, a qualified name is a call, whose `CallExpr` has the
-`Qualifier` before its `NameRef`, as a `CallStmt` does after `call`; a
+`Qualifier` before its `NameRef`, as a `CallStmt` does after `call`, or,
+without braces, a `QualifiedName`, a variable or a constant, which an
+assignment's target and a transaction's `collecting` can be too; a
 qualified call without `call`, as a statement, is fixed as any is
 (P0013).
 
@@ -1399,9 +1401,13 @@ is true. One the initial values break is R0023, whose labels say what
 breaks it where its form says: each part is checked again of the initial
 values, the false operands of an `and`, the tuples of `a minus b` for
 `a <= b`, and those of the relation `is_empty` is given. Constraints have
-a namespace of their own, for A0001, since no name refers to one. One in
-the interface is moved to the implementation (`sections::check`), as a
-variable is. The constraint the program keeps is its parts, the operands
+a namespace of their own, for A0001, since no name refers to one. Where
+it is declared is checked by the variables it mentions
+(`constraints::misplaced`, by `ConditionNames::mentioned`, each with where it
+first is): one on another unit's variable is A0083, and one in the
+implementation on a variable the interface declares is moved to the
+interface (A0067), where every unit that assigns the variable sees it.
+The constraint the program keeps is its parts, the operands
 of its `and`s (`constraints::conjuncts`, by `Form`, which recognizes the
 forms that say what breaks them for the compile-time labels too), each a
 `hir::ConstraintPart` checked again for its condition, with, for `a <= b`
@@ -1693,11 +1699,21 @@ whose HIR operator nothing calls. A definition with another heading that
 isn't a version is reported (A0068), with a fix copying the
 declaration's, and paired still. What the interface can't have is
 reported too (A0067): a version, or an operator with a body, there
-(`operators::in_interface`), and, before the signatures, a variable, or
-a type or heading only the implementation declares that its
-declarations' parameters, results, attributes, components or supertypes
-name (`sections::check`); the fixes move the declaration to the section
-it belongs in (`sections::moved`), with the comments just before it.
+(`operators::in_interface`), and a type, a heading, a constant or a
+variable only the implementation declares that what the interface
+declares names, as lookup finds it (`errors::implementation_only`); the
+fixes move the declaration to the section it belongs in
+(`sections::moved`), with the comments just before it, but a constraint
+on the implementation's variables alone moves to the implementation
+instead. A variable the interface declares is the interface's whole,
+initial value and all (`errors::variable_completed`, A0001 for one
+declared again in the implementation), as other units read and assign
+it: they see it as they see the interface's other names
+(`scope::Declared::sees`), read it qualified (`Names::value_in`, of
+`scope::Variables::variable_in`), and assign it so
+(`assign::TargetName`, `Assigning::assigned_in`), and a read-only
+operator's fix that passes it as a parameter writes its type only if it
+is built of the built-in types alone (`Globals::written_type`).
 
 A type the interface declares with several possible representations is
 declared again in the implementation, with their conversions

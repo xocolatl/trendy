@@ -1,13 +1,11 @@
 /* A unit of the `units` example, `lakes.depths`, named by its path from
    the directory of the program's main file. Its interface declares what
-   other units see of it: here a type, a constant, a heading, and
-   operators, each operator by its heading alone. Its implementation gives
-   the constant its value, repeats each such operator's heading with its
-   body, declares the type again with how its representations convert, and
-   keeps what no other unit sees: which representation the type's values
-   are stored as, and the variable the lakes are recorded in, which other
-   units reach only through its update operators, so what is true of it is
-   the unit's to keep. */
+   other units see of it: here a type, a constant, a heading, a variable,
+   with a constraint on it, and operators, each operator by its heading
+   alone. Its implementation gives the constant its value, repeats each
+   such operator's heading with its body, declares the type again with how
+   its representations convert, and keeps what no other unit sees: which
+   representation the type's values are stored as. */
 
 interface
 
@@ -29,11 +27,17 @@ heading lake := { name: text, native: text, depth: metres };
 /* The deepest of `lakes`. */
 operator deepest{lakes: relation lake}: relation lake;
 
+/* The lakes recorded so far, which other units read and assign as this
+   one does. */
+var known: relation lake key { name };
+
+/* Each lake recorded has its name in its own language too. What holds of a
+   variable the interface declares is said here, where each unit that
+   assigns it sees it. */
+constraint named := is_empty{r: known where native = ""};
+
 /* Record a lake, `depth` metres deep. */
 operator record{name: text, native: text, depth: integer};
-
-/* The lakes recorded so far. */
-operator recorded{out lakes: relation lake};
 
 implementation
 
@@ -45,16 +49,10 @@ type metres {
 
 const shallow_limit := metres{m: 500};
 
-var known: relation lake key { name };
-
 operator deepest{lakes: relation lake}: relation lake [
     lakes where depth = max{r: lakes, of: depth}
 ];
 
 operator record{name: text, native: text, depth: integer} [
     insert known relation { { name: name, native: native, depth: metres{m: depth} } };
-];
-
-operator recorded{out lakes: relation lake} [
-    lakes := known;
 ];

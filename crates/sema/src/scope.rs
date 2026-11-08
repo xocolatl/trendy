@@ -756,6 +756,19 @@ impl Variables {
         }
     }
 
+    /// The variable named `name` that `unit` declares, if what is written at
+    /// `at` sees it: in its interface, unless it is the viewer's own unit.
+    pub(crate) fn variable_in(
+        &self,
+        name: &str,
+        unit: hir::FileId,
+        at: Span,
+    ) -> Option<hir::VariableId> {
+        self.ids
+            .seen_in(name, unit, self.units.viewer(at), &self.units)
+            .copied()
+    }
+
     /// The constant named `name` that `unit` declares, if what is written at
     /// `at` sees it.
     pub(crate) fn constant_in(

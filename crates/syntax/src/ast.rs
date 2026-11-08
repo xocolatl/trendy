@@ -1273,10 +1273,14 @@ impl Collecting {
         significant_tokens(&self.0).next()
     }
 
-    /// The variable the errors are added to.
+    /// The variable the errors are added to: its name, qualified by its
+    /// unit's or not.
     #[must_use]
-    pub fn variable(&self) -> Option<NameRef> {
-        self.0.children().find_map(NameRef::cast)
+    pub fn variable(&self) -> Option<Expr> {
+        self.0
+            .children()
+            .find(|node| matches!(node.kind(), SyntaxKind::NameRef | SyntaxKind::QualifiedName))
+            .and_then(Expr::cast)
     }
 }
 

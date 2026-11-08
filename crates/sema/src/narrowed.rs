@@ -287,7 +287,8 @@ impl Assigns {
                 if let Some(ident) = stmt
                     .collecting()
                     .and_then(|c| c.variable())
-                    .and_then(|v| v.ident())
+                    .and_then(|v| crate::assign::target_path(&v))
+                    .and_then(|(name, _)| name.ident())
                 {
                     self.named(ident.text(), stmt.span());
                 }
@@ -393,14 +394,14 @@ impl Names for Narrowed<'_> {
         self.outer.narrowing_ended(name)
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
-        self.outer.constant_of(name, unit, span, errors)
+        self.outer.value_in(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
@@ -480,14 +481,14 @@ impl Names for Unnarrowed<'_> {
         self.outer.narrowing_ended(name)
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
-        self.outer.constant_of(name, unit, span, errors)
+        self.outer.value_in(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {

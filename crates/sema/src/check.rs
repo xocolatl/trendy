@@ -107,9 +107,10 @@ pub(crate) trait Names {
         self.resolve(name, span, errors)
     }
 
-    /// What reading the constant named `name` that `unit` declares is, written
-    /// at `span`: nothing, if what is written there doesn't see one.
-    fn constant_of(
+    /// What reading the variable or the constant named `name` that `unit`
+    /// declares is, written at `span` qualified by the unit's name: nothing,
+    /// if what is written there doesn't see one.
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
@@ -739,8 +740,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `written`, as `expr`: a constant the unit it names declares, the one
-    /// kind of value a unit's interface can give another.
+    /// `written`, as `expr`: a variable or a constant the unit it names
+    /// declares, the values a unit's interface can give another.
     fn qualified(
         &mut self,
         written: &ast::QualifiedName,
@@ -766,7 +767,7 @@ impl<'a> Checker<'a> {
             .namespaces()
             .written_name(&ident, Some(&qualifier), errors)?;
         let unit = name.unit?;
-        match self.names.constant_of(ident.text(), unit, span, errors) {
+        match self.names.value_in(ident.text(), unit, span, errors) {
             Lookup::Found(value) => self.matched(expected, value, expr, errors),
             Lookup::Reported => None,
             Lookup::Unknown => {
@@ -4192,14 +4193,14 @@ impl Names for TupleNames<'_> {
         }
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
-        self.outer.constant_of(name, unit, span, errors)
+        self.outer.value_in(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {
@@ -4355,14 +4356,14 @@ impl Names for ComponentNames<'_> {
         }
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
-        self.outer.constant_of(name, unit, span, errors)
+        self.outer.value_in(name, unit, span, errors)
     }
 
     fn candidates(&self, at: Span) -> Vec<String> {

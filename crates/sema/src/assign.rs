@@ -30,6 +30,91 @@ pub(crate) trait Assigning: Names {
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee>;
+
+    /// The variable of the program's `written`, qualified by the name of
+    /// `unit`, which declares it, that an assignment assigns, or `None` after
+    /// reporting why it can't be assigned.
+    fn assigned_in(
+        &mut self,
+        written: &ast::QualifiedName,
+        unit: hir::FileId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee>;
+}
+
+/// The variable an assignment's target names, as it is written.
+#[derive(Clone)]
+pub(crate) enum TargetName {
+    /// By its name alone.
+    Plain(ast::NameRef),
+    /// By its name, qualified by its unit's.
+    Qualified(ast::QualifiedName),
+}
+
+impl TargetName {
+    /// Its name, unqualified.
+    pub(crate) fn ident(&self) -> Option<SyntaxToken> {
+        match self {
+            TargetName::Plain(name) => name.ident(),
+            TargetName::Qualified(written) => written.ident(),
+        }
+    }
+}
+
+/// The variable `target` names, that an assignment assigns, or `None` after
+/// reporting why it can't be assigned.
+pub(crate) fn assignee(
+    target: &TargetName,
+    names: &mut dyn Assigning,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Assignee> {
+    let ident = target.ident()?;
+    match target {
+        TargetName::Plain(_) => {
+            let span = trendy_syntax::span(ident.text_range());
+            names.assigned(ident.text(), span, errors)
+        }
+        TargetName::Qualified(written) => {
+            let unit = names
+                .namespaces()
+                .written_name(&ident, written.qualifier().as_ref(), errors)?
+                .unit?;
+            names.assigned_in(written, unit, errors)
+        }
+    }
+}
+
+/// The variable `written`, qualified by the name of `unit`, names, of those
+/// `declared` has, as an assignment's target, or `None` after reporting why
+/// it names none: a constant, which never changes, or nothing that unit's
+/// interface declares.
+pub(crate) fn qualified_variable(
+    written: &ast::QualifiedName,
+    unit: hir::FileId,
+    declared: &crate::scope::Variables,
+    names: &dyn Names,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::VariableId> {
+    let ident = written.ident()?;
+    let span = trendy_syntax::span(ident.text_range());
+    if let Some(id) = declared.variable_in(ident.text(), unit, span) {
+        return Some(id);
+    }
+    if let Some(id) = declared.constant_in(ident.text(), unit, span) {
+        errors.push(errors::assigned_qualified_constant(
+            written,
+            &declared.constant(id).first,
+        ));
+    } else {
+        errors.push(errors::unknown_qualified_value(
+            written,
+            &ident,
+            unit,
+            names.namespaces(),
+            names.operators(),
+        ));
+    }
+    None
 }
 
 /// A variable an assignment assigns, of the program or local to the
@@ -274,16 +359,12 @@ fn change(
 ) -> Option<(Assignee, Change)> {
     let written = clause.target()?;
     let Some((name, positions)) = target_path(&written) else {
-        if let Some(qualified) = qualified_target(&written) {
-            errors.push(errors::assigned_qualified(&qualified));
-        } else if let Some(error) = attribute_assigned(clause, &written, names, errors) {
+        if let Some(error) = attribute_assigned(clause, &written, names, errors) {
             errors.push(error);
         }
         return None;
     };
-    let ident = name.ident()?;
-    let span = trendy_syntax::span(ident.text_range());
-    let assignee = names.assigned(ident.text(), span, errors)?;
+    let assignee = assignee(&name, names, errors)?;
     let declared = assignee.declared()?;
     let target = Target {
         expected: Expected {
@@ -327,31 +408,22 @@ fn change(
 /// The variable that `written`, an assignment's target, names, and the
 /// brackets of each position after it, from the variable's array in, if
 /// the target is a variable, or an element of one, as in `grid[i][j]`.
-pub(crate) fn target_path(written: &ast::Expr) -> Option<(ast::NameRef, Vec<ast::IndexExpr>)> {
+pub(crate) fn target_path(written: &ast::Expr) -> Option<(TargetName, Vec<ast::IndexExpr>)> {
     let mut positions = Vec::new();
     let mut at = written.clone();
     loop {
-        match at {
-            ast::Expr::Name(name) => {
-                positions.reverse();
-                return Some((name, positions));
-            }
+        let name = match at {
+            ast::Expr::Name(name) => TargetName::Plain(name),
+            ast::Expr::Qualified(written) => TargetName::Qualified(written),
             ast::Expr::Index(index) => {
                 at = index.operand()?;
                 positions.push(index);
+                continue;
             }
             _ => return None,
-        }
-    }
-}
-
-/// The qualified name `written`, an assignment's target, or the array whose
-/// element it is, is, if it is one.
-fn qualified_target(written: &ast::Expr) -> Option<ast::QualifiedName> {
-    match written {
-        ast::Expr::Qualified(qualified) => Some(qualified.clone()),
-        ast::Expr::Index(index) => qualified_target(&index.operand()?),
-        _ => None,
+        };
+        positions.reverse();
+        return Some((name, positions));
     }
 }
 
@@ -442,9 +514,7 @@ fn attribute_assigned(
     // is one.
     let path = (|| {
         let (name, positions) = target_path(&base)?;
-        let ident = name.ident()?;
-        let span = trendy_syntax::span(ident.text_range());
-        let mut ty = names.assigned(ident.text(), span, errors)?.ty;
+        let mut ty = assignee(&name, names, errors)?.ty;
         for _ in &positions {
             let hir::Type::Array(element) = ty else {
                 return None;

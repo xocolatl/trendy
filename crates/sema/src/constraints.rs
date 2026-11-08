@@ -67,6 +67,10 @@ fn constraint(
         ));
         return None;
     }
+    if let Some(error) = misplaced(decl, &names.mentioned, cx) {
+        errors.push(error);
+        return None;
+    }
     if holds == Some(false) {
         let breaches = initial.breaches(&written);
         let mentioned: Vec<&str> = names.mentioned.keys().map(String::as_str).collect();
@@ -87,12 +91,49 @@ fn constraint(
         .unit_at(trendy_syntax::span(ident.text_range()));
     Some(hir::VariableConstraint {
         name: cx.namespaces.constraint_identity(ident.text(), unit),
-        variables: names.mentioned.values().copied().collect(),
+        variables: names.mentioned.values().map(|&(id, _)| id).collect(),
         parts,
         written: written.syntax().text().to_string(),
         site: cx.sites.at(decl.span()),
         checked_at_start: holds.is_none(),
     })
+}
+
+/// Why the constraint `decl`, which mentions the variables `mentioned`, isn't
+/// where it belongs, if it isn't: a unit declares the constraints on its own
+/// variables (A0083), and those on the variables its interface declares in
+/// its interface (A0067), as other units assign them. One in the interface
+/// mentions only those, as the interface sees only interfaces.
+fn misplaced(
+    decl: &ast::ConstraintDecl,
+    mentioned: &BTreeMap<String, (hir::VariableId, Span)>,
+    cx: &Context,
+) -> Option<Diagnostic> {
+    let unit = cx.namespaces.unit_at(decl.span());
+    let section = ast::section_of(decl.syntax());
+    let declared = |id: hir::VariableId| {
+        let variable = cx.declared.decl(id);
+        (
+            cx.namespaces.unit_at(variable.span()),
+            ast::section_of(variable.syntax()),
+        )
+    };
+    if let Some((written, (owner, at))) = mentioned.iter().find_map(|(written, &(id, at))| {
+        let (owner, _) = declared(id);
+        (owner != unit).then_some((written, (owner, at)))
+    }) {
+        let owner = cx.namespaces.units().name(owner);
+        return Some(errors::foreign_constraint(decl, written, at, owner));
+    }
+    if section == ast::Section::Interface {
+        return None;
+    }
+    let (written, &(_, at)) = mentioned
+        .iter()
+        .find(|(_, (id, _))| declared(*id).1 == ast::Section::Interface)?;
+    let file = ast::SourceFile::cast(decl.syntax().parent()?)?;
+    let moved = sections::moved(&file, decl.syntax(), ast::Section::Interface);
+    Some(errors::implementation_constraint(decl, written, at, moved))
 }
 
 /// What a condition on the variables is of their initial values, when compiling.
@@ -251,8 +292,9 @@ struct ConditionNames<'c, 'a> {
     cx: &'c Context<'a>,
     initial: bool,
     locals: Locals,
-    /// The variables it mentions, by the names it writes.
-    mentioned: BTreeMap<String, hir::VariableId>,
+    /// The variables it mentions, by the names it writes, each with where
+    /// it first does.
+    mentioned: BTreeMap<String, (hir::VariableId, Span)>,
 }
 
 impl<'c, 'a> ConditionNames<'c, 'a> {
@@ -262,6 +304,21 @@ impl<'c, 'a> ConditionNames<'c, 'a> {
             initial,
             locals: Locals::default(),
             mentioned: BTreeMap::new(),
+        }
+    }
+
+    /// Reading the variable of the program's `id`, written `name` at `span`:
+    /// its initial value, when the condition is of those.
+    fn variable_read(&mut self, id: hir::VariableId, name: String, span: Span) -> Lookup {
+        self.mentioned.entry(name).or_insert((id, span));
+        // A variable with errors in its declaration is already reported.
+        match &self.cx.variables[id.0] {
+            // Of its declared type, which can be a supertype of its value's.
+            Some(variable) if self.initial => {
+                Lookup::Found(hir::Expr::Constant(variable.init.clone()).treated(&variable.ty))
+            }
+            Some(_) => Lookup::Found(hir::Expr::Variable(id)),
+            None => Lookup::Reported,
         }
     }
 
@@ -357,17 +414,7 @@ impl Names for ConditionNames<'_, '_> {
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
         if let Some(id) = self.cx.declared.find(name, span) {
-            self.mentioned.insert(name.to_string(), id);
-            // A variable with errors in its declaration is already reported.
-            return match &self.cx.variables[id.0] {
-                // Of its declared type, which can be a supertype of its
-                // value's.
-                Some(variable) if self.initial => {
-                    Lookup::Found(hir::Expr::Constant(variable.init.clone()).treated(&variable.ty))
-                }
-                Some(_) => Lookup::Found(hir::Expr::Variable(id)),
-                None => Lookup::Reported,
-            };
+            return self.variable_read(id, name.to_string(), span);
         }
         if let Some(id) = self.cx.declared.find_constant(name, span) {
             return self.cx.constant_read(id);
@@ -379,13 +426,17 @@ impl Names for ConditionNames<'_, '_> {
         Lookup::Unknown
     }
 
-    fn constant_of(
+    fn value_in(
         &mut self,
         name: &str,
         unit: hir::FileId,
         span: Span,
         _errors: &mut Vec<Diagnostic>,
     ) -> Lookup {
+        if let Some(id) = self.cx.declared.variable_in(name, unit, span) {
+            let qualifier = self.cx.namespaces.qualifier_for(unit, span);
+            return self.variable_read(id, format!("{qualifier}::{name}"), span);
+        }
         self.cx
             .declared
             .constant_in(name, unit, span)

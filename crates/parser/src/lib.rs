@@ -2877,7 +2877,8 @@ impl<'a> Parser<'a> {
 
     /// `transaction [ … ];` or `transaction collecting e [ … ];`: the
     /// block's statements, undone, all of them, if one fails, and with
-    /// `collecting`, the errors they give, added to the variable `e`.
+    /// `collecting`, the errors they give, added to the variable `e`, which
+    /// may be qualified by its unit's name.
     /// `collecting` is a contextual keyword. SQL's `BEGIN
     /// TRANSACTION` and `START TRANSACTION` are fixed, and the habits of a
     /// block (see [`Parser::branch`]) reported.
@@ -2895,7 +2896,9 @@ impl<'a> Parser<'a> {
         if self.at_word("collecting") {
             self.start_node(SyntaxKind::Collecting);
             self.contextual_keyword("collecting");
-            if self.at(SyntaxKind::Ident) {
+            if let Some(len) = self.qualifier_len(0) {
+                self.qualified_name(len);
+            } else if self.at(SyntaxKind::Ident) {
                 self.start_node(SyntaxKind::NameRef);
                 self.bump();
                 self.builder.finish_node();
@@ -9919,14 +9922,16 @@ var b := tuple { fail: fail }.fail;",
 
     #[test]
     fn transactions() {
-        // With and without `collecting`, nested; `collecting` is a name
-        // elsewhere, and `begin`, `commit` and `try` are too.
+        // With and without `collecting`, nested, of a variable another unit
+        // declares too; `collecting` is a name elsewhere, and `begin`,
+        // `commit` and `try` are too.
         let parse = parse_str(
             "operator f{} [
     transaction [ call g{}; ];
     transaction collecting found [
         transaction [ var collecting := 1; ];
     ];
+    transaction collecting lakes.depths::refused [ call g{}; ];
     var begin := 1;
     commit := begin;
     call try{n: 1};
@@ -9940,11 +9945,19 @@ var b := tuple { fail: fail }.fail;",
             .filter_map(trendy_syntax::ast::TransactionStmt::cast)
             .map(|t| {
                 t.collecting()
-                    .and_then(|c| c.variable()?.ident())
-                    .map(|i| i.text().to_string())
+                    .and_then(|c| c.variable())
+                    .map(|v| v.syntax().text().to_string())
             })
             .collect();
-        assert_eq!(transactions, [None, Some("found".to_string()), None]);
+        assert_eq!(
+            transactions,
+            [
+                None,
+                Some("found".to_string()),
+                None,
+                Some("lakes.depths::refused".to_string())
+            ]
+        );
         // SQL's words and another language's `try`, reported, with fixes
         // where they are mechanical.
         for (source, fixed, codes) in [
