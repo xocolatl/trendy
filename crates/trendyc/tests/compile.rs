@@ -10201,6 +10201,13 @@ operator main{} [
     call debug_value{v: count{r: (r rename {v as a}) union (s rename {v as a}) union (t rename {x as a, y as k})}};
     /* Wanted in canonical order, to be written. */
     call debug_value{v: (r rename {v as a}) minus (s rename {v as a})};
+    /* Extended with attributes that come before the others by name: sorted by `k`, then
+       `v`, then those, before and after a restriction, which keeps the order. */
+    call debug_value{v: count{r: (r extend { a := k mod 2 }) union (s extend { a := k mod 2 })}};
+    call debug_value{v: count{r: ((r where k > 2) extend { a := k mod 2 }) minus (s extend { a := k mod 2 } where k < 6)}};
+    call debug_value{v: count{r: (r extend { a := 60 div k }) union (s extend { a := 60 div k })}};
+    /* Replacing an attribute, which can make two tuples equal. */
+    call debug_value{v: count{r: (r replace { v := k div 2 }) union (s replace { v := k div 2 })}};
     /* A disjoint union's operands that share a tuple. */
     call debug_value{v: count{r: (r rename {v as a}) d_union (s rename {v as a})}};
 ];
@@ -10209,19 +10216,23 @@ operator main{} [
     assert_eq!(ran.code, 1, "{}", ran.stderr);
     let lines: Vec<&str> = ran.stderr.lines().collect();
     assert_eq!(
-        lines[..6],
+        lines[..10],
         [
             "9",
             "3",
             "9",
             "6",
             "9",
-            "relation { a: integer, k: integer } { { a: 10, k: 1 }, { a: 20, k: 2 }, { a: 30, k: 3 } }"
+            "relation { a: integer, k: integer } { { a: 10, k: 1 }, { a: 20, k: 2 }, { a: 30, k: 3 } }",
+            "9",
+            "2",
+            "9",
+            "9",
         ],
         "{}",
         ran.stderr
     );
-    assert!(lines[6].starts_with("error[R0006]"), "{}", ran.stderr);
+    assert!(lines[10].starts_with("error[R0006]"), "{}", ran.stderr);
 }
 
 /// A rename named by a `const` reads what it renames in place, but only if that is already

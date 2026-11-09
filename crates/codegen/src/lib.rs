@@ -304,6 +304,26 @@ impl Functions {
         Ok(())
     }
 
+    /// Store at `dst` the address of the element at the position at `index` of the array or
+    /// relation at `array`, whose elements are laid out as `element`.
+    fn element(
+        &mut self,
+        dst: &lir::Place,
+        array: &lir::Place,
+        index: &lir::Place,
+        element: &lir::Layout,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        let pointer = self.config.pointer_type();
+        let elements = self.load(pointer, array, frame, b)?;
+        let index = self.load(pointer, index, frame, b)?;
+        let size = i64::try_from(self.target.size(element)).map_err(|e| e.to_string())?;
+        let offset = b.ins().imul_imm_s(index, size);
+        let address = b.ins().iadd(elements, offset);
+        self.store(dst, address, frame, b)
+    }
+
     /// The integer at `dst` of the unsigned number of `width` at `src`.
     fn widen(
         &mut self,
@@ -406,15 +426,7 @@ impl Functions {
                 array,
                 index,
                 element,
-            } => {
-                let pointer = self.config.pointer_type();
-                let elements = self.load(pointer, array, frame, b)?;
-                let index = self.load(pointer, index, frame, b)?;
-                let size = i64::try_from(self.target.size(element)).map_err(|e| e.to_string())?;
-                let offset = b.ins().imul_imm_s(index, size);
-                let address = b.ins().iadd(elements, offset);
-                self.store(dst, address, frame, b)?;
-            }
+            } => self.element(dst, array, index, element, frame, b)?,
             lir::Inst::Widen { dst, src, width } => self.widen(dst, src, *width, frame, b)?,
             lir::Inst::Narrow { dst, src, width } => self.narrow(dst, src, *width, frame, b)?,
             lir::Inst::Increment { place } => {
@@ -428,7 +440,10 @@ impl Functions {
                 self.store(dst, address, frame, b)?;
             }
             // They only say what is true of a relation.
-            lir::Inst::InAnyOrder(_) | lir::Inst::InOrderOf { .. } | lir::Inst::NoValueYet(_) => {}
+            lir::Inst::InAnyOrder(_)
+            | lir::Inst::InOrderOf { .. }
+            | lir::Inst::SortedAs { .. }
+            | lir::Inst::NoValueYet(_) => {}
             lir::Inst::IsNull { dst, src } => {
                 let address = self.load(self.config.pointer_type(), src, frame, b)?;
                 let null = b.ins().iconst(self.config.pointer_type(), 0);

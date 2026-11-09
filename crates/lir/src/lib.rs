@@ -1449,6 +1449,10 @@ pub enum Inst {
     /// The tuples of the relation `dst` are in the order they are in the relation `src`,
     /// which compiled code has read them from. No code, as for [`Inst::InAnyOrder`].
     InOrderOf { dst: Place, src: Place },
+    /// The tuples of the relation `relation`, which compiled code has filled, are sorted
+    /// as the descriptor at `descriptor` says, by name or otherwise, as it filled them in
+    /// that order. No code, as for [`Inst::InAnyOrder`].
+    SortedAs { relation: Place, descriptor: Place },
     /// Whether the address at `src` is null, as a slot's is once
     /// [`RuntimeFn::Release`] has made it zero, or before anything has been made for
     /// it: the one read of such a slot that means what it says.
@@ -2054,6 +2058,14 @@ impl Inst {
     ) {
         match self {
             Inst::InAnyOrder(relation) => arrange(arranged, Some(relation), Arrangement::Loose),
+            Inst::SortedAs {
+                relation,
+                descriptor,
+            } => arrange(
+                arranged,
+                Some(relation),
+                arranged_as(Some(descriptor), data),
+            ),
             Inst::InOrderOf { dst, src } => {
                 let arrangement = arrangement_of(arranged, src);
                 arrange(arranged, Some(dst), arrangement);
@@ -2092,9 +2104,11 @@ impl Inst {
     fn reads_and_write(&self) -> (Vec<&Place>, Option<&Place>) {
         match self {
             Inst::NoValueYet(place) => (Vec::new(), Some(place)),
-            Inst::CheckStack | Inst::Site(_) | Inst::InAnyOrder(_) | Inst::InOrderOf { .. } => {
-                (Vec::new(), None)
-            }
+            Inst::CheckStack
+            | Inst::Site(_)
+            | Inst::InAnyOrder(_)
+            | Inst::InOrderOf { .. }
+            | Inst::SortedAs { .. } => (Vec::new(), None),
             Inst::Copy { dst, src, .. }
             | Inst::Unary { dst, src, .. }
             | Inst::Widen { dst, src, .. }

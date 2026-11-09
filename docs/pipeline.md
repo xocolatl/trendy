@@ -2664,13 +2664,25 @@ sorted where it is, rather than through pointers to it (`Operand::sorts_here`).
 A relation can also be sorted otherwise than by name, which only a descriptor whose sort
 order says so describes (`Lowering::described`, `Order::SortedBy`, a `SortId` interned in
 `Lowering::sort_orders`). `FunctionBuilder::sorted_place` gives one, as `loose_place` gives a
-loose one, only to what asks, in whatever sorted order is less work, and says which.
+loose one, only to what asks, in whatever sorted order is less work, and says which. What
+a reader asks is a `Want`: canonical order, sorted in any order, any order, or any order
+with some tuples the same, which `FunctionBuilder::given` sends where each is computed.
 - **A rename** of a sorted relation is sorted by the same attributes under their new names,
   so it is reshaped with its tuples where they are, and described in that order
   (`FunctionBuilder::renamed_in_order`, `Lowering::renamed_order`). `r rename {v as a}`, of
   `r` sorted by `k`, then `v`, is sorted by `k`, then `a`, not by name, which would take a
   sort. The reshape is told its tuples come in that order (`Reshaped::Kept`,
   `ORDERED_RESULT`), so it writes them once, with nothing to sort or check.
+- **An extension** that only adds attributes makes its tuples in its operand's order, all
+  different, so they are sorted by the operand's order, then the attributes it adds, by
+  name (`Lowering::extended_order`). It asks its operand for whatever sorted order is less
+  work, or for canonical order if what it computes can fail, as its failure says which tuple
+  it failed for. It says what it made with `lir::Inst::SortedAs`, with nothing to sort or
+  check (`Made::Kept`). One that replaces an attribute can make two tuples equal, so it is
+  sorted into canonical order.
+- **A restriction** keeps its operand's order, as it always has (`InOrderOf`), and asks its
+  operand for what it is asked, unless its condition can fail. Only one in canonical order
+  finds runs by binary search (`equal_runs`).
 - **A combination** that nothing wants in canonical order, such as a union only counted,
   merges its operands in one order, the result's (`FunctionBuilder::combine`). It works out
   first what order each would come in, without computing it

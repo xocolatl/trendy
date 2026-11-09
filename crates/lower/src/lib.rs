@@ -1280,6 +1280,20 @@ impl Lowering {
         self.sorted_by(names)
     }
 
+    /// The order of a relation of `heading` in `order`, a sorted one, extended with
+    /// `added`, attributes it hasn't: sorted by the same attributes, then those it adds, by
+    /// name, as an extension's tuples are made in its operand's order, all different.
+    fn extended_order(
+        &mut self,
+        order: Order,
+        heading: &hir::Heading,
+        added: &BTreeMap<String, hir::Expr>,
+    ) -> Order {
+        let mut names = self.sort_names(order, heading);
+        names.extend(added.keys().cloned());
+        self.sorted_by(names)
+    }
+
     /// The fields of a descriptor that hold `name`: the address of its
     /// UTF-8 bytes, and their length.
     fn name(&mut self, name: &str) -> (lir::Field, lir::Field) {
@@ -1510,14 +1524,45 @@ enum Order {
     Repeated,
 }
 
-/// What a reshape is told of its result's order.
+/// What the reader of a relation asks of its order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Want {
+    /// Canonical order, so that equal relations have equal arrays.
+    Canonical,
+    /// Sorted in whatever order is less work, which may not be by name, and which the
+    /// reader is told ([`FunctionBuilder::sorted_place`]).
+    Sorted,
+    /// In any order, all different: what nothing depends the order of needn't be sorted
+    /// (see [`FunctionBuilder::loose_place`]).
+    Any,
+    /// In any order, with some perhaps the same: for what removes those itself, as a
+    /// projection does.
+    Repeated,
+}
+
+impl Want {
+    /// The order that what can only give canonical order or leave its tuples as they
+    /// come gives what is wanted so: canonical order is a sorted one.
+    fn as_comes(self) -> Order {
+        match self {
+            Want::Canonical | Want::Sorted => Order::Canonical,
+            Want::Any => Order::Loose,
+            Want::Repeated => Order::Repeated,
+        }
+    }
+}
+
+/// What is known of the order of a relation's tuples as they are made, as what makes them
+/// is told: by a reshape or an extension.
 #[derive(Clone, Copy, Debug)]
-enum Reshaped {
-    /// Wanted in this order, which its tuples are sorted into if they don't come so, or in
-    /// none, if it is [`Order::Loose`].
+enum Made {
+    /// Wanted in this order, which they are sorted into if they don't come so, or in none,
+    /// if it is [`Order::Loose`].
     Wanted(Order),
-    /// In this order, a sorted one, which its tuples come in, as they are in what it
-    /// reshapes, so they needn't be sorted or checked ([`lir::ORDERED_RESULT`]).
+    /// In this order, a sorted one, which they come in, as they do in what they are made
+    /// from, so they needn't be sorted or checked: by a reshape, a rename's of a relation
+    /// sorted by the same attributes ([`lir::ORDERED_RESULT`]), and by an extension, its
+    /// operand's order, then the attributes it adds ([`lir::Inst::SortedAs`]).
     Kept(Order),
 }
 
@@ -2007,7 +2052,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Treat(_, inner) => self.returned(inner, ty, cx),
             hir::Expr::Let(..) => {
-                let (end, alive) = self.let_bindings(expr, Order::Canonical, cx);
+                let (end, alive) = self.let_bindings(expr, Want::Canonical, cx);
                 self.reading_last(end, alive.iter().map(|(id, ..)| *id), |this| {
                     this.returned(end, ty, cx);
                 });
@@ -2345,18 +2390,16 @@ impl<'a> FunctionBuilder<'a> {
     fn let_chain(
         &mut self,
         expr: &hir::Expr,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let outer = self.site;
         let (end, alive) = self.let_bindings(expr, want, cx);
         let bound = alive.iter().map(|(id, ..)| *id);
-        let (mut value, order) = self.reading_last(end, bound, |this| {
-            if want == Order::Loose {
-                this.loose_place(end, cx)
-            } else {
-                (this.place(end, cx), Order::Canonical)
-            }
+        let (mut value, order) = self.reading_last(end, bound, |this| match want {
+            Want::Any => this.loose_place(end, cx),
+            Want::Sorted => this.sorted_place(end, cx),
+            Want::Canonical | Want::Repeated => (this.place(end, cx), Order::Canonical),
         });
         if !alive.is_empty() {
             // The end's value may point into the bindings still alive, so
@@ -2482,7 +2525,7 @@ impl<'a> FunctionBuilder<'a> {
     fn let_bindings<'e>(
         &mut self,
         expr: &'e hir::Expr,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (&'e hir::Expr, Vec<(hir::LocalId, lir::Place, hir::Type)>) {
         // The chain's sites and bindings, in order, then its end.
@@ -2544,7 +2587,7 @@ impl<'a> FunctionBuilder<'a> {
                         Part::Site(_) => true,
                     });
             loose[k] = later
-                && read_as(end, want == Order::Canonical)
+                && read_as(end, matches!(want, Want::Canonical | Want::Sorted))
                 && self.is_relation_of_no_key_to_check(*id);
         }
         let mut alive: Vec<(hir::LocalId, lir::Place, hir::Type)> = Vec::new();
@@ -5646,6 +5689,23 @@ impl<'a> FunctionBuilder<'a> {
                 cx.renamed_order(order, &view)
             }
             hir::Expr::Combine(_, lhs, rhs) => self.shared_order(lhs, rhs, cx),
+            hir::Expr::Restrict(operand, condition) if !condition.can_fail() => {
+                self.sorted_order(operand, cx)
+            }
+            hir::Expr::Extend(operand, _, attributes) => {
+                let hir::Type::Relation(heading) = self.type_of(operand) else {
+                    return Order::Canonical;
+                };
+                if attributes.keys().any(|name| heading.get(name).is_some()) {
+                    return Order::Canonical;
+                }
+                let order = if attributes.values().any(hir::Expr::can_fail) {
+                    Order::Canonical
+                } else {
+                    self.sorted_order(operand, cx)
+                };
+                cx.extended_order(order, &heading, attributes)
+            }
             _ => Order::Canonical,
         }
     }
@@ -5693,7 +5753,13 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Rename(..) => self.renamed_in_order(expr, cx),
             hir::Expr::Combine(combination, lhs, rhs) => {
-                self.combine(*combination, lhs, rhs, Order::Loose, cx)
+                self.combine(*combination, lhs, rhs, Want::Sorted, cx)
+            }
+            hir::Expr::Restrict(operand, condition) => {
+                self.restrict(operand, condition, Want::Sorted, cx)
+            }
+            hir::Expr::Extend(operand, _, attributes) => {
+                self.extend(expr, operand, attributes, Want::Sorted, cx)
             }
             _ => (self.place(expr, cx), Order::Canonical),
         }
@@ -5704,19 +5770,19 @@ impl<'a> FunctionBuilder<'a> {
     /// Tuples in order cost nothing to keep so, through a join as through a restriction, where
     /// leaving them out of order for a reader that wants them in order costs a sort of what
     /// comes out, which is often much larger.
-    fn given(&mut self, expr: &hir::Expr, want: Order, cx: &mut Lowering) -> (lir::Place, Order) {
-        if want == Order::Canonical {
-            (self.place(expr, cx), Order::Canonical)
-        } else {
-            self.loose_place(expr, cx)
+    fn given(&mut self, expr: &hir::Expr, want: Want, cx: &mut Lowering) -> (lir::Place, Order) {
+        match want {
+            Want::Canonical => (self.place(expr, cx), Order::Canonical),
+            Want::Sorted => self.sorted_place(expr, cx),
+            Want::Any | Want::Repeated => self.loose_place(expr, cx),
         }
     }
 
     /// How a join or a semijoin reads its operand `expr`: through any renames around it, if
     /// nothing above it depends on the order of what comes out, and otherwise as it is, so that
     /// the operand is in the order that makes that cost nothing.
-    fn operand_view<'e>(&self, expr: &'e hir::Expr, want: Order) -> View<'e> {
-        if want == Order::Canonical {
+    fn operand_view<'e>(&self, expr: &'e hir::Expr, want: Want) -> View<'e> {
+        if matches!(want, Want::Canonical | Want::Sorted) {
             self.view_as_it_is(expr)
         } else {
             self.view_of(expr)
@@ -5744,20 +5810,20 @@ impl<'a> FunctionBuilder<'a> {
                 }
                 given
             }
-            hir::Expr::Let(..) => self.let_chain(expr, Order::Loose, cx),
-            hir::Expr::Rename(..) => self.renamed(expr, Order::Loose, cx),
-            hir::Expr::Remove(operand, names) => self.removed(operand, names, Order::Loose, cx),
-            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Order::Loose, cx),
-            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, Order::Loose, cx),
-            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, Order::Loose, cx),
+            hir::Expr::Let(..) => self.let_chain(expr, Want::Any, cx),
+            hir::Expr::Rename(..) => self.renamed(expr, Want::Any, cx),
+            hir::Expr::Remove(operand, names) => self.removed(operand, names, Want::Any, cx),
+            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Want::Any, cx),
+            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, Want::Any, cx),
+            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, Want::Any, cx),
             hir::Expr::Restrict(operand, condition) => {
-                self.restrict(operand, condition, Order::Loose, cx)
+                self.restrict(operand, condition, Want::Any, cx)
             }
             hir::Expr::Extend(operand, _, attributes) => {
-                self.extend(expr, operand, attributes, Order::Loose, cx)
+                self.extend(expr, operand, attributes, Want::Any, cx)
             }
             hir::Expr::Combine(combination, lhs, rhs) => {
-                self.combine(*combination, lhs, rhs, Order::Loose, cx)
+                self.combine(*combination, lhs, rhs, Want::Any, cx)
             }
             _ => (self.place(expr, cx), Order::Canonical),
         }
@@ -6048,7 +6114,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.canonical(place, order, &ty, cx)
             }
             hir::Expr::At(site, expr) => self.place_at(*site, expr, cx),
-            hir::Expr::Let(..) => self.let_chain(expr, Order::Canonical, cx).0,
+            hir::Expr::Let(..) => self.let_chain(expr, Want::Canonical, cx).0,
             hir::Expr::Run(block, value) => self.run(block, value, cx),
             hir::Expr::Parameter(name) if self.pointers.contains_key(name) => {
                 self.pointee(name, cx)
@@ -6087,10 +6153,10 @@ impl<'a> FunctionBuilder<'a> {
                 self.conditional(expr, condition, [then, otherwise], cx)
             }
             hir::Expr::Remove(operand, names) => {
-                self.removed(operand, names, Order::Canonical, cx).0
+                self.removed(operand, names, Want::Canonical, cx).0
             }
-            hir::Expr::Rename(..) => self.renamed(expr, Order::Canonical, cx).0,
-            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Order::Canonical, cx).0,
+            hir::Expr::Rename(..) => self.renamed(expr, Want::Canonical, cx).0,
+            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Want::Canonical, cx).0,
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Only(operand) => self.only(operand, cx),
             // A value of a type of the program's own is laid out as the tuple
@@ -6105,21 +6171,21 @@ impl<'a> FunctionBuilder<'a> {
                 self.fail_with(error, cx);
                 self.slot(cx.layout(ty))
             }
-            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, Order::Canonical, cx).0,
-            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, Order::Canonical, cx).0,
+            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, Want::Canonical, cx).0,
+            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, Want::Canonical, cx).0,
             hir::Expr::Restrict(operand, condition) => {
-                self.restrict(operand, condition, Order::Canonical, cx).0
+                self.restrict(operand, condition, Want::Canonical, cx).0
             }
             hir::Expr::Tclose(operand) => self.closed(operand, cx),
             hir::Expr::Combine(combination, lhs, rhs) => {
-                self.combine(*combination, lhs, rhs, Order::Canonical, cx).0
+                self.combine(*combination, lhs, rhs, Want::Canonical, cx).0
             }
             hir::Expr::Current(depth, _) => {
                 self.tuples[self.tuples.len() - 1 - depth].place.clone()
             }
             hir::Expr::Call(call) => self.read_only_call(call, cx),
             hir::Expr::Extend(operand, _, attributes) => {
-                self.extend(expr, operand, attributes, Order::Canonical, cx)
+                self.extend(expr, operand, attributes, Want::Canonical, cx)
                     .0
             }
             // Of the operands of `and` and `or`, those that can fail are
@@ -6227,7 +6293,7 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         operand: &hir::Expr,
         names: &BTreeSet<String>,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let view = self.view_of(operand);
@@ -6235,16 +6301,16 @@ impl<'a> FunctionBuilder<'a> {
         // removes any that it does make, by sorting them, whatever order they are in. What
         // can't, wanted in order, is in order for nothing if what it comes from is.
         let (order, reads) = match (want, keeps_tuples_apart(&view, names)) {
-            (Order::Canonical, true) => (Order::Canonical, Order::Canonical),
-            (_, true) => (Order::Loose, Order::Loose),
-            (_, false) => (Order::Canonical, Order::Loose),
+            (Want::Canonical | Want::Sorted, true) => (Order::Canonical, Want::Canonical),
+            (_, true) => (Order::Loose, Want::Any),
+            (_, false) => (Order::Canonical, Want::Any),
         };
         // A `replace` can make tuples equal, which this removes, so needn't be sorted first.
         let (src, _) = match view.inner {
             hir::Expr::Extend(extended, _, attributes)
-                if reads == Order::Loose && matches!(view.ty, hir::Type::Relation(_)) =>
+                if reads == Want::Any && matches!(view.ty, hir::Type::Relation(_)) =>
             {
-                self.extend(view.inner, extended, attributes, Order::Repeated, cx)
+                self.extend(view.inner, extended, attributes, Want::Repeated, cx)
             }
             inner => self.given(inner, reads, cx),
         };
@@ -6266,7 +6332,7 @@ impl<'a> FunctionBuilder<'a> {
             &result,
             &sources,
             src.clone(),
-            Reshaped::Wanted(order),
+            Made::Wanted(order),
             cx,
         );
         self.operand_read(view.inner, &src, &view.ty, cx);
@@ -6276,7 +6342,7 @@ impl<'a> FunctionBuilder<'a> {
     /// `expr`, a rename, of whatever it renames, computed in any order. It is where that is,
     /// if that has the same layout and the same order: otherwise it is reshaped, sorted
     /// unless `want` needn't be.
-    fn renamed(&mut self, expr: &hir::Expr, want: Order, cx: &mut Lowering) -> (lir::Place, Order) {
+    fn renamed(&mut self, expr: &hir::Expr, want: Want, cx: &mut Lowering) -> (lir::Place, Order) {
         let view = self.view_of(expr);
         let (src, order) = self.given(view.inner, want, cx);
         if view.shape.is_as_laid_out() {
@@ -6287,11 +6353,11 @@ impl<'a> FunctionBuilder<'a> {
             &view.named,
             &view.shape.positions(),
             src.clone(),
-            Reshaped::Wanted(want),
+            Made::Wanted(want.as_comes()),
             cx,
         );
         self.operand_read(view.inner, &src, &view.ty, cx);
-        (dst, want)
+        (dst, want.as_comes())
     }
 
     /// `expr`, a rename, of whatever it renames, computed sorted, in the order that is less
@@ -6310,7 +6376,7 @@ impl<'a> FunctionBuilder<'a> {
             &view.named,
             &view.shape.positions(),
             src.clone(),
-            Reshaped::Kept(renamed),
+            Made::Kept(renamed),
             cx,
         );
         self.operand_read(view.inner, &src, &view.ty, cx);
@@ -6684,7 +6750,7 @@ impl<'a> FunctionBuilder<'a> {
         expr: &hir::Expr,
         operand: &hir::Expr,
         attributes: &BTreeMap<String, hir::Expr>,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let ty = self.type_of(operand);
@@ -6699,21 +6765,44 @@ impl<'a> FunctionBuilder<'a> {
                 (dst, Order::Canonical)
             }
             (hir::Type::Relation(heading), hir::Type::Relation(result)) => {
-                let src =
-                    if want == Order::Canonical || attributes.values().any(hir::Expr::can_fail) {
-                        self.place(operand, cx)
-                    } else {
-                        self.loose_place(operand, cx).0
-                    };
                 // A new attribute can't make two tuples equal, as replacing one can.
                 let adds = attributes.keys().all(|name| heading.get(name).is_none());
-                let order = if adds || want == Order::Repeated {
-                    want
-                } else {
-                    Order::Canonical
+                // What can fail for a tuple is computed in canonical order, as its failure
+                // says which, so that the first to fail is the same.
+                let can_fail = attributes.values().any(hir::Expr::can_fail);
+                let (src, made) = match want {
+                    // Made in its operand's order, then by the attributes it adds.
+                    Want::Sorted if adds => {
+                        let (src, order) = if can_fail {
+                            (self.place(operand, cx), Order::Canonical)
+                        } else {
+                            self.sorted_place(operand, cx)
+                        };
+                        (
+                            src,
+                            Made::Kept(cx.extended_order(order, heading, attributes)),
+                        )
+                    }
+                    Want::Canonical | Want::Sorted => {
+                        (self.place(operand, cx), Made::Wanted(Order::Canonical))
+                    }
+                    Want::Any | Want::Repeated => {
+                        let src = if can_fail {
+                            self.place(operand, cx)
+                        } else {
+                            self.loose_place(operand, cx).0
+                        };
+                        let order = if adds || want == Want::Repeated {
+                            want.as_comes()
+                        } else {
+                            Order::Canonical
+                        };
+                        (src, Made::Wanted(order))
+                    }
                 };
-                let dst = self.extend_relation(heading, &src, attributes, result, order, cx);
+                let dst = self.extend_relation(heading, &src, attributes, result, made, cx);
                 self.operand_read(operand, &src, &ty, cx);
+                let (Made::Wanted(order) | Made::Kept(order)) = made;
                 (dst, order)
             }
             _ => unreachable!("sema extends only tuples and relations"),
@@ -6767,7 +6856,7 @@ impl<'a> FunctionBuilder<'a> {
         src: &lir::Place,
         attributes: &BTreeMap<String, hir::Expr>,
         result: &hir::Heading,
-        order: Order,
+        made: Made,
         cx: &mut Lowering,
     ) -> lir::Place {
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
@@ -6786,15 +6875,25 @@ impl<'a> FunctionBuilder<'a> {
                 vec![(to.clone(), built.clone())]
             });
         });
-        if order != Order::Canonical {
-            self.adopt(&dst, &result_ty, cx);
-            return dst;
+        match made {
+            Made::Wanted(Order::Canonical) => {
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Sort,
+                    args: vec![dst.clone(), descriptor],
+                });
+            }
+            Made::Wanted(_) => self.adopt(&dst, &result_ty, cx),
+            Made::Kept(order) => {
+                self.adopt(&dst, &result_ty, cx);
+                let descriptor =
+                    lir::Place::whole(lir::Base::Data(cx.described(&result_ty, order)));
+                self.insts.push(lir::Inst::SortedAs {
+                    relation: dst.clone(),
+                    descriptor,
+                });
+            }
         }
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Sort,
-            args: vec![dst.clone(), descriptor],
-        });
         dst
     }
 
@@ -6807,7 +6906,7 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         operand: &hir::Expr,
         condition: &hir::Expr,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let ty = self.type_of(operand);
@@ -7904,12 +8003,12 @@ impl<'a> FunctionBuilder<'a> {
         result_ty: &hir::Type,
         sources: &[usize],
         src: lir::Place,
-        result: Reshaped,
+        result: Made,
         cx: &mut Lowering,
     ) -> lir::Place {
         let (want, flags) = match result {
-            Reshaped::Wanted(order) => (order, 0),
-            Reshaped::Kept(order) => (order, lir::ORDERED_RESULT),
+            Made::Wanted(order) => (order, 0),
+            Made::Kept(order) => (order, lir::ORDERED_RESULT),
         };
         let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
             unreachable!("sema reshapes only tuples and relations");
@@ -7967,7 +8066,7 @@ impl<'a> FunctionBuilder<'a> {
         rhs: &View,
         (lhs_place, lhs_order): (lir::Place, Order),
         (rhs_place, rhs_order): (lir::Place, Order),
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let result_ty = lhs.named.and(&rhs.named);
@@ -7986,14 +8085,14 @@ impl<'a> FunctionBuilder<'a> {
             joining.sources,
             joining.common,
             joining.common_count,
-            orders_constant(lhs_order, rhs_order, want, 0, cx),
+            orders_constant(lhs_order, rhs_order, want.as_comes(), 0, cx),
         ];
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::And,
             args,
         });
         self.scoped = true;
-        (dst, want)
+        (dst, want.as_comes())
     }
 
     /// `expr`, the array of the tuples of `relation`, in the order of the
@@ -8213,7 +8312,7 @@ impl<'a> FunctionBuilder<'a> {
         lhs: &hir::Expr,
         rhs: &hir::Expr,
         negated: bool,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let narrowed = if negated {
@@ -8274,7 +8373,7 @@ impl<'a> FunctionBuilder<'a> {
             &left.named,
             &left.shape.positions(),
             dst.clone(),
-            Reshaped::Wanted(want),
+            Made::Wanted(want.as_comes()),
             cx,
         );
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&left.ty)));
@@ -8282,7 +8381,7 @@ impl<'a> FunctionBuilder<'a> {
             function: lir::RuntimeFn::DropOperand,
             args: vec![dst, descriptor],
         });
-        (reshaped, want)
+        (reshaped, want.as_comes())
     }
 
     /// The relations `lhs` and `rhs`, of the same attributes, combined as
@@ -8298,13 +8397,13 @@ impl<'a> FunctionBuilder<'a> {
         combination: hir::Combination,
         lhs: &hir::Expr,
         rhs: &hir::Expr,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let ty = combination.combined(&self.type_of(lhs), &self.type_of(rhs));
         let (lhs_ty, rhs_ty) = (self.type_of(lhs), self.type_of(rhs));
         let order = match want {
-            Order::Canonical => Order::Canonical,
+            Want::Canonical => Order::Canonical,
             _ => self.shared_order(lhs, rhs, cx),
         };
         let (lhs_place, rhs_place) = (self.exactly(lhs, order, cx), self.exactly(rhs, order, cx));
@@ -8433,7 +8532,7 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         lhs: &hir::Expr,
         rhs: &hir::Expr,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         if let Some((operand, key)) = self
@@ -8494,7 +8593,7 @@ impl<'a> FunctionBuilder<'a> {
         lhs: &hir::Expr,
         rhs: &hir::Expr,
         leaves: &[&hir::Expr],
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let views: Vec<View> = leaves
@@ -8537,7 +8636,7 @@ impl<'a> FunctionBuilder<'a> {
         let dst = self.slot(cx.layout(&result_ty));
         let joined = self.slot(lir::Layout::U8);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
-        let orders = orders_constant(Order::Canonical, Order::Canonical, want, 0, cx);
+        let orders = orders_constant(Order::Canonical, Order::Canonical, want.as_comes(), 0, cx);
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Join,
             args: vec![
@@ -8576,7 +8675,7 @@ impl<'a> FunctionBuilder<'a> {
             layout: cx.layout(&result_ty),
         });
         self.end_block(lir::Terminator::Jump(after), after);
-        (dst, want)
+        (dst, want.as_comes())
     }
 
     /// The AND of `lhs` and `rhs`, of the operands `views`, computed at `given`, by the plan
@@ -8587,7 +8686,7 @@ impl<'a> FunctionBuilder<'a> {
         rhs: &hir::Expr,
         views: &[View],
         given: &[(lir::Place, Order)],
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> lir::Place {
         let mut operands = PlannedOperands {
@@ -8610,7 +8709,7 @@ impl<'a> FunctionBuilder<'a> {
         lhs: &'e hir::Expr,
         rhs: &'e hir::Expr,
         operands: &mut PlannedOperands<'_, 'e>,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let (left, lhs_place, lhs_order) = self.planned_part(lhs, operands, want, cx);
@@ -8637,7 +8736,7 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         expr: &'e hir::Expr,
         operands: &mut PlannedOperands<'_, 'e>,
-        want: Order,
+        want: Want,
         cx: &mut Lowering,
     ) -> (View<'e>, lir::Place, Order) {
         let mut inner = expr;
