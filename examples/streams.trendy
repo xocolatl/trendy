@@ -45,4 +45,10 @@ operator main{} [
     for name in names loop [
         call write{line: "Habari, " || name || "!"};
     ];
+    /* The rivers a file names, one a line, counted: a blank line names none. */
+    var listed: array text;
+    call load_text_file{path: file_path{text: "examples/rivers.txt"}, out lines: listed};
+    var rivers: relation { river: text };
+    load rivers from listed as river where river <> "";
+    call write{line: to_text{from: count{r: rivers}} || " rivers", to: standard_error};
 ];

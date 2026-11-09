@@ -3222,7 +3222,13 @@ fn streams() {
     );
     assert_eq!(
         ran.stderr.lines().collect::<Vec<_>>(),
-        ["greeted", "started", "greeted 4", "copied: true"]
+        [
+            "greeted",
+            "started",
+            "greeted 4",
+            "copied: true",
+            "6 rivers"
+        ]
     );
 }
 

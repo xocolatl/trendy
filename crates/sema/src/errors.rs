@@ -2467,6 +2467,18 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
             "use `trendy.process`, and read `environment`: `environment where name = \"HOME\"` is the variable `HOME`, if there is one",
         );
     }
+    if let Some(&(_, ours)) = STREAMS_ELSEWHERE
+        .iter()
+        .find(|(other, _)| *other == lowercase)
+    {
+        return d.with_note(STREAMS_RULE).with_suggestion(
+            format!("write `{ours}`, of `trendy.streams`"),
+            vec![Edit {
+                span,
+                replacement: ours.to_string(),
+            }],
+        );
+    }
     if (lowercase == "transaction_timestamp" || CLOCK_NAMES.contains(&lowercase.as_str()))
         && let Some((note, help)) = absent(name)
     {
@@ -4173,6 +4185,17 @@ const ENVIRONMENT_RULE: &str = "the environment the program is started with is `
 /// Other languages' names, lowercase, for the environment a program is
 /// started with, or a variable of it, as a value or an operator.
 const ENVIRONMENT_ELSEWHERE: &[&str] = &["environ", "env", "environment_variables"];
+
+/// Where the streams a program is started with are, for notes.
+const STREAMS_RULE: &str = "the three streams a program is started with are `trendy.streams`' constants `standard_input`, `standard_output` and `standard_error`, values of `stream`: `read` reads standard input, and `write` writes to the stream its `to` names";
+
+/// C's, Ruby's and Python's names for the streams a program is started with,
+/// lowercase, as values, with trendy's.
+const STREAMS_ELSEWHERE: &[(&str, &str)] = &[
+    ("stdin", "standard_input"),
+    ("stdout", "standard_output"),
+    ("stderr", "standard_error"),
+];
 
 /// Where the arguments a program is started with are, for notes.
 const ARGUMENTS_RULE: &str = "the arguments the program is started with, but its path, are `trendy.process`'s variable `arguments`, an `array text`, which any unit that uses that unit reads, as it does its `environment`";

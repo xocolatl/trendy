@@ -149,14 +149,16 @@ const COMPILE_TIME: &[&str] = &["hir", "sema", "opt", "numeric", "text"];
 
 /// What reads the world outside the program, or what it can't know when
 /// compiling: files, the environment, the clock, the network, other
-/// processes, and standard input.
+/// processes, and standard input, which only a call of `stdin()` reads, as
+/// `std::io::stdin()` and `io::stdin()` are, where the word alone can be
+/// another language's name, as a fix knows it.
 const OUTSIDE: &[&str] = &[
     "std::fs",
     "std::env",
     "std::time",
     "std::net",
     "std::process",
-    "stdin",
+    "stdin()",
 ];
 
 #[test]

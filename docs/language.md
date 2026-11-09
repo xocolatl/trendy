@@ -2744,7 +2744,9 @@ operator main{} [
 - **Other languages' names are fixed to it:** Python's `print`, Java's and
   Rust's `println`, Ruby's and C's `puts`, Pascal's `writeln` and the shell's
   `echo` to `write{line: …}`, and Rust's `eprintln` to `write{line: …, to:
-  standard_error}`, each with its unit used.
+  standard_error}`, each with its unit used. C's, Ruby's and Python's
+  `stdin`, `stdout` and `stderr` are fixed to `standard_input`,
+  `standard_output` and `standard_error`.
 
 ```trendy,error
 operator main{} [

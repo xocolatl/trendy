@@ -10847,6 +10847,15 @@ operator poke{var p: pair} [ update p { n := 3 }; ];
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         }
+        // C's, Ruby's and Python's names for the streams themselves.
+        for (written, ours) in [("stderr", "standard_error"), ("STDOUT", "standard_output")] {
+            let source = format!(
+                "uses {{ trendy.streams }};\n\noperator main{{}} [\n    call write{{line: \"oops\", to: {written}}};\n];\n"
+            );
+            let fixed = fix(&source);
+            assert_eq!(fixed, source.replace(written, ours), "{written}");
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
     }
 
     #[test]
