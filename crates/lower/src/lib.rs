@@ -1073,8 +1073,10 @@ impl Lowering {
     }
 
     /// The descriptor of `ty`, laid out as `trendy_runtime::TypeDesc`:
-    /// `{ kind: u8, size, attributes: *Attr, count, element: *TypeDesc,
-    /// name: *u8, name_len, written: *u8, written_len }`.
+    /// `{ kind: u8, points: u8, integers, size, attributes: *Attr, count,
+    /// sorted_by: *usize, element: *TypeDesc, name: *u8, name_len, written: *u8,
+    /// written_len }`. A relation's tuples are sorted by its attributes as
+    /// listed, by name, so `sorted_by` is null.
     fn descriptor(&mut self, ty: &hir::Type) -> lir::DataId {
         if let Some(&id) = self.descriptors.get(ty) {
             return id;
@@ -1141,6 +1143,7 @@ impl Lowering {
             lir::Field::Size(self.layout(ty)),
             lir::Field::Address(attributes),
             lir::Field::Usize(len(count)),
+            lir::Field::Usize(0),
             element,
             name.0,
             name.1,
@@ -1175,6 +1178,7 @@ impl Lowering {
             lir::Field::Size(layout),
             lir::Field::Address(components),
             lir::Field::Usize(1),
+            lir::Field::Usize(0),
             lir::Field::Usize(0),
             name.0,
             name.1,
@@ -6812,8 +6816,8 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The run of tuples of the relation or run at `src`, of type `ty`, whose
-    /// attribute `i`, from the first in name order, is equal to the value at
-    /// `value`, in a new slot.
+    /// attribute `i` in its sort order, from the first, which is by name, is
+    /// equal to the value at `value`, in a new slot.
     fn equal_run(
         &mut self,
         src: lir::Place,
@@ -12701,7 +12705,7 @@ mod tests {
             HashMap::new(),
         );
         let element = |cx: &Lowering, id: lir::DataId| {
-            let lir::Field::Address(element) = cx.data[id.0].fields[6] else {
+            let lir::Field::Address(element) = cx.data[id.0].fields[7] else {
                 panic!("the element's descriptor is an address");
             };
             cx.data[element.0].fields[0].clone()
@@ -12715,7 +12719,7 @@ mod tests {
         assert_eq!(element(&cx, relation), lir::Field::U8(KIND_TUPLE));
         // Other types have none.
         let scalar = cx.descriptor(&integer());
-        assert_eq!(cx.data[scalar.0].fields[6], lir::Field::Usize(0));
+        assert_eq!(cx.data[scalar.0].fields[7], lir::Field::Usize(0));
     }
 
     #[test]

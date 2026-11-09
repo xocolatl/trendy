@@ -1479,8 +1479,8 @@ struct Group {
 /// Both operands' tuples are sorted on the common attributes, then merged:
 /// each run of tuples of one that agree on them pairs with the matching run
 /// of the other. Of none in common, it is their product: made in canonical
-/// order, if all one's attributes come before all the other's in name
-/// order, and otherwise sorted.
+/// order, if all one's attributes come before all the other's in the
+/// result's sort order, and otherwise sorted.
 ///
 /// # Safety
 ///
@@ -1524,6 +1524,7 @@ pub unsafe extern "C" fn trendy_rt_and(
                     count: rhs_count,
                     size: rhs_desc.element().size,
                 },
+                [lhs_desc, rhs_desc],
                 result,
                 sources,
                 orders,
@@ -2012,8 +2013,11 @@ impl<'a> JoinRun<'a> {
                 let Some(total) = x.tuples.count.checked_mul(y.tuples.count) else {
                     return Err(out_of_memory());
                 };
+                // The operand of the first of `attrs` comes first, which, of operands that
+                // don't interleave in that order, writes them in it.
+                let rhs_first = sources.first().is_some_and(|source| source.from == 1);
                 return finish(total, &|to: *mut u8| {
-                    write_product(x.tuples, y.tuples, attrs, size, sources, to);
+                    write_product(x.tuples, y.tuples, rhs_first, attrs, size, sources, to);
                 });
             }
             let common = core::slice::from_raw_parts(self.common.ptr(), shared);
@@ -2292,6 +2296,8 @@ unsafe fn made_desc(
             size,
             attributes: made,
             count,
+            // Made here to be read here, as the attributes are listed.
+            sorted_by: core::ptr::null(),
             element,
             name: core::ptr::NonNull::dangling().as_ptr(),
             name_len: 0,
@@ -2333,15 +2339,16 @@ impl Tuples {
 }
 
 /// The relation `result` describes of every tuple made of a tuple of `lhs`
-/// and one of `rhs`, which have no attributes in common, in canonical
-/// order, in memory the statement owns: that memory and how many tuples it
-/// holds. `sources` says where each attribute of `result` comes from, in
-/// name order. If all one operand's come before all the other's, each tuple
-/// of that one, in its order, with each of the other's, in its order, is
-/// the canonical order of the result, which is written as it is made, with
-/// no sorting and no copy. Otherwise the tuples must be sorted, as they must if an
-/// operand is in no particular order, unless `orders` has [`LOOSE_RESULT`]. They are
-/// all different, as each operand's are.
+/// and one of `rhs`, which have no attributes in common, in its sort order,
+/// in memory the statement owns: that memory and how many tuples it holds.
+/// `operands` describes each, and `sources` says where each attribute of
+/// `result` comes from, as `result` lists them. If the result is sorted by all
+/// of one operand's attributes, in that one's sort order, then by all of the
+/// other's, in its, each tuple of the first, in its order, with each of the
+/// other's, in its order, is the result's order, so it is written as it is made,
+/// with no sorting and no copy. Otherwise the tuples must be sorted, as they must if
+/// an operand is in no particular order, unless `orders` has [`LOOSE_RESULT`]. They
+/// are all different, as each operand's are.
 ///
 /// # Safety
 ///
@@ -2350,6 +2357,7 @@ impl Tuples {
 unsafe fn product(
     lhs: Tuples,
     rhs: Tuples,
+    operands: [&TypeDesc; 2],
     result: &TypeDesc,
     sources: &[Source],
     orders: usize,
@@ -2361,27 +2369,65 @@ unsafe fn product(
         let Some(total) = lhs.count.checked_mul(rhs.count) else {
             return Err(out_of_memory());
         };
+        // The operand of the attribute the result is sorted by first.
+        let rhs_first = sort_indices(result)
+            .next()
+            .is_some_and(|i| sources[i].from == 1);
         let write = |to: *mut u8| {
-            write_product(lhs, rhs, attributes(result), element.size, sources, to);
+            write_product(
+                lhs,
+                rhs,
+                rhs_first,
+                attributes(result),
+                element.size,
+                sources,
+                to,
+            );
         };
-        // The attributes change operand at most once if they don't interleave.
-        let changes = sources
-            .windows(2)
-            .filter(|pair| pair[0].from != pair[1].from)
-            .count();
         if orders & LOOSE_RESULT != 0 {
             return made_loose(total, result, write);
         }
-        if changes > 1 || orders & (LOOSE_LHS | LOOSE_RHS) != 0 {
+        if orders & (LOOSE_LHS | LOOSE_RHS) != 0
+            || !product_in_order(operands, result, sources, rhs_first)
+        {
             return made_canonical(total, result, write);
         }
         made_in_order(total, result, write)
     }
 }
 
+/// Whether the result of [`product`], which `result` describes, of operands each
+/// in its order, as `operands` describe them, with each tuple of the right operand
+/// with each of the left's if `rhs_first`, and otherwise each of the left's with
+/// each of the right's, is in the result's sort order: that order is all the first
+/// operand's attributes, in its sort order, then all the other's, in its, as
+/// `sources` says where each of the result's comes from.
+///
+/// # Safety
+///
+/// As for [`product`].
+#[cfg(not(test))]
+unsafe fn product_in_order(
+    operands: [&TypeDesc; 2],
+    result: &TypeDesc,
+    sources: &[Source],
+    rhs_first: bool,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let firsts = if rhs_first { [1, 0] } else { [0, 1] };
+        let operands_order = firsts
+            .into_iter()
+            .flat_map(|from| in_sort_order(operands[from]).map(move |attr| (from, attr.offset)));
+        let result_order = sort_indices(result).map(|i| (sources[i].from, sources[i].offset));
+        result_order.eq(operands_order)
+    }
+}
+
 /// Write at `to` every tuple made of a tuple of `lhs` and one of `rhs`, in tuples of `size`
-/// bytes, as `sources` says of each of `attrs`: each of the operand the first attribute comes
-/// from, in its order, with each of the other's, in its order.
+/// bytes, as `sources` says of each of `attrs`: each of the right operand's, in its order,
+/// with each of the left's, in its order, if `rhs_first`, and otherwise each of the left's
+/// with each of the right's.
 ///
 /// # Safety
 ///
@@ -2390,12 +2436,12 @@ unsafe fn product(
 unsafe fn write_product(
     lhs: Tuples,
     rhs: Tuples,
+    rhs_first: bool,
     attrs: &[Attr],
     size: usize,
     sources: &[Source],
     to: *mut u8,
 ) {
-    let rhs_first = sources.first().is_some_and(|source| source.from == 1);
     let (outer, inner) = if rhs_first { (rhs, lhs) } else { (lhs, rhs) };
     // SAFETY: guaranteed by the caller.
     unsafe {
@@ -2485,8 +2531,9 @@ pub unsafe extern "C" fn trendy_rt_index(
 /// of `key` alone, its right, in memory the statement owns. `index` is
 /// `rel`'s index on those attributes (see [`trendy_rt_index`]), in which
 /// the tuples that agree with `key` are a run, found by binary search.
-/// They are in canonical order, and so are the tuples made of them, as
-/// `key`'s attributes are the same in each, so they need no sorting.
+/// They are in `rel`'s sort order, and so are the tuples made of them in
+/// `result`'s, as `key`'s attributes are the same in each, so they need no
+/// sorting.
 /// `rel_desc` describes `rel`, and `sources` says where each attribute of
 /// `result` comes from: 0 for `rel` and 1 for `key`.
 ///
@@ -2495,7 +2542,7 @@ pub unsafe extern "C" fn trendy_rt_index(
 /// `rel` must point to a valid relation of the type `rel_desc` describes,
 /// `index` to its index on the `common` attributes, `key` to a valid
 /// tuple, `result` to a valid descriptor of the relation type with the
-/// attributes of both, `sources` to one source per attribute of `result`,
+/// attributes of both, sorted as `rel` is but for `key`'s attributes, `sources` to one source per attribute of `result`,
 /// `common` to `*common_count` common attributes, and `dst` to memory for a
 /// relation.
 #[cfg(not(test))]
@@ -2562,10 +2609,10 @@ pub unsafe extern "C" fn trendy_rt_lookup(
 }
 
 /// Store at `dst` the run of tuples of the relation at `src`, which `desc`
-/// describes, whose attribute `*attribute`, from the first in name order,
-/// is equal to the value at `value`, found by binary search: it is the
-/// attribute they are sorted by, as those before it are the same in all of
-/// them. It has no buffer of its own, only its tuples' address in `src`'s,
+/// describes, whose attribute at `*attribute` in its sort order, from the
+/// first, is equal to the value at `value`, found by binary search: it is
+/// the attribute they are sorted by, as those before it are the same in all
+/// of them. It has no buffer of its own, only its tuples' address in `src`'s,
 /// and their number, so it is only to be read while `src` holds them.
 ///
 /// # Safety
@@ -2587,7 +2634,9 @@ pub unsafe extern "C" fn trendy_rt_equal_run(
         let desc = &*desc;
         let (tuples, count) = read_slice(src);
         let size = desc.element().size;
-        let attr = &attributes(desc)[attribute.read_unaligned()];
+        let attr = in_sort_order(desc)
+            .nth(attribute.read_unaligned())
+            .unwrap_or_else(|| internal_error("an attribute's place in a sort order"));
         let compared = |i: usize| order(tuples.add(i * size + attr.offset), value, &*attr.desc);
         let start = partition_point(0, count, |i| compared(i).is_lt());
         let end = partition_point(start, count, |i| compared(i).is_eq());
@@ -3429,14 +3478,30 @@ pub unsafe extern "C" fn trendy_rt_matching(
     })
 }
 
+/// The two attributes of the relation `desc` describes, whose transitive closure is
+/// taken, in its sort order: what an arc of it goes from, then what it goes to.
+///
+/// # Safety
+///
+/// `desc` must be a valid relation descriptor.
+#[cfg(not(test))]
+unsafe fn arc(desc: &TypeDesc) -> [&Attr; 2] {
+    // SAFETY: guaranteed by the caller.
+    let mut sorted = unsafe { in_sort_order(desc) };
+    match (sorted.next(), sorted.next(), sorted.next()) {
+        (Some(from), Some(to), None) => [from, to],
+        _ => internal_error("the transitive closure of a relation without two attributes"),
+    }
+}
+
 /// Store at `dst` the transitive closure of the relation at `src`, of two
 /// attributes of one type, of the type `desc` describes, in memory the
 /// statement owns: a tuple for each path through its tuples, each an arc
-/// from its first attribute's value, in name order, to its second's, from
+/// from its first attribute's value, in its sort order, to its second's, from
 /// the path's first value to its last, as the compiler computes it
-/// (`hir::Value::tclose`). Each value reaches what `reaching` says, in order,
-/// so the tuples are written in canonical order, once each, with nothing to
-/// sort. Fails if the memory can't be allocated.
+/// (`hir::Value::tclose`), which, of the other two, gives the same tuples. Each
+/// value reaches what `reaching` says, in order, so the tuples are written in
+/// that order, once each, with nothing to sort. Fails if the memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -3455,9 +3520,7 @@ pub unsafe extern "C" fn trendy_rt_tclose(
     status(|| unsafe {
         let desc = &*desc;
         let element = desc.element();
-        let [from, to] = attributes(element) else {
-            internal_error("the transitive closure of a relation without two attributes");
-        };
+        let [from, to] = arc(desc);
         let value = &*from.desc;
         let (tuples, count) = read_slice(src);
         let laid = Ordered::Laid {
@@ -3495,8 +3558,8 @@ pub unsafe extern "C" fn trendy_rt_tclose(
 }
 
 /// Store at `dst` the tuples of the transitive closure of the relation at `src`,
-/// as for [`trendy_rt_tclose`], whose attribute `*attribute`, 0 or 1 by name order,
-/// is the value at `value`, in memory the statement owns: following only paths from
+/// as for [`trendy_rt_tclose`], whose attribute `*attribute`, 0 or 1 in its sort
+/// order, is the value at `value`, in memory the statement owns: following only paths from
 /// that value, or to it, rather than making the whole closure (`closure_of`).
 /// Fails if the memory can't be allocated.
 ///
@@ -3550,9 +3613,7 @@ pub unsafe extern "C" fn trendy_rt_tclose_of_each(
     // of the value it describes.
     status(|| unsafe {
         let (desc, common) = (&*desc, &*common);
-        let [first, _] = attributes(desc.element()) else {
-            internal_error("the transitive closure of a relation without two attributes");
-        };
+        let [first, _] = arc(desc);
         let value = &*common.desc;
         let (tuples, count) = read_slice(values);
         let size = (*values_desc).element().size;
@@ -3568,7 +3629,7 @@ pub unsafe extern "C" fn trendy_rt_tclose_of_each(
 }
 
 /// The tuples of the transitive closure of the relation at `src`, which `desc`
-/// describes, whose first attribute by name order is one of `starts`, if `forward`,
+/// describes, whose first attribute in its sort order is one of `starts`, if `forward`,
 /// and otherwise whose second is, in memory the current statement owns, and how many
 /// there are: following only paths from those values, or to them, rather than making
 /// the whole closure. The tuples are in order by the first attribute, so paths from a
@@ -3591,9 +3652,7 @@ unsafe fn closure_of(
     // of the value it describes.
     unsafe {
         let element = desc.element();
-        let [first, second] = attributes(element) else {
-            internal_error("the transitive closure of a relation without two attributes");
-        };
+        let [first, second] = arc(desc);
         let (tuples, count) = read_slice(src);
         if forward {
             let tuples = Ordered::Laid {
@@ -4652,7 +4711,7 @@ struct Operand {
     /// Whether it is the left operand, which says where the common attributes are.
     is_lhs: bool,
     /// Whether its tuples are in order on the common attributes as they are: those
-    /// attributes come first in name order, which is what they are sorted by.
+    /// attributes come first in its sort order, in the order `common` has them.
     in_order: bool,
     /// How many integers its tuples are, if they can be sorted where they are, into that
     /// order: they are in no particular order, but would be if they were canonical, and
@@ -4680,14 +4739,13 @@ impl Operand {
         loose: bool,
     ) -> Operand {
         // SAFETY: guaranteed by the caller.
-        let (attributes, size) = unsafe { (attributes(desc), desc.element().size) };
+        let (sorted, size) = unsafe { (in_sort_order(desc), desc.element().size) };
         // Two attributes are at one place only if the first takes no memory, so has
         // one value, which orders nothing.
-        let leads = attributes
-            .iter()
-            .zip(common)
-            .all(|(attr, c)| attr.offset == if is_lhs { c.lhs } else { c.rhs })
-            && common.len() <= attributes.len();
+        let leads = common.len() <= desc.count
+            && sorted
+                .zip(common)
+                .all(|(attr, c)| attr.offset == if is_lhs { c.lhs } else { c.rhs });
         // SAFETY: guaranteed by the caller, which a relation of no tuples isn't asked of.
         let sorts_here = (loose
             && leads
@@ -5980,18 +6038,51 @@ unsafe fn compare_integers(lhs: *const u8, rhs: *const u8, count: usize) -> core
     core::cmp::Ordering::Equal
 }
 
-/// The canonical order of two tuples with the attributes of `desc`.
+/// The order of two tuples with the attributes of `desc`: of a relation's, its sort
+/// order, and of a tuple's or a component's, the canonical order, by name.
 ///
 /// # Safety
 ///
 /// As for [`order`], with `desc` describing a tuple or relation.
+#[inline]
 unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cmp::Ordering {
     // SAFETY: guaranteed by the caller.
     unsafe {
+        // Sorting, merging and searching compare little else, so this is inlined into
+        // their loops, without a call for each.
         if desc.integers > 0 {
             return compare_integers(lhs, rhs, desc.integers);
         }
+        if !desc.sorted_by.is_null() {
+            return compare_in_sort_order(lhs, rhs, desc);
+        }
         for attr in attributes(desc) {
+            let ordering = order(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc);
+            if ordering.is_ne() {
+                return ordering;
+            }
+        }
+        core::cmp::Ordering::Equal
+    }
+}
+
+/// [`compare_tuples`] of a relation's tuples sorted otherwise than by name, by the
+/// attributes of its sort order, in turn. It is never inlined into
+/// [`compare_tuples`], which would then be too big to be inlined into the loops
+/// that compare tuples by name, which would each take a call for each comparison.
+///
+/// # Safety
+///
+/// As for [`compare_tuples`], with `desc` describing such a relation.
+#[inline(never)]
+unsafe fn compare_in_sort_order(
+    lhs: *const u8,
+    rhs: *const u8,
+    desc: &TypeDesc,
+) -> core::cmp::Ordering {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        for attr in in_sort_order(desc) {
             let ordering = order(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc);
             if ordering.is_ne() {
                 return ordering;
@@ -8098,8 +8189,8 @@ pub struct TypeDesc {
     pub points: bool,
     /// How many integers a value of this type, or a tuple of a relation of
     /// this type, is, if it is nothing else, one after another in the
-    /// order they compare, and otherwise 0. Comparing them takes no walking
-    /// through their descriptors.
+    /// order they compare, a relation's sort order, and otherwise 0.
+    /// Comparing them takes no walking through their descriptors.
     pub integers: usize,
     /// The size of a value of this type, in bytes.
     pub size: usize,
@@ -8108,6 +8199,13 @@ pub struct TypeDesc {
     /// `count` is 0 and this is not read.
     pub attributes: *const Attr,
     pub count: usize,
+    /// For a relation, the positions among `attributes` of those its tuples
+    /// are sorted by, most significant first, each of them once, or null if
+    /// they are sorted by `attributes` as listed, by name. Where each is in a
+    /// tuple is its `offset`, which needn't follow this order. For other kinds,
+    /// null: a tuple's or a component's values are compared by name, as values
+    /// inside another always are. So only a relation sorted otherwise has one.
+    pub sorted_by: *const usize,
     /// For a relation, its tuples' type, and for an array, its elements':
     /// what each element of its memory is. For other kinds, null.
     pub element: *const TypeDesc,
@@ -11455,6 +11553,49 @@ unsafe fn attributes(desc: &TypeDesc) -> &[Attr] {
     unsafe { core::slice::from_raw_parts(desc.attributes, desc.count) }
 }
 
+/// The positions among the attributes of the relation `desc` describes of those
+/// its tuples are sorted by, most significant first, if that isn't as they are
+/// listed (see [`TypeDesc::sorted_by`]).
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor.
+unsafe fn sort_positions(desc: &TypeDesc) -> Option<&[usize]> {
+    if desc.sorted_by.is_null() {
+        return None;
+    }
+    // SAFETY: a valid descriptor's sort order, if it has one, has an entry for each
+    // attribute.
+    Some(unsafe { core::slice::from_raw_parts(desc.sorted_by, desc.count) })
+}
+
+/// The attributes of the tuples of the relation, tuple or type of the program's own
+/// that `desc` describes, in the order they are sorted by: a relation's sort order,
+/// and otherwise their names'.
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor.
+unsafe fn in_sort_order(desc: &TypeDesc) -> impl Iterator<Item = &Attr> {
+    // SAFETY: guaranteed by the caller.
+    let attrs = unsafe { attributes(desc) };
+    // SAFETY: as above.
+    unsafe { sort_indices(desc) }.map(move |i| &attrs[i])
+}
+
+/// The positions among the attributes of the relation, tuple or type of the program's
+/// own that `desc` describes of those its tuples are sorted by, as [`in_sort_order`]
+/// gives them.
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor.
+unsafe fn sort_indices(desc: &TypeDesc) -> impl Iterator<Item = usize> {
+    // SAFETY: guaranteed by the caller.
+    let positions = unsafe { sort_positions(desc) };
+    (0..desc.count).map(move |i| positions.map_or(i, |positions| positions[i]))
+}
+
 /// The `len` values at `values`, which can be dangling, or misaligned
 /// for `T`, when there are none.
 ///
@@ -12040,6 +12181,7 @@ mod tests {
             size,
             attributes: core::ptr::null(),
             count: 0,
+            sorted_by: core::ptr::null(),
             element: core::ptr::null(),
             name: core::ptr::null(),
             name_len: 0,
@@ -12063,6 +12205,7 @@ mod tests {
             size,
             attributes: attributes.as_ptr(),
             count: attributes.len(),
+            sorted_by: core::ptr::null(),
             element: core::ptr::null(),
             name: core::ptr::null(),
             name_len: 0,
@@ -12081,6 +12224,7 @@ mod tests {
             size,
             attributes: attributes.as_ptr(),
             count: attributes.len(),
+            sorted_by: core::ptr::null(),
             element: core::ptr::null(),
             name: name.as_ptr(),
             name_len: name.len(),
@@ -12111,6 +12255,7 @@ mod tests {
             size: 16,
             attributes: tuple.attributes,
             count: tuple.count,
+            sorted_by: core::ptr::null(),
             element: tuple,
             name: core::ptr::null(),
             name_len: 0,
@@ -12128,6 +12273,7 @@ mod tests {
             size: 16,
             attributes: core::ptr::null(),
             count: 0,
+            sorted_by: core::ptr::null(),
             element,
             name: core::ptr::null(),
             name_len: 0,
@@ -12327,6 +12473,44 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_relations_tuples_compare_in_its_sort_order() {
+        let (integer, text) = (scalar(KIND_INTEGER, 8), scalar(KIND_TEXT, 16));
+        // A river's `km`, at the start of the tuple, and its `name`, after it.
+        let attributes = [attr("km", 0, &integer), attr("name", 8, &text)];
+        let tuple = tuple_of(&attributes, 24);
+        let by_name = relation_of(&tuple);
+        let positions = [1_usize, 0];
+        let by_river = TypeDesc {
+            sorted_by: positions.as_ptr(),
+            ..relation_of(&tuple)
+        };
+        let river = |km: usize, name: &'static str| -> [usize; 3] {
+            [km, name.as_ptr() as usize, name.len()]
+        };
+        let (nile, volga) = (river(6650, "Nile"), river(3530, "Volga"));
+        let (nile, volga) = (nile.as_ptr().cast(), volga.as_ptr().cast());
+        // SAFETY: each is a tuple of those attributes, as each describes.
+        unsafe {
+            assert_eq!(
+                compare_tuples(nile, volga, &by_name),
+                core::cmp::Ordering::Greater
+            );
+            assert_eq!(
+                compare_tuples(nile, volga, &by_river),
+                core::cmp::Ordering::Less
+            );
+            // A tuple's attributes, as inside another value, are always by name.
+            assert_eq!(
+                compare_tuples(nile, volga, &tuple),
+                core::cmp::Ordering::Greater
+            );
+            // `name`, at 8, then `km`, at 0.
+            let sorted: Vec<usize> = in_sort_order(&by_river).map(|attr| attr.offset).collect();
+            assert_eq!(sorted, [8, 0]);
         }
     }
 

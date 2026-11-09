@@ -2721,7 +2721,20 @@ The canonical order of a relation's tuples is `hir::Value`'s order, which
 the compiler uses for constants and the runtime reproduces
 (`trendy_runtime::order`). The two must agree, or equal relations would
 compare unequal; the examples check it by printing each result folded
-when compiling and computed when running. Once relations arrive, this is where
+when compiling and computed when running. The runtime sorts a relation's
+tuples by its descriptor's sort order, `sorted_by`, the positions of the
+attributes it sorts by, most significant first. Where a tuple's fields are,
+their offsets, is apart from that order. Null is the attributes as listed, by
+name, the canonical order, which is how lowering makes every relation's. A tuple's
+attributes, and a value's inside another, as a relation-valued attribute's,
+are always compared by name. What follows a relation's order follows its sort
+order:
+- the runs `trendy_rt_equal_run` finds, by an attribute's position in it;
+- whether a join's operand is in order on the common attributes, which come
+  first in it;
+- whether a product is made in its result's order, which is one operand's
+  sort order, then the other's;
+- which of a transitive closure's two attributes an arc is from. Once relations arrive, this is where
 relational operators get fused into loops over tuples with fixed layouts.
 
 ### codegen (`trendy_codegen`)
@@ -2784,7 +2797,7 @@ otherwise make for each tuple: whether a value of the type can point to
 buffers at all (`points`), which takes no reference to anything if not,
 and, of a tuple, a value of a type of the program's own or a relation of
 such tuples, how many integers it is, if it is nothing else, one after
-another in name order, as they are laid out and compared (`integers`), which
+another in the order they are compared, as they are laid out (`integers`), which
 equality compares as a run of them, and sorting too. Tuples of up to 8 integers
 are written straight into the result's buffer, which holds no references, and
 sorted there as arrays of integers (`made_canonical`, `sorted_in_place`,

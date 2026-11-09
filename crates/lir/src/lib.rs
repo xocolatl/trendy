@@ -762,8 +762,8 @@ runtime_functions! {
     /// [`Combination::code`] of a union or a disjoint union, says.
     Insert => "trendy_rt_insert", true;
     /// `trendy_rt_tclose_of(dst, relation, value, descriptor, attribute)`: the
-    /// tuples of the relation's transitive closure whose attribute, 0 or 1 by
-    /// name order, is `value`, searching only by paths from or to it.
+    /// tuples of the relation's transitive closure whose attribute, 0 or 1 in
+    /// its sort order, is `value`, searching only by paths from or to it.
     TcloseOf => "trendy_rt_tclose_of", true;
     /// `trendy_rt_tclose_of_each(dst, relation, values, descriptor,
     /// values_descriptor, common)`: the tuples of the relation's transitive closure
@@ -950,8 +950,8 @@ runtime_functions! {
     Lookup => "trendy_rt_lookup", true;
     /// `trendy_rt_equal_run(dst, src, value, descriptor, attribute)`: store
     /// at `dst` the run of tuples of the relation at `src`, of the type the
-    /// descriptor describes, whose attribute `attribute` (a
-    /// [`Field::Usize`]), from the first in name order, is equal to `value`,
+    /// descriptor describes, whose attribute at `attribute` (a
+    /// [`Field::Usize`]) in its sort order, from the first, is equal to `value`,
     /// which they are sorted by, as those before it are the same in all of
     /// them: the address of the first in `src`'s buffer, and their number,
     /// so only to be read while `src` holds them.
