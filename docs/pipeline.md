@@ -2707,6 +2707,18 @@ with some tuples the same, which `FunctionBuilder::given` sends where each is co
   attributes come first in its order needn't be sorted. A semijoin's tuples are in its left
   operand's order. A join of a transitive closure, a lookup and a join of several are in
   canonical order.
+- **A constant relation** is written in the order what reads it wants, as it is compiled,
+  at no cost when it runs (`Lowering::relation_field`, `FunctionBuilder::constant_in`), in a
+  slot that `lir::Inst::SortedAs` says is sorted so, if not by name. A union's constant
+  operand is written in the other's order (`shared_order`); a join's or a semijoin's,
+  sorted by the attributes in common (`joined_operand`), but a semijoin's left one, whose
+  order is its result's, only where canonical order isn't wanted; and a restriction's,
+  sorted by the attributes its condition equates to values (`equated_attributes`), so that
+  its runs are found by binary search. One whose condition only equates attributes, each
+  a different one, to values some of which can fail, is sorted by those that can't, then
+  by those that can (`only_equated_attributes`), so that its runs leave nothing to compute
+  for each tuple, and the values are computed once if it has a tuple, failing just when
+  they would have for the first.
 - **A combination** that nothing wants in canonical order, such as a union only counted,
   merges its operands in one order, the result's (`FunctionBuilder::combine`). It works out
   first what order each would come in, without computing it

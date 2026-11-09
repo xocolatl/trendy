@@ -1068,22 +1068,37 @@ impl Lowering {
                     .map(|(_, value)| self.value_field(value))
                     .collect(),
             ),
-            hir::Value::Relation(relation) => {
-                // The tuples go in a read-only array, in their canonical order.
-                let elements = relation
-                    .tuples
-                    .iter()
-                    .map(|t| self.value_field(&hir::Value::Tuple(t.clone())))
-                    .collect();
-                let tuples = self.buffer(lir::Field::Struct(elements));
-                lir::Field::Struct(vec![tuples, lir::Field::Usize(len(relation.tuples.len()))])
-            }
+            hir::Value::Relation(relation) => self.relation_field(relation, Order::Canonical),
             hir::Value::Array(array) => {
                 let elements = array.elements.iter().map(|e| self.value_field(e)).collect();
                 let elements = self.buffer(lir::Field::Struct(elements));
                 lir::Field::Struct(vec![elements, lir::Field::Usize(len(array.elements.len()))])
             }
         }
+    }
+
+    /// The value `relation`, as [`Lowering::value_field`] lays it out, with its tuples in a
+    /// read-only array, sorted in `order`, a sorted one: in canonical order, as `hir::Value`
+    /// orders them, or by the attributes of another, each as `hir::Value` orders its values,
+    /// as the runtime does.
+    fn relation_field(&mut self, relation: &hir::RelationValue, order: Order) -> lir::Field {
+        let mut tuples: Vec<&hir::TupleValue> = relation.tuples.iter().collect();
+        if let Order::SortedBy(_) = order {
+            let names = self.sort_names(order, &relation.heading);
+            tuples.sort_by(|a, b| {
+                names
+                    .iter()
+                    .map(|name| a.get(name).cmp(&b.get(name)))
+                    .find(|ordering| ordering.is_ne())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        let elements = tuples
+            .into_iter()
+            .map(|t| self.value_field(&hir::Value::Tuple(t.clone())))
+            .collect();
+        let tuples = self.buffer(lir::Field::Struct(elements));
+        lir::Field::Struct(vec![tuples, lir::Field::Usize(len(relation.tuples.len()))])
     }
 
     /// The descriptor of `ty`, laid out as `trendy_runtime::TypeDesc`:
@@ -5835,6 +5850,119 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
+    /// Where the constant relation `value`, of type `ty`, is, with its tuples in `order`, a
+    /// sorted one, as what reads it wants: in the program's data, sorted so as it is
+    /// compiled, at no cost when it runs, and, if not by name, in a slot that says so, for
+    /// [`lir::Function::loose_read`], which knows only slots.
+    fn constant_in(
+        &mut self,
+        value: &hir::RelationValue,
+        ty: &hir::Type,
+        order: Order,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let field = cx.relation_field(value, order);
+        let data = in_data(cx.constant(vec![field]));
+        if order == Order::Canonical {
+            return data;
+        }
+        let layout = cx.layout(ty);
+        let slot = self.slot(layout.clone());
+        self.insts.push(lir::Inst::Copy {
+            dst: slot.clone(),
+            src: data,
+            layout,
+        });
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.described(ty, order)));
+        self.insts.push(lir::Inst::SortedAs {
+            relation: slot.clone(),
+            descriptor,
+        });
+        slot
+    }
+
+    /// The order the constant relation `value` is given in to what would have it sorted by
+    /// `leading` first: that, as it costs nothing, if there are any, and otherwise canonical
+    /// order.
+    fn constant_order(value: &hir::RelationValue, leading: &[String], cx: &mut Lowering) -> Order {
+        if leading.is_empty() {
+            Order::Canonical
+        } else {
+            cx.leading_order(leading, &value.heading)
+        }
+    }
+
+    /// The attributes of a relation of `heading` that the conjuncts of the restriction
+    /// `condition` each equate to a value, if that is all they say, each of a different
+    /// one: those equated to values that can't fail first, then those equated to values
+    /// that can, each by name, in which order [`FunctionBuilder::equal_runs`] finds the run
+    /// of each, leaving nothing of the condition to compute for each tuple.
+    fn only_equated_attributes(
+        &self,
+        heading: &hir::Heading,
+        condition: &hir::Expr,
+    ) -> Option<Vec<String>> {
+        let (mut safe, mut failing) = (BTreeSet::new(), BTreeSet::new());
+        for conjunct in condition.conjuncts() {
+            let (name, value) = heading
+                .attributes()
+                .find_map(|(name, ty)| Some((name, self.equated(conjunct, name, ty)?)))?;
+            let fresh = !safe.contains(name) && !failing.contains(name);
+            let into = if value.can_fail() {
+                &mut failing
+            } else {
+                &mut safe
+            };
+            if !fresh || !into.insert(name.to_string()) {
+                return None;
+            }
+        }
+        Some(safe.into_iter().chain(failing).collect())
+    }
+
+    /// What a join or a semijoin is given of its operand, what `view` reads, joined with what
+    /// `other` reads: a constant written sorted by the attributes they have in common,
+    /// which the runtime merges them on, as it costs nothing, and anything else as `want`
+    /// asks.
+    fn joined_operand(
+        &mut self,
+        view: &View,
+        other: &View,
+        want: Want,
+        cx: &mut Lowering,
+    ) -> (lir::Place, Order) {
+        let Some(value) = constant_relation(view.inner) else {
+            return self.given(view.inner, want, cx);
+        };
+        let order = Self::constant_order(value, &common_owns(view, other), cx);
+        (self.constant_in(value, &view.ty, order, cx), order)
+    }
+
+    /// The order [`FunctionBuilder::joined_operand`] would give what `view` reads in, without
+    /// computing it, as a sorted order will do.
+    fn joined_operand_order(&self, view: &View, other: &View, cx: &mut Lowering) -> Order {
+        match constant_relation(view.inner) {
+            Some(value) => Self::constant_order(value, &common_owns(view, other), cx),
+            None => self.sorted_order(view.inner, cx),
+        }
+    }
+
+    /// The attributes of a relation of `heading` that the restriction `condition` says are
+    /// each equal to a value that can't fail, which its runs are found by, by name.
+    fn equated_attributes(&self, heading: &hir::Heading, condition: &hir::Expr) -> Vec<String> {
+        let conjuncts = condition.conjuncts();
+        heading
+            .attributes()
+            .filter(|(name, ty)| {
+                conjuncts.iter().any(|conjunct| {
+                    self.equated(conjunct, name, ty)
+                        .is_some_and(|value| !value.can_fail())
+                })
+            })
+            .map(|(name, _)| name.to_string())
+            .collect()
+    }
+
     /// The order [`FunctionBuilder::sorted_place`] would give the relation `expr` in,
     /// without computing it.
     fn sorted_order(&self, expr: &hir::Expr, cx: &mut Lowering) -> Order {
@@ -5850,8 +5978,21 @@ impl<'a> FunctionBuilder<'a> {
                 cx.renamed_order(order, &view)
             }
             hir::Expr::Combine(_, lhs, rhs) => self.shared_order(lhs, rhs, cx),
-            hir::Expr::Restrict(operand, condition) if !condition.can_fail() => {
-                self.sorted_order(operand, cx)
+            hir::Expr::Restrict(operand, condition) => {
+                match (constant_relation(operand), self.type_of(operand)) {
+                    (Some(value), hir::Type::Relation(heading)) if !condition.can_fail() => {
+                        let leading = self.equated_attributes(&heading, condition);
+                        Self::constant_order(value, &leading, cx)
+                    }
+                    (Some(value), hir::Type::Relation(heading)) => {
+                        match self.only_equated_attributes(&heading, condition) {
+                            Some(leading) => Self::constant_order(value, &leading, cx),
+                            None => Order::Canonical,
+                        }
+                    }
+                    _ if condition.can_fail() => Order::Canonical,
+                    _ => self.sorted_order(operand, cx),
+                }
             }
             hir::Expr::Extend(operand, _, attributes) => {
                 let hir::Type::Relation(heading) = self.type_of(operand) else {
@@ -5875,13 +6016,13 @@ impl<'a> FunctionBuilder<'a> {
                     && !joins_a_closure(lhs, rhs) =>
             {
                 let (left, right) = (self.view_as_it_is(lhs), self.view_as_it_is(rhs));
-                let (lhs_order, rhs_order) =
-                    (self.sorted_order(lhs, cx), self.sorted_order(rhs, cx));
+                let lhs_order = self.joined_operand_order(&left, &right, cx);
+                let rhs_order = self.joined_operand_order(&right, &left, cx);
                 cx.joined_order(&left, &right, lhs_order, rhs_order)
             }
-            hir::Expr::Semijoin(lhs, _) | hir::Expr::Antijoin(lhs, _) => {
-                let left = self.view_as_it_is(lhs);
-                let order = self.sorted_order(lhs, cx);
+            hir::Expr::Semijoin(lhs, rhs) | hir::Expr::Antijoin(lhs, rhs) => {
+                let (left, right) = (self.view_as_it_is(lhs), self.view_as_it_is(rhs));
+                let order = self.joined_operand_order(&left, &right, cx);
                 cx.read_order(order, &left)
             }
             _ => Order::Canonical,
@@ -5892,6 +6033,12 @@ impl<'a> FunctionBuilder<'a> {
     /// where any will do: the one [`FunctionBuilder::sorted_place`] would give both in, if
     /// it is the same, and otherwise canonical order.
     fn shared_order(&self, lhs: &hir::Expr, rhs: &hir::Expr, cx: &mut Lowering) -> Order {
+        // A constant is written in whatever order the other comes in.
+        match (constant_relation(lhs), constant_relation(rhs)) {
+            (Some(_), None) => return self.sorted_order(rhs, cx),
+            (None, Some(_)) => return self.sorted_order(lhs, cx),
+            _ => {}
+        }
         let order = self.sorted_order(lhs, cx);
         if order == self.sorted_order(rhs, cx) {
             order
@@ -5948,6 +6095,11 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Remove(operand, names) => {
                 self.removed(operand, names, want, Some(leading), cx)
             }
+            hir::Expr::Constant(hir::Value::Relation(value)) => {
+                let order = Self::constant_order(value, leading, cx);
+                let ty = self.type_of(expr);
+                (self.constant_in(value, &ty, order, cx), order)
+            }
             _ => self.given(expr, want, cx),
         }
     }
@@ -5961,8 +6113,11 @@ impl<'a> FunctionBuilder<'a> {
         if order == Order::Canonical {
             return self.place(expr, cx);
         }
-        let (place, given) = self.sorted_place(expr, cx);
         let ty = self.type_of(expr);
+        if let Some(value) = constant_relation(expr) {
+            return self.constant_in(value, &ty, order, cx);
+        }
+        let (place, given) = self.sorted_place(expr, cx);
         self.in_order(place, given, order, &ty, cx)
     }
 
@@ -6278,17 +6433,7 @@ impl<'a> FunctionBuilder<'a> {
         };
         match expr {
             hir::Expr::Restrict(_, condition) => {
-                let conjuncts = condition.conjuncts();
-                let equated: Vec<String> = heading
-                    .attributes()
-                    .filter(|(name, ty)| {
-                        conjuncts.iter().any(|conjunct| {
-                            self.equated(conjunct, name, ty)
-                                .is_some_and(|value| !value.can_fail())
-                        })
-                    })
-                    .map(|(name, _)| name.to_string())
-                    .collect();
+                let equated = self.equated_attributes(&heading, condition);
                 if !equated.is_empty() && repeated {
                     reads.looked_up_again = true;
                 }
@@ -7314,7 +7459,24 @@ impl<'a> FunctionBuilder<'a> {
                 Order::Canonical,
                 Some(hir::Connective::And.of(rest)),
             ),
+            // A constant whose condition only equates attributes to values, some of which
+            // can fail, is written sorted by them, so that its runs leave nothing of the
+            // condition to compute for each tuple, and its order says nothing of which fails.
+            None if condition.can_fail()
+                && let Some(value) = constant_relation(operand)
+                && let Some(leading) = self.only_equated_attributes(heading, condition) =>
+            {
+                let order = Self::constant_order(value, &leading, cx);
+                (self.constant_in(value, &ty, order, cx), order, None)
+            }
             None if condition.can_fail() => (self.place(operand, cx), Order::Canonical, None),
+            // A constant is written sorted by the attributes the condition equates to
+            // values, so that its runs are found by binary search.
+            None if let Some(value) = constant_relation(operand) => {
+                let leading = self.equated_attributes(heading, condition);
+                let order = Self::constant_order(value, &leading, cx);
+                (self.constant_in(value, &ty, order, cx), order, None)
+            }
             None => {
                 let (place, order) = self.given(operand, want, cx);
                 (place, order, None)
@@ -8747,8 +8909,14 @@ impl<'a> FunctionBuilder<'a> {
                 )
             } else {
                 let (left, right) = (self.operand_view(lhs, want), self.operand_view(rhs, want));
-                let lhs_given = self.given(left.inner, want, cx);
-                let rhs_given = self.given(right.inner, want, cx);
+                // Its tuples are in the order they are in its left operand, which a constant is
+                // written in only where canonical order isn't wanted.
+                let lhs_given = if want == Want::Canonical {
+                    self.given(left.inner, want, cx)
+                } else {
+                    self.joined_operand(&left, &right, want, cx)
+                };
+                let rhs_given = self.joined_operand(&right, &left, want, cx);
                 (left, right, lhs_given, rhs_given)
             };
         let common = common_attributes(&left.shape, &right.shape, cx);
@@ -8990,8 +9158,8 @@ impl<'a> FunctionBuilder<'a> {
                 (left, right, canonical(other), canonical(closure))
             } else {
                 let (left, right) = (self.operand_view(lhs, want), self.operand_view(rhs, want));
-                let lhs_given = self.given(left.inner, want, cx);
-                let rhs_given = self.given(right.inner, want, cx);
+                let lhs_given = self.joined_operand(&left, &right, want, cx);
+                let rhs_given = self.joined_operand(&right, &left, want, cx);
                 (left, right, lhs_given, rhs_given)
             };
         let (lhs_place, rhs_place) = (lhs_given.0.clone(), rhs_given.0.clone());
@@ -9944,6 +10112,28 @@ fn orders_constant(
         operand(lhs, lir::LOOSE_LHS) | operand(rhs, lir::LOOSE_RHS) | result | flags,
         cx,
     )
+}
+
+/// The attributes what `view` reads has in common with what `other` reads, by their own
+/// names in it, in the order a join compares them: by the names they are read by.
+fn common_owns(view: &View, other: &View) -> Vec<String> {
+    view.shape
+        .names
+        .iter()
+        .filter(|(read, _)| other.shape.names.contains_key(*read))
+        .map(|(_, own)| own.clone())
+        .collect()
+}
+
+/// The constant relation `expr` is, if that is all it is.
+fn constant_relation(mut expr: &hir::Expr) -> Option<&hir::RelationValue> {
+    while let hir::Expr::At(_, inner) = expr {
+        expr = inner;
+    }
+    match expr {
+        hir::Expr::Constant(hir::Value::Relation(relation)) => Some(relation),
+        _ => None,
+    }
 }
 
 /// The local variable or binding `expr` reads, if that is all it is.

@@ -10299,6 +10299,82 @@ operator main{} [
     );
 }
 
+/// A constant relation is written in the order what reads it wants, as it is compiled: a
+/// union's operand in the other's order, one looked up by an attribute sorted by it, so
+/// that its runs are found by binary search, and one joined or matched sorted by the
+/// attributes in common. The answers are the same as in canonical order, and a relation
+/// written out is written in canonical order still.
+#[test]
+fn a_constant_relation_is_written_in_the_order_it_is_read_in() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 9;
+    const r := series{from: 1, to: n} extend { k := value, v := value * 10 } remove {value};
+    /* A union of a rename and a constant, written in the rename's order. */
+    call debug_value{v: count{r: (r rename {v as a}) union relation { { k: 1, a: 10 }, { k: 20, a: 5 }, { k: 30, a: 1 } }}};
+    call debug_value{v: (r rename {v as a} where k < 3) union relation { { k: 7, a: 1 }, { k: 0, a: 100 } }};
+    /* A constant looked up by `v`, which comes after `k` by name. */
+    var found := 0;
+    var i := 0;
+    while i < 12 loop [
+        found := found + count{r: relation { { k: 1, v: 30 }, { k: 2, v: 10 }, { k: 3, v: 20 }, { k: 4, v: 10 } } where v = i * 10};
+        i := i + 1;
+    ];
+    call debug_value{v: found};
+    /* Joined, and matched, on `z`, which comes after the others by name. */
+    const p := series{from: 1, to: n} extend { z := value mod 4, a := value } remove {value};
+    call debug_value{v: count{r: p join relation { { z: 1, b: 7 }, { z: 2, b: 8 }, { z: 3, b: 9 }, { z: 2, b: 6 } }}};
+    call debug_value{v: relation { { z: 1, b: 7 }, { z: 5, b: 8 }, { z: 3, b: 9 } } matching p};
+    call debug_value{v: count{r: p not matching relation { { z: 1, b: 7 }, { z: 0, b: 9 } }}};
+];
+";
+    let ran = ran_source("constants_in_order", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr.lines().collect::<Vec<_>>(),
+        [
+            "11",
+            "relation { a: integer, k: integer } { { a: 1, k: 7 }, { a: 10, k: 1 }, { a: 20, k: 2 }, { a: 100, k: 0 } }",
+            "4",
+            "9",
+            "relation { b: integer, z: integer } { { b: 7, z: 1 }, { b: 9, z: 3 } }",
+            "4",
+        ],
+        "{}",
+        ran.stderr
+    );
+}
+
+/// A constant restricted only by attributes equal to values that can fail is written sorted
+/// by them, its runs found by binary search, the values computed once if it has a tuple: it
+/// fails just when it would have for its first tuple, and gives the same answers.
+#[test]
+fn a_constant_found_by_values_that_can_fail_fails_as_it_would() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const big := length{a: arguments} + 9223372036854775806;
+    /* Of no tuples, the value is never computed, and nothing fails. */
+    call debug_value{v: count{r: relation { k: integer, v: integer } {} where v = big + 2}};
+    /* Each equated to a value that can fail: found by binary search, the same as before. */
+    call debug_value{v: count{r: relation { { k: 1, v: 30 }, { k: 2, v: 10 } } where v = big - 9223372036854775796 and k = big - 9223372036854775804}};
+    /* Of tuples, it fails, as it would for the first. */
+    call debug_value{v: count{r: relation { { k: 1, v: 30 }, { k: 2, v: 10 } } where v = big + 2}};
+];
+";
+    let ran = ran_source("constants_failing", source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    let lines: Vec<&str> = ran.stderr.lines().collect();
+    assert_eq!(lines[..2], ["0", "1"], "{}", ran.stderr);
+    assert!(
+        lines[2].starts_with("error[R0001]: overflow: 9223372036854775806 + 2"),
+        "{}",
+        ran.stderr
+    );
+    assert!(lines[3].ends_with(":10:5"), "{}", ran.stderr);
+}
+
 /// A rename named by a `const` reads what it renames in place, but only if that is already
 /// computed: a rename of what could fail is computed where it was written, before what comes
 /// after it, as what it fails with says.
