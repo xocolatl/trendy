@@ -469,6 +469,15 @@ fn runtime_loosely(
             };
             arrange(arranged, args.first(), result);
         }
+        // It searches the relation as the descriptor says it is sorted, and its run is a
+        // part of it, sorted alike.
+        RuntimeFn::EqualRun => {
+            let described = arranged_as(args.get(3), data);
+            if let Some(src) = args.get(1) {
+                read_as(src, described, arranged, found);
+            }
+            arrange(arranged, args.first(), described);
+        }
         // Both operands are sorted as the descriptor says, and so is the result.
         RuntimeFn::Combine => {
             let described = arranged_as(args.get(3), data);

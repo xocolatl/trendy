@@ -10246,6 +10246,59 @@ operator main{} [
     assert!(lines[14].starts_with("error[R0006]"), "{}", ran.stderr);
 }
 
+/// A local variable is sorted by what reads it would have it sorted by first: one looked
+/// up again by an attribute, by that attribute, so that its runs are found by binary
+/// search, and a projection joined, by the attributes it is joined on, so that neither is
+/// sorted again. The answers are the same as in canonical order.
+#[test]
+fn a_local_variable_is_sorted_as_what_reads_it_would_have_it() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 50;
+    /* Looked up by `v`, which comes after `k` by name. */
+    const r := series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value};
+    var found := 0;
+    var i := 0;
+    while i < n loop [
+        found := found + count{r: r where v = i};
+        i := i + 1;
+    ];
+    call debug_value{v: found};
+    /* By a value that can fail, and by two attributes. */
+    var also := 0;
+    i := 1;
+    while i < 10 loop [
+        also := also + count{r: r where v = i * 7 mod n} + count{r: r where v = i and k = i};
+        i := i + 1;
+    ];
+    call debug_value{v: also};
+    /* Looked up by two attributes, one at a time: by neither first. */
+    const t := series{from: 1, to: n} extend { k := value, v := value mod 5 } remove {value};
+    var both := 0;
+    i := 0;
+    while i < 5 loop [
+        both := both + count{r: t where v = i} + count{r: t where k = i + 1};
+        i := i + 1;
+    ];
+    call debug_value{v: both};
+    /* Projections joined on `z`, which comes after the others by name. */
+    const p := series{from: 1, to: n} extend { z := value mod 10, a := value } remove {value};
+    const q := series{from: 1, to: 20} extend { z := value, b := value * 2 } remove {value};
+    call debug_value{v: count{r: p join q}};
+    call debug_value{v: count{r: (p join q) where b = 4}};
+];
+";
+    let ran = ran_source("sorted_as_read", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr.lines().collect::<Vec<_>>(),
+        ["50", "9", "55", "45", "5"],
+        "{}",
+        ran.stderr
+    );
+}
+
 /// A rename named by a `const` reads what it renames in place, but only if that is already
 /// computed: a rename of what could fail is computed where it was written, before what comes
 /// after it, as what it fails with says.

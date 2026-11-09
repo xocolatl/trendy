@@ -1349,6 +1349,24 @@ impl Lowering {
         self.sorted_by(names)
     }
 
+    /// The order of a relation of `heading` sorted by `leading` first, then by its other
+    /// attributes, by name.
+    fn leading_order(&mut self, leading: &[String], heading: &hir::Heading) -> Order {
+        let mut names = leading.to_vec();
+        for (name, _) in heading.attributes() {
+            if !leading.iter().any(|first| first == name) {
+                names.push(name.to_string());
+            }
+        }
+        self.sorted_by(names)
+    }
+
+    /// Whether a relation of `heading` in `order` is sorted by `leading` first.
+    fn leads_with(&self, order: Order, heading: &hir::Heading, leading: &[String]) -> bool {
+        matches!(order, Order::Canonical | Order::SortedBy(_))
+            && self.sort_names(order, heading).starts_with(leading)
+    }
+
     /// The order of a relation of `heading` in `order`, a sorted one, extended with
     /// `added`, attributes it hasn't: sorted by the same attributes, then those it adds, by
     /// name, as an extension's tuples are made in its operand's order, all different.
@@ -1555,6 +1573,45 @@ struct FunctionBuilder<'a> {
     /// that reads each wants: any order, or a sorted one (see
     /// [`FunctionBuilder::note_loose_locals`]).
     local_wants: HashMap<hir::LocalId, Want>,
+    /// The attributes what reads each of those would have it sorted by first, as
+    /// [`ReadsOf`] gathers them: what sorts it anyway sorts it so, and one looked up again
+    /// is put in that order.
+    local_leading: HashMap<hir::LocalId, Vec<String>>,
+}
+
+/// What [`FunctionBuilder::read_want`] gathers of the reads of a local variable or a
+/// binding, as it goes through them.
+#[derive(Default)]
+struct ReadsOf {
+    /// How many joins and semijoins search it: what is searched more than once is better
+    /// sorted once.
+    searches: usize,
+    /// The attributes what reads it would have it sorted by first, if all that would agree:
+    /// a restriction's equated ones, which its runs are found by, and a join's or a
+    /// semijoin's common ones, which it is merged on.
+    leading: Option<Vec<String>>,
+    /// Whether two would have it sorted by different ones first, so that none is.
+    disagree: bool,
+    /// Whether a restriction finds its equated attributes in it again for each tuple of
+    /// something, or time round a loop, which sorting it once by them pays for.
+    looked_up_again: bool,
+}
+
+impl ReadsOf {
+    /// Note that a reader would have it sorted by `leading` first.
+    fn prefer(&mut self, leading: Vec<String>) {
+        if leading.is_empty() {
+            return;
+        }
+        match &self.leading {
+            None if !self.disagree => self.leading = Some(leading),
+            Some(known) if *known == leading => {}
+            _ => {
+                self.leading = None;
+                self.disagree = true;
+            }
+        }
+    }
 }
 
 /// What is around a read of a relation, as [`FunctionBuilder::read_want`] goes down.
@@ -1566,6 +1623,10 @@ struct Around {
     searched: bool,
     /// Whether it is read again for each tuple of something, or time round a loop.
     repeated: bool,
+    /// Whether it is part of a join of several, whose operands are joined in the order its
+    /// plan says as the program runs ([`lir::RuntimeFn::Join`]), so that what it would have
+    /// them sorted by first isn't known when compiling.
+    planned: bool,
 }
 
 impl Around {
@@ -1575,6 +1636,7 @@ impl Around {
             want: Want::Canonical,
             searched: false,
             repeated: false,
+            planned: false,
         }
     }
 }
@@ -1968,6 +2030,7 @@ impl<'a> FunctionBuilder<'a> {
             last_read: Vec::new(),
             local_orders: HashMap::new(),
             local_wants: HashMap::new(),
+            local_leading: HashMap::new(),
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -2659,13 +2722,13 @@ impl<'a> FunctionBuilder<'a> {
             if !self.is_relation_of_no_key_to_check(*id) {
                 continue;
             }
-            let mut searches = 0;
+            let mut reads = ReadsOf::default();
             let mut read_as = |expr: &hir::Expr, want: Want| {
                 let around = Around {
                     want,
                     ..Around::wanted_in_order()
                 };
-                self.read_want(*id, expr, around, &mut searches)
+                self.read_want(*id, expr, around, &mut reads)
             };
             let mut wanted = Want::Any;
             for (part, &later) in parts[k + 1..].iter().zip(&wants[k + 1..]) {
@@ -2683,7 +2746,8 @@ impl<'a> FunctionBuilder<'a> {
             } else {
                 want
             };
-            wants[k] = wanted.stronger(read_as(end, end_want));
+            let wanted = wanted.stronger(read_as(end, end_want));
+            wants[k] = self.leading_want(*id, wanted, reads);
         }
         let mut alive: Vec<(hir::LocalId, lir::Place, hir::Type)> = Vec::new();
         for (k, part) in parts.iter().enumerate() {
@@ -2763,7 +2827,7 @@ impl<'a> FunctionBuilder<'a> {
         let slot = self.slot(layout.clone());
         self.lets.push((slot.clone(), ty.clone()));
         self.nested_scope(cx, |this, cx| {
-            let (src, order) = this.given(value, want, cx);
+            let (src, order) = this.given_local(id, value, want, cx);
             if order != Order::Canonical {
                 this.local_orders.insert(id, order);
             }
@@ -5369,7 +5433,7 @@ impl<'a> FunctionBuilder<'a> {
     fn assigned_value(&mut self, assignment: &hir::Assignment, cx: &mut Lowering) -> lir::Place {
         match &assignment.target {
             hir::Target::Local(id) if let Some(&want) = self.local_wants.get(id) => {
-                let (place, order) = self.given(&assignment.value, want, cx);
+                let (place, order) = self.given_local(*id, &assignment.value, want, cx);
                 if order != Order::Canonical {
                     self.local_orders.insert(*id, order);
                 }
@@ -5390,15 +5454,13 @@ impl<'a> FunctionBuilder<'a> {
             if !self.is_relation_of_no_key_to_check(*id) || block.times_assigned(*id) != 1 {
                 continue;
             }
-            let mut searches = 0;
-            let mut want = self.block_read_want(*id, block, false, &mut searches);
+            let mut reads = ReadsOf::default();
+            let mut want = self.block_read_want(*id, block, false, &mut reads);
             if let Some(end) = end {
-                let read = self.read_want(*id, end, Around::wanted_in_order(), &mut searches);
+                let read = self.read_want(*id, end, Around::wanted_in_order(), &mut reads);
                 want = want.stronger(read);
             }
-            if want != Want::Canonical {
-                self.local_wants.insert(*id, want);
-            }
+            self.note_local(*id, want, reads);
         }
     }
 
@@ -5496,7 +5558,8 @@ impl<'a> FunctionBuilder<'a> {
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         let holder = self.holder(target, cx);
         let gone = kept.clone().negated();
-        let (run, rest) = self.equal_runs(holder.clone(), &ty, heading, &gone, cx);
+        let (run, rest) =
+            self.equal_runs(holder.clone(), &ty, Order::Canonical, heading, &gone, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         self.scoped = true;
         if rest == hir::Expr::Constant(hir::Value::Boolean(true)) {
@@ -5837,6 +5900,58 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
+    /// Where `value`, the value of the local variable or binding `id`, is, computed as `want`
+    /// asks, and its order: sorted by what its readers would have it sorted by first, if it
+    /// is sorted anyway, as a projection that may make two tuples equal is, and if it is
+    /// wanted sorted, as one looked up again is ([`FunctionBuilder::leading_want`]).
+    fn given_local(
+        &mut self,
+        id: hir::LocalId,
+        value: &hir::Expr,
+        want: Want,
+        cx: &mut Lowering,
+    ) -> (lir::Place, Order) {
+        let Some(leading) = self.local_leading.get(&id).cloned() else {
+            return self.given(value, want, cx);
+        };
+        let (place, order) = self.preferring(value, want, &leading, cx);
+        let hir::Type::Relation(heading) = self.locals[id.0].ty.clone() else {
+            return (place, order);
+        };
+        if want != Want::Sorted || cx.leads_with(order, &heading, &leading) {
+            return (place, order);
+        }
+        let wanted = cx.leading_order(&leading, &heading);
+        let ty = hir::Type::Relation(heading);
+        (self.in_order(place, order, wanted, &ty, cx), wanted)
+    }
+
+    /// Where the relation `expr` is, computed as `want` asks, and its order: a projection
+    /// that is sorted anyway sorted by `leading` first.
+    fn preferring(
+        &mut self,
+        expr: &hir::Expr,
+        want: Want,
+        leading: &[String],
+        cx: &mut Lowering,
+    ) -> (lir::Place, Order) {
+        match expr {
+            hir::Expr::At(site, inner) => {
+                let outer = self.site;
+                self.at(Some(*site), cx);
+                let given = self.preferring(inner, want, leading, cx);
+                if outer.is_some() {
+                    self.at(outer, cx);
+                }
+                given
+            }
+            hir::Expr::Remove(operand, names) => {
+                self.removed(operand, names, want, Some(leading), cx)
+            }
+            _ => self.given(expr, want, cx),
+        }
+    }
+
     /// Where the relation `expr` is, computed in `order`, a sorted order: as
     /// [`FunctionBuilder::place`] computes it, in canonical order, and otherwise as
     /// [`FunctionBuilder::sorted_place`] does, which gives it in an order other than by name
@@ -5939,7 +6054,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Let(..) => self.let_chain(expr, Want::Any, cx),
             hir::Expr::Rename(..) => self.renamed(expr, Want::Any, cx),
-            hir::Expr::Remove(operand, names) => self.removed(operand, names, Want::Any, cx),
+            hir::Expr::Remove(operand, names) => self.removed(operand, names, Want::Any, None, cx),
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Want::Any, cx),
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, Want::Any, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, Want::Any, cx),
@@ -6082,12 +6197,12 @@ impl<'a> FunctionBuilder<'a> {
         id: hir::LocalId,
         expr: &hir::Expr,
         around: Around,
-        searches: &mut usize,
+        reads: &mut ReadsOf,
     ) -> Want {
         match expr {
             hir::Expr::Local(read) if *read == id => {
-                *searches += usize::from(around.searched);
-                if *searches > 1
+                reads.searches += usize::from(around.searched);
+                if reads.searches > 1
                     || (around.searched && around.repeated)
                     || (around.want == Want::Sorted && around.repeated)
                 {
@@ -6096,15 +6211,15 @@ impl<'a> FunctionBuilder<'a> {
                     around.want
                 }
             }
-            hir::Expr::At(_, inner) => self.read_want(id, inner, around, searches),
+            hir::Expr::At(_, inner) => self.read_want(id, inner, around, reads),
             hir::Expr::Let(bound, ..) if *bound == id => Want::Canonical,
             hir::Expr::Let(_, value, body) => {
                 let value_around = Around {
                     want: Want::Canonical,
                     ..around
                 };
-                self.read_want(id, value, value_around, searches)
-                    .stronger(self.read_want(id, body, around, searches))
+                self.read_want(id, value, value_around, reads)
+                    .stronger(self.read_want(id, body, around, reads))
             }
             _ => {
                 let loosely = self.reads_loosely(expr);
@@ -6113,6 +6228,8 @@ impl<'a> FunctionBuilder<'a> {
                     expr,
                     hir::Expr::And(..) | hir::Expr::Semijoin(..) | hir::Expr::Antijoin(..)
                 );
+                let planned = around.planned
+                    || matches!(expr, hir::Expr::And(lhs, rhs) if several_joined(lhs, rhs).is_some());
                 let mut wanted = Want::Any;
                 expr.for_each_child(|child, _| {
                     let is_loose = loosely.iter().any(|operand| core::ptr::eq(*operand, child));
@@ -6132,11 +6249,98 @@ impl<'a> FunctionBuilder<'a> {
                         want,
                         searched: around.searched || searches_it,
                         repeated: around.repeated || expr.computes_again(child),
+                        planned,
                     };
-                    wanted = wanted.stronger(self.read_want(id, child, child_around, searches));
+                    if local_read(child) == Some(id) && !planned {
+                        self.note_leading(expr, child, child_around.repeated, reads);
+                    }
+                    wanted = wanted.stronger(self.read_want(id, child, child_around, reads));
                 });
                 wanted
             }
+        }
+    }
+
+    /// Note in `reads` what `expr` would have its operand `child`, a local variable or a
+    /// binding, sorted by first: a restriction's attributes it equates to a value that
+    /// can't fail, by name, and a join's or a semijoin's common attributes, by name, as it
+    /// compares them. A restriction found again for each tuple, or time round a loop, if
+    /// `repeated`, is looked up again.
+    fn note_leading(
+        &self,
+        expr: &hir::Expr,
+        child: &hir::Expr,
+        repeated: bool,
+        reads: &mut ReadsOf,
+    ) {
+        let hir::Type::Relation(heading) = self.type_of(child) else {
+            return;
+        };
+        match expr {
+            hir::Expr::Restrict(_, condition) => {
+                let conjuncts = condition.conjuncts();
+                let equated: Vec<String> = heading
+                    .attributes()
+                    .filter(|(name, ty)| {
+                        conjuncts.iter().any(|conjunct| {
+                            self.equated(conjunct, name, ty)
+                                .is_some_and(|value| !value.can_fail())
+                        })
+                    })
+                    .map(|(name, _)| name.to_string())
+                    .collect();
+                if !equated.is_empty() && repeated {
+                    reads.looked_up_again = true;
+                }
+                reads.prefer(equated);
+            }
+            hir::Expr::And(lhs, rhs)
+            | hir::Expr::Semijoin(lhs, rhs)
+            | hir::Expr::Antijoin(lhs, rhs) => {
+                let other = if core::ptr::eq(lhs.as_ref(), child) {
+                    rhs
+                } else {
+                    lhs
+                };
+                let hir::Type::Relation(other) = self.type_of(other) else {
+                    return;
+                };
+                let common = heading
+                    .attributes()
+                    .filter(|(name, _)| other.get(name).is_some())
+                    .map(|(name, _)| name.to_string())
+                    .collect();
+                reads.prefer(common);
+            }
+            _ => {}
+        }
+    }
+
+    /// Note what all that reads the local variable or binding `id` wants of its order, as
+    /// `reads` gathered it, and what they would have it sorted by first. One looked up again
+    /// by what they would is wanted sorted, which finding it by binary search pays for.
+    fn note_local(&mut self, id: hir::LocalId, want: Want, reads: ReadsOf) {
+        let want = self.leading_want(id, want, reads);
+        if want != Want::Canonical {
+            self.local_wants.insert(id, want);
+        }
+    }
+
+    /// What the local variable or binding `id`, wanted as `want` by what reads it, as `reads`
+    /// gathered them, is computed in: sorted, if it is looked up again by what they would
+    /// have it sorted by first, which is noted, unless it is wanted in canonical order.
+    fn leading_want(&mut self, id: hir::LocalId, want: Want, reads: ReadsOf) -> Want {
+        if want == Want::Canonical {
+            return want;
+        }
+        let Some(leading) = reads.leading else {
+            return want;
+        };
+        self.local_leading.insert(id, leading);
+        if reads.looked_up_again {
+            Want::Sorted
+        } else {
+            want
         }
     }
 
@@ -6186,7 +6390,7 @@ impl<'a> FunctionBuilder<'a> {
         id: hir::LocalId,
         block: &hir::Block,
         repeated: bool,
-        searches: &mut usize,
+        reads: &mut ReadsOf,
     ) -> Want {
         let mut wanted = Want::Any;
         for (_, statement) in &block.statements {
@@ -6199,8 +6403,8 @@ impl<'a> FunctionBuilder<'a> {
                 repeated,
                 ..Around::wanted_in_order()
             };
-            let mut reads =
-                |expr: &hir::Expr, around: Around| self.read_want(id, expr, around, &mut *searches);
+            let mut read =
+                |expr: &hir::Expr, around: Around| self.read_want(id, expr, around, &mut *reads);
             let own = match statement {
                 hir::Statement::Assign(assignments) => {
                     assignments.iter().fold(Want::Any, |wanted, assignment| {
@@ -6212,20 +6416,20 @@ impl<'a> FunctionBuilder<'a> {
                                 .unwrap_or(Want::Canonical),
                             _ => Want::Canonical,
                         };
-                        wanted.stronger(reads(&assignment.value, Around { want, ..around }))
+                        wanted.stronger(read(&assignment.value, Around { want, ..around }))
                     })
                 }
                 hir::Statement::Call(call) => call
                     .args
                     .values()
-                    .fold(Want::Any, |wanted, arg| wanted.stronger(reads(arg, around))),
+                    .fold(Want::Any, |wanted, arg| wanted.stronger(read(arg, around))),
                 // What a `return` gives is the operator's value, in its order.
                 hir::Statement::If(condition, ..)
                 | hir::Statement::For(_, condition, _)
                 | hir::Statement::Fail(condition)
                 | hir::Statement::Warn(condition)
-                | hir::Statement::Return(Some(condition)) => reads(condition, around),
-                hir::Statement::Loop(condition, ..) => reads(
+                | hir::Statement::Return(Some(condition)) => read(condition, around),
+                hir::Statement::Loop(condition, ..) => read(
                     condition,
                     Around {
                         repeated: true,
@@ -6240,7 +6444,7 @@ impl<'a> FunctionBuilder<'a> {
             };
             wanted = wanted.stronger(own);
             for inner in statement.blocks() {
-                wanted = wanted.stronger(self.block_read_want(id, inner, again, &mut *searches));
+                wanted = wanted.stronger(self.block_read_want(id, inner, again, &mut *reads));
             }
         }
         wanted
@@ -6333,7 +6537,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.conditional(expr, condition, [then, otherwise], cx)
             }
             hir::Expr::Remove(operand, names) => {
-                self.removed(operand, names, Want::Canonical, cx).0
+                self.removed(operand, names, Want::Canonical, None, cx).0
             }
             hir::Expr::Rename(..) => self.renamed(expr, Want::Canonical, cx).0,
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Want::Canonical, cx).0,
@@ -6474,6 +6678,7 @@ impl<'a> FunctionBuilder<'a> {
         operand: &hir::Expr,
         names: &BTreeSet<String>,
         want: Want,
+        leading: Option<&[String]>,
         cx: &mut Lowering,
     ) -> (lir::Place, Order) {
         let view = self.view_of(operand);
@@ -6507,6 +6712,13 @@ impl<'a> FunctionBuilder<'a> {
             })
             .collect();
         let result = view.named.without(names);
+        // Sorted anyway, it is sorted by what its readers would have it sorted by first.
+        let order = match (order, leading, &result) {
+            (Order::Canonical, Some(leading), hir::Type::Relation(heading)) => {
+                cx.leading_order(leading, heading)
+            }
+            _ => order,
+        };
         let dst = self.reshape(
             &view.ty,
             &result,
@@ -7109,9 +7321,10 @@ impl<'a> FunctionBuilder<'a> {
             }
         };
         let condition = rest.as_ref().unwrap_or(condition);
-        // Tuples that agree are together only in canonical order.
-        let (src, condition) = if order == Order::Canonical {
-            self.equal_runs(whole.clone(), &ty, heading, condition, cx)
+        // Tuples that agree are together only if they are sorted, by the attributes their
+        // sort order begins with.
+        let (src, condition) = if matches!(order, Order::Canonical | Order::SortedBy(_)) {
+            self.equal_runs(whole.clone(), &ty, order, heading, condition, cx)
         } else {
             (whole.clone(), condition.clone())
         };
@@ -7294,13 +7507,25 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         src: lir::Place,
         ty: &hir::Type,
+        order: Order,
         heading: &hir::Heading,
         condition: &hir::Expr,
         cx: &mut Lowering,
     ) -> (lir::Place, hir::Expr) {
         let mut src = src;
         let mut rest: Vec<&hir::Expr> = condition.conjuncts().iter().collect();
-        let mut attributes = heading.attributes().enumerate().peekable();
+        // Its attributes in the order its tuples are sorted by, each with its place in it.
+        let names = cx.sort_names(order, heading);
+        let mut attributes = names
+            .iter()
+            .map(|name| {
+                let attribute = heading
+                    .get(name)
+                    .expect("a sort order names the attributes");
+                (name.as_str(), attribute)
+            })
+            .enumerate()
+            .peekable();
         while let Some(&(i, (name, attribute))) = attributes.peek() {
             let found = rest.iter().enumerate().find_map(|(at, conjunct)| {
                 let value = self.equated(conjunct, name, attribute)?;
@@ -7316,30 +7541,31 @@ impl<'a> FunctionBuilder<'a> {
             self.tuples.push(AtHand::one(src.clone()));
             let value = self.place(value, cx);
             self.tuples.pop();
-            src = self.equal_run(src, &value, i, ty, cx);
+            src = self.equal_run(src, &value, i, ty, order, cx);
         }
         let values = self.failable_equalities(&rest, attributes);
         if let Some(values) = values {
             rest.clear();
-            src = self.failable_runs(src, &values, ty, cx);
+            src = self.failable_runs(src, &values, ty, order, cx);
         }
         let rest = rest.into_iter().cloned().collect();
         (src, hir::Connective::And.of(rest))
     }
 
-    /// The run of tuples of the relation or run at `src`, of type `ty`, whose
-    /// attribute `i` in its sort order, from the first, which is by name, is
-    /// equal to the value at `value`, in a new slot.
+    /// The run of tuples of the relation or run at `src`, of type `ty`, sorted in
+    /// `order`, whose attribute `i` in that order, from the first, is equal to the value at
+    /// `value`, in a new slot.
     fn equal_run(
         &mut self,
         src: lir::Place,
         value: &lir::Place,
         i: usize,
         ty: &hir::Type,
+        order: Order,
         cx: &mut Lowering,
     ) -> lir::Place {
         let run = self.slot(cx.layout(ty));
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.described(ty, order)));
         let attribute = usize_constant(len(i), cx);
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::EqualRun,
@@ -7386,11 +7612,12 @@ impl<'a> FunctionBuilder<'a> {
         src: lir::Place,
         values: &[(usize, &hir::Expr)],
         ty: &hir::Type,
+        order: Order,
         cx: &mut Lowering,
     ) -> lir::Place {
         let places = self.values_if_any_tuple(&src, values, cx);
         places.iter().fold(src, |src, (i, value)| {
-            self.equal_run(src, value, *i, ty, cx)
+            self.equal_run(src, value, *i, ty, order, cx)
         })
     }
 
@@ -9717,6 +9944,17 @@ fn orders_constant(
         operand(lhs, lir::LOOSE_LHS) | operand(rhs, lir::LOOSE_RHS) | result | flags,
         cx,
     )
+}
+
+/// The local variable or binding `expr` reads, if that is all it is.
+fn local_read(mut expr: &hir::Expr) -> Option<hir::LocalId> {
+    while let hir::Expr::At(_, inner) = expr {
+        expr = inner;
+    }
+    match expr {
+        hir::Expr::Local(id) => Some(*id),
+        _ => None,
+    }
 }
 
 /// Whether a join of `lhs` and `rhs` joins a transitive closure.

@@ -2631,7 +2631,16 @@ as far as a reader that wants it or doesn't, takes it so (`FunctionBuilder::read
 `passes_order_down`), and so is a block's local variable, a `const` in a body with statements,
 if it is assigned only where it is declared (`FunctionBuilder::note_loose_locals`). One that
 all read in a sorted order, any one, as a union's operand is (`passed_down`), is computed in
-whatever sorted order is less work, which its readers are given (`local_orders`). What a
+whatever sorted order is less work, which its readers are given (`local_orders`). What
+reads a local variable or a binding directly says what it would have it sorted by first
+(`ReadsOf`, `note_leading`): a restriction, the attributes it equates to a value that can't
+fail, and a join or a semijoin, its common attributes, but not one of a join of several,
+which joins its operands in the order its plan says as it runs (`Around::planned`). If all that would agree, a projection
+that is sorted anyway, as one that can make two tuples equal is, is sorted so
+(`FunctionBuilder::given_local`, `removed`), and one that a restriction looks up again, for
+each tuple or time round a loop, is put in that order once, as finding it by binary search
+pays for that (`leading_want`). So `r where v = i` in a loop finds its run by binary search
+however `r`'s attributes are named, and `r join s` of two projections sorts neither again. What a
 join or a semijoin searches more than once, or once for each tuple of something, is sorted
 all the same, as sorting it once is less work, and so is what is wanted in a sorted order
 again for each tuple, or time round a loop, as each time might sort it into another. Read another way, a loose one is sorted there,
@@ -2684,8 +2693,9 @@ with some tuples the same, which `FunctionBuilder::given` sends where each is co
   check (`Made::Kept`). One that replaces an attribute can make two tuples equal, so it is
   sorted into canonical order.
 - **A restriction** keeps its operand's order, as it always has (`InOrderOf`), and asks its
-  operand for what it is asked, unless its condition can fail. Only one in canonical order
-  finds runs by binary search (`equal_runs`).
+  operand for what it is asked, unless its condition can fail. One of a sorted operand,
+  in any order, finds runs by binary search on the attributes its sort order begins with
+  (`equal_runs`), each by its place in that order.
 - **A join** is merged on its common attributes, each run of tuples that agree on them
   pairing one of the left operand's, in its order, with each of the right's, in its. So,
   where a sorted order will do, it is made by the common attributes, then the left's
