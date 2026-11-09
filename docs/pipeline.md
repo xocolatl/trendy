@@ -2627,11 +2627,14 @@ isn't taken loose. A `replace` can make two tuples equal, so it is sorted, unles
 projection reads it, which removes those itself (`Order::Repeated`).
 
 A `Let`'s binding is loose if all that reads it, followed up through what passes order down,
-as far as a reader that wants it or doesn't, takes it so (`FunctionBuilder::reads_only_loosely`,
+as far as a reader that wants it or doesn't, takes it so (`FunctionBuilder::read_want`,
 `passes_order_down`), and so is a block's local variable, a `const` in a body with statements,
-if it is assigned only where it is declared (`FunctionBuilder::note_loose_locals`). What a
+if it is assigned only where it is declared (`FunctionBuilder::note_loose_locals`). One that
+all read in a sorted order, any one, as a union's operand is (`passed_down`), is computed in
+whatever sorted order is less work, which its readers are given (`local_orders`). What a
 join or a semijoin searches more than once, or once for each tuple of something, is sorted
-all the same, as sorting it once is less work. Read another way, a loose one is sorted there,
+all the same, as sorting it once is less work, and so is what is wanted in a sorted order
+again for each tuple, or time round a loop, as each time might sort it into another. Read another way, a loose one is sorted there,
 in a copy, which gives the right answer and is a mistake: it costs that sort each time, for
 what sorting it once would have saved. `lir::Program::sorts_what_it_left_unsorted` finds that,
 and `crates/trendyc/tests/compile.rs` checks that nothing does. A binding gives up its own

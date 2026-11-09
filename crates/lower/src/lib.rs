@@ -1546,20 +1546,22 @@ struct FunctionBuilder<'a> {
     /// The `Let`s' bindings that the value being computed reads for the last
     /// time, as an operand (see [`FunctionBuilder::operand_read`]).
     last_read: Vec<hir::LocalId>,
-    /// The `Let`s' bindings, and the local variables, of relations whose tuples are in no
-    /// particular order, as nothing that reads them depends on it (see
-    /// [`FunctionBuilder::loose_place`]).
-    loose_locals: Vec<hir::LocalId>,
-    /// The blocks' local variables that can be so, when they are assigned (see
+    /// The order of each of the `Let`s' bindings, and of the local variables, of relations
+    /// whose tuples aren't in canonical order, as nothing that reads them depends on it: in
+    /// no particular order (see [`FunctionBuilder::loose_place`]), or sorted otherwise
+    /// (see [`FunctionBuilder::sorted_place`]).
+    local_orders: HashMap<hir::LocalId, Order>,
+    /// The blocks' local variables that can be so, when they are assigned, with what all
+    /// that reads each wants: any order, or a sorted one (see
     /// [`FunctionBuilder::note_loose_locals`]).
-    may_be_loose: Vec<hir::LocalId>,
+    local_wants: HashMap<hir::LocalId, Want>,
 }
 
-/// What is around a read of a relation, as [`FunctionBuilder::reads_only_loosely`] goes down.
+/// What is around a read of a relation, as [`FunctionBuilder::read_want`] goes down.
 #[derive(Clone, Copy)]
 struct Around {
-    /// Whether what it is part of has to come out in canonical order.
-    in_order: bool,
+    /// What order what it is part of has to come out in.
+    want: Want,
     /// Whether it is part of what a join or a semijoin searches, by order.
     searched: bool,
     /// Whether it is read again for each tuple of something, or time round a loop.
@@ -1570,7 +1572,7 @@ impl Around {
     /// What is around a value that its reader wants in canonical order.
     fn wanted_in_order() -> Around {
         Around {
-            in_order: true,
+            want: Want::Canonical,
             searched: false,
             repeated: false,
         }
@@ -1610,6 +1612,21 @@ enum Want {
 }
 
 impl Want {
+    /// The stronger of this and `other`: what is wanted by readers that want either. Any
+    /// order is the weakest, then a sorted one, then canonical order.
+    fn stronger(self, other: Want) -> Want {
+        let strength = |want: Want| match want {
+            Want::Any | Want::Repeated => 0,
+            Want::Sorted => 1,
+            Want::Canonical => 2,
+        };
+        if strength(other) > strength(self) {
+            other
+        } else {
+            self
+        }
+    }
+
     /// The order that what can only give canonical order or leave its tuples as they
     /// come gives what is wanted so: canonical order is a sorted one.
     fn as_comes(self) -> Order {
@@ -1949,8 +1966,8 @@ impl<'a> FunctionBuilder<'a> {
             exits: Vec::new(),
             outer_scope: None,
             last_read: Vec::new(),
-            loose_locals: Vec::new(),
-            may_be_loose: Vec::new(),
+            local_orders: HashMap::new(),
+            local_wants: HashMap::new(),
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -2632,32 +2649,41 @@ impl<'a> FunctionBuilder<'a> {
             }
             end.reads_local(id)
         };
-        // Whether each binding can be left as it comes: the last first, as whether one can
-        // says what those it is computed from can be.
-        let mut loose = vec![false; parts.len()];
+        // What each binding is wanted in by all that reads it: the last first, as what one is
+        // wanted in says what those it is computed from are.
+        let mut wants = vec![Want::Canonical; parts.len()];
         for k in (0..parts.len()).rev() {
             let Part::Let(id, _) = &parts[k] else {
                 continue;
             };
+            if !self.is_relation_of_no_key_to_check(*id) {
+                continue;
+            }
             let mut searches = 0;
-            let mut read_as = |expr: &hir::Expr, in_order: bool| {
+            let mut read_as = |expr: &hir::Expr, want: Want| {
                 let around = Around {
-                    in_order,
+                    want,
                     ..Around::wanted_in_order()
                 };
-                self.reads_only_loosely(*id, expr, around, &mut searches)
+                self.read_want(*id, expr, around, &mut searches)
             };
-            let later =
-                parts[k + 1..]
-                    .iter()
-                    .zip(&loose[k + 1..])
-                    .all(|(part, is_loose)| match part {
-                        Part::Let(bound, value) => bound != id && read_as(value, !is_loose),
-                        Part::Site(_) => true,
-                    });
-            loose[k] = later
-                && read_as(end, matches!(want, Want::Canonical | Want::Sorted))
-                && self.is_relation_of_no_key_to_check(*id);
+            let mut wanted = Want::Any;
+            for (part, &later) in parts[k + 1..].iter().zip(&wants[k + 1..]) {
+                if let Part::Let(bound, value) = part {
+                    wanted = if bound == id {
+                        Want::Canonical
+                    } else {
+                        wanted.stronger(read_as(value, later))
+                    };
+                }
+            }
+            // What the end is computed as: canonical order, unless wanted otherwise.
+            let end_want = if want == Want::Repeated {
+                Want::Canonical
+            } else {
+                want
+            };
+            wants[k] = wanted.stronger(read_as(end, end_want));
         }
         let mut alive: Vec<(hir::LocalId, lir::Place, hir::Type)> = Vec::new();
         for (k, part) in parts.iter().enumerate() {
@@ -2670,7 +2696,7 @@ impl<'a> FunctionBuilder<'a> {
                         .filter(|bound| !read_after(k, *bound))
                         .collect();
                     let (slot, ty) = self.reading_last(value, ending.into_iter(), |this| {
-                        this.let_bound(*id, value, loose[k], cx)
+                        this.let_bound(*id, value, wants[k], cx)
                     });
                     if cx.points(&ty) {
                         alive.push((*id, slot, ty));
@@ -2701,7 +2727,7 @@ impl<'a> FunctionBuilder<'a> {
         &mut self,
         id: hir::LocalId,
         value: &hir::Expr,
-        may_be_loose: bool,
+        want: Want,
         cx: &mut Lowering,
     ) -> (lir::Place, hir::Type) {
         self.bound_in_loops(&[id]);
@@ -2737,13 +2763,9 @@ impl<'a> FunctionBuilder<'a> {
         let slot = self.slot(layout.clone());
         self.lets.push((slot.clone(), ty.clone()));
         self.nested_scope(cx, |this, cx| {
-            let (src, order) = if may_be_loose {
-                this.loose_place(value, cx)
-            } else {
-                (this.place(value, cx), Order::Canonical)
-            };
+            let (src, order) = this.given(value, want, cx);
             if order != Order::Canonical {
-                this.loose_locals.push(id);
+                this.local_orders.insert(id, order);
             }
             this.check_keys(&hir::Target::Local(id), &src, cx);
             this.insts.push(lir::Inst::Copy {
@@ -5346,10 +5368,10 @@ impl<'a> FunctionBuilder<'a> {
     /// is to a local variable that nothing reads otherwise, as it then says.
     fn assigned_value(&mut self, assignment: &hir::Assignment, cx: &mut Lowering) -> lir::Place {
         match &assignment.target {
-            hir::Target::Local(id) if self.may_be_loose.contains(id) => {
-                let (place, order) = self.loose_place(&assignment.value, cx);
+            hir::Target::Local(id) if let Some(&want) = self.local_wants.get(id) => {
+                let (place, order) = self.given(&assignment.value, want, cx);
                 if order != Order::Canonical {
-                    self.loose_locals.push(*id);
+                    self.local_orders.insert(*id, order);
                 }
                 place
             }
@@ -5357,22 +5379,25 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Note which of `block`'s local variables can be left with their tuples in no
-    /// particular order: a relation with no key to check, assigned only where it is
-    /// declared, that the block, and `end`, its value if it has one, read only in a way
-    /// that makes order no use (see [`FunctionBuilder::reads_only_loosely`]). The last are
-    /// first, as whether one can be says what those it is computed from can be.
+    /// Note which of `block`'s local variables can be left out of canonical order, and what
+    /// all that reads each wants instead: a relation with no key to check, assigned only
+    /// where it is declared, that the block, and `end`, its value if it has one, read only
+    /// in ways that want any order, or a sorted one (see [`FunctionBuilder::read_want`]).
+    /// The last are first, as what one is wanted in says what those it is computed from
+    /// are.
     fn note_loose_locals(&mut self, block: &hir::Block, end: Option<&hir::Expr>) {
         for id in block.locals.iter().rev() {
+            if !self.is_relation_of_no_key_to_check(*id) || block.times_assigned(*id) != 1 {
+                continue;
+            }
             let mut searches = 0;
-            let only = self.is_relation_of_no_key_to_check(*id)
-                && block.times_assigned(*id) == 1
-                && self.block_reads_only_loosely(*id, block, false, &mut searches)
-                && end.is_none_or(|end| {
-                    self.reads_only_loosely(*id, end, Around::wanted_in_order(), &mut searches)
-                });
-            if only {
-                self.may_be_loose.push(*id);
+            let mut want = self.block_read_want(*id, block, false, &mut searches);
+            if let Some(end) = end {
+                let read = self.read_want(*id, end, Around::wanted_in_order(), &mut searches);
+                want = want.stronger(read);
+            }
+            if want != Want::Canonical {
+                self.local_wants.insert(*id, want);
             }
         }
     }
@@ -5691,11 +5716,11 @@ impl<'a> FunctionBuilder<'a> {
             .expect("a local variable is placed before it is used")
             .value
             .clone();
-        let order = if self.loose_locals.contains(&id) {
-            Order::Loose
-        } else {
-            Order::Canonical
-        };
+        let order = self
+            .local_orders
+            .get(&id)
+            .copied()
+            .unwrap_or(Order::Canonical);
         (place, order)
     }
 
@@ -5752,6 +5777,10 @@ impl<'a> FunctionBuilder<'a> {
     fn sorted_order(&self, expr: &hir::Expr, cx: &mut Lowering) -> Order {
         match expr {
             hir::Expr::At(_, inner) => self.sorted_order(inner, cx),
+            hir::Expr::Local(id) => match self.local_orders.get(id) {
+                Some(&order @ Order::SortedBy(_)) => order,
+                _ => Order::Canonical,
+            },
             hir::Expr::Rename(..) => {
                 let view = self.view_of(expr);
                 let order = self.sorted_order(view.inner, cx);
@@ -5836,6 +5865,15 @@ impl<'a> FunctionBuilder<'a> {
                     self.at(outer, cx);
                 }
                 given
+            }
+            hir::Expr::Local(id) => {
+                let (place, order) = self.local_place(*id);
+                if matches!(order, Order::Loose | Order::Repeated) {
+                    let ty = self.locals[id.0].ty.clone();
+                    (self.canonical(place, order, &ty, cx), Order::Canonical)
+                } else {
+                    (place, order)
+                }
             }
             hir::Expr::Rename(..) => self.renamed_in_order(expr, cx),
             hir::Expr::Combine(combination, lhs, rhs) => {
@@ -6034,31 +6072,39 @@ impl<'a> FunctionBuilder<'a> {
                 .all(|key| key.len() == attribute_names(&local.ty).count())
     }
 
-    /// Whether everything in `expr` that reads the binding or local variable `id` reads it in
-    /// a way that makes it no use to have it in canonical order, around as `around` says, so
-    /// that its value is best not sorted. `searches` counts the joins and semijoins that read
-    /// it: what is searched more than once is better sorted once.
-    fn reads_only_loosely(
+    /// What the reads of the local variable `id` in `expr`, with `around` around it, want
+    /// of its order, all of them: any order, a sorted one, or canonical order. A read wants
+    /// what is around it, and canonical order if it is searched more than once, or for each
+    /// tuple of something, as sorting once is less work then, and if it wants a sorted order
+    /// again for each tuple, or time round a loop, as each might sort it into another.
+    fn read_want(
         &self,
         id: hir::LocalId,
         expr: &hir::Expr,
         around: Around,
         searches: &mut usize,
-    ) -> bool {
+    ) -> Want {
         match expr {
             hir::Expr::Local(read) if *read == id => {
                 *searches += usize::from(around.searched);
-                !around.in_order && (!around.searched || !around.repeated) && *searches <= 1
+                if *searches > 1
+                    || (around.searched && around.repeated)
+                    || (around.want == Want::Sorted && around.repeated)
+                {
+                    Want::Canonical
+                } else {
+                    around.want
+                }
             }
-            hir::Expr::At(_, inner) => self.reads_only_loosely(id, inner, around, searches),
-            hir::Expr::Let(bound, ..) if *bound == id => false,
+            hir::Expr::At(_, inner) => self.read_want(id, inner, around, searches),
+            hir::Expr::Let(bound, ..) if *bound == id => Want::Canonical,
             hir::Expr::Let(_, value, body) => {
                 let value_around = Around {
-                    in_order: true,
+                    want: Want::Canonical,
                     ..around
                 };
-                self.reads_only_loosely(id, value, value_around, searches)
-                    && self.reads_only_loosely(id, body, around, searches)
+                self.read_want(id, value, value_around, searches)
+                    .stronger(self.read_want(id, body, around, searches))
             }
             _ => {
                 let loosely = self.reads_loosely(expr);
@@ -6067,18 +6113,52 @@ impl<'a> FunctionBuilder<'a> {
                     expr,
                     hir::Expr::And(..) | hir::Expr::Semijoin(..) | hir::Expr::Antijoin(..)
                 );
-                let mut only = true;
+                let mut wanted = Want::Any;
                 expr.for_each_child(|child, _| {
                     let is_loose = loosely.iter().any(|operand| core::ptr::eq(*operand, child));
+                    let want = if is_loose && passes_order_down {
+                        self.passed_down(expr, around.want)
+                    } else if is_loose {
+                        Want::Any
+                    } else if matches!(expr, hir::Expr::Combine(..))
+                        && around.want != Want::Canonical
+                    {
+                        // Merged in whatever order both come in (`FunctionBuilder::combine`).
+                        Want::Sorted
+                    } else {
+                        Want::Canonical
+                    };
                     let child_around = Around {
-                        in_order: !is_loose || (around.in_order && passes_order_down),
+                        want,
                         searched: around.searched || searches_it,
                         repeated: around.repeated || expr.computes_again(child),
                     };
-                    only = only && self.reads_only_loosely(id, child, child_around, searches);
+                    wanted = wanted.stronger(self.read_want(id, child, child_around, searches));
                 });
-                only
+                wanted
             }
+        }
+    }
+
+    /// What `expr`, which makes what it reads in the order it reads it, asks its operand,
+    /// asked `want` itself, as it is computed: what it is asked, but canonical order for a
+    /// sorted one, of what isn't kept in any but that (`FunctionBuilder::sorted_place`): a
+    /// projection, and an extension that replaces an attribute.
+    fn passed_down(&self, expr: &hir::Expr, want: Want) -> Want {
+        let keeps_sorted = match expr {
+            hir::Expr::Remove(..) => false,
+            hir::Expr::Extend(operand, _, attributes) => match self.type_of(operand) {
+                hir::Type::Relation(heading) => {
+                    attributes.keys().all(|name| heading.get(name).is_none())
+                }
+                _ => false,
+            },
+            _ => true,
+        };
+        if want == Want::Sorted && !keeps_sorted {
+            Want::Canonical
+        } else {
+            want
         }
     }
 
@@ -6097,17 +6177,19 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// As [`FunctionBuilder::reads_only_loosely`], of what `block` reads, its statements run
-    /// again if `repeated`. What a declaration of a local variable that can be left as it
-    /// comes is computed from needn't be in order; `block`'s later ones are known by now.
-    fn block_reads_only_loosely(
+    /// As [`FunctionBuilder::read_want`], of what `block` reads, its statements run again if
+    /// `repeated`. What a declaration of a local variable that can be left out of canonical
+    /// order is computed from is read as that is wanted; `block`'s later ones are known by
+    /// now.
+    fn block_read_want(
         &self,
         id: hir::LocalId,
         block: &hir::Block,
         repeated: bool,
         searches: &mut usize,
-    ) -> bool {
-        block.statements.iter().all(|(_, statement)| {
+    ) -> Want {
+        let mut wanted = Want::Any;
+        for (_, statement) in &block.statements {
             let again = repeated
                 || matches!(
                     statement,
@@ -6117,18 +6199,26 @@ impl<'a> FunctionBuilder<'a> {
                 repeated,
                 ..Around::wanted_in_order()
             };
-            let mut reads = |expr: &hir::Expr, around: Around| {
-                self.reads_only_loosely(id, expr, around, &mut *searches)
-            };
+            let mut reads =
+                |expr: &hir::Expr, around: Around| self.read_want(id, expr, around, &mut *searches);
             let own = match statement {
-                hir::Statement::Assign(assignments) => assignments.iter().all(|assignment| {
-                    let in_order = !matches!(
-                        &assignment.target,
-                        hir::Target::Local(target) if self.may_be_loose.contains(target)
-                    );
-                    reads(&assignment.value, Around { in_order, ..around })
-                }),
-                hir::Statement::Call(call) => call.args.values().all(|arg| reads(arg, around)),
+                hir::Statement::Assign(assignments) => {
+                    assignments.iter().fold(Want::Any, |wanted, assignment| {
+                        let want = match &assignment.target {
+                            hir::Target::Local(target) => self
+                                .local_wants
+                                .get(target)
+                                .copied()
+                                .unwrap_or(Want::Canonical),
+                            _ => Want::Canonical,
+                        };
+                        wanted.stronger(reads(&assignment.value, Around { want, ..around }))
+                    })
+                }
+                hir::Statement::Call(call) => call
+                    .args
+                    .values()
+                    .fold(Want::Any, |wanted, arg| wanted.stronger(reads(arg, around))),
                 // What a `return` gives is the operator's value, in its order.
                 hir::Statement::If(condition, ..)
                 | hir::Statement::For(_, condition, _)
@@ -6146,13 +6236,14 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Statement::Transaction(..)
                 | hir::Statement::Return(None)
                 | hir::Statement::Leave(_)
-                | hir::Statement::Iterate(_) => true,
+                | hir::Statement::Iterate(_) => Want::Any,
             };
-            own && statement
-                .blocks()
-                .iter()
-                .all(|inner| self.block_reads_only_loosely(id, inner, again, &mut *searches))
-        })
+            wanted = wanted.stronger(own);
+            for inner in statement.blocks() {
+                wanted = wanted.stronger(self.block_read_want(id, inner, again, &mut *searches));
+            }
+        }
+        wanted
     }
 
     /// How `expr`, a relation or a tuple, is read through any renames around it.
