@@ -5963,8 +5963,17 @@ unsafe fn in_canonical_order(tuples: *const u8, count: usize, desc: &TypeDesc) -
     // SAFETY: guaranteed by the caller.
     unsafe {
         let size = desc.element().size;
+        let pair = |i: usize| (tuples.add((i - 1) * size), tuples.add(i * size));
+        // Tuples of integers, which many are, compared as runs of them with nothing else to
+        // ask of each pair.
+        if desc.integers > 0 {
+            return (1..count).all(|i| {
+                let (earlier, later) = pair(i);
+                compare_integers(earlier, later, desc.integers).is_lt()
+            });
+        }
         (1..count).all(|i| {
-            let (earlier, later) = (tuples.add((i - 1) * size), tuples.add(i * size));
+            let (earlier, later) = pair(i);
             compare_tuples(earlier, later, desc).is_lt()
         })
     }
