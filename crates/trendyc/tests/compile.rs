@@ -10208,6 +10208,13 @@ operator main{} [
     call debug_value{v: count{r: (r extend { a := 60 div k }) union (s extend { a := 60 div k })}};
     /* Replacing an attribute, which can make two tuples equal. */
     call debug_value{v: count{r: (r replace { v := k div 2 }) union (s replace { v := k div 2 })}};
+    /* Joined on `z`, which sorts last by name: by `z`, then `v`, then `w`. */
+    call debug_value{v: count{r: ((r rename {k as z}) join (s rename {k as z, v as w})) union ((r rename {k as z}) join (s rename {k as z, v as w}))}};
+    /* A product, by its left operand's order, then its right's. */
+    call debug_value{v: count{r: ((r rename {k as p, v as q}) times (series{from: 1, to: 2} rename {value as a})) union ((r rename {k as p, v as q}) times (series{from: 1, to: 2} rename {value as a}))}};
+    /* Semijoins, in their left operand's order. */
+    call debug_value{v: count{r: ((r rename {v as a}) matching s) union ((s rename {v as a}) matching r)}};
+    call debug_value{v: count{r: ((r rename {v as a}) not matching s) union ((s rename {v as a}) not matching r)}};
     /* A disjoint union's operands that share a tuple. */
     call debug_value{v: count{r: (r rename {v as a}) d_union (s rename {v as a})}};
 ];
@@ -10216,7 +10223,7 @@ operator main{} [
     assert_eq!(ran.code, 1, "{}", ran.stderr);
     let lines: Vec<&str> = ran.stderr.lines().collect();
     assert_eq!(
-        lines[..10],
+        lines[..14],
         [
             "9",
             "3",
@@ -10228,11 +10235,15 @@ operator main{} [
             "2",
             "9",
             "9",
+            "3",
+            "12",
+            "3",
+            "6",
         ],
         "{}",
         ran.stderr
     );
-    assert!(lines[10].starts_with("error[R0006]"), "{}", ran.stderr);
+    assert!(lines[14].starts_with("error[R0006]"), "{}", ran.stderr);
 }
 
 /// A rename named by a `const` reads what it renames in place, but only if that is already

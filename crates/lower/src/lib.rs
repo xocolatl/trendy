@@ -775,6 +775,10 @@ struct Lowering {
     sort_ids: HashMap<Vec<String>, SortId>,
     /// The descriptor of each relation type sorted by each such order, built once.
     sorted_descriptors: HashMap<(hir::Type, SortId), lir::DataId>,
+    /// Each list of positions a descriptor's sort order has, made once, so that one sort
+    /// order is one data object, whatever its attributes are named
+    /// ([`lir::Arrangement::Sorted`]).
+    sort_positions: HashMap<Vec<u64>, lir::DataId>,
     /// An empty constant, for addresses that are never read.
     empty: Option<lir::DataId>,
     /// The functions lowered, by id, which counts up from 0: one is added
@@ -826,6 +830,7 @@ impl Lowering {
             sort_orders: Vec::new(),
             sort_ids: HashMap::new(),
             sorted_descriptors: HashMap::new(),
+            sort_positions: HashMap::new(),
             empty: None,
             functions: BTreeMap::new(),
             functions_of: HashMap::new(),
@@ -1240,17 +1245,24 @@ impl Lowering {
         let hir::Type::Relation(heading) = ty else {
             unreachable!("only a relation is sorted");
         };
-        let positions = self.sort_orders[id.0]
+        let positions: Vec<u64> = self.sort_orders[id.0]
             .iter()
             .map(|name| {
                 let position = heading
                     .attributes()
                     .position(|(a, _)| a == name)
                     .expect("a sort order names the relation's attributes");
-                lir::Field::Usize(len(position))
+                len(position)
             })
             .collect();
-        let positions = self.constant(positions);
+        let positions = if let Some(&made) = self.sort_positions.get(&positions) {
+            made
+        } else {
+            let fields = positions.iter().map(|&p| lir::Field::Usize(p)).collect();
+            let made = self.constant(fields);
+            self.sort_positions.insert(positions, made);
+            made
+        };
         let by_name = self.descriptor(ty);
         let mut fields = self.data[by_name.0].fields.clone();
         fields[DESCRIPTOR_INTEGERS] = lir::Field::Usize(0);
@@ -1277,6 +1289,63 @@ impl Lowering {
             .iter()
             .map(|own| read_as[own.as_str()].to_string())
             .collect();
+        self.sorted_by(names)
+    }
+
+    /// The order of what `view` reads, of what it reads through its renames in `order`:
+    /// sorted by the same attributes, as they are read, if it is sorted.
+    fn read_order(&mut self, order: Order, view: &View) -> Order {
+        match order {
+            Order::Canonical | Order::SortedBy(_) => self.renamed_order(order, view),
+            Order::Loose | Order::Repeated => order,
+        }
+    }
+
+    /// The order a join of what `lhs` and `rhs` read, in `lhs_order` and `rhs_order`, is
+    /// made in where a sorted one will do: by its common attributes, which the runtime
+    /// merges it on, in the order it compares them, then the others of each operand, in
+    /// its order, as each run of tuples that agree on them pairs one of the left's, in its
+    /// order, with each of the right's, in its (see `trendy_runtime::Matches`). With none in
+    /// common, that is the left's order, then the right's, as a product is written. One
+    /// that reads a much larger operand as it is, unsorted, or of a loose operand, sorts its
+    /// tuples into it, which costs no more than into canonical order. Of a loose operand,
+    /// whose runs are in no particular order, it is canonical order.
+    fn joined_order(
+        &mut self,
+        lhs: &View,
+        rhs: &View,
+        lhs_order: Order,
+        rhs_order: Order,
+    ) -> Order {
+        if [lhs_order, rhs_order]
+            .iter()
+            .any(|order| matches!(order, Order::Loose | Order::Repeated))
+        {
+            return Order::Canonical;
+        }
+        let read = |this: &mut Lowering, order: Order, view: &View| {
+            let read_order = this.read_order(order, view);
+            let hir::Type::Relation(heading) = &view.named else {
+                unreachable!("only a relation is sorted");
+            };
+            this.sort_names(read_order, heading)
+        };
+        let common: Vec<String> = lhs
+            .shape
+            .names
+            .keys()
+            .filter(|name| rhs.shape.names.contains_key(*name))
+            .cloned()
+            .collect();
+        let mut names = common.clone();
+        for name in read(self, lhs_order, lhs)
+            .into_iter()
+            .chain(read(self, rhs_order, rhs))
+        {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
         self.sorted_by(names)
     }
 
@@ -5706,6 +5775,23 @@ impl<'a> FunctionBuilder<'a> {
                 };
                 cx.extended_order(order, &heading, attributes)
             }
+            hir::Expr::And(lhs, rhs)
+                if matches!(self.type_of(lhs), hir::Type::Relation(_))
+                    && self.lookup_in(lhs, rhs).is_none()
+                    && self.lookup_in(rhs, lhs).is_none()
+                    && several_joined(lhs, rhs).is_none()
+                    && !joins_a_closure(lhs, rhs) =>
+            {
+                let (left, right) = (self.view_as_it_is(lhs), self.view_as_it_is(rhs));
+                let (lhs_order, rhs_order) =
+                    (self.sorted_order(lhs, cx), self.sorted_order(rhs, cx));
+                cx.joined_order(&left, &right, lhs_order, rhs_order)
+            }
+            hir::Expr::Semijoin(lhs, _) | hir::Expr::Antijoin(lhs, _) => {
+                let left = self.view_as_it_is(lhs);
+                let order = self.sorted_order(lhs, cx);
+                cx.read_order(order, &left)
+            }
             _ => Order::Canonical,
         }
     }
@@ -5761,6 +5847,9 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Extend(operand, _, attributes) => {
                 self.extend(expr, operand, attributes, Want::Sorted, cx)
             }
+            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Want::Sorted, cx),
+            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, Want::Sorted, cx),
+            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, Want::Sorted, cx),
             _ => (self.place(expr, cx), Order::Canonical),
         }
     }
@@ -8071,28 +8160,32 @@ impl<'a> FunctionBuilder<'a> {
     ) -> (lir::Place, Order) {
         let result_ty = lhs.named.and(&rhs.named);
         let joining = Joining::of(&lhs.shape, &rhs.shape, &result_ty, cx);
-        let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
-            lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
+        let order = match want {
+            Want::Sorted => cx.joined_order(lhs, rhs, lhs_order, rhs_order),
+            _ => want.as_comes(),
+        };
+        let described = |ty: &hir::Type, order: Order, cx: &mut Lowering| {
+            lir::Place::whole(lir::Base::Data(cx.described(ty, order)))
         };
         let dst = self.slot(cx.layout(&result_ty));
         let args = vec![
             dst.clone(),
             lhs_place,
             rhs_place,
-            descriptor(&result_ty, cx),
-            descriptor(&lhs.ty, cx),
-            descriptor(&rhs.ty, cx),
+            described(&result_ty, order, cx),
+            described(&lhs.ty, lhs_order, cx),
+            described(&rhs.ty, rhs_order, cx),
             joining.sources,
             joining.common,
             joining.common_count,
-            orders_constant(lhs_order, rhs_order, want.as_comes(), 0, cx),
+            orders_constant(lhs_order, rhs_order, order, 0, cx),
         ];
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::And,
             args,
         });
         self.scoped = true;
-        (dst, want.as_comes())
+        (dst, order)
     }
 
     /// `expr`, the array of the tuples of `relation`, in the order of the
@@ -8343,16 +8436,16 @@ impl<'a> FunctionBuilder<'a> {
         let common = common_attributes(&left.shape, &right.shape, cx);
         let common_count = usize_constant(len(common.len()), cx);
         let negated = usize_constant(u64::from(negated), cx);
-        let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
-            lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
+        let described = |ty: &hir::Type, order: Order, cx: &mut Lowering| {
+            lir::Place::whole(lir::Base::Data(cx.described(ty, order)))
         };
         let dst = self.slot(cx.layout(&left.ty));
         let args = vec![
             dst.clone(),
             lhs_place.clone(),
             rhs_place.clone(),
-            descriptor(&left.ty, cx),
-            descriptor(&right.ty, cx),
+            described(&left.ty, lhs_order, cx),
+            described(&right.ty, rhs_order, cx),
             lir::Place::whole(lir::Base::Data(cx.constant(common))),
             common_count,
             negated,
@@ -8366,7 +8459,7 @@ impl<'a> FunctionBuilder<'a> {
         self.operand_read(left.inner, &lhs_place, &left.ty, cx);
         self.operand_read(right.inner, &rhs_place, &right.ty, cx);
         if left.shape.is_as_laid_out() {
-            return (dst, lhs_order);
+            return (dst, cx.read_order(lhs_order, &left));
         }
         let reshaped = self.reshape(
             &left.ty,
@@ -8541,6 +8634,13 @@ impl<'a> FunctionBuilder<'a> {
         {
             return (self.looked_up(operand, key, cx), Order::Canonical);
         }
+        // What a closure is matched with, or matched with it, is joined in canonical order,
+        // as `sorted_order` says.
+        let want = if want == Want::Sorted && joins_a_closure(lhs, rhs) {
+            Want::Canonical
+        } else {
+            want
+        };
         let lhs_ty = self.type_of(lhs);
         let rhs_ty = self.type_of(rhs);
         if let hir::Type::Tuple(_) = lhs_ty {
@@ -9498,10 +9598,9 @@ fn common_attributes(lhs: &Shape, rhs: &Shape, cx: &mut Lowering) -> Vec<lir::Fi
         .collect()
 }
 
-/// The constant of the runtime's `LOOSE_` bits for an operation of operands in the orders
-/// `lhs` and `rhs`, whose result is to be in the order `result`.
-/// The `LOOSE_` flags of an operation on relations in the orders `lhs` and `rhs`, given
-/// their types' descriptors, by name, of a result wanted as `result` says, with `flags`.
+/// The `LOOSE_` flags of an operation on relations in the orders `lhs` and `rhs`, each given
+/// with the descriptor of its order ([`Lowering::described`]), of a result wanted as
+/// `result` says, with `flags`.
 fn orders_constant(
     lhs: Order,
     rhs: Order,
@@ -9509,10 +9608,15 @@ fn orders_constant(
     flags: u64,
     cx: &mut Lowering,
 ) -> lir::Place {
-    // An operand sorted otherwise than its descriptor says is in no particular order to
-    // what reads it by that, and a result is sorted as its own descriptor says, unless
-    // wanted in no particular order.
-    let operand = |order: Order, bit: u64| if order == Order::Canonical { 0 } else { bit };
+    // An operand is sorted as its descriptor says, unless it is loose, and a result is sorted
+    // as its own descriptor says, unless wanted in no particular order.
+    let operand = |order: Order, bit: u64| {
+        if matches!(order, Order::Loose | Order::Repeated) {
+            bit
+        } else {
+            0
+        }
+    };
     let result = if result == Order::Loose {
         lir::LOOSE_RESULT
     } else {
@@ -9522,6 +9626,11 @@ fn orders_constant(
         operand(lhs, lir::LOOSE_LHS) | operand(rhs, lir::LOOSE_RHS) | result | flags,
         cx,
     )
+}
+
+/// Whether a join of `lhs` and `rhs` joins a transitive closure.
+fn joins_a_closure(lhs: &hir::Expr, rhs: &hir::Expr) -> bool {
+    arcs_of_closure(lhs).is_some() || arcs_of_closure(rhs).is_some()
 }
 
 /// The relation whose transitive closure `expr` is, if it is one.

@@ -2683,6 +2683,17 @@ with some tuples the same, which `FunctionBuilder::given` sends where each is co
 - **A restriction** keeps its operand's order, as it always has (`InOrderOf`), and asks its
   operand for what it is asked, unless its condition can fail. Only one in canonical order
   finds runs by binary search (`equal_runs`).
+- **A join** is merged on its common attributes, each run of tuples that agree on them
+  pairing one of the left operand's, in its order, with each of the right's, in its. So,
+  where a sorted order will do, it is made by the common attributes, then the left's
+  others in its order, then the right's in its (`Lowering::joined_order`), and with none in
+  common, the left's order, then the right's, which `product` writes as it makes it. One
+  that reads a much larger operand as it is, unsorted, sorts its result into that order,
+  which costs what canonical order would. Each operand is given with its own order's
+  descriptor, and flagged loose only if it is (`orders_constant`), so one whose common
+  attributes come first in its order needn't be sorted. A semijoin's tuples are in its left
+  operand's order. A join of a transitive closure, a lookup and a join of several are in
+  canonical order.
 - **A combination** that nothing wants in canonical order, such as a union only counted,
   merges its operands in one order, the result's (`FunctionBuilder::combine`). It works out
   first what order each would come in, without computing it
@@ -2700,7 +2711,9 @@ with some tuples the same, which `FunctionBuilder::given` sends where each is co
 
 `loose_read` checks each relation's arrangement (`lir::Arrangement`): canonical, loose, or
 sorted as a descriptor says, which it reads from the descriptor itself
-(`lir::SORTED_BY_FIELD`). What sorts or makes a relation arranges it as its descriptor says.
+(`lir::SORTED_BY_FIELD`). A sort order is known by its list of positions, which lowering
+makes one data object of (`Lowering::sort_positions`), so a relation through a rename that
+leaves each attribute where it is is arranged as its new descriptor says too. What sorts or makes a relation arranges it as its descriptor says.
 `trendy_rt_combine` has to be given both operands as its descriptor says. One read as
 canonical, or with another's descriptor, fails, and so does one arranged one way on one way
 through the function and another way on another.

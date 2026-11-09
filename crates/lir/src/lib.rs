@@ -297,7 +297,10 @@ pub enum Arrangement {
     Canonical,
     /// In no particular order.
     Loose,
-    /// Sorted as the descriptor in this data object says, otherwise than by name.
+    /// Sorted otherwise than by name, by the attributes at the positions in this data
+    /// object, a descriptor's sort order: a relation sorted so is described by any
+    /// descriptor of its layout with that sort order, whatever its attributes are named,
+    /// as through a rename that leaves each where it is.
     Sorted(DataId),
 }
 
@@ -327,11 +330,11 @@ fn arranged_as(place: Option<&Place>, data: &[Data]) -> Arrangement {
         base: Base::Data(id),
         ..
     }) = place
-        && let Some(Field::Address(_)) = data
+        && let Some(&Field::Address(positions)) = data
             .get(id.0)
             .and_then(|data| data.fields.get(SORTED_BY_FIELD))
     {
-        return Arrangement::Sorted(*id);
+        return Arrangement::Sorted(positions);
     }
     Arrangement::Canonical
 }
@@ -538,7 +541,8 @@ pub const ORDERED_RESULT: u64 = 8;
 
 /// Where a descriptor, laid out as `trendy_runtime::TypeDesc`, has its sort order among
 /// its fields: a [`Field::Address`] of the positions of the attributes a relation's tuples
-/// are sorted by, or a null [`Field::Usize`] if by name.
+/// are sorted by, or a null [`Field::Usize`] if by name. Lowering makes one data object for
+/// each list of positions, so that two descriptors of one sort order have the same one.
 pub const SORTED_BY_FIELD: usize = 6;
 
 /// `found` with the slot `place` reads, if it is among `released`.
