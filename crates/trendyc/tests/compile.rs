@@ -10375,6 +10375,43 @@ operator main{} [
     assert!(lines[3].ends_with(":10:5"), "{}", ran.stderr);
 }
 
+/// Two values can tie in a type's order of another representation than the stored one, as
+/// rounding in a conversion between approximate numbers can make them. Of those, `max` and
+/// `min` give the first, in canonical order, folded when compiling as computed when running:
+/// folding once gave `max`'s last.
+#[test]
+fn of_values_that_tie_min_and_max_give_the_first_folded_or_not() {
+    let source = "uses { trendy.process };
+
+/* Ordered by half its value, which two values can share. */
+type halved {
+    { a: integer },
+    { h: integer }
+        to { a := h * 2 }
+        from { h := a div 2 },
+    order [asc h],
+};
+
+operator main{} [
+    const one := length{a: arguments} + 1;
+    const folded := relation { { p: halved{a: 2} }, { p: halved{a: 3} } };
+    const computed := relation { { p: halved{a: 2 * one} }, { p: halved{a: 3 * one} } };
+    call debug_value{v: max{r: relation { { p: halved{a: 2} }, { p: halved{a: 3} } }, of: p}};
+    call debug_value{v: max{r: computed, of: p}};
+    call debug_value{v: min{r: relation { { p: halved{a: 2} }, { p: halved{a: 3} } }, of: p}};
+    call debug_value{v: min{r: computed, of: p}};
+];
+";
+    let ran = ran_source("ties_folded", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr.lines().collect::<Vec<_>>(),
+        ["halved{a: 2}"; 4],
+        "{}",
+        ran.stderr
+    );
+}
+
 /// A rename named by a `const` reads what it renames in place, but only if that is already
 /// computed: a rename of what could fail is computed where it was written, before what comes
 /// after it, as what it fails with says.

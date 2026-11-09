@@ -1794,7 +1794,10 @@ operator main{} [
 **`max{r: any relation, of: T per r}: T`**, for `T` of `any ordered`, are
 the least and the greatest value of `of` for a tuple of `r`, by `<`:
 Tutorial D's `MIN` and `MAX`, and SQL's. `of` can be of any ordered type,
-so text too, by code point. Of no tuples, neither has a value, so either
+so text too, by code point. Two values of a type of the program's own can tie in
+an order of a representation other than the stored one, as rounding in a
+conversion between approximate numbers can make them; of those, each gives
+the first in canonical order, whether computed when compiling or running. Of no tuples, neither has a value, so either
 is an error, when compiling if the relation is known then, and otherwise
 when the program runs (R0010); SQL's would be `NULL`, which trendy doesn't
 have. A group's image relation has no tuples when nothing matches the

@@ -1851,14 +1851,11 @@ impl ReadOnlyBuiltin {
                 }
                 other => panic!("`length` of {other:?}"),
             },
-            ReadOnlyBuiltin::Min => values()
-                .min_by(|a, b| compare(a, b, converted))
-                .cloned()
-                .ok_or(BuiltinFailure::NoTuples),
-            ReadOnlyBuiltin::Max => values()
-                .max_by(|a, b| compare(a, b, converted))
-                .cloned()
-                .ok_or(BuiltinFailure::NoTuples),
+            ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max => {
+                first_extreme(values(), converted, self == ReadOnlyBuiltin::Max)
+                    .cloned()
+                    .ok_or(BuiltinFailure::NoTuples)
+            }
             ReadOnlyBuiltin::Sum | ReadOnlyBuiltin::Product => {
                 let of = relation().heading.get("of").expect("`of` is an attribute");
                 let folded = if self == ReadOnlyBuiltin::Sum {
@@ -4254,6 +4251,25 @@ impl Converted {
                 .expect("sema converts each value an order compares in another representation"),
         }
     }
+}
+
+/// The least of `values`, or the greatest if `greatest`, by [`compare`]: of those that tie
+/// in their type's order, the first, in the order they come, canonical order, as the runtime
+/// keeps it, where `max_by` would give the last.
+fn first_extreme<'v>(
+    values: impl Iterator<Item = &'v Value>,
+    converted: &Converted,
+    greatest: bool,
+) -> Option<&'v Value> {
+    values.reduce(|kept, value| {
+        let ordering = compare(value, kept, converted);
+        let beyond = if greatest {
+            ordering.is_gt()
+        } else {
+            ordering.is_lt()
+        };
+        if beyond { value } else { kept }
+    })
 }
 
 /// The order of two values of the same ordered type: `false` before
