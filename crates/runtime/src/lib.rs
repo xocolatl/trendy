@@ -1355,7 +1355,10 @@ pub unsafe extern "C" fn trendy_rt_reshape(
                 }
             }
         };
-        let (bytes, len) = if orders.read_unaligned() & LOOSE_RESULT == 0 {
+        let orders = orders.read_unaligned();
+        let (bytes, len) = if orders & ORDERED_RESULT != 0 {
+            made_in_order(count, result, write)?
+        } else if orders & LOOSE_RESULT == 0 {
             made_canonical(count, result, write)?
         } else {
             made_loose(count, result, write)?
@@ -1374,17 +1377,18 @@ pub const LOOSE_RHS: usize = 2;
 /// In the `orders` of a join or a reshape: nothing depends on its result's order, so it
 /// is left as it comes, rather than sorted.
 pub const LOOSE_RESULT: usize = 4;
+/// In the `orders` of a reshape: its result's tuples come in its sort order, all
+/// different, as they are in the operand, as a rename's of a relation sorted by the same
+/// attributes do, so they are written as they are, with no sorting or checking.
+pub const ORDERED_RESULT: usize = 8;
 
 /// Put the relation at `relation`, of the type `desc` describes, whose tuples are all
-/// different and hold references to what they point to, in canonical order: where they
-/// are, if nothing else holds them and they are integers, and otherwise a copy, in memory
-/// the statement owns, giving up the buffer it had if only the statement's scope holds it.
+/// different and hold references to what they point to, in its sort order, as `in_order`
+/// does: of a loose relation, which lowering left in no particular order.
 ///
 /// # Safety
 ///
-/// `relation` must point to a valid relation of that type, in any order, that nothing else
-/// points into, if only the current scope holds its buffer. The statement must have begun
-/// a scope.
+/// As for `in_order`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_put_in_order(
@@ -1392,8 +1396,38 @@ pub unsafe extern "C" fn trendy_rt_put_in_order(
     desc: *const TypeDesc,
 ) -> bool {
     // SAFETY: guaranteed by the caller.
-    status(|| unsafe {
-        let desc = &*desc;
+    status(|| unsafe { in_order(relation, &*desc) })
+}
+
+/// Put the relation at `relation`, of the type `desc` describes, sorted otherwise than it
+/// says, in its sort order, as `in_order` does: for what wants it in an order other than
+/// the one it is in.
+///
+/// # Safety
+///
+/// As for `in_order`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_reorder(relation: *mut Text, desc: *const TypeDesc) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe { in_order(relation, &*desc) })
+}
+
+/// Put the relation at `relation`, of the type `desc` describes, whose tuples are all
+/// different and hold references to what they point to, in its sort order: where they
+/// are, if nothing else holds them and they are integers, and otherwise a copy, in memory
+/// the statement owns, giving up the buffer it had if only the statement's scope holds it.
+/// Fails if there is no memory.
+///
+/// # Safety
+///
+/// `relation` must point to a valid relation of that type, in any order, that nothing else
+/// points into, if only the current scope holds its buffer. The statement must have begun
+/// a scope.
+#[cfg(not(test))]
+unsafe fn in_order(relation: *mut Text, desc: &TypeDesc) -> Fallible<()> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
         let (tuples, count) = read_slice(relation.cast());
         if in_canonical_order(tuples, count, desc) {
             return Ok(());
@@ -1407,7 +1441,7 @@ pub unsafe extern "C" fn trendy_rt_put_in_order(
         relation.write_unaligned(Text { bytes, len });
         release_replaced(tuples.cast_mut());
         Ok(())
-    })
+    }
 }
 
 /// Store at `dst` the relation `desc` describes whose tuples are the

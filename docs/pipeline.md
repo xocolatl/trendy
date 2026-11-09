@@ -2661,6 +2661,38 @@ what one of `trendy_rt_join` is, which the check compares with what it knows. Ea
 loose one of integers that only the statement holds, with the common attributes first, is
 sorted where it is, rather than through pointers to it (`Operand::sorts_here`).
 
+A relation can also be sorted otherwise than by name, which only a descriptor whose sort
+order says so describes (`Lowering::described`, `Order::SortedBy`, a `SortId` interned in
+`Lowering::sort_orders`). `FunctionBuilder::sorted_place` gives one, as `loose_place` gives a
+loose one, only to what asks, in whatever sorted order is less work, and says which.
+- **A rename** of a sorted relation is sorted by the same attributes under their new names,
+  so it is reshaped with its tuples where they are, and described in that order
+  (`FunctionBuilder::renamed_in_order`, `Lowering::renamed_order`). `r rename {v as a}`, of
+  `r` sorted by `k`, then `v`, is sorted by `k`, then `a`, not by name, which would take a
+  sort. The reshape is told its tuples come in that order (`Reshaped::Kept`,
+  `ORDERED_RESULT`), so it writes them once, with nothing to sort or check.
+- **A combination** that nothing wants in canonical order, such as a union only counted,
+  merges its operands in one order, the result's (`FunctionBuilder::combine`). It works out
+  first what order each would come in, without computing it
+  (`FunctionBuilder::sorted_order`). If both would come in the same one, each is computed
+  in it. If they wouldn't, each is computed in canonical order, as it would be if that were
+  wanted, rather than computed in one order and sorted again, so this is never more work
+  than canonical order. A local variable or a constant comes in canonical order, so `r
+  rename {v as a} union s rename {v as a}` is merged without a sort, but not when one of them
+  is named first. Putting a sorted relation in another order is `trendy_rt_reorder`, which
+  `sorts_what_it_left_unsorted` doesn't count, as it is choosing an order rather than
+  sorting what was left in none.
+- **To anything else,** given its type's descriptor, by name, such a relation is in no
+  particular order: a local variable holding one is loose, and a join's operand is flagged
+  so (`orders_constant`).
+
+`loose_read` checks each relation's arrangement (`lir::Arrangement`): canonical, loose, or
+sorted as a descriptor says, which it reads from the descriptor itself
+(`lir::SORTED_BY_FIELD`). What sorts or makes a relation arranges it as its descriptor says.
+`trendy_rt_combine` has to be given both operands as its descriptor says. One read as
+canonical, or with another's descriptor, fails, and so does one arranged one way on one way
+through the function and another way on another.
+
 The results are sorted into the canonical order, if they aren't in it, and they are to be,
 into memory released like a text's. A product, of operands with no attribute in common, is made in
 that order where it can be (`product`): if all one operand's attributes come

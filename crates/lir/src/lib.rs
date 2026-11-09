@@ -91,7 +91,7 @@
 //! fields. Its sizes and offsets are [`Field::Size`] and [`Field::Offset`],
 //! which codegen resolves with the same layout rules it uses for values.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -200,36 +200,40 @@ impl Function {
         )
     }
 
-    /// A slot holding a loose relation, one whose tuples are in no particular order, given
-    /// to something that could depend on their being in canonical order, on some way through
-    /// the function, and the block that does so. Of equal relations, only arrays in canonical
-    /// order are equal, and merges, binary searches and what depends on them are wrong of
-    /// anything else, with nothing to say so.
+    /// A slot holding a relation not in canonical order given to something that could
+    /// depend on its being in it, on some way through the function, and the block that does
+    /// so. A relation is loose, its tuples in no particular order, or sorted as its
+    /// descriptor's sort order says, otherwise than by name ([`Arrangement`]). Of equal
+    /// relations, only arrays in canonical order are equal, and merges, binary searches and
+    /// what depends on them are wrong of a relation in any other order, unless its
+    /// descriptor says which, with nothing to say so.
     ///
-    /// So a loose relation can only be read by what says it can read one: compiled code
-    /// going through its tuples or reading its count, what just holds it, and what
-    /// `Inst::loosely` lists. Anything else fails this, so a new reader of relations can't
-    /// be given one by mistake. Tuples compiled code fills are loose unless it says
-    /// otherwise, so one that forgets to say fails this, rather than being trusted. `data` is
-    /// the program's, for the flags a call has been given.
+    /// So such a relation can only be read by what says it can read one: compiled code
+    /// going through its tuples or reading its count, what just holds it, what
+    /// `Inst::loosely` lists, and, of one sorted otherwise, what is given the descriptor that
+    /// says how. Anything else fails this, so a new reader of relations can't be given one by
+    /// mistake. Tuples compiled code fills are loose unless it says otherwise, so one that
+    /// forgets to say fails this, rather than being trusted. A slot in one order on one way
+    /// here and in another on another is loose. `data` is the program's, for the flags a call
+    /// has been given, and its descriptors' sort orders.
     #[must_use]
     pub fn loose_read(&self, data: &[Data]) -> Option<(BlockId, SlotId)> {
         self.first_found(
-            |inst, loose, found| inst.loosely(loose, data, found),
-            |place, loose, found| read_loosely(place, loose, found),
+            |inst, arranged, found| inst.loosely(arranged, data, found),
+            |place, arranged, found| read_loosely(place, arranged, found),
         )
     }
 
     /// The first slot `step` or `end` finds, going through each way through the function
-    /// with a set of slots that `step` keeps as each instruction goes by, and `end` reads
-    /// for each place the block's terminator reads, and the block that is in.
-    fn first_found(
+    /// with what is known of slots, which `step` keeps as each instruction goes by, and `end`
+    /// reads for each place the block's terminator reads, and the block that is in.
+    fn first_found<S: Known>(
         &self,
-        step: impl Fn(&Inst, &mut BTreeSet<SlotId>, &mut dyn FnMut(SlotId)),
-        end: impl Fn(&Place, &BTreeSet<SlotId>, &mut dyn FnMut(SlotId)),
+        step: impl Fn(&Inst, &mut S, &mut dyn FnMut(SlotId)),
+        end: impl Fn(&Place, &S, &mut dyn FnMut(SlotId)),
     ) -> Option<(BlockId, SlotId)> {
-        let mut entering: Vec<Option<BTreeSet<SlotId>>> = vec![None; self.blocks.len()];
-        entering[0] = Some(BTreeSet::new());
+        let mut entering: Vec<Option<S>> = vec![None; self.blocks.len()];
+        entering[0] = Some(S::default());
         let mut waiting = vec![BlockId(0)];
         while let Some(at) = waiting.pop() {
             let block = &self.blocks[at.0];
@@ -239,7 +243,7 @@ impl Function {
             let mut found = None;
             for inst in &block.insts {
                 step(inst, &mut slots, &mut |slot| found = Some(slot));
-                ever.extend(slots.iter().copied());
+                ever.join(&slots);
             }
             block
                 .terminator
@@ -255,12 +259,13 @@ impl Function {
                 .chain(block.failure.map(|next| (next, &ever)))
             {
                 let known = &mut entering[next.0];
-                let grows = match known {
-                    Some(known) => !state.is_subset(known),
-                    None => true,
+                let grows = if let Some(known) = known {
+                    known.join(state)
+                } else {
+                    *known = Some(state.clone());
+                    true
                 };
                 if grows {
-                    known.get_or_insert_default().extend(state.iter().copied());
                     waiting.push(next);
                 }
             }
@@ -269,11 +274,92 @@ impl Function {
     }
 }
 
-/// `found` with the slot `place` reads, if it holds a loose relation among `loose`, and
+/// What [`Function::first_found`] knows of slots as it goes through a function, which it
+/// joins where ways through it meet.
+trait Known: Clone + Default {
+    /// Add what `other` knows to this, as of either way: whether this then knows more.
+    fn join(&mut self, other: &Self) -> bool;
+}
+
+/// Slots that something is true of, on some way.
+impl Known for BTreeSet<SlotId> {
+    fn join(&mut self, other: &Self) -> bool {
+        let before = self.len();
+        self.extend(other.iter().copied());
+        self.len() > before
+    }
+}
+
+/// How a slot's relation is arranged, as [`Function::loose_read`] follows it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Arrangement {
+    /// In canonical order, as every relation's descriptor says unless it says otherwise.
+    Canonical,
+    /// In no particular order.
+    Loose,
+    /// Sorted as the descriptor in this data object says, otherwise than by name.
+    Sorted(DataId),
+}
+
+/// The arrangement of each slot's relation that isn't in canonical order, on every way
+/// to here: one that isn't there is in canonical order, so one in one order on one way and
+/// in another on another, canonical included, is loose.
+impl Known for BTreeMap<SlotId, Arrangement> {
+    fn join(&mut self, other: &Self) -> bool {
+        let mut grows = false;
+        let slots: BTreeSet<SlotId> = self.keys().chain(other.keys()).copied().collect();
+        for slot in slots {
+            let (known, given) = (self.get(&slot), other.get(&slot));
+            if known != given && known != Some(&Arrangement::Loose) {
+                self.insert(slot, Arrangement::Loose);
+                grows = true;
+            }
+        }
+        grows
+    }
+}
+
+/// The arrangement of a relation that the descriptor at `place` describes, as it
+/// says: sorted otherwise than by name if its sort order isn't null, and otherwise in
+/// canonical order.
+fn arranged_as(place: Option<&Place>, data: &[Data]) -> Arrangement {
+    if let Some(Place {
+        base: Base::Data(id),
+        ..
+    }) = place
+        && let Some(Field::Address(_)) = data
+            .get(id.0)
+            .and_then(|data| data.fields.get(SORTED_BY_FIELD))
+    {
+        return Arrangement::Sorted(*id);
+    }
+    Arrangement::Canonical
+}
+
+/// `found` with the slot `place` reads, if its relation isn't in canonical order, and
 /// this is anything but its count, which is true of it in any order.
-fn read_loosely(place: &Place, loose: &BTreeSet<SlotId>, found: &mut dyn FnMut(SlotId)) {
+fn read_loosely(
+    place: &Place,
+    arranged: &BTreeMap<SlotId, Arrangement>,
+    found: &mut dyn FnMut(SlotId),
+) {
+    read_as(place, Arrangement::Canonical, arranged, found);
+}
+
+/// `found` with the slot `place` reads, if its relation isn't arranged as `wanted`, and
+/// this is anything but its count, which is true of it in any order.
+fn read_as(
+    place: &Place,
+    wanted: Arrangement,
+    arranged: &BTreeMap<SlotId, Arrangement>,
+    found: &mut dyn FnMut(SlotId),
+) {
     if let Base::Slot(slot) = &place.base
-        && loose.contains(slot)
+        && arranged
+            .get(slot)
+            .copied()
+            .unwrap_or(Arrangement::Canonical)
+            != wanted
         && place.path != [1]
     {
         found(*slot);
@@ -293,6 +379,147 @@ fn flags_at(place: Option<&Place>, data: &[Data]) -> u64 {
     0
 }
 
+/// The slot that is all of `place`, if it is one.
+fn whole_slot(place: &Place) -> Option<SlotId> {
+    match (&place.base, place.path.is_empty()) {
+        (Base::Slot(slot), true) => Some(*slot),
+        _ => None,
+    }
+}
+
+/// How the relation in the slot that is all of `place` is arranged, if it is one, and
+/// otherwise canonical, as what isn't in a slot is.
+fn arrangement_of(arranged: &BTreeMap<SlotId, Arrangement>, place: &Place) -> Arrangement {
+    whole_slot(place)
+        .and_then(|slot| arranged.get(&slot).copied())
+        .unwrap_or(Arrangement::Canonical)
+}
+
+/// Note that the relation in the slot that is all of `place`, if it is one, is arranged
+/// as `arrangement` says.
+fn arrange(
+    arranged: &mut BTreeMap<SlotId, Arrangement>,
+    place: Option<&Place>,
+    arrangement: Arrangement,
+) {
+    if let Some(slot) = place.and_then(whole_slot) {
+        if arrangement == Arrangement::Canonical {
+            arranged.remove(&slot);
+        } else {
+            arranged.insert(slot, arrangement);
+        }
+    }
+}
+
+/// What a call of the runtime's `function` with `args` does to `arranged`, as
+/// [`Inst::loosely`] says of an instruction.
+fn runtime_loosely(
+    function: RuntimeFn,
+    args: &[Place],
+    arranged: &mut BTreeMap<SlotId, Arrangement>,
+    data: &[Data],
+    found: &mut dyn FnMut(SlotId),
+) {
+    // Loose if `flag` is among `flags`, and otherwise as the descriptor at `desc` says.
+    let flagged_or = |flags: u64, flag: u64, desc: Option<&Place>| {
+        if flags & flag == 0 {
+            arranged_as(desc, data)
+        } else {
+            Arrangement::Loose
+        }
+    };
+    match function {
+        // They hold it and give it up, or are exact, and so the same in any order
+        // (`trendy_numeric`).
+        RuntimeFn::Retain
+        | RuntimeFn::Keep
+        | RuntimeFn::DropOperand
+        | RuntimeFn::Adopt
+        | RuntimeFn::Sum
+        | RuntimeFn::Product => {}
+        RuntimeFn::Release => arrange(arranged, args.first(), Arrangement::Canonical),
+        // They sort it as the descriptor says.
+        RuntimeFn::Sort | RuntimeFn::PutInOrder | RuntimeFn::Reorder => {
+            arrange(arranged, args.first(), arranged_as(args.get(1), data));
+        }
+        RuntimeFn::And | RuntimeFn::Matching => {
+            let orders = flags_at(args.last(), data);
+            // A join's operands' descriptors come after its result's.
+            let first = if function == RuntimeFn::And { 4 } else { 3 };
+            // Each operand is as its descriptor says, unless the call is told it is in no
+            // particular order.
+            for (arg, desc, flag) in [
+                (args.get(1), args.get(first), LOOSE_LHS),
+                (args.get(2), args.get(first + 1), LOOSE_RHS),
+            ] {
+                if orders & flag == 0
+                    && let Some(arg) = arg
+                {
+                    read_as(arg, arranged_as(desc, data), arranged, found);
+                }
+            }
+            // A semijoin's tuples are in the order they are in its left operand.
+            let result = if function == RuntimeFn::And {
+                flagged_or(orders, LOOSE_RESULT, args.get(3))
+            } else {
+                flagged_or(orders, LOOSE_LHS, args.get(first))
+            };
+            arrange(arranged, args.first(), result);
+        }
+        // Both operands are sorted as the descriptor says, and so is the result.
+        RuntimeFn::Combine => {
+            let described = arranged_as(args.get(3), data);
+            for arg in [args.get(1), args.get(2)].into_iter().flatten() {
+                read_as(arg, described, arranged, found);
+            }
+            arrange(arranged, args.first(), described);
+        }
+        // It takes a reference to the tuples, in the order they are in: only a local
+        // variable's slot can say that of them, not a variable of the program.
+        RuntimeFn::Assign => {
+            let (dst, src) = (args.first(), args.get(1));
+            let arrangement =
+                src.map_or(Arrangement::Canonical, |src| arrangement_of(arranged, src));
+            if let Some(src) = src.filter(|_| dst.and_then(whole_slot).is_none()) {
+                read_loosely(src, arranged, found);
+            }
+            arrange(arranged, dst, arrangement);
+        }
+        // It gives its first argument new memory, whatever was there before: the last
+        // time round a loop.
+        RuntimeFn::Allocate => {
+            for arg in args.iter().skip(1) {
+                read_loosely(arg, arranged, found);
+            }
+            arrange(arranged, args.first(), Arrangement::Canonical);
+        }
+        // It makes its tuples anew: sorting them as its result's descriptor says, or
+        // leaving them as they come.
+        RuntimeFn::Reshape => {
+            let flags = flags_at(args.last(), data);
+            arrange(
+                arranged,
+                args.first(),
+                flagged_or(flags, LOOSE_RESULT, args.get(2)),
+            );
+        }
+        // A join of several is told what each operand is as it is given it.
+        RuntimeFn::Join => {
+            let flags = flags_at(args.last(), data);
+            arrange(
+                arranged,
+                args.first(),
+                flagged_or(flags, LOOSE_RESULT, None),
+            );
+        }
+        _ => {
+            for arg in args {
+                read_loosely(arg, arranged, found);
+            }
+        }
+    }
+}
+
 /// As for `trendy_runtime::JOIN_LOOSE`.
 pub const JOIN_LOOSE: u64 = 1;
 /// As for `trendy_runtime::JOIN_DROPS`.
@@ -306,6 +533,13 @@ pub const LOOSE_LHS: u64 = 1;
 pub const LOOSE_RHS: u64 = 2;
 /// As for `trendy_runtime::LOOSE_RESULT`.
 pub const LOOSE_RESULT: u64 = 4;
+/// As for `trendy_runtime::ORDERED_RESULT`.
+pub const ORDERED_RESULT: u64 = 8;
+
+/// Where a descriptor, laid out as `trendy_runtime::TypeDesc`, has its sort order among
+/// its fields: a [`Field::Address`] of the positions of the attributes a relation's tuples
+/// are sorted by, or a null [`Field::Usize`] if by name.
+pub const SORTED_BY_FIELD: usize = 6;
 
 /// `found` with the slot `place` reads, if it is among `released`.
 fn read_of(place: &Place, released: &BTreeSet<SlotId>, found: &mut dyn FnMut(SlotId)) {
@@ -1018,6 +1252,11 @@ runtime_functions! {
     /// order, in its own buffer if only the statement's scope holds that, and otherwise
     /// in a copy (see [`Function::loose_read`]).
     PutInOrder => "trendy_rt_put_in_order", true;
+    /// `trendy_rt_reorder(relation, descriptor)`: put the relation at `relation`, sorted
+    /// otherwise than the descriptor says, whose tuples hold references to what they point
+    /// to, in the descriptor's order, as [`RuntimeFn::PutInOrder`] does a loose one. That is
+    /// choosing an order, for what wants another, not putting in order what was left in none.
+    Reorder => "trendy_rt_reorder", true;
     /// `trendy_rt_sort(relation, descriptor)`: replace the relation at
     /// `relation`, of the type the descriptor describes, with one of its
     /// tuples in the canonical order, without duplicates, in memory the
@@ -1804,116 +2043,47 @@ impl Inst {
         }
     }
 
-    /// What the instruction does to `loose`, the slots holding loose relations, as
+    /// What the instruction does to `arranged`, how each slot's relation is arranged, as
     /// [`Function::loose_read`] says: `found` with each it reads in a way that could depend
-    /// on their order. `data` is the program's.
-    fn loosely(&self, loose: &mut BTreeSet<SlotId>, data: &[Data], found: &mut dyn FnMut(SlotId)) {
-        let whole_slot = |place: &Place| match (&place.base, place.path.is_empty()) {
-            (Base::Slot(slot), true) => Some(*slot),
-            _ => None,
-        };
-        let says = |loose: &mut BTreeSet<SlotId>, place: Option<&Place>, is_loose: bool| {
-            if let Some(slot) = place.and_then(whole_slot) {
-                if is_loose {
-                    loose.insert(slot);
-                } else {
-                    loose.remove(&slot);
-                }
-            }
-        };
+    /// on its order. `data` is the program's.
+    fn loosely(
+        &self,
+        arranged: &mut BTreeMap<SlotId, Arrangement>,
+        data: &[Data],
+        found: &mut dyn FnMut(SlotId),
+    ) {
         match self {
-            Inst::InAnyOrder(relation) => says(loose, Some(relation), true),
+            Inst::InAnyOrder(relation) => arrange(arranged, Some(relation), Arrangement::Loose),
             Inst::InOrderOf { dst, src } => {
-                let is_loose = whole_slot(src).is_some_and(|slot| loose.contains(&slot));
-                says(loose, Some(dst), is_loose);
+                let arrangement = arrangement_of(arranged, src);
+                arrange(arranged, Some(dst), arrangement);
             }
             Inst::Copy { dst, src, .. } => {
-                let is_loose = whole_slot(src).is_some_and(|slot| loose.contains(&slot));
+                let arrangement = arrangement_of(arranged, src);
                 // Into a tuple, an argument or a result, where nothing says what it is.
-                if !is_loose || whole_slot(dst).is_none() {
-                    read_loosely(src, loose, found);
+                if arrangement == Arrangement::Canonical || whole_slot(dst).is_none() {
+                    read_loosely(src, arranged, found);
                 }
-                says(loose, Some(dst), is_loose);
+                arrange(arranged, Some(dst), arrangement);
             }
             // Given to a join that says it takes it so.
             Inst::RelationAddress {
                 dst, loose: true, ..
-            } => says(loose, Some(dst), false),
+            } => arrange(arranged, Some(dst), Arrangement::Canonical),
             // Going through its tuples, in the order they are in.
             Inst::Element { dst, index, .. } => {
-                read_loosely(index, loose, found);
-                says(loose, Some(dst), false);
+                read_loosely(index, arranged, found);
+                arrange(arranged, Some(dst), Arrangement::Canonical);
             }
-            Inst::CallRuntime { function, args } => match function {
-                // They hold it and give it up, or are exact, and so the same in any order
-                // (`trendy_numeric`).
-                RuntimeFn::Retain
-                | RuntimeFn::Keep
-                | RuntimeFn::DropOperand
-                | RuntimeFn::Adopt
-                | RuntimeFn::Sum
-                | RuntimeFn::Product => {}
-                RuntimeFn::Release | RuntimeFn::Sort | RuntimeFn::PutInOrder => {
-                    says(loose, args.first(), false);
-                }
-                RuntimeFn::And | RuntimeFn::Matching => {
-                    let orders = flags_at(args.last(), data);
-                    for (arg, flag) in [(args.get(1), LOOSE_LHS), (args.get(2), LOOSE_RHS)] {
-                        if orders & flag == 0
-                            && let Some(arg) = arg
-                        {
-                            read_loosely(arg, loose, found);
-                        }
-                    }
-                    // A semijoin's tuples are in the order they are in its left operand.
-                    let result = if *function == RuntimeFn::And {
-                        LOOSE_RESULT
-                    } else {
-                        LOOSE_LHS
-                    };
-                    says(loose, args.first(), orders & result != 0);
-                }
-                // It takes a reference to the tuples, in the order they are in: only a local
-                // variable's slot can say that of them, not a variable of the program.
-                RuntimeFn::Assign => {
-                    let (dst, src) = (args.first(), args.get(1));
-                    let is_loose = src
-                        .and_then(whole_slot)
-                        .is_some_and(|slot| loose.contains(&slot));
-                    if let Some(src) = src.filter(|_| dst.and_then(whole_slot).is_none()) {
-                        read_loosely(src, loose, found);
-                    }
-                    says(loose, dst, is_loose);
-                }
-                // It gives its first argument new memory, whatever was there before: the
-                // last time round a loop.
-                RuntimeFn::Allocate => {
-                    for arg in args.iter().skip(1) {
-                        read_loosely(arg, loose, found);
-                    }
-                    says(loose, args.first(), false);
-                }
-                // It makes its tuples anew: sorting them, or leaving them as they come. A
-                // join of several is told what each operand is as it is given it.
-                RuntimeFn::Reshape | RuntimeFn::Join => {
-                    says(
-                        loose,
-                        args.first(),
-                        flags_at(args.last(), data) & LOOSE_RESULT != 0,
-                    );
-                }
-                _ => {
-                    for arg in args {
-                        read_loosely(arg, loose, found);
-                    }
-                }
-            },
+            Inst::CallRuntime { function, args } => {
+                runtime_loosely(*function, args, arranged, data, found);
+            }
             _ => {
                 let (reads, written) = self.reads_and_write();
                 for place in reads {
-                    read_loosely(place, loose, found);
+                    read_loosely(place, arranged, found);
                 }
-                says(loose, written, false);
+                arrange(arranged, written, Arrangement::Canonical);
             }
         }
     }
@@ -2438,6 +2608,106 @@ mod tests {
         function(vec![block(insts, Terminator::Return)])
             .loose_read(&flagged(flags))
             .map(|(block, slot)| (block.0, slot.0))
+    }
+
+    /// The flags at data 0, as for [`flagged`], then a descriptor of a relation sorted
+    /// otherwise than by name at data 1, and one of a relation sorted by name at data 2.
+    fn described(flags: u64) -> Vec<Data> {
+        let descriptor = |sorted_by: Field| {
+            let mut fields = vec![Field::Usize(0); SORTED_BY_FIELD + 1];
+            fields[SORTED_BY_FIELD] = sorted_by;
+            Data {
+                kind: DataKind::Constant,
+                writable: false,
+                fields,
+            }
+        };
+        let mut data = flagged(flags);
+        data.push(descriptor(Field::Address(DataId(0))));
+        data.push(descriptor(Field::Usize(0)));
+        data
+    }
+
+    /// The descriptor at data `id`.
+    fn desc(id: usize) -> Place {
+        Place::whole(Base::Data(DataId(id)))
+    }
+
+    #[test]
+    fn a_relation_sorted_otherwise_is_read_only_as_its_descriptor_says() {
+        let checked = |blocks: Vec<Block>, flags: u64| {
+            function(blocks)
+                .loose_read(&described(flags))
+                .map(|(block, slot)| (block.0, slot.0))
+        };
+        let in_one = |insts: Vec<Inst>| checked(vec![block(insts, Terminator::Return)], 0);
+        let sorted = || runtime(RuntimeFn::Sort, vec![slot(0), desc(1)]);
+        let combined = |described: usize| {
+            runtime(
+                RuntimeFn::Combine,
+                vec![slot(4), slot(0), slot(0), desc(described)],
+            )
+        };
+        // Merged with what describes it so, or with what describes it by name.
+        assert_eq!(in_one(vec![sorted(), combined(1)]), None);
+        assert_eq!(in_one(vec![sorted(), combined(2)]), Some((0, 0)));
+        // A relation sorted by name isn't sorted otherwise.
+        let by_name = || runtime(RuntimeFn::Sort, vec![slot(0), desc(2)]);
+        assert_eq!(in_one(vec![by_name(), combined(1)]), Some((0, 0)));
+        assert_eq!(in_one(vec![by_name(), combined(2)]), None);
+        // What merges them is sorted as it says, for what reads it next.
+        let next = runtime(RuntimeFn::Combine, vec![slot(6), slot(4), slot(4), desc(2)]);
+        assert_eq!(in_one(vec![sorted(), combined(1), next]), Some((0, 4)));
+        // Read by what knows nothing of sort orders.
+        let printed = runtime(RuntimeFn::DebugValue, vec![slot(0)]);
+        assert_eq!(in_one(vec![sorted(), printed]), Some((0, 0)));
+        // Given to a join with a descriptor by name, unless it is told it is loose.
+        let joined = |flags: u64| {
+            checked(
+                vec![block(
+                    vec![
+                        sorted(),
+                        runtime(
+                            RuntimeFn::And,
+                            vec![
+                                slot(4),
+                                slot(0),
+                                slot(5),
+                                desc(2),
+                                desc(2),
+                                desc(2),
+                                desc(0),
+                            ],
+                        ),
+                    ],
+                    Terminator::Return,
+                )],
+                flags,
+            )
+        };
+        assert_eq!(joined(0), Some((0, 0)));
+        assert_eq!(joined(LOOSE_LHS), None);
+        // Sorted otherwise on one way here, and by name on the other: loose where they meet.
+        let branches = |second: usize| {
+            vec![
+                block(
+                    Vec::new(),
+                    Terminator::Branch {
+                        condition: slot(7),
+                        then: BlockId(1),
+                        otherwise: BlockId(2),
+                    },
+                ),
+                block(vec![sorted()], Terminator::Jump(BlockId(3))),
+                block(
+                    vec![runtime(RuntimeFn::Sort, vec![slot(0), desc(second)])],
+                    Terminator::Jump(BlockId(3)),
+                ),
+                block(vec![combined(1)], Terminator::Return),
+            ]
+        };
+        assert_eq!(checked(branches(1), 0), None);
+        assert_eq!(checked(branches(2), 0), Some((3, 0)));
     }
 
     #[test]

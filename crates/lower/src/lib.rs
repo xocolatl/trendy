@@ -769,6 +769,12 @@ struct Lowering {
     data: Vec<lir::Data>,
     /// Each type's descriptor, built once.
     descriptors: HashMap<hir::Type, lir::DataId>,
+    /// Each sort order other than by name some relation is sorted by, by its [`SortId`],
+    /// and each one's id.
+    sort_orders: Vec<Vec<String>>,
+    sort_ids: HashMap<Vec<String>, SortId>,
+    /// The descriptor of each relation type sorted by each such order, built once.
+    sorted_descriptors: HashMap<(hir::Type, SortId), lir::DataId>,
     /// An empty constant, for addresses that are never read.
     empty: Option<lir::DataId>,
     /// The functions lowered, by id, which counts up from 0: one is added
@@ -817,6 +823,9 @@ impl Lowering {
             families: Families::new(subtypes, bounds),
             data: Vec::new(),
             descriptors: HashMap::new(),
+            sort_orders: Vec::new(),
+            sort_ids: HashMap::new(),
+            sorted_descriptors: HashMap::new(),
             empty: None,
             functions: BTreeMap::new(),
             functions_of: HashMap::new(),
@@ -1076,7 +1085,8 @@ impl Lowering {
     /// `{ kind: u8, points: u8, integers, size, attributes: *Attr, count,
     /// sorted_by: *usize, element: *TypeDesc, name: *u8, name_len, written: *u8,
     /// written_len }`. A relation's tuples are sorted by its attributes as
-    /// listed, by name, so `sorted_by` is null.
+    /// listed, by name, so `sorted_by` is null, as it is for every type but a relation
+    /// sorted otherwise ([`Lowering::described`]).
     fn descriptor(&mut self, ty: &hir::Type) -> lir::DataId {
         if let Some(&id) = self.descriptors.get(ty) {
             return id;
@@ -1189,6 +1199,87 @@ impl Lowering {
         id
     }
 
+    /// The order of a relation's tuples sorted by the attributes `names`, every one of
+    /// them, most significant first: canonical, if that is by name.
+    fn sorted_by(&mut self, names: Vec<String>) -> Order {
+        if names.is_sorted() {
+            return Order::Canonical;
+        }
+        if let Some(&id) = self.sort_ids.get(&names) {
+            return Order::SortedBy(id);
+        }
+        let id = SortId(self.sort_orders.len());
+        self.sort_orders.push(names.clone());
+        self.sort_ids.insert(names, id);
+        Order::SortedBy(id)
+    }
+
+    /// The names of the attributes a relation of `heading` in `order`, which is sorted,
+    /// is sorted by, most significant first.
+    fn sort_names(&self, order: Order, heading: &hir::Heading) -> Vec<String> {
+        match order {
+            Order::SortedBy(id) => self.sort_orders[id.0].clone(),
+            Order::Canonical => heading.attributes().map(|(a, _)| a.to_string()).collect(),
+            Order::Loose | Order::Repeated => {
+                unreachable!("only a sorted relation has a sort order")
+            }
+        }
+    }
+
+    /// The descriptor of a relation of type `ty` whose tuples are in `order`: its type's,
+    /// unless they are sorted otherwise than by name, which its sort order then says. The
+    /// layout is the type's, by name, so its tuples' integers, if that is all they are, are
+    /// compared through the sort order, not as a run of them.
+    fn described(&mut self, ty: &hir::Type, order: Order) -> lir::DataId {
+        let Order::SortedBy(id) = order else {
+            return self.descriptor(ty);
+        };
+        if let Some(&described) = self.sorted_descriptors.get(&(ty.clone(), id)) {
+            return described;
+        }
+        let hir::Type::Relation(heading) = ty else {
+            unreachable!("only a relation is sorted");
+        };
+        let positions = self.sort_orders[id.0]
+            .iter()
+            .map(|name| {
+                let position = heading
+                    .attributes()
+                    .position(|(a, _)| a == name)
+                    .expect("a sort order names the relation's attributes");
+                lir::Field::Usize(len(position))
+            })
+            .collect();
+        let positions = self.constant(positions);
+        let by_name = self.descriptor(ty);
+        let mut fields = self.data[by_name.0].fields.clone();
+        fields[DESCRIPTOR_INTEGERS] = lir::Field::Usize(0);
+        fields[lir::SORTED_BY_FIELD] = lir::Field::Address(positions);
+        let described = self.constant(fields);
+        self.sorted_descriptors.insert((ty.clone(), id), described);
+        described
+    }
+
+    /// The order of what `view` reads, of what it reads through its renames in `order`,
+    /// which is sorted: sorted by the same attributes, as they are read.
+    fn renamed_order(&mut self, order: Order, view: &View) -> Order {
+        let hir::Type::Relation(heading) = &view.ty else {
+            unreachable!("only a relation is sorted");
+        };
+        let read_as: BTreeMap<&str, &str> = view
+            .shape
+            .names
+            .iter()
+            .map(|(read, own)| (own.as_str(), read.as_str()))
+            .collect();
+        let names = self
+            .sort_names(order, heading)
+            .iter()
+            .map(|own| read_as[own.as_str()].to_string())
+            .collect();
+        self.sorted_by(names)
+    }
+
     /// The fields of a descriptor that hold `name`: the address of its
     /// UTF-8 bytes, and their length.
     fn name(&mut self, name: &str) -> (lir::Field, lir::Field) {
@@ -1289,6 +1380,10 @@ const KIND_CHARACTER: u8 = 9;
 const KIND_U8: u8 = 10;
 const KIND_U16: u8 = 11;
 const KIND_U32: u8 = 12;
+
+/// Where a descriptor has `trendy_runtime::TypeDesc::integers` among its fields, as
+/// [`Lowering::descriptor`] lays it out.
+const DESCRIPTOR_INTEGERS: usize = 2;
 
 /// The part of lowering for one function.
 struct FunctionBuilder<'a> {
@@ -1404,6 +1499,9 @@ impl Around {
 enum Order {
     /// In canonical order, so that equal relations have equal arrays.
     Canonical,
+    /// Sorted by the attributes of a sort order other than by name, in turn, as only a
+    /// descriptor that says so can describe it ([`Lowering::described`]).
+    SortedBy(SortId),
     /// In no particular order, only all different: what nothing depends the order of needn't
     /// be sorted (see [`FunctionBuilder::loose_place`]).
     Loose,
@@ -1411,6 +1509,23 @@ enum Order {
     /// as a projection does.
     Repeated,
 }
+
+/// What a reshape is told of its result's order.
+#[derive(Clone, Copy, Debug)]
+enum Reshaped {
+    /// Wanted in this order, which its tuples are sorted into if they don't come so, or in
+    /// none, if it is [`Order::Loose`].
+    Wanted(Order),
+    /// In this order, a sorted one, which its tuples come in, as they are in what it
+    /// reshapes, so they needn't be sorted or checked ([`lir::ORDERED_RESULT`]).
+    Kept(Order),
+}
+
+/// A sort order other than by name: the names of the attributes a relation's tuples are
+/// sorted by, most significant first, each of them once, among
+/// [`Lowering::sort_orders`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct SortId(usize);
 
 /// How a relation is read through a rename, which needs none of its tuples moved, as what
 /// reads it reads attributes by where they are: its heading, and the name each attribute
@@ -2515,7 +2630,7 @@ impl<'a> FunctionBuilder<'a> {
             } else {
                 (this.place(value, cx), Order::Canonical)
             };
-            if order == Order::Loose {
+            if order != Order::Canonical {
                 this.loose_locals.push(id);
             }
             this.check_keys(&hir::Target::Local(id), &src, cx);
@@ -5121,7 +5236,7 @@ impl<'a> FunctionBuilder<'a> {
         match &assignment.target {
             hir::Target::Local(id) if self.may_be_loose.contains(id) => {
                 let (place, order) = self.loose_place(&assignment.value, cx);
-                if order == Order::Loose {
+                if order != Order::Canonical {
                     self.loose_locals.push(*id);
                 }
                 place
@@ -5482,7 +5597,22 @@ impl<'a> FunctionBuilder<'a> {
         ty: &hir::Type,
         cx: &mut Lowering,
     ) -> lir::Place {
-        if order == Order::Canonical {
+        self.in_order(place, order, Order::Canonical, ty, cx)
+    }
+
+    /// The relation at `place`, of type `ty`, as `order` says, in `wanted`, a sorted order:
+    /// where it is if it already is, and otherwise in a new slot, as what is there may be
+    /// read again as it is. A loose one is put in order, and one sorted otherwise is
+    /// sorted again, which is a choice of order rather than something left unsorted.
+    fn in_order(
+        &mut self,
+        place: lir::Place,
+        order: Order,
+        wanted: Order,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        if order == wanted {
             return place;
         }
         let layout = cx.layout(ty);
@@ -5492,13 +5622,81 @@ impl<'a> FunctionBuilder<'a> {
             src: place,
             layout,
         });
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        let function = match order {
+            Order::Loose | Order::Repeated => lir::RuntimeFn::PutInOrder,
+            Order::Canonical | Order::SortedBy(_) => lir::RuntimeFn::Reorder,
+        };
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.described(ty, wanted)));
         self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::PutInOrder,
+            function,
             args: vec![dst.clone(), descriptor],
         });
         self.scoped = true;
         dst
+    }
+
+    /// The order [`FunctionBuilder::sorted_place`] would give the relation `expr` in,
+    /// without computing it.
+    fn sorted_order(&self, expr: &hir::Expr, cx: &mut Lowering) -> Order {
+        match expr {
+            hir::Expr::At(_, inner) => self.sorted_order(inner, cx),
+            hir::Expr::Rename(..) => {
+                let view = self.view_of(expr);
+                let order = self.sorted_order(view.inner, cx);
+                cx.renamed_order(order, &view)
+            }
+            hir::Expr::Combine(_, lhs, rhs) => self.shared_order(lhs, rhs, cx),
+            _ => Order::Canonical,
+        }
+    }
+
+    /// The order the relations `lhs` and `rhs`, of the same attributes, are merged in,
+    /// where any will do: the one [`FunctionBuilder::sorted_place`] would give both in, if
+    /// it is the same, and otherwise canonical order.
+    fn shared_order(&self, lhs: &hir::Expr, rhs: &hir::Expr, cx: &mut Lowering) -> Order {
+        let order = self.sorted_order(lhs, cx);
+        if order == self.sorted_order(rhs, cx) {
+            order
+        } else {
+            Order::Canonical
+        }
+    }
+
+    /// Where the relation `expr` is, computed in `order`, a sorted order: as
+    /// [`FunctionBuilder::place`] computes it, in canonical order, and otherwise as
+    /// [`FunctionBuilder::sorted_place`] does, which gives it in an order other than by name
+    /// only as [`FunctionBuilder::sorted_order`] says, so it is put in `order` only if that
+    /// isn't it.
+    fn exactly(&mut self, expr: &hir::Expr, order: Order, cx: &mut Lowering) -> lir::Place {
+        if order == Order::Canonical {
+            return self.place(expr, cx);
+        }
+        let (place, given) = self.sorted_place(expr, cx);
+        let ty = self.type_of(expr);
+        self.in_order(place, given, order, &ty, cx)
+    }
+
+    /// Where the relation `expr` is, computed as [`FunctionBuilder::place`] does, but with
+    /// its tuples sorted in whatever order is less work, which may not be by name, and
+    /// that order. What it is given to has to be told that order, by its descriptor
+    /// ([`Lowering::described`]), as [`lir::Function::loose_read`] checks.
+    fn sorted_place(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> (lir::Place, Order) {
+        match expr {
+            hir::Expr::At(site, inner) => {
+                let outer = self.site;
+                self.at(Some(*site), cx);
+                let given = self.sorted_place(inner, cx);
+                if outer.is_some() {
+                    self.at(outer, cx);
+                }
+                given
+            }
+            hir::Expr::Rename(..) => self.renamed_in_order(expr, cx),
+            hir::Expr::Combine(combination, lhs, rhs) => {
+                self.combine(*combination, lhs, rhs, Order::Loose, cx)
+            }
+            _ => (self.place(expr, cx), Order::Canonical),
+        }
     }
 
     /// `expr` as `want` asks: in canonical order, computed all the way down as
@@ -5557,6 +5755,9 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Extend(operand, _, attributes) => {
                 self.extend(expr, operand, attributes, Order::Loose, cx)
+            }
+            hir::Expr::Combine(combination, lhs, rhs) => {
+                self.combine(*combination, lhs, rhs, Order::Loose, cx)
             }
             _ => (self.place(expr, cx), Order::Canonical),
         }
@@ -5910,7 +6111,9 @@ impl<'a> FunctionBuilder<'a> {
                 self.restrict(operand, condition, Order::Canonical, cx).0
             }
             hir::Expr::Tclose(operand) => self.closed(operand, cx),
-            hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
+            hir::Expr::Combine(combination, lhs, rhs) => {
+                self.combine(*combination, lhs, rhs, Order::Canonical, cx).0
+            }
             hir::Expr::Current(depth, _) => {
                 self.tuples[self.tuples.len() - 1 - depth].place.clone()
             }
@@ -6058,7 +6261,14 @@ impl<'a> FunctionBuilder<'a> {
             })
             .collect();
         let result = view.named.without(names);
-        let dst = self.reshape(&view.ty, &result, &sources, src.clone(), order, cx);
+        let dst = self.reshape(
+            &view.ty,
+            &result,
+            &sources,
+            src.clone(),
+            Reshaped::Wanted(order),
+            cx,
+        );
         self.operand_read(view.inner, &src, &view.ty, cx);
         (dst, order)
     }
@@ -6077,11 +6287,34 @@ impl<'a> FunctionBuilder<'a> {
             &view.named,
             &view.shape.positions(),
             src.clone(),
-            want,
+            Reshaped::Wanted(want),
             cx,
         );
         self.operand_read(view.inner, &src, &view.ty, cx);
         (dst, want)
+    }
+
+    /// `expr`, a rename, of whatever it renames, computed sorted, in the order that is less
+    /// work: what it renames, sorted, is sorted by the same attributes under their new
+    /// names, so it is reshaped with none of its tuples moved from where they are in it,
+    /// and the runtime is told so, with nothing to check.
+    fn renamed_in_order(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> (lir::Place, Order) {
+        let view = self.view_of(expr);
+        let (src, order) = self.sorted_place(view.inner, cx);
+        let renamed = cx.renamed_order(order, &view);
+        if view.shape.is_as_laid_out() {
+            return (src, renamed);
+        }
+        let dst = self.reshape(
+            &view.ty,
+            &view.named,
+            &view.shape.positions(),
+            src.clone(),
+            Reshaped::Kept(renamed),
+            cx,
+        );
+        self.operand_read(view.inner, &src, &view.ty, cx);
+        (dst, renamed)
     }
 
     /// Copy each of `attributes`, in name order, into a field of the tuple
@@ -7671,9 +7904,13 @@ impl<'a> FunctionBuilder<'a> {
         result_ty: &hir::Type,
         sources: &[usize],
         src: lir::Place,
-        want: Order,
+        result: Reshaped,
         cx: &mut Lowering,
     ) -> lir::Place {
+        let (want, flags) = match result {
+            Reshaped::Wanted(order) => (order, 0),
+            Reshaped::Kept(order) => (order, lir::ORDERED_RESULT),
+        };
         let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
             unreachable!("sema reshapes only tuples and relations");
         };
@@ -7701,7 +7938,7 @@ impl<'a> FunctionBuilder<'a> {
                 .map(|&i| lir::Field::Offset(tuple_layout.clone(), vec![i]))
                 .collect(),
         );
-        let result_desc = lir::Place::whole(lir::Base::Data(cx.descriptor(result_ty)));
+        let result_desc = lir::Place::whole(lir::Base::Data(cx.described(result_ty, want)));
         let source_desc = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Reshape,
@@ -7711,7 +7948,7 @@ impl<'a> FunctionBuilder<'a> {
                 result_desc,
                 source_desc,
                 lir::Place::whole(lir::Base::Data(offsets)),
-                orders_constant(Order::Canonical, Order::Canonical, want, cx),
+                orders_constant(Order::Canonical, Order::Canonical, want, flags, cx),
             ],
         });
         self.scoped = true;
@@ -7749,7 +7986,7 @@ impl<'a> FunctionBuilder<'a> {
             joining.sources,
             joining.common,
             joining.common_count,
-            orders_constant(lhs_order, rhs_order, want, cx),
+            orders_constant(lhs_order, rhs_order, want, 0, cx),
         ];
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::And,
@@ -8020,7 +8257,7 @@ impl<'a> FunctionBuilder<'a> {
             lir::Place::whole(lir::Base::Data(cx.constant(common))),
             common_count,
             negated,
-            orders_constant(lhs_order, rhs_order, Order::Canonical, cx),
+            orders_constant(lhs_order, rhs_order, Order::Canonical, 0, cx),
         ];
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Matching,
@@ -8037,7 +8274,7 @@ impl<'a> FunctionBuilder<'a> {
             &left.named,
             &left.shape.positions(),
             dst.clone(),
-            want,
+            Reshaped::Wanted(want),
             cx,
         );
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&left.ty)));
@@ -8049,19 +8286,29 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The relations `lhs` and `rhs`, of the same attributes, combined as
-    /// `combination` says, computed by the runtime into a new stack slot.
-    /// Their tuples are laid out alike, and described by the result's type.
+    /// `combination` says, computed by the runtime into a new stack slot, and its order.
+    /// Their tuples are laid out alike, and merged in one order, the result's: canonical
+    /// order, if that is what is wanted, and otherwise any, as `want` is
+    /// [`Order::Loose`]. Then, if both would be computed sorted in the same order as the
+    /// least work for each ([`FunctionBuilder::sorted_order`]), they are, and otherwise each
+    /// is computed in canonical order, as it would be if that were wanted, rather than
+    /// computed in one order and sorted again.
     fn combine(
         &mut self,
         combination: hir::Combination,
         lhs: &hir::Expr,
         rhs: &hir::Expr,
+        want: Order,
         cx: &mut Lowering,
-    ) -> lir::Place {
+    ) -> (lir::Place, Order) {
         let ty = combination.combined(&self.type_of(lhs), &self.type_of(rhs));
         let (lhs_ty, rhs_ty) = (self.type_of(lhs), self.type_of(rhs));
-        let (lhs_place, rhs_place) = (self.place(lhs, cx), self.place(rhs, cx));
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let order = match want {
+            Order::Canonical => Order::Canonical,
+            _ => self.shared_order(lhs, rhs, cx),
+        };
+        let (lhs_place, rhs_place) = (self.exactly(lhs, order, cx), self.exactly(rhs, order, cx));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.described(&ty, order)));
         let combination = match combination {
             hir::Combination::Union => lir::Combination::Union,
             hir::Combination::DisjointUnion => lir::Combination::DisjointUnion,
@@ -8085,7 +8332,7 @@ impl<'a> FunctionBuilder<'a> {
         self.scoped = true;
         self.operand_read(lhs, &lhs_place, &lhs_ty, cx);
         self.operand_read(rhs, &rhs_place, &rhs_ty, cx);
-        dst
+        (dst, order)
     }
 
     /// The relation `operand` with the relation-valued attributes `names`
@@ -8284,13 +8531,13 @@ impl<'a> FunctionBuilder<'a> {
                     ..relations.clone()
                 },
                 src: place.clone(),
-                loose: *order == Order::Loose,
+                loose: *order != Order::Canonical,
             });
         }
         let dst = self.slot(cx.layout(&result_ty));
         let joined = self.slot(lir::Layout::U8);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
-        let orders = orders_constant(Order::Canonical, Order::Canonical, want, cx);
+        let orders = orders_constant(Order::Canonical, Order::Canonical, want, 0, cx);
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Join,
             args: vec![
@@ -9154,11 +9401,28 @@ fn common_attributes(lhs: &Shape, rhs: &Shape, cx: &mut Lowering) -> Vec<lir::Fi
 
 /// The constant of the runtime's `LOOSE_` bits for an operation of operands in the orders
 /// `lhs` and `rhs`, whose result is to be in the order `result`.
-fn orders_constant(lhs: Order, rhs: Order, result: Order, cx: &mut Lowering) -> lir::Place {
-    let bit = |order: Order, bit: u64| if order == Order::Loose { bit } else { 0 };
-    let orders =
-        bit(lhs, lir::LOOSE_LHS) | bit(rhs, lir::LOOSE_RHS) | bit(result, lir::LOOSE_RESULT);
-    usize_constant(orders, cx)
+/// The `LOOSE_` flags of an operation on relations in the orders `lhs` and `rhs`, given
+/// their types' descriptors, by name, of a result wanted as `result` says, with `flags`.
+fn orders_constant(
+    lhs: Order,
+    rhs: Order,
+    result: Order,
+    flags: u64,
+    cx: &mut Lowering,
+) -> lir::Place {
+    // An operand sorted otherwise than its descriptor says is in no particular order to
+    // what reads it by that, and a result is sorted as its own descriptor says, unless
+    // wanted in no particular order.
+    let operand = |order: Order, bit: u64| if order == Order::Canonical { 0 } else { bit };
+    let result = if result == Order::Loose {
+        lir::LOOSE_RESULT
+    } else {
+        0
+    };
+    usize_constant(
+        operand(lhs, lir::LOOSE_LHS) | operand(rhs, lir::LOOSE_RHS) | result | flags,
+        cx,
+    )
 }
 
 /// The relation whose transitive closure `expr` is, if it is one.
@@ -9245,10 +9509,10 @@ fn join_operand(
             ])
         })
         .collect();
-    let loose = if order == Order::Loose {
-        lir::JOIN_LOOSE
-    } else {
+    let loose = if order == Order::Canonical {
         0
+    } else {
+        lir::JOIN_LOOSE
     };
     lir::Field::Struct(vec![
         lir::Field::Address(cx.descriptor(&view.ty)),

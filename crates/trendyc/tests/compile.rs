@@ -10178,6 +10178,52 @@ operator main{{}} [
     assert!(lowered > 10, "only {lowered} examples");
 }
 
+/// The operands of a union, or another combination, that nothing wants in canonical order are
+/// merged in the order they come in, as renamed relations come in what they rename's, if both
+/// come in the same one, and otherwise each is put in canonical order first. Either way, the
+/// answers are the same, as are those a reader that wants canonical order is given.
+#[test]
+fn a_combinations_operands_are_merged_in_the_order_they_come_in() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 6;
+    const r := series{from: 1, to: n} extend { k := value, v := value * 10 } remove {value};
+    const s := series{from: 4, to: n + 3} extend { k := value, v := value * 10 } remove {value};
+    const later := series{from: n + 1, to: n + 3} extend { k := value, v := value * 10 } remove {value};
+    /* Both renamed alike, so sorted by `k`, then `a`, not by name. */
+    call debug_value{v: count{r: (r rename {v as a}) union (s rename {v as a})}};
+    call debug_value{v: count{r: (r rename {v as a}) minus (s rename {v as a})}};
+    call debug_value{v: count{r: (r rename {v as a}) d_union (later rename {v as a})}};
+    /* Renamed into another order, by `a`, then `k`: both put in canonical order. */
+    const t := series{from: 1, to: n} extend { x := value * 10, y := value } remove {value};
+    call debug_value{v: count{r: (r rename {v as a}) union (t rename {x as a, y as k})}};
+    call debug_value{v: count{r: (r rename {v as a}) union (s rename {v as a}) union (t rename {x as a, y as k})}};
+    /* Wanted in canonical order, to be written. */
+    call debug_value{v: (r rename {v as a}) minus (s rename {v as a})};
+    /* A disjoint union's operands that share a tuple. */
+    call debug_value{v: count{r: (r rename {v as a}) d_union (s rename {v as a})}};
+];
+";
+    let ran = ran_source("merged_in_order", source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    let lines: Vec<&str> = ran.stderr.lines().collect();
+    assert_eq!(
+        lines[..6],
+        [
+            "9",
+            "3",
+            "9",
+            "6",
+            "9",
+            "relation { a: integer, k: integer } { { a: 10, k: 1 }, { a: 20, k: 2 }, { a: 30, k: 3 } }"
+        ],
+        "{}",
+        ran.stderr
+    );
+    assert!(lines[6].starts_with("error[R0006]"), "{}", ran.stderr);
+}
+
 /// A rename named by a `const` reads what it renames in place, but only if that is already
 /// computed: a rename of what could fail is computed where it was written, before what comes
 /// after it, as what it fails with says.
