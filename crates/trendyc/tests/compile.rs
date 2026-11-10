@@ -1458,6 +1458,30 @@ operator main{{}} [
         "{}",
         ran.stderr
     );
+    // What is learned is kept from one run of the restriction to the next, and a run that
+    // an operand begins, of the same restriction, ranks it again in the middle of a tuple,
+    // which mustn't change the order the tuple's operands are computed in. The deepest run
+    // ranks `x mod 2 = 0`, false for odd `x`, first, and the call, which recurses, last, as
+    // the tuple `x` is 1 of each run around it has computed the call first and waits: were
+    // its order changed then, it would compute the call again and never `x mod 2 = 0`, and
+    // keep the tuple.
+    let nested = "uses { trendy.process };
+
+operator depth{n: integer}: integer [
+    if n = 0 then 1
+    else count{r: series{from: 1, to: 40} rename {value as x} where step{x, n} >= 0 and x + 0 > 0 and x mod 2 = 0}
+];
+
+operator step{x: integer, n: integer}: integer [
+    depth{n: n - 1}
+];
+
+operator main{} [
+    call debug_value{v: depth{n: length{a: arguments} + 3}};
+];
+";
+    let ran = ran_source("ranked_nested", nested, b"");
+    assert_eq!((ran.code, ran.stderr.as_str()), (0, "20\n"));
 }
 
 /// A key that fails fails just when going through the tuples would have: for a tuple

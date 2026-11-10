@@ -1920,20 +1920,34 @@ struct Steps {
     again: Vec<lir::BlockId>,
 }
 
-/// What a restriction's loop keeps of how the operands that can fail of its condition, an
-/// `and` or an `or`, have decided it, so as to compute them in the order likeliest to decide
-/// it soonest ([`FunctionBuilder::ranked_connective`]).
+/// What a restriction keeps of how the operands that can fail of its condition, an `and`
+/// or an `or`, have decided it, so as to compute them in the order likeliest to decide it
+/// soonest ([`FunctionBuilder::ranked_connective`]): kept for the whole run of the program,
+/// as each time the restriction runs learns from the last.
 struct Ranking {
     /// How many operands it ranks.
     count: usize,
-    /// One slot of `4 * count` usizes, as `trendy_rt_rank` orders them: the operand computed
-    /// in each place, in turn, then for each operand, as written, how many times it was
-    /// computed, how many times it decided the condition, and what it costs.
-    state: lir::Place,
-    /// How many tuples the condition has been computed for, and at how many it is ranked
-    /// next, twice as many each time.
-    seen: lir::Place,
-    next: lir::Place,
+    /// A variable of the program's own of `4 * count + 2` usizes: as `trendy_rt_rank` orders
+    /// them, the operand computed in each place, in turn, then for each operand, as written,
+    /// how many times it was computed, how many times it decided the condition, and what it
+    /// costs; then how many tuples the condition has been computed for, and at how many it
+    /// is ranked next.
+    state: lir::DataId,
+    /// The order, as this run of the restriction computes its operands in: one slot of
+    /// `count` usizes, copied from `state` as it begins, and once it ranks them again. A run
+    /// that an operand begins, of the same restriction, can rank them again too, which
+    /// mustn't change the order of a tuple some operands of which are computed already.
+    order: lir::Place,
+}
+
+impl Ranking {
+    /// Its state's field `at`.
+    fn field(&self, at: usize) -> lir::Place {
+        lir::Place {
+            base: lir::Base::Data(self.state),
+            path: vec![at],
+        }
+    }
 }
 
 /// What the loop of [`FunctionBuilder::each_at_hand_failing_first`] gives the handler of a
@@ -8614,7 +8628,8 @@ impl<'a> FunctionBuilder<'a> {
     /// `and` or an `or` of at least two operands that can fail, one of which calls a
     /// function, for what is cheap costs less to compute than to rank. Each is computed
     /// first in the place it is written, until it is ranked, with its cost estimated from
-    /// how much it computes ([`estimated_cost`]).
+    /// how much it computes ([`estimated_cost`]). What it learns is kept for the next time
+    /// the restriction runs, in a variable of the program's own.
     fn ranking_for(&mut self, condition: &hir::Expr, cx: &mut Lowering) -> Option<Ranking> {
         let hir::Expr::Connective(hir::Connective::And | hir::Connective::Or, operands) = condition
         else {
@@ -8625,42 +8640,42 @@ impl<'a> FunctionBuilder<'a> {
             return None;
         }
         let count = failing.len();
-        let state = self.slot(lir::Layout::Struct(vec![lir::Layout::Usize; 4 * count]));
-        let field = |at: usize| {
-            let mut field = state.clone();
-            field.path.push(at);
-            field
+        // As written, none computed yet, then the costs, then the tuples so far and when
+        // it is ranked first.
+        let fields: Vec<lir::Field> = (0..count)
+            .map(len)
+            .chain(std::iter::repeat_n(0, 2 * count))
+            .chain(failing.iter().map(|operand| estimated_cost(operand)))
+            .chain([0, 16])
+            .map(lir::Field::Usize)
+            .collect();
+        let name = format!("__ranking_{}", cx.data.len());
+        let state = cx.push(lir::Data {
+            kind: lir::DataKind::Variable { name },
+            writable: true,
+            fields,
+        });
+        let ranking = Ranking {
+            count,
+            state,
+            order: self.slot(lir::Layout::Struct(vec![lir::Layout::Usize; count])),
         };
-        for (i, operand) in failing.iter().enumerate() {
-            for (at, n) in [
-                (i, len(i)),
-                (count + i, 0),
-                (2 * count + i, 0),
-                (3 * count + i, estimated_cost(operand)),
-            ] {
-                let value = usize_constant(n, cx);
-                self.insts.push(lir::Inst::Copy {
-                    dst: field(at),
-                    src: value,
-                    layout: lir::Layout::Usize,
-                });
-            }
-        }
-        let (seen, next) = (self.slot(lir::Layout::Usize), self.slot(lir::Layout::Usize));
-        for (slot, n) in [(&seen, 0), (&next, 16)] {
-            let value = usize_constant(n, cx);
+        self.order_as_ranked(&ranking);
+        Some(ranking)
+    }
+
+    /// Copy the order `ranking` has its operands in into the slot this run of its
+    /// restriction computes them in.
+    fn order_as_ranked(&mut self, ranking: &Ranking) {
+        for at in 0..ranking.count {
+            let mut place = ranking.order.clone();
+            place.path.push(at);
             self.insts.push(lir::Inst::Copy {
-                dst: slot.clone(),
-                src: value,
+                dst: place,
+                src: ranking.field(at),
                 layout: lir::Layout::Usize,
             });
         }
-        Some(Ranking {
-            count,
-            state,
-            seen,
-            next,
-        })
     }
 
     /// `condition`, an `and` or an `or` as [`FunctionBuilder::ranking_for`] ranks, computed for
@@ -8704,17 +8719,12 @@ impl<'a> FunctionBuilder<'a> {
         self.end_block(lir::Terminator::Jump(dispatch), dispatch);
         let (operand_blocks, after_all) = self.dispatch_ranked(ranking, &place, cx);
         let raise = self.new_block();
-        let field = |at: usize| {
-            let mut field = ranking.state.clone();
-            field.path.push(at);
-            field
-        };
         let mut handlers = Vec::new();
         for (i, operand) in failing.iter().enumerate() {
             // What comes before goes on to the next place in the order.
             self.end_block(lir::Terminator::Jump(dispatch), operand_blocks[i]);
             self.insts.push(lir::Inst::Increment {
-                place: field(ranking.count + i),
+                place: ranking.field(ranking.count + i),
             });
             let handler = self.new_block();
             let bound = self.lets.len();
@@ -8736,7 +8746,7 @@ impl<'a> FunctionBuilder<'a> {
                 counted,
             );
             self.insts.push(lir::Inst::Increment {
-                place: field(2 * ranking.count + i),
+                place: ranking.field(2 * ranking.count + i),
             });
             self.end_block(lir::Terminator::Jump(settled), next);
             self.insts.push(lir::Inst::Increment {
@@ -8873,18 +8883,24 @@ impl<'a> FunctionBuilder<'a> {
         );
     }
 
-    /// Count a tuple `ranking`'s condition is computed for, and have the runtime order its
-    /// operands again if that is the one it is due at, and twice as many after.
+    /// Count a tuple `ranking`'s condition is computed for, and if it is the one it is due at,
+    /// have the runtime order its operands again, which this run computes them in from then
+    /// on, and next at twice as many tuples, or at 4096 more once that is fewer, so that a
+    /// program that runs long goes on learning.
     fn rank_if_due(&mut self, ranking: &Ranking, cx: &mut Lowering) {
+        let (seen, next) = (
+            ranking.field(4 * ranking.count),
+            ranking.field(4 * ranking.count + 1),
+        );
         self.insts.push(lir::Inst::Increment {
-            place: ranking.seen.clone(),
+            place: seen.clone(),
         });
         let due = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Binary {
             dst: due.clone(),
             op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
-            lhs: ranking.seen.clone(),
-            rhs: ranking.next.clone(),
+            lhs: seen,
+            rhs: next.clone(),
         });
         let (rank, on) = (self.new_block(), self.new_block());
         self.end_block(
@@ -8898,13 +8914,38 @@ impl<'a> FunctionBuilder<'a> {
         let count = usize_constant(len(ranking.count), cx);
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Rank,
-            args: vec![ranking.state.clone(), count],
+            args: vec![lir::Place::whole(lir::Base::Data(ranking.state)), count],
         });
+        self.order_as_ranked(ranking);
+        let most = usize_constant(4096, cx);
+        let few = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Binary {
-            dst: ranking.next.clone(),
+            dst: few.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Less, lir::Operand::Usize),
+            lhs: next.clone(),
+            rhs: most.clone(),
+        });
+        let (doubled, steady) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: few,
+                then: doubled,
+                otherwise: steady,
+            },
+            doubled,
+        );
+        self.insts.push(lir::Inst::Binary {
+            dst: next.clone(),
             op: lir::BinaryOp::Add(lir::Numeric::Integer),
-            lhs: ranking.next.clone(),
-            rhs: ranking.next.clone(),
+            lhs: next.clone(),
+            rhs: next.clone(),
+        });
+        self.end_block(lir::Terminator::Jump(on), steady);
+        self.insts.push(lir::Inst::Binary {
+            dst: next.clone(),
+            op: lir::BinaryOp::Add(lir::Numeric::Integer),
+            lhs: next,
+            rhs: most,
         });
         self.end_block(lir::Terminator::Jump(on), on);
     }
@@ -8941,11 +8982,11 @@ impl<'a> FunctionBuilder<'a> {
                 },
                 this_one,
             );
-            let mut field = ranking.state.clone();
-            field.path.push(at);
+            let mut place = ranking.order.clone();
+            place.path.push(at);
             self.insts.push(lir::Inst::Copy {
                 dst: operand.clone(),
-                src: field,
+                src: place,
                 layout: lir::Layout::Usize,
             });
             self.end_block(lir::Terminator::Jump(chosen), next);
