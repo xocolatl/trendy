@@ -295,6 +295,19 @@ impl Signature {
         }
     }
 
+    /// Where its parameter `name` is written, in the program's own definition.
+    pub(crate) fn parameter_written(&self, name: &str) -> Option<Span> {
+        self.decl
+            .as_ref()
+            .and_then(ast::Operator::params)
+            .and_then(|params| {
+                params.attributes().find_map(|a| {
+                    let name_node = a.name()?;
+                    (name_node.ident()?.text() == name).then(|| name_node.span())
+                })
+            })
+    }
+
     /// Where the operator's name is written in its definition, or a
     /// built-in's declaration: a constraint's `constraint`, and a
     /// representation's selector, if it isn't the stored one's, or

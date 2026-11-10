@@ -78,6 +78,31 @@ fn combine(
         .ok()
 }
 
+/// Where what a name refers to, `found`, for `name` written at `span`, is declared, if it is
+/// the program's: a variable's or a constant's declaration, which the name means where it
+/// is written, as treating a value narrower names it still.
+pub(crate) fn declared_in_program(
+    namespaces: &Namespaces,
+    found: &hir::Expr,
+    name: &str,
+    span: Span,
+) -> Option<Span> {
+    match named_leaf(found) {
+        hir::Expr::Variable(_) => namespaces.variable(name, span),
+        hir::Expr::ComputedConstant(..) | hir::Expr::Constant(_) => namespaces.constant(name, span),
+        _ => None,
+    }
+}
+
+/// What a name refers to, `found`, without the treating of it as narrower that what is
+/// known of its value adds (see [`crate::narrowed`]).
+pub(crate) fn named_leaf(found: &hir::Expr) -> &hir::Expr {
+    match found {
+        hir::Expr::TreatAs(_, inner) => named_leaf(inner),
+        _ => found,
+    }
+}
+
 /// `expr` without the parentheses around it, if it has any.
 fn unparenthesized(expr: &Expr) -> Expr {
     match expr {
@@ -105,6 +130,15 @@ pub(crate) trait Names {
     /// type (see [`crate::narrowed`]).
     fn resolve_variable(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
         self.resolve(name, span, errors)
+    }
+
+    /// Where what [`Names::resolve`] gave as `found`, for `name` written at `span`, is
+    /// declared, for [`crate::definitions`]: the program's variables and constants as
+    /// [`declared_in_program`] says, and what names the checker gives itself, as local
+    /// variables and parameters, as it says. `None` of what has no declaration to go to,
+    /// as an attribute of the tuple at hand.
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        declared_in_program(self.namespaces(), found, name, span)
     }
 
     /// What reading the variable or the constant named `name` that `unit`
@@ -694,7 +728,12 @@ impl<'a> Checker<'a> {
         let ident = name_ref.ident()?;
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         match self.names.resolve(name, span, errors) {
-            Lookup::Found(resolved) => self.matched(expected, resolved, expr, errors),
+            Lookup::Found(resolved) => {
+                if let Some(declared) = self.names.declared_at(&resolved, name, span) {
+                    self.names.namespaces().found(span, declared);
+                }
+                self.matched(expected, resolved, expr, errors)
+            }
             Lookup::Reported => None,
             // `ARRAY[1]`, as SQL writes an array of one element.
             Lookup::Unknown if name.eq_ignore_ascii_case("array") && indexed(name_ref) => {
@@ -1216,7 +1255,12 @@ impl<'a> Checker<'a> {
             .operators()
             .chosen(called, &argument_names(written))
         {
-            Some(Chosen::One(signature)) => signature.clone(),
+            Some(Chosen::One(signature)) => {
+                if let Some(declared) = signature.defined() {
+                    self.names.namespaces().found(span, declared);
+                }
+                signature.clone()
+            }
             Some(Chosen::Tied(tied)) => {
                 let units = self.names.namespaces().units();
                 errors.push(errors::unchosen_operator(name, &tied, written, units));
@@ -4182,6 +4226,14 @@ impl Names for TupleNames<'_> {
         self.outer.namespaces()
     }
 
+    /// An attribute of the tuple at hand has no declaration to go to.
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        if self.heading.get(name).is_some() {
+            return None;
+        }
+        self.outer.declared_at(found, name, span)
+    }
+
     fn site(&self, at: Span) -> hir::Site {
         self.outer.site(at)
     }
@@ -4331,6 +4383,18 @@ impl<'a> ComponentNames<'a> {
 impl Names for ComponentNames<'_> {
     fn namespaces(&self) -> &Namespaces {
         self.outer.namespaces()
+    }
+
+    /// A component of a value of the type has no declaration to go to.
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        if self
+            .defined
+            .possible_representations()
+            .any(|heading| heading.get(name).is_some())
+        {
+            return None;
+        }
+        self.outer.declared_at(found, name, span)
     }
 
     fn site(&self, at: Span) -> hir::Site {

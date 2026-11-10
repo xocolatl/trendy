@@ -26,6 +26,30 @@ impl<'a> LineIndex<'a> {
         Position::new(saturate(line - 1), saturate(character))
     }
 
+    /// The byte offset of `position`: as many UTF-16 code units into its line as it
+    /// says, or that line's end, and the document's end for a line past its last.
+    pub fn offset(&self, position: Position) -> usize {
+        let mut start = 0;
+        for _ in 0..position.line {
+            match self.source[start..].find('\n') {
+                Some(end) => start += end + 1,
+                None => return self.source.len(),
+            }
+        }
+        let end = self.source[start..]
+            .find('\n')
+            .map_or(self.source.len(), |end| start + end);
+        let wanted = usize::try_from(position.character).unwrap_or(usize::MAX);
+        let mut units = 0;
+        for (at, character) in self.source[start..end].char_indices() {
+            if units >= wanted {
+                return start + at;
+            }
+            units += character.len_utf16();
+        }
+        end
+    }
+
     pub fn range(&self, span: Span) -> Range {
         Range::new(self.position(span.start), self.position(span.end))
     }
@@ -66,6 +90,17 @@ mod tests {
         let index = LineIndex::new("é𝄞x");
         assert_eq!(index.position(2), Position::new(0, 1));
         assert_eq!(index.position(6), Position::new(0, 3));
+    }
+
+    #[test]
+    fn offsets_are_positions_back() {
+        let index = LineIndex::new("é𝄞x\nab\n");
+        for offset in [0, 2, 6, 7, 8, 10, 11] {
+            assert_eq!(index.offset(index.position(offset)), offset, "{offset}");
+        }
+        // Past a line's end, its end, and past the last line, the document's.
+        assert_eq!(index.offset(Position::new(1, 9)), 10);
+        assert_eq!(index.offset(Position::new(5, 0)), 11);
     }
 
     #[test]

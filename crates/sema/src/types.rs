@@ -389,12 +389,17 @@ pub(crate) fn resolve(
                 return Some(hir::Type::Parameter(parameter.clone()));
             }
             let name = namespaces.written_name(&ident, qualifier.as_ref(), errors)?;
+            let written = trendy_syntax::span(ident.text_range());
             if let Some(scalar) = namespaces.builtin_type(name) {
+                if let Some(declared) = namespaces.builtin_type_declared(name) {
+                    namespaces.found(written, declared);
+                }
                 return Some(hir::Type::Scalar(scalar));
             }
             // A type whose declaration has errors is reported where it is
             // declared.
-            if let Some((_, defined)) = namespaces.defined(name) {
+            if let Some((declared, defined)) = namespaces.defined(name) {
+                namespaces.found(written, declared);
                 return match defined {
                     Some(defined) => Some(hir::Type::Defined(Box::new(defined.clone()))),
                     None => namespaces
@@ -462,7 +467,7 @@ pub(crate) fn resolve_heading_expr(
             let ident = named.ident()?;
             let qualifier = named.qualifier();
             let name = namespaces.written_name(&ident, qualifier.as_ref(), errors)?;
-            let Some((_, attributes)) = namespaces.heading(name) else {
+            let Some((declared, attributes)) = namespaces.heading(name) else {
                 errors.push(match (&qualifier, name.unit) {
                     (Some(qualifier), Some(unit)) => {
                         errors::unknown_qualified(&ident, qualifier, unit, "heading", namespaces)
@@ -471,6 +476,7 @@ pub(crate) fn resolve_heading_expr(
                 });
                 return None;
             };
+            namespaces.found(trendy_syntax::span(ident.text_range()), declared);
             attributes.cloned()
         }
     }

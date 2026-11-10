@@ -2060,6 +2060,18 @@ as the secondary label. Missing and unknown attributes are reported at the
 tuple value. An unknown attribute close to a missing one is reported once,
 with a rename that fixes both.
 
+Where it resolves a written name, sema notes the declaration the name
+refers to (`Namespaces::found`): an operator a call chooses, the prelude's
+too; a type or a heading, a built-in type by its declaration in the
+prelude; a variable, a constant, a parameter or a local; and a unit named
+in a `uses`, by its file's start. `trendy_sema::definitions` checks a
+program as `check_unit` does, or the library alone as `check_library`
+does, and gives these, each name's span and its declaration's in the
+program's, for the language server's go-to-definition.
+Attributes and components aren't noted: a name in a tuple's heading
+refers to that heading, which may be written nowhere, as one a
+projection makes.
+
 ### opt (`trendy_opt`)
 
 **Provides:** the optimizer, from HIR to HIR: a program that means the same
@@ -2998,7 +3010,11 @@ results. They contain no language logic of their own.
   errors, or, if there are none, all sema errors, one in another file, and
   a label there, as a related location in that file. It offers each suggestion as a quick fix,
   provides semantic highlighting by classifying tokens in the CST (so
-  highlighting always agrees with the compiler, even in broken files), and answers formatting requests with fmt. It also converts
+  highlighting always agrees with the compiler, even in broken files), and answers formatting requests with fmt. It answers
+  definition requests with the declarations sema notes
+  (`trendy_sema::definitions`), in the document, another unit of its
+  program or the compiler's own sources, for a document with no syntax
+  errors. It also converts
   byte spans to the UTF-16 positions LSP uses. The VS Code extension in
   `editors/vscode` is its client, and makes it the formatter for trendy
   files, run on every save. The extension's TextMate grammar, used

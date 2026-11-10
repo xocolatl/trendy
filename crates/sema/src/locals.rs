@@ -347,15 +347,7 @@ fn written_parameter(declaring: Declaring, name: &str) -> Option<Span> {
     let Declaring::Operator(op) = declaring else {
         return None;
     };
-    op.decl
-        .as_ref()
-        .and_then(ast::Operator::params)
-        .and_then(|params| {
-            params.attributes().find_map(|a| {
-                let name_node = a.name()?;
-                (name_node.ident()?.text() == name).then(|| name_node.span())
-            })
-        })
+    op.parameter_written(name)
 }
 
 /// The local variables of `body`, the body of the operator `op`, its block

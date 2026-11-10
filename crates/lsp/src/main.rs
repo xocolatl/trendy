@@ -13,13 +13,15 @@ use lsp_types::notification::{
     Notification as NotificationTrait, PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, Formatting, Request as RequestTrait, SemanticTokensFullRequest,
+    CodeActionRequest, Formatting, GotoDefinition, Request as RequestTrait,
+    SemanticTokensFullRequest,
 };
 use lsp_types::{
-    CodeActionParams, CodeActionProviderCapability, DocumentFormattingParams, OneOf,
-    PublishDiagnosticsParams, SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CodeActionParams, CodeActionProviderCapability, DocumentFormattingParams, GotoDefinitionParams,
+    GotoDefinitionResponse, OneOf, PublishDiagnosticsParams, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -30,6 +32,7 @@ fn main() -> Result<()> {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         document_formatting_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: analysis::semantic_tokens_legend(),
@@ -93,6 +96,15 @@ impl Server<'_> {
                 })
             });
             Response::new_ok(id, tokens)
+        } else if request.method == GotoDefinition::METHOD {
+            let (id, params) = request.extract::<GotoDefinitionParams>(GotoDefinition::METHOD)?;
+            let at = params.text_document_position_params;
+            let location = self
+                .documents
+                .get(&at.text_document.uri)
+                .and_then(|text| analysis::definition(&at.text_document.uri, text, at.position))
+                .map(GotoDefinitionResponse::Scalar);
+            Response::new_ok(id, location)
         } else if request.method == CodeActionRequest::METHOD {
             let (id, params) = request.extract::<CodeActionParams>(CodeActionRequest::METHOD)?;
             let uri = &params.text_document.uri;

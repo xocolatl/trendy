@@ -120,6 +120,10 @@ impl Names for Outside<'_> {
         self.outer.namespaces()
     }
 
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        self.outer.declared_at(found, name, span)
+    }
+
     fn site(&self, at: Span) -> hir::Site {
         self.outer.site(at)
     }
@@ -400,6 +404,18 @@ impl<'a> BlockNames<'a> {
 impl Names for BlockNames<'_> {
     fn namespaces(&self) -> &Namespaces {
         self.outer.namespaces()
+    }
+
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        match self.own(name) {
+            Some((_, local)) => Some(
+                local
+                    .decl
+                    .name()
+                    .map_or_else(|| local.decl.span(), |n| n.span()),
+            ),
+            None => self.outer.declared_at(found, name, span),
+        }
     }
 
     fn site(&self, at: Span) -> hir::Site {

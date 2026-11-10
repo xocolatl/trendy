@@ -4,8 +4,8 @@ use std::fmt::Write;
 
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, DiagnosticRelatedInformation,
-    DiagnosticSeverity, Location, NumberOrString, Range, SemanticToken, SemanticTokenModifier,
-    SemanticTokenType, SemanticTokensLegend, TextEdit, Uri, WorkspaceEdit,
+    DiagnosticSeverity, Location, NumberOrString, Position, Range, SemanticToken,
+    SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend, TextEdit, Uri, WorkspaceEdit,
 };
 
 use crate::highlight::{self, Class};
@@ -91,25 +91,69 @@ fn errors(uri: &Uri, source: &str, checked: &Checked) -> Vec<trendy_diag::Diagno
                 return parse.errors;
             }
             LIBRARY.with(|library| {
-                // The document, in its unit's place.
-                let library: Vec<trendy_sema::File> = files(library)
-                    .into_iter()
-                    .map(|file| {
-                        if file.name == unit.name {
-                            trendy_sema::File {
-                                name: unit.name,
-                                path: uri.as_str(),
-                                tree: &parse.tree,
-                            }
-                        } else {
-                            file
-                        }
-                    })
-                    .collect();
-                trendy_sema::check_library(&library)
+                trendy_sema::check_library(&in_its_place(library, *unit, uri, &parse.tree))
             })
         }
     }
+}
+
+/// The files of the units that come with the compiler, `library`, with the document at
+/// `uri`, `tree`, in the place of its unit, `unit`.
+fn in_its_place<'a>(
+    library: &'a [trendy_load::Unit],
+    unit: trendy_prelude::Unit,
+    uri: &'a Uri,
+    tree: &'a trendy_syntax::ast::SourceFile,
+) -> Vec<trendy_sema::File<'a>> {
+    files(library)
+        .into_iter()
+        .map(|file| {
+            if file.name == unit.name {
+                trendy_sema::File {
+                    name: unit.name,
+                    path: uri.as_str(),
+                    tree,
+                }
+            } else {
+                file
+            }
+        })
+        .collect()
+}
+
+/// Where what the name at `position` in the document at `uri`, of the text `source`, refers
+/// to is declared, as sema finds it (see `trendy_sema::definitions`), checking the
+/// document as [`diagnostics`] does: in the document, another unit of its program, or a
+/// unit that comes with the compiler. Nothing for a document with syntax errors, which
+/// sema doesn't check.
+pub fn definition(uri: &Uri, source: &str, position: Position) -> Option<Location> {
+    let checked = Checked::of(uri, source);
+    let found = match &checked {
+        Checked::Program(program) => {
+            if !program.errors().is_empty() {
+                return None;
+            }
+            LIBRARY
+                .with(|library| trendy_sema::definitions(&files(&program.units), &files(library)))
+        }
+        Checked::Library(unit) => {
+            let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
+            if !parse.errors.is_empty() {
+                return None;
+            }
+            LIBRARY.with(|library| {
+                trendy_sema::definitions(&[], &in_its_place(library, *unit, uri, &parse.tree))
+            })
+        }
+    };
+    let files = Files::new(uri, source, &checked);
+    let offset = LineIndex::new(source).offset(position);
+    let name = found.iter().find(|definition| {
+        files
+            .in_document(definition.name)
+            .is_some_and(|name| name.start <= offset && offset <= name.end)
+    })?;
+    Some(files.location(name.declaration))
 }
 
 /// Where the spans of the errors in a document are: in it, or in another
@@ -165,6 +209,12 @@ impl<'a> Files<'a> {
             sources: trendy_diag::Sources::new(all.iter().map(|&(_, name, text)| (name, text))),
             uris: all.into_iter().map(|(uri, _, _)| uri).collect(),
         }
+    }
+
+    /// Where `span` is in the document, if it is in it.
+    fn in_document(&self, span: trendy_diag::Span) -> Option<trendy_diag::Span> {
+        let located = self.sources.locate(span);
+        (located.index == self.document).then_some(located.span)
     }
 
     /// Where `span` is.
@@ -645,6 +695,47 @@ mod tests {
         assert_eq!(
             related[0].location.range,
             Range::new(at(column), at(column + "boolean".len()))
+        );
+    }
+
+    #[test]
+    fn definitions_in_and_of_the_prelude() {
+        let prelude = trendy_prelude::PRELUDE;
+        let uri = source_uri(prelude.source_path);
+        let line_of = |start: &str| {
+            let line = prelude
+                .source
+                .lines()
+                .position(|line| line.starts_with(start))
+                .unwrap();
+            u32::try_from(line).unwrap()
+        };
+        let count = Range::new(
+            Position::new(line_of("builtin operator count{"), 17),
+            Position::new(line_of("builtin operator count{"), 22),
+        );
+        // A built-in operator, from a program's call.
+        let source = "var n := count{r: relation { { x: 1 } }};\noperator main{} [];";
+        let found = definition(&self::uri(), source, Position::new(0, 11)).unwrap();
+        assert_eq!((found.uri, found.range), (uri.clone(), count));
+        // The same, from a call in the prelude itself, checked as the library is.
+        let found = definition(
+            &uri,
+            prelude.source,
+            Position::new(line_of("    count{r: r} = 0"), 4),
+        )
+        .unwrap();
+        assert_eq!((found.uri, found.range), (uri.clone(), count));
+        // A type the prelude declares, from its use there.
+        let found = definition(
+            &uri,
+            prelude.source,
+            Position::new(line_of("heading transaction_collection :="), 44),
+        )
+        .unwrap();
+        assert_eq!(
+            found.range.start,
+            Position::new(line_of("type error union;"), 5)
         );
     }
 

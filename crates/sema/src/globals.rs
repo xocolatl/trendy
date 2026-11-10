@@ -1368,6 +1368,17 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         self.globals.namespaces
     }
 
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        match crate::check::named_leaf(found) {
+            hir::Expr::Parameter(parameter) => self.signature().parameter_written(parameter),
+            hir::Expr::Local(_) => match self.locals.find(name) {
+                Some(Local::Declared(_, _, declaration)) => Some(declaration.name_span()),
+                _ => None,
+            },
+            _ => crate::check::declared_in_program(self.namespaces(), found, name, span),
+        }
+    }
+
     fn site(&self, at: Span) -> hir::Site {
         self.globals.sites.at(at)
     }

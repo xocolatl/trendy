@@ -1212,7 +1212,12 @@ impl Statements<'_, '_> {
             .map(|args| argument_names(Written::Arguments(args)))
             .unwrap_or_default();
         let signature = match cx.operators.chosen(called, &names) {
-            Some(Chosen::One(signature)) => signature,
+            Some(Chosen::One(signature)) => {
+                if let Some(declared) = signature.defined() {
+                    cx.namespaces.found(span, declared);
+                }
+                signature
+            }
             Some(Chosen::Tied(tied)) => {
                 // Without arguments, a syntax error, which is reported.
                 if let Some(args) = &args {
@@ -2032,6 +2037,15 @@ impl Names for BodyNames<'_> {
         self.around.namespaces()
     }
 
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        if let hir::Expr::Local(_) = crate::check::named_leaf(found)
+            && let Some(Local::Declared(_, _, declaration)) = self.locals.find(name)
+        {
+            return Some(declaration.name_span());
+        }
+        self.around.declared_at(found, name, span)
+    }
+
     fn site(&self, at: Span) -> hir::Site {
         self.around.site(at)
     }
@@ -2276,6 +2290,13 @@ impl UpdateNames<'_, '_> {
 impl Names for UpdateNames<'_, '_> {
     fn namespaces(&self) -> &Namespaces {
         self.cx.namespaces
+    }
+
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        if let hir::Expr::Parameter(parameter) = crate::check::named_leaf(found) {
+            return self.signature().parameter_written(parameter);
+        }
+        crate::check::declared_in_program(self.namespaces(), found, name, span)
     }
 
     fn site(&self, at: Span) -> hir::Site {

@@ -33,6 +33,7 @@ impl Client {
         let result = client.request("initialize", json!({ "capabilities": {} }));
         assert_eq!(result["capabilities"]["documentFormattingProvider"], true);
         assert_eq!(result["capabilities"]["codeActionProvider"], true);
+        assert_eq!(result["capabilities"]["definitionProvider"], true);
         assert_eq!(
             result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"],
             json!([
@@ -89,6 +90,17 @@ impl Client {
             }
             other => panic!("expected diagnostics, got {other:?}"),
         }
+    }
+
+    /// Where the name at `line` and `character` of the document is declared.
+    fn definition(&mut self, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": URI },
+                "position": { "line": line, "character": character },
+            }),
+        )
     }
 
     fn shutdown(mut self) {
@@ -216,6 +228,69 @@ fn semantic_tokens() {
     // `operator` (keyword) at 0:0, then `main` (function, declaration and
     // definition) 9 columns later.
     assert_eq!(tokens["data"], json!([0, 0, 8, 0, 0, 0, 9, 4, 1, 3]));
+
+    client.shutdown();
+}
+
+#[test]
+fn definition() {
+    let mut client = Client::start();
+    open(
+        &mut client,
+        "operator twice{n: integer}: integer [ n * 2 ];\n\
+         \n\
+         operator main{} [\n    \
+             var four := twice{n: 2};\n    \
+             call debug_value{v: four};\n\
+         ];\n",
+    );
+    client.diagnostics();
+
+    // An operator of the document, from its call: any character of the name,
+    // or just after it, as a cursor at the end of a word is.
+    let twice = json!({
+        "uri": URI,
+        "range": {
+            "start": { "line": 0, "character": 9 },
+            "end": { "line": 0, "character": 14 },
+        },
+    });
+    assert_eq!(client.definition(3, 16), twice);
+    assert_eq!(client.definition(3, 21), twice);
+    // A local variable, from where it is read.
+    assert_eq!(
+        client.definition(4, 24)["range"],
+        json!({
+            "start": { "line": 3, "character": 8 },
+            "end": { "line": 3, "character": 12 },
+        })
+    );
+    // An operator that comes with the compiler, in the prelude's source.
+    let debug_value = client.definition(4, 10);
+    assert!(
+        debug_value["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/crates/prelude/src/prelude.trendy"),
+        "{debug_value}"
+    );
+    // Nothing at a keyword.
+    assert_eq!(client.definition(4, 5), Value::Null);
+
+    // A program with an error sema finds still has its names.
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": URI, "version": 2 },
+            "contentChanges": [{ "text": "operator twice{n: integer}: integer [ n * 2 ];\n\
+                \n\
+                operator main{} [\n    \
+                    var four := twice{n: \"2\"};\n\
+                ];\n" }],
+        }),
+    );
+    assert_ne!(client.diagnostics(), json!([]));
+    assert_eq!(client.definition(3, 16), twice);
 
     client.shutdown();
 }

@@ -89,6 +89,35 @@ pub fn check_unit(units: &[File], library: &[File]) -> Vec<Diagnostic> {
     errors
 }
 
+/// Where each name written in `units` and `library` refers to is declared, as checking
+/// them, as [`check_unit`] does, or, with no `units`, the library alone, as
+/// [`check_library`] does, finds it: an operator's, by a call; a type's or a heading's,
+/// by its name in a type; a variable's, a constant's, a local variable's or a
+/// parameter's, by a value's name; and a unit's, by its name in a `uses`. Each is in the
+/// spans their errors are in, in source order, a name once. What has errors is checked
+/// as far as it can be, so what refers to nothing is left out. An attribute or a
+/// component is left out too: it refers to a heading, which may be written nowhere.
+///
+/// # Panics
+///
+/// If the library hasn't the prelude or the catalog.
+#[must_use]
+pub fn definitions(units: &[File], library: &[File]) -> Vec<Definition> {
+    // Only what resolves names: the checks of sections and uses only report errors.
+    check(&Files::new(units, library), &mut Vec::new())
+        .namespaces
+        .definitions()
+}
+
+/// A name written in the program, where [`definitions`] says it is declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Definition {
+    /// The name, as written.
+    pub name: Span,
+    /// Its declaration's name, or, of a unit, the start of its file.
+    pub declaration: Span,
+}
+
 /// What [`analyze`] and [`check_unit`] both check: each unit's sections, that
 /// each used unit has a use, and all of them together.
 fn units_checked(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
@@ -442,6 +471,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     // which only the prelude declares.
     let kinds = builtins::kinds(files.prelude(), errors);
     let mut namespaces = collect_names(&kinds, files, errors);
+    namespaces.found_units(files);
     // Each file's path and text, in the program's order, the units' first.
     let texts: Vec<(&str, String)> = files
         .units
@@ -748,6 +778,10 @@ pub(crate) struct Namespaces {
     /// signatures name, once the types are resolved:
     /// [`builtins::library`] fills it in.
     library: Option<hir::Library>,
+    /// Where each name checking has found refers to is declared, as it finds them, for
+    /// [`definitions`]: noted wherever a name is resolved, which reaches these through
+    /// every checker, so they are noted through a shared reference.
+    found: std::cell::RefCell<Vec<Definition>>,
 }
 
 /// An operator's definition, as its name's namespace has it.
@@ -804,7 +838,49 @@ impl Namespaces {
                 .map(|(kind, members)| (kind.name.clone(), (kind.clone(), members.clone())))
                 .collect(),
             library: None,
+            found: std::cell::RefCell::default(),
         }
+    }
+
+    /// Note that the name written at `name` refers to what is declared at `declaration`.
+    pub(crate) fn found(&self, name: Span, declaration: Span) {
+        self.found
+            .borrow_mut()
+            .push(Definition { name, declaration });
+    }
+
+    /// Note where each unit that a `uses` of `files` names is: the start of its file.
+    fn found_units(&self, files: &Files) {
+        for (_, file) in &files.units {
+            for used in file
+                .uses()
+                .flat_map(|decl| decl.units().collect::<Vec<_>>())
+            {
+                let Some(name) = used.name() else {
+                    continue;
+                };
+                if let Some(unit) = self.units.id(&name.text()) {
+                    let start = files.tree(unit).span().start;
+                    let written = trendy_syntax::span(name.syntax().text_range());
+                    self.found(written, Span { start, end: start });
+                }
+            }
+        }
+    }
+
+    /// What [`Namespaces::found`] noted, in source order, each name once, as first found:
+    /// what is checked more than once is found again.
+    fn definitions(&self) -> Vec<Definition> {
+        let mut found = self.found.take();
+        found.sort_by_key(|definition| definition.name.start);
+        found.dedup_by_key(|definition| definition.name);
+        found
+    }
+
+    /// Where the prelude declares the built-in type `name` names, if it names one.
+    pub(crate) fn builtin_type_declared(&self, name: WrittenName) -> Option<Span> {
+        self.builtin_type(name)?;
+        self.builtin_types.get(name.name).copied()
     }
 
     /// The types of the units that come with the compiler that built-ins'
@@ -1822,6 +1898,47 @@ mod tests {
             .map(|((&(name, _), tree), path)| File { name, path, tree })
             .collect();
         with_library(None, |library| analyze(&files, library))
+    }
+
+    /// What each name written in the first of `units`, each a unit's name and text, refers
+    /// to, as [`definitions`] says: the name's text, and its declaration's, or of a unit's
+    /// file, the first line of it.
+    fn definitions_in(units: &[(&str, &str)]) -> Vec<(String, String)> {
+        let trees: Vec<SourceFile> = units.iter().map(|&(_, source)| parse(source)).collect();
+        let paths: Vec<String> = units
+            .iter()
+            .map(|(name, _)| format!("{name}.trendy"))
+            .collect();
+        let files: Vec<File> = units
+            .iter()
+            .zip(&trees)
+            .zip(&paths)
+            .map(|((&(name, _), tree), path)| File { name, path, tree })
+            .collect();
+        let found = with_library(None, |library| definitions(&files, library));
+        let text: String = units
+            .iter()
+            .map(|(_, source)| *source)
+            .chain(trendy_prelude::UNITS.iter().map(|unit| unit.source))
+            .collect();
+        found
+            .iter()
+            .filter(|d| d.name.end <= units[0].1.len())
+            .map(|d| {
+                let declaration = if d.declaration.start == d.declaration.end {
+                    text[d.declaration.start..]
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                } else {
+                    &text[d.declaration.start..d.declaration.end]
+                };
+                (
+                    text[d.name.start..d.name.end].to_string(),
+                    declaration.to_string(),
+                )
+            })
+            .collect()
     }
 
     /// The errors of the units that come with the compiler, checked alone,
@@ -17774,6 +17891,61 @@ var a := duration{n: days{n: 1}};
                 .versions
                 .iter()
                 .all(|v| program.operator(v.operator).name == "message"),
+        );
+    }
+
+    #[test]
+    fn each_name_refers_to_its_declaration() {
+        let depths = "interface\n\noperator below{m: integer}: integer;\n\nimplementation\n\noperator below{m: integer}: integer [ m - 1 ];\n";
+        let main = "uses { depths };
+
+heading lake := { name: text, metres: integer };
+type label { { text: text } };
+var lakes: relation lake := relation {};
+const deepest := 1600;
+
+operator described{l: tuple lake}: label [
+    label{text: l.name}
+];
+
+operator main{} [
+    var listed := count{r: lakes};
+    var more := listed + deepest + below{m: listed};
+    call debug_value{v: more};
+    call debug_value{v: described{l: tuple { name: \"Baikal\", metres: 1642 }}};
+    call debug_value{v: count{r: lakes where name = \"Baikal\"}};
+];
+";
+        let found = definitions_in(&[("main", main), ("depths", depths)]);
+        let in_main: Vec<(&str, &str)> = found
+            .iter()
+            .map(|(name, declared)| (name.as_str(), declared.as_str()))
+            .collect();
+        for expected in [
+            // A unit, by its file.
+            ("depths", "interface"),
+            // Types and headings, the prelude's too.
+            ("text", "text"),
+            ("integer", "integer"),
+            ("lake", "lake"),
+            ("label", "label"),
+            // Operators, the prelude's and another unit's, and a selector.
+            ("count", "count"),
+            ("below", "below"),
+            ("debug_value", "debug_value"),
+            // Values: a parameter, a variable, a constant and local variables.
+            ("l", "l"),
+            ("lakes", "lakes"),
+            ("deepest", "deepest"),
+            ("listed", "listed"),
+            ("more", "more"),
+        ] {
+            assert!(in_main.contains(&expected), "{expected:?} in {in_main:#?}");
+        }
+        // An attribute of the tuple at hand has no declaration to go to.
+        assert!(
+            !in_main.iter().any(|(name, _)| *name == "name"),
+            "{in_main:#?}"
         );
     }
 }

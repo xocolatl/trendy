@@ -379,6 +379,10 @@ impl Names for Narrowed<'_> {
         self.outer.namespaces()
     }
 
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        self.outer.declared_at(found, name, span)
+    }
+
     fn site(&self, at: Span) -> hir::Site {
         self.outer.site(at)
     }
@@ -469,6 +473,10 @@ pub(crate) struct Unnarrowed<'a> {
 impl Names for Unnarrowed<'_> {
     fn namespaces(&self) -> &Namespaces {
         self.outer.namespaces()
+    }
+
+    fn declared_at(&self, found: &hir::Expr, name: &str, span: Span) -> Option<Span> {
+        self.outer.declared_at(found, name, span)
     }
 
     fn site(&self, at: Span) -> hir::Site {
