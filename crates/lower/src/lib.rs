@@ -1896,31 +1896,35 @@ struct LocalPlace {
     holds: bool,
 }
 
-/// The slots [`FunctionBuilder::each_at_hand_failing_first`] keeps what it knows in, as its
-/// loop runs.
+/// The slots what puts failures aside keeps what it knows in, as it runs: the loop of
+/// [`FunctionBuilder::each_at_hand_failing_first`], or the steps of
+/// [`FunctionBuilder::steps_put_aside`].
 struct FirstFailing {
-    /// Where the first tuple in canonical order to fail is, among those so far, or `none`.
-    least: lir::Place,
-    /// `usize::MAX`: where no tuple is.
+    /// Which is the first to fail, among those so far, or `none`: a tuple's index, or a
+    /// step's.
+    first: lir::Place,
+    /// `usize::MAX`: no tuple or step.
     none: lir::Place,
-    /// Whether that tuple's work is being computed again, to fail as it did.
-    again: lir::Place,
-    /// The scope innermost as the loop begins, which a failure's own end with it.
-    scope: lir::Place,
-    /// How many calls the trace has as the loop begins, after which a failure's are forgotten.
-    traced: lir::Place,
-    /// The site as the loop begins, which a failure in a call leaves at the call's.
-    site: lir::Place,
+    /// The scope innermost as it begins, if what it computes begins scopes of its own,
+    /// which a failure's end with.
+    scope: Option<lir::Place>,
+    /// How many calls the trace has as it begins, and the site, if what it computes makes
+    /// calls, which leave a failure's calls in the trace and the site at their own.
+    traced: Option<(lir::Place, lir::Place)>,
 }
 
-/// What the loop of [`FunctionBuilder::each_at_hand_failing_first`] gives what comes after it.
+/// The steps of [`FunctionBuilder::steps_put_aside`], once they are lowered.
+struct Steps {
+    failing: FirstFailing,
+    /// Where each is computed again, from a copy of its own, to fail as it did.
+    again: Vec<lir::BlockId>,
+}
+
+/// What the loop of [`FunctionBuilder::each_at_hand_failing_first`] gives the handler of a
+/// tuple's failure.
 struct Looped {
-    /// Where the work of a tuple begins, which computing one again goes back to.
-    start: lir::BlockId,
     /// Where the loop goes on after a tuple's work, with the next.
     next: lir::BlockId,
-    /// Where a tuple's failure goes.
-    handler: lir::BlockId,
     /// The tuple at hand, which a slot points to.
     at_hand: lir::Place,
     /// Its index.
@@ -3262,17 +3266,17 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Check each part of the constraint `index`, in turn.
+    /// Check each part of the constraint `index`, in turn: those that can't fail first,
+    /// each reporting that it is broken if it is, then those that can, as steps
+    /// ([`FunctionBuilder::steps_put_aside`]), as one that is false decides that the
+    /// constraint is broken even if another fails (see [`hir::Connective::And`]). If none
+    /// is, the first to fail is computed again, and fails as it did.
     fn variable_constraint_checked(&mut self, index: usize, cx: &mut Lowering) {
         let constraint = &self.program.constraints[index];
-        for (part, written) in constraint.parts.iter().enumerate() {
-            let checked = Checked {
-                constraint: index,
-                part,
-                tuples: false,
-            };
-            let holds = self.slot(scalar_layout(hir::Scalar::Boolean));
-            self.call_constraint(checked, holds.clone(), cx);
+        let (failing, safe): (Vec<usize>, Vec<usize>) = (0..constraint.parts.len())
+            .partition(|&part| constraint.parts[part].condition.can_fail());
+        for part in safe {
+            let holds = self.part_holds(index, part, cx);
             let (kept, broken) = (self.new_block(), self.new_block());
             self.end_block(
                 lir::Terminator::Branch {
@@ -3282,24 +3286,83 @@ impl<'a> FunctionBuilder<'a> {
                 },
                 broken,
             );
-            let name = self.text(&constraint.name, cx);
-            let condition = self.text(&written.written, cx);
-            let tuples = written.breaking.is_some().then(|| {
-                let tuples = self.slot(scalar_layout(hir::Scalar::Text));
-                let checked = Checked {
-                    tuples: true,
-                    ..checked
-                };
-                self.call_constraint(checked, tuples.clone(), cx);
-                tuples
-            });
-            let failure = lir::Failure::ConstraintViolated {
-                constraint: name,
-                condition,
-                tuples,
-            };
-            self.fail(failure, kept);
+            self.part_broken(index, part, kept, cx);
         }
+        if failing.is_empty() {
+            return;
+        }
+        let broken: Vec<lir::BlockId> = failing.iter().map(|_| self.new_block()).collect();
+        let steps = self.steps_put_aside(
+            failing.len(),
+            true,
+            cx,
+            |this, i, cx| this.part_holds(index, failing[i], cx),
+            |this, i, holds, _| {
+                let kept = this.new_block();
+                this.end_block(
+                    lir::Terminator::Branch {
+                        condition: holds,
+                        then: kept,
+                        otherwise: broken[i],
+                    },
+                    kept,
+                );
+            },
+        );
+        let failed = self.steps_failed(&steps);
+        let (again, held) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: failed,
+                then: again,
+                otherwise: held,
+            },
+            again,
+        );
+        self.fail_again(&steps, cx);
+        for (i, &part) in failing.iter().enumerate() {
+            self.end_block(lir::Terminator::Jump(held), broken[i]);
+            let unreached = self.new_block();
+            self.part_broken(index, part, unreached, cx);
+        }
+        self.end_block(lir::Terminator::Jump(held), held);
+    }
+
+    /// Whether the part `part` of the constraint `index` holds, in a new slot.
+    fn part_holds(&mut self, index: usize, part: usize, cx: &mut Lowering) -> lir::Place {
+        let checked = Checked {
+            constraint: index,
+            part,
+            tuples: false,
+        };
+        let holds = self.slot(scalar_layout(hir::Scalar::Boolean));
+        self.call_constraint(checked, holds.clone(), cx);
+        holds
+    }
+
+    /// Fail where the part `part` of the constraint `index` is broken, saying so, with the
+    /// tuples that break it if its form says which, and go on building `next`.
+    fn part_broken(&mut self, index: usize, part: usize, next: lir::BlockId, cx: &mut Lowering) {
+        let constraint = &self.program.constraints[index];
+        let written = &constraint.parts[part];
+        let name = self.text(&constraint.name, cx);
+        let condition = self.text(&written.written, cx);
+        let tuples = written.breaking.is_some().then(|| {
+            let tuples = self.slot(scalar_layout(hir::Scalar::Text));
+            let checked = Checked {
+                constraint: index,
+                part,
+                tuples: true,
+            };
+            self.call_constraint(checked, tuples.clone(), cx);
+            tuples
+        });
+        let failure = lir::Failure::ConstraintViolated {
+            constraint: name,
+            condition,
+            tuples,
+        };
+        self.fail(failure, next);
     }
 
     /// Call the function of `checked`, its value into `result`.
@@ -6740,12 +6803,12 @@ impl<'a> FunctionBuilder<'a> {
                 self.extend(expr, operand, attributes, Want::Canonical, cx)
                     .0
             }
-            // Of the operands of `and` and `or`, those that can fail are
-            // computed only when those that can't don't decide the result.
-            hir::Expr::Connective(connective, operands)
-                if let Some(guarded) = connective.guarded(operands) =>
-            {
-                self.place(&guarded, cx)
+            // Decided by any operand that decides it, those that can fail included.
+            hir::Expr::Connective(
+                connective @ (hir::Connective::And | hir::Connective::Or),
+                operands,
+            ) if operands.iter().any(hir::Expr::can_fail) => {
+                self.deciding_connective(*connective, operands, cx)
             }
             hir::Expr::Connective(connective, operands) => {
                 self.connective(expr, *connective, operands, cx)
@@ -6794,8 +6857,8 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
-    /// `expr`, the `connective` of `operands`, all of which can fail or
-    /// none of which can (see [`hir::Connective::guarded`]). Of an `and` or an
+    /// `expr`, the `connective` of `operands`: an `xor`, or an `and` or an `or` none of
+    /// whose operands can fail (see [`FunctionBuilder::deciding_connective`]). Of an `and` or an
     /// `or` of those that can't, each is computed only if those before it
     /// don't decide the result: since they can't fail, that only saves
     /// work, which is worth a branch unless those after it are only read.
@@ -6837,6 +6900,81 @@ impl<'a> FunctionBuilder<'a> {
             });
             result = dst;
         }
+        result
+    }
+
+    /// `connective`, an `and` or an `or`, of `operands`, some of which can fail: decided by
+    /// any operand that decides it, false for `and` and true for `or`, whatever the others
+    /// do, and otherwise failing as the first operand written that fails does (see
+    /// [`hir::Connective::And`]). Those that can't fail are computed first, each only if
+    /// those before it don't decide the result, then those that can, in the order written,
+    /// as steps ([`FunctionBuilder::steps_put_aside`]): one that fails is put aside, as one
+    /// after it may yet decide the result, and if none does, the first to fail is computed
+    /// again, and fails as it did. The result is in a new slot.
+    fn deciding_connective(
+        &mut self,
+        connective: hir::Connective,
+        operands: &[hir::Expr],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let result = self.slot(scalar_layout(hir::Scalar::Boolean));
+        let (settled, done) = (self.new_block(), self.new_block());
+        let decides = !connective.identity();
+        // To `decided` if `value` decides it, and else on.
+        let decide = |this: &mut Self, value: lir::Place| {
+            let next = this.new_block();
+            let (then, otherwise) = if decides {
+                (settled, next)
+            } else {
+                (next, settled)
+            };
+            this.end_block(
+                lir::Terminator::Branch {
+                    condition: value,
+                    then,
+                    otherwise,
+                },
+                next,
+            );
+        };
+        let (failing, safe): (Vec<&hir::Expr>, Vec<&hir::Expr>) =
+            operands.iter().partition(|operand| operand.can_fail());
+        for operand in safe {
+            let value = self.place(operand, cx);
+            decide(self, value);
+        }
+        let calls = failing.iter().any(|operand| makes_calls(operand));
+        let steps = self.steps_put_aside(
+            failing.len(),
+            calls,
+            cx,
+            |this, i, cx| this.place(failing[i], cx),
+            |this, _, value, _| decide(this, value),
+        );
+        let failed = self.steps_failed(&steps);
+        let (again, undecided) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: failed,
+                then: again,
+                otherwise: undecided,
+            },
+            again,
+        );
+        self.fail_again(&steps, cx);
+        self.end_block(lir::Terminator::Jump(done), undecided);
+        let set = |this: &mut Self, value: bool, cx: &mut Lowering| {
+            let src = u8_constant(u8::from(value), cx);
+            this.insts.push(lir::Inst::Copy {
+                dst: result.clone(),
+                src,
+                layout: lir::Layout::U8,
+            });
+        };
+        set(self, connective.identity(), cx);
+        self.end_block(lir::Terminator::Jump(done), settled);
+        set(self, decides, cx);
+        self.end_block(lir::Terminator::Jump(done), done);
         result
     }
 
@@ -7422,7 +7560,7 @@ impl<'a> FunctionBuilder<'a> {
         let dst = self.allocated(&result_ty, count, cx);
         let built = hir::Type::Tuple(result.clone());
         self.each_at_hand_in(src, &tuple, comes, fails, cx, |this, at_hand, index, cx| {
-            let to = this.element(&dst, index, result_tuple);
+            let to = this.element(&dst, index, result_tuple.clone());
             // The work on each tuple in a scope of its own, which the
             // tuple built outlives.
             this.nested_scope(cx, |this, cx| {
@@ -7552,7 +7690,7 @@ impl<'a> FunctionBuilder<'a> {
                 this.insts.push(lir::Inst::Copy {
                     dst: to,
                     src: at_hand.clone(),
-                    layout: tuple,
+                    layout: tuple.clone(),
                 });
                 this.insts.push(lir::Inst::Increment {
                     place: kept.clone(),
@@ -7581,9 +7719,9 @@ impl<'a> FunctionBuilder<'a> {
     /// for which that holds, in a new slot, found by following only the paths from
     /// or to that value ([`lir::RuntimeFn::TcloseOf`]), and what is left of
     /// `condition`. The first attribute's is preferred, whose arcs are in order
-    /// already. An equality of a value that can't fail guards the other conjuncts,
-    /// as for [`FunctionBuilder::equal_runs`], and one of a value that can is taken
-    /// only if nothing else is left, computed if the closure has a tuple, which it
+    /// already. An equality of a value that can't fail narrows what the other conjuncts
+    /// are computed for, as for [`FunctionBuilder::equal_runs`], and one of a value that
+    /// can is taken only if nothing else is left, computed if the closure has a tuple, which it
     /// does if `operand` has one.
     fn closure_narrowed(
         &mut self,
@@ -7612,8 +7750,7 @@ impl<'a> FunctionBuilder<'a> {
         let ty = self.type_of(arcs);
         let src = self.place(arcs, cx);
         let value = if fails {
-            let mut values = self.values_if_any_tuple(&src, &[(i, value)], cx);
-            values.remove(0).1
+            self.value_if_any_tuple(&src, value, cx)
         } else {
             self.tuples.push(AtHand::one(src.clone()));
             let value = self.place(value, cx);
@@ -7688,9 +7825,8 @@ impl<'a> FunctionBuilder<'a> {
     /// run, found by binary search ([`lir::RuntimeFn::EqualRun`]), and
     /// among them, so are those for which the next is, and so on, while
     /// `condition` has a conjunct for it (see [`FunctionBuilder::equated`]).
-    /// An equality of a value that can't fail can't fail, so it guards the
-    /// other conjuncts, which are computed only for the tuples it holds for,
-    /// as they are in the run. If all that is left then is such equalities of
+    /// An equality that is false decides the `and`, so the other conjuncts are
+    /// computed only for the tuples it holds for, as they are in the run. If all that is left then is such equalities of
     /// values that can fail, see [`FunctionBuilder::failable_runs`].
     fn equal_runs(
         &mut self,
@@ -7735,7 +7871,7 @@ impl<'a> FunctionBuilder<'a> {
         let values = self.failable_equalities(&rest, attributes);
         if let Some(values) = values {
             rest.clear();
-            src = self.failable_runs(src, &values, ty, order, cx);
+            src = self.failable_runs(&src, &values, ty, order, cx);
         }
         let rest = rest.into_iter().cloned().collect();
         (src, hir::Connective::And.of(rest))
@@ -7788,37 +7924,108 @@ impl<'a> FunctionBuilder<'a> {
         Some(values)
     }
 
-    /// The run of tuples of the relation or run at `src`, of type `ty`, whose
-    /// attributes are equal to `values`, each with its place from the first in
-    /// name order, which can fail but read no tuple, and are all that is left
-    /// of a condition. For each tuple every one of them would be computed, as
-    /// nothing is left to guard them (see `language.md`'s "Boolean operators"),
-    /// and each is the same for all of them, so computing them once, if there
-    /// is a tuple, fails just when that would. They are computed before any
-    /// of them narrows the tuples down, as they would be for the first.
+    /// The run of tuples of the relation or run at `src`, of type `ty`, sorted in `order`,
+    /// whose attributes are equal to `values`, each with its place in that order, which can
+    /// fail but read no tuple, and are all that is left of a condition, in a new slot. Each
+    /// is the same for every tuple, so each is computed once, if there is a tuple, as a step
+    /// ([`FunctionBuilder::steps_put_aside`]), before any of them narrows the tuples down,
+    /// as they would be for the first. If none fails, they find the run by binary search.
+    /// If one does, a tuple's condition fails only if no other conjunct is false of it (see
+    /// [`hir::Connective::And`]): so if a tuple has each value of those that didn't fail,
+    /// the first to fail is computed again, and fails as it did, and otherwise no tuple is
+    /// kept.
     fn failable_runs(
         &mut self,
-        src: lir::Place,
+        src: &lir::Place,
         values: &[(usize, &hir::Expr)],
         ty: &hir::Type,
         order: Order,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let places = self.values_if_any_tuple(&src, values, cx);
-        places.iter().fold(src, |src, (i, value)| {
+        let hir::Type::Relation(heading) = ty else {
+            unreachable!("only a relation has runs");
+        };
+        let run = self.slot(cx.layout(ty));
+        let done = self.new_block();
+        // With no tuple, nothing is computed, and nothing reads the values.
+        let mut count = src.clone();
+        count.path.push(1);
+        let zero = usize_constant(0, cx);
+        let some = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: some.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Less, lir::Operand::Usize),
+            lhs: zero,
+            rhs: count,
+        });
+        let (computing, found) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: some,
+                then: computing,
+                otherwise: found,
+            },
+            computing,
+        );
+        let (steps, places) = self.failable_values(src, values, cx);
+        let failed = self.steps_failed(&steps);
+        let failing = self.new_block();
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: failed,
+                then: failing,
+                otherwise: found,
+            },
+            found,
+        );
+        let narrowed = places.iter().fold(src.clone(), |src, (i, value, _)| {
             self.equal_run(src, value, *i, ty, order, cx)
-        })
+        });
+        self.insts.push(lir::Inst::Copy {
+            dst: run.clone(),
+            src: narrowed,
+            layout: cx.layout(ty),
+        });
+        self.end_block(lir::Terminator::Jump(done), failing);
+        let matched = self.has_values(src, heading, order, &places, cx);
+        let (again, none) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: matched,
+                then: again,
+                otherwise: none,
+            },
+            again,
+        );
+        self.fail_again(&steps, cx);
+        self.end_block(lir::Terminator::Jump(done), none);
+        // The run of none of them.
+        self.insts.push(lir::Inst::Copy {
+            dst: run.clone(),
+            src: src.clone(),
+            layout: cx.layout(ty),
+        });
+        let mut length = run.clone();
+        length.path.push(1);
+        let zero = usize_constant(0, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: length,
+            src: zero,
+            layout: lir::Layout::Usize,
+        });
+        self.end_block(lir::Terminator::Jump(done), done);
+        run
     }
 
-    /// `values`, each computed if the relation at `src` has a tuple, as for
-    /// [`FunctionBuilder::failable_runs`], each in a slot of its own, which
-    /// nothing reads with no tuple to compare it to.
-    fn values_if_any_tuple(
+    /// `value`, the whole of a condition, which can fail, but reads no tuple, so is the same
+    /// for each, computed if the relation at `src` has a tuple, as it would be for the first,
+    /// in a slot of its own, which nothing reads with no tuple to compare it to.
+    fn value_if_any_tuple(
         &mut self,
         src: &lir::Place,
-        values: &[(usize, &hir::Expr)],
+        value: &hir::Expr,
         cx: &mut Lowering,
-    ) -> Vec<(usize, lir::Place)> {
+    ) -> lir::Place {
         let mut count = src.clone();
         count.path.push(1);
         let zero = usize_constant(0, cx);
@@ -7839,23 +8046,136 @@ impl<'a> FunctionBuilder<'a> {
             computed,
         );
         self.tuples.push(AtHand::one(src.clone()));
-        let places: Vec<(usize, lir::Place)> = values
+        let layout = cx.layout(&self.type_of(value));
+        let place = self.place(value, cx);
+        let slot = self.slot(layout.clone());
+        self.insts.push(lir::Inst::Copy {
+            dst: slot.clone(),
+            src: place,
+            layout,
+        });
+        self.tuples.pop();
+        self.end_block(lir::Terminator::Jump(after), after);
+        slot
+    }
+
+    /// `values`, of [`FunctionBuilder::failable_runs`], each computed as a step
+    /// ([`FunctionBuilder::steps_put_aside`]), with the tuple at hand the relation at `src`'s,
+    /// further out than they read: the steps, and of each value, its attribute's place in
+    /// the sort order, the slot it is computed into, and whether it was.
+    fn failable_values(
+        &mut self,
+        src: &lir::Place,
+        values: &[(usize, &hir::Expr)],
+        cx: &mut Lowering,
+    ) -> (Steps, Vec<(usize, lir::Place, lir::Place)>) {
+        let places: Vec<(usize, lir::Place, lir::Place)> = values
             .iter()
-            .map(|(i, value)| {
+            .map(|&(i, value)| {
                 let layout = cx.layout(&self.type_of(value));
-                let computed = self.place(value, cx);
-                let slot = self.slot(layout.clone());
-                self.insts.push(lir::Inst::Copy {
+                (i, self.slot(layout), self.slot(lir::Layout::U8))
+            })
+            .collect();
+        let no = u8_constant(0, cx);
+        for (_, _, computed) in &places {
+            self.insts.push(lir::Inst::Copy {
+                dst: computed.clone(),
+                src: no.clone(),
+                layout: lir::Layout::U8,
+            });
+        }
+        // Computed before the tuples are: a value reads none of them, but what's further
+        // out is further out from it than from here.
+        self.tuples.push(AtHand::one(src.clone()));
+        let calls = values.iter().any(|(_, value)| makes_calls(value));
+        let steps = self.steps_put_aside(
+            values.len(),
+            calls,
+            cx,
+            |this, j, cx| this.place(values[j].1, cx),
+            |this, j, computed, cx| {
+                let layout = cx.layout(&this.type_of(values[j].1));
+                let (_, slot, done) = &places[j];
+                this.insts.push(lir::Inst::Copy {
                     dst: slot.clone(),
                     src: computed,
                     layout,
                 });
-                (*i, slot)
-            })
-            .collect();
+                let yes = u8_constant(1, cx);
+                this.insts.push(lir::Inst::Copy {
+                    dst: done.clone(),
+                    src: yes,
+                    layout: lir::Layout::U8,
+                });
+            },
+        );
         self.tuples.pop();
-        self.end_block(lir::Terminator::Jump(after), after);
-        places
+        (steps, places)
+    }
+
+    /// Whether a tuple of the relation or run at `src`, with `heading`, sorted in `order`,
+    /// has each of `values` that was computed, as [`FunctionBuilder::failable_runs`] keeps
+    /// them, each with the attribute's place in that order, the slot of the value, and
+    /// whether it was computed: in a new slot, found by reading each tuple.
+    fn has_values(
+        &mut self,
+        src: &lir::Place,
+        heading: &hir::Heading,
+        order: Order,
+        values: &[(usize, lir::Place, lir::Place)],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let matched = self.slot(lir::Layout::U8);
+        let no = u8_constant(0, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: matched.clone(),
+            src: no,
+            layout: lir::Layout::U8,
+        });
+        let names = cx.sort_names(order, heading);
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
+        self.each_tuple(src, tuple, cx, |this, at_hand, _, cx| {
+            let next = this.new_block();
+            for (i, value, computed) in values {
+                let name = &names[*i];
+                let ty = heading
+                    .get(name)
+                    .expect("a sort order names the attributes");
+                let position = heading
+                    .attributes()
+                    .position(|(a, _)| a == name)
+                    .expect("the attribute is the relation's");
+                let mut attribute = at_hand.clone();
+                attribute.path.push(position);
+                let (compare, after) = (this.new_block(), this.new_block());
+                this.end_block(
+                    lir::Terminator::Branch {
+                        condition: computed.clone(),
+                        then: compare,
+                        otherwise: after,
+                    },
+                    compare,
+                );
+                let equal = hir::BinaryOp::Compare(hir::Comparison::Equal, hir::Compared::of(ty));
+                let same = this.binary(equal, ty, attribute, value.clone(), cx);
+                this.end_block(
+                    lir::Terminator::Branch {
+                        condition: same,
+                        then: after,
+                        otherwise: next,
+                    },
+                    after,
+                );
+            }
+            let yes = u8_constant(1, cx);
+            this.insts.push(lir::Inst::Copy {
+                dst: matched.clone(),
+                src: yes,
+                layout: lir::Layout::U8,
+            });
+            this.end_block(lir::Terminator::Jump(next), next);
+        });
+        matched
     }
 
     /// The value `conjunct`, of a condition on a relation's tuples, says
@@ -8010,7 +8330,7 @@ impl<'a> FunctionBuilder<'a> {
         comes: Order,
         fails: bool,
         cx: &mut Lowering,
-        body: impl FnOnce(&mut Self, &lir::Place, &lir::Place, &mut Lowering),
+        body: impl FnMut(&mut Self, &lir::Place, &lir::Place, &mut Lowering),
     ) {
         if fails && comes != Order::Canonical {
             self.each_at_hand_failing_first(src, tuple, cx, body);
@@ -8026,117 +8346,44 @@ impl<'a> FunctionBuilder<'a> {
     /// it is whatever order they come in (see `language.md`'s "Evaluation"), found without
     /// sorting them: a tuple's failure is put aside ([`FunctionBuilder::put_aside`]), keeping
     /// where the first in canonical order to fail so far is, and the loop goes on. Then that
-    /// tuple's `body` is computed again ([`FunctionBuilder::failing_again`]), which fails as it
-    /// did, as what is computed for a tuple is a function of it (TTM RM Prescription 3), and
-    /// that failure goes on. If none fails, all it costs is a check after each tuple that it
-    /// isn't the one computed again.
+    /// tuple's `body` is computed again, from a copy of it of its own, which fails as it did,
+    /// as what is computed for a tuple is a function of it (TTM RM Prescription 3), and that
+    /// failure goes on. A copy, rather than going back into the loop, keeps what only a
+    /// failure needs out of the loop: going back would make a loop of its own, out of which
+    /// what the handler computes would be computed for every tuple. If none fails, nothing is
+    /// done but the loop.
     fn each_at_hand_failing_first(
         &mut self,
         src: &lir::Place,
         tuple: &hir::Type,
         cx: &mut Lowering,
-        body: impl FnOnce(&mut Self, &lir::Place, &lir::Place, &mut Lowering),
+        mut body: impl FnMut(&mut Self, &lir::Place, &lir::Place, &mut Lowering),
     ) {
         let layout = cx.layout(tuple);
-        let failing = self.first_failing(cx);
+        let failing = self.first_failing(true, true, cx);
         let bound = self.lets.len();
         let handler = self.new_block();
         let mut looped = None;
-        self.each_at_hand(src, layout, cx, |this, at_hand, index, cx| {
-            let start = this.new_block();
-            this.end_block(lir::Terminator::Jump(start), start);
+        self.each_at_hand(src, layout.clone(), cx, |this, at_hand, index, cx| {
             this.catching(handler, |this| body(this, at_hand, index, cx));
-            let (unfailed, next) = (this.new_block(), this.new_block());
-            this.end_block(
-                lir::Terminator::Branch {
-                    condition: failing.again.clone(),
-                    then: unfailed,
-                    otherwise: next,
-                },
-                unfailed,
-            );
-            this.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Unfailed,
-                args: Vec::new(),
-            });
+            let next = this.new_block();
             this.end_block(lir::Terminator::Jump(next), next);
             looped = Some(Looped {
-                start,
                 next,
-                handler,
                 at_hand: at_hand.clone(),
                 index: index.clone(),
                 bound: bound..this.lets.len(),
             });
         });
         let looped = looped.expect("the loop has a body");
-        let done = self.new_block();
-        self.failing_again(&failing, &looped, src, tuple, done, cx);
-        self.put_aside(&failing, &looped, src, tuple, done, cx);
-    }
-
-    /// The slots [`FunctionBuilder::each_at_hand_failing_first`] keeps what it knows in as
-    /// its loop runs, set as it begins.
-    fn first_failing(&mut self, cx: &mut Lowering) -> FirstFailing {
-        let none = usize_constant(u64::MAX, cx);
-        let least = self.slot(lir::Layout::Usize);
-        self.insts.push(lir::Inst::Copy {
-            dst: least.clone(),
-            src: none.clone(),
-            layout: lir::Layout::Usize,
-        });
-        let again = self.slot(lir::Layout::U8);
-        let no = u8_constant(0, cx);
-        self.insts.push(lir::Inst::Copy {
-            dst: again.clone(),
-            src: no,
-            layout: lir::Layout::U8,
-        });
-        let (scope, traced, site) = (
-            self.slot(lir::Layout::Address),
-            self.slot(lir::Layout::Usize),
-            self.slot(lir::Layout::Address),
-        );
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Innermost,
-            args: vec![scope.clone()],
-        });
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Traced,
-            args: vec![traced.clone()],
-        });
-        self.insts.push(lir::Inst::SaveSite { dst: site.clone() });
-        FirstFailing {
-            least,
-            none,
-            again,
-            scope,
-            traced,
-            site,
-        }
-    }
-
-    /// After the loop of [`FunctionBuilder::each_at_hand_failing_first`], the work of the
-    /// first tuple in canonical order to fail, if one did, computed again, from where
-    /// `looped` starts its body, its failure going to the loop's handler, which is built
-    /// next: the tuple at hand is that one, and `again` says so. If none did, on to `done`.
-    fn failing_again(
-        &mut self,
-        failing: &FirstFailing,
-        looped: &Looped,
-        src: &lir::Place,
-        tuple: &hir::Type,
-        done: lir::BlockId,
-        cx: &mut Lowering,
-    ) {
         let failed = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Binary {
             dst: failed.clone(),
             op: lir::BinaryOp::Compare(lir::Comparison::NotEqual, lir::Operand::Usize),
-            lhs: failing.least.clone(),
+            lhs: failing.first.clone(),
             rhs: failing.none.clone(),
         });
-        let once_more = self.new_block();
+        let (once_more, done) = (self.new_block(), self.new_block());
         self.end_block(
             lir::Terminator::Branch {
                 condition: failed,
@@ -8145,37 +8392,279 @@ impl<'a> FunctionBuilder<'a> {
             },
             once_more,
         );
-        let yes = u8_constant(1, cx);
-        self.insts.push(lir::Inst::Copy {
-            dst: failing.again.clone(),
-            src: yes,
-            layout: lir::Layout::U8,
+        // The first to fail, at hand again.
+        let at_hand = self.element(src, &failing.first, layout);
+        self.tuples.push(AtHand {
+            place: at_hand.clone(),
+            lookups: Some(Lookups::default()),
         });
+        body(self, &at_hand, &failing.first, cx);
+        self.tuples.pop();
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Unfailed,
+            args: Vec::new(),
+        });
+        self.end_block(lir::Terminator::Jump(done), handler);
+        self.put_aside(&failing, &looped, src, tuple, done, cx);
+    }
+
+    /// The slots of [`FirstFailing`], set as what puts failures aside begins: none has
+    /// failed. The scope innermost then is kept if what it computes `nests` scopes in it,
+    /// and how many calls the trace has, and the site, if it `calls` functions.
+    fn first_failing(&mut self, nests: bool, calls: bool, cx: &mut Lowering) -> FirstFailing {
+        let none = usize_constant(u64::MAX, cx);
+        let first = self.slot(lir::Layout::Usize);
         self.insts.push(lir::Inst::Copy {
-            dst: looped.index.clone(),
-            src: failing.least.clone(),
+            dst: first.clone(),
+            src: none.clone(),
             layout: lir::Layout::Usize,
         });
-        let lir::Base::Indirect { slot, .. } = looped.at_hand.base else {
-            unreachable!("the tuple at hand is where a slot points");
-        };
-        self.insts.push(lir::Inst::Element {
-            dst: lir::Place::whole(lir::Base::Slot(slot)),
-            array: src.clone(),
-            index: looped.index.clone(),
-            element: cx.layout(tuple),
+        let scope = nests.then(|| {
+            let scope = self.slot(lir::Layout::Address);
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Innermost,
+                args: vec![scope.clone()],
+            });
+            scope
         });
-        self.end_block(lir::Terminator::Jump(looped.start), looped.handler);
+        let traced = calls.then(|| {
+            let (traced, site) = (
+                self.slot(lir::Layout::Usize),
+                self.slot(lir::Layout::Address),
+            );
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Traced,
+                args: vec![traced.clone()],
+            });
+            self.insts.push(lir::Inst::SaveSite { dst: site.clone() });
+            (traced, site)
+        });
+        FirstFailing {
+            first,
+            none,
+            scope,
+            traced,
+        }
+    }
+
+    /// Put aside the failure that brought the program here, of what began as `failing`
+    /// says, which made the bindings `bound` among [`FunctionBuilder::lets`]: what its
+    /// scopes and bindings hold is given up (a lookup's index then null, so it is made
+    /// again), unless it has no error, as running out of memory has none, when it goes
+    /// on to `raise`. Then the calls it passed through are forgotten, the site is
+    /// restored, and its error is given up.
+    fn forget_failure(
+        &mut self,
+        failing: &FirstFailing,
+        bound: std::ops::Range<usize>,
+        raise: lir::BlockId,
+        cx: &mut Lowering,
+    ) {
+        if let Some(scope) = &failing.scope {
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::EndSince,
+                args: vec![scope.clone()],
+            });
+        }
+        for i in bound {
+            let (slot, ty) = self.lets[i].clone();
+            self.release_place(&slot, &ty, cx);
+        }
+        // An error waits if its type does, which is null where none does, as giving one up
+        // makes it: so this needs none of the types it could be, each a constant whose
+        // address would otherwise be computed where every handler's paths meet.
+        let waiting = cx.waiting(self.program);
+        let error = waiting.error();
+        let mut own_type = error.clone();
+        own_type.path.push(0);
+        let none = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::IsNull {
+            dst: none.clone(),
+            src: own_type,
+        });
+        let take = self.new_block();
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: none,
+                then: raise,
+                otherwise: take,
+            },
+            take,
+        );
+        if let Some((traced, site)) = &failing.traced {
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Untrace,
+                args: vec![traced.clone()],
+            });
+            self.insts
+                .push(lir::Inst::RestoreSite { src: site.clone() });
+        }
+        self.release_place(&error, &waiting.ty, cx);
+    }
+
+    /// `count` steps, one after another, and what comes after them, where this leaves
+    /// building: the `i`th computed by `compute`, which can fail, and then, if it didn't,
+    /// what `after` does with what it computed, which can go elsewhere, as when it decides
+    /// what happens. A step's failure is put aside ([`FunctionBuilder::forget_failure`]),
+    /// keeping which was the first to fail, and the next is computed, as it may yet decide
+    /// what happens. What comes after asks whether one failed
+    /// ([`FunctionBuilder::steps_failed`]) and computes the first again
+    /// ([`FunctionBuilder::fail_again`]), from a copy of `compute` of its own, which fails as
+    /// it did, as what it computes is a function of what it reads (TTM RM Prescription 3). A
+    /// copy, rather than going back to the step, keeps what only a failure needs out of
+    /// the steps' code: going back would make a loop of it, out of which what a failure
+    /// needs would be computed each time the steps are. The trace and site are kept if what
+    /// the steps compute `calls` functions, which change them.
+    fn steps_put_aside(
+        &mut self,
+        count: usize,
+        calls: bool,
+        cx: &mut Lowering,
+        mut compute: impl FnMut(&mut Self, usize, &mut Lowering) -> lir::Place,
+        mut after: impl FnMut(&mut Self, usize, lir::Place, &mut Lowering),
+    ) -> Steps {
+        let start = self.position();
+        let mut failing = self.first_failing(false, calls, cx);
+        let raise = self.new_block();
+        let mut lowered = Vec::new();
+        for i in 0..count {
+            let handler = self.new_block();
+            let bound = self.lets.len();
+            let mut value = None;
+            self.catching(handler, |this| value = Some(compute(this, i, cx)));
+            let value = value.expect("a step computes a value");
+            after(self, i, value, cx);
+            let next = self.new_block();
+            self.end_block(lir::Terminator::Jump(next), next);
+            lowered.push((handler, next, bound..self.lets.len()));
+        }
+        // What its steps begin, ended by a failure in one.
+        if self.begins_scopes_since(start) {
+            let scope = self.slot(lir::Layout::Address);
+            self.insert(
+                start,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Innermost,
+                    args: vec![scope.clone()],
+                },
+            );
+            failing.scope = Some(scope);
+        }
+        let done = self.new_block();
+        for (i, (handler, next, bound)) in lowered.into_iter().enumerate() {
+            self.end_block(lir::Terminator::Jump(done), handler);
+            self.forget_failure(&failing, bound, raise, cx);
+            let first = self.slot(lir::Layout::U8);
+            self.insts.push(lir::Inst::Binary {
+                dst: first.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+                lhs: failing.first.clone(),
+                rhs: failing.none.clone(),
+            });
+            let kept = self.new_block();
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: first,
+                    then: kept,
+                    otherwise: next,
+                },
+                kept,
+            );
+            let index = usize_constant(len(i), cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: failing.first.clone(),
+                src: index,
+                layout: lir::Layout::Usize,
+            });
+            self.end_block(lir::Terminator::Jump(next), raise);
+        }
+        self.end_block(lir::Terminator::Raise, done);
+        // Each step again, from a copy, which fails as it did; reached only from
+        // `fail_again`.
+        let mut again = Vec::new();
+        for i in 0..count {
+            let copy = self.new_block();
+            let after_copies = self.new_block();
+            self.end_block(lir::Terminator::Jump(after_copies), copy);
+            compute(self, i, cx);
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Unfailed,
+                args: Vec::new(),
+            });
+            self.end_block(lir::Terminator::Jump(after_copies), after_copies);
+            again.push(copy);
+        }
+        Steps { failing, again }
+    }
+
+    /// Whether one of `steps` failed, in a new slot.
+    fn steps_failed(&mut self, steps: &Steps) -> lir::Place {
+        let failed = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: failed.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::NotEqual, lir::Operand::Usize),
+            lhs: steps.failing.first.clone(),
+            rhs: steps.failing.none.clone(),
+        });
+        failed
+    }
+
+    /// Compute again the first of `steps` to fail, which one did, from its copy, to fail
+    /// as it did, its failure going on. Building goes on in a block nothing reaches.
+    fn fail_again(&mut self, steps: &Steps, cx: &mut Lowering) {
+        let (last, before) = steps.again.split_last().expect("there are steps");
+        for (i, copy) in before.iter().enumerate() {
+            let is = self.slot(lir::Layout::U8);
+            let index = usize_constant(len(i), cx);
+            self.insts.push(lir::Inst::Binary {
+                dst: is.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+                lhs: steps.failing.first.clone(),
+                rhs: index,
+            });
+            let next = self.new_block();
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: is,
+                    then: *copy,
+                    otherwise: next,
+                },
+                next,
+            );
+        }
+        let unreached = self.new_block();
+        self.end_block(lir::Terminator::Jump(*last), unreached);
+    }
+
+    /// Whether what has been built since `start`, a position, begins a scope.
+    fn begins_scopes_since(&self, start: (lir::BlockId, usize)) -> bool {
+        let begins = |inst: &lir::Inst| {
+            matches!(
+                inst,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Begin,
+                    ..
+                }
+            )
+        };
+        let (block, index) = start;
+        let in_start = if block == self.current {
+            self.insts[index..].iter().any(begins)
+        } else {
+            self.blocks[block.0].insts[index..].iter().any(begins)
+        };
+        in_start
+            || self.blocks[block.0 + 1..]
+                .iter()
+                .any(|b| b.insts.iter().any(begins))
+            || (block != self.current && self.insts.iter().any(begins))
     }
 
     /// The handler of a tuple's failure in the loop of
-    /// [`FunctionBuilder::each_at_hand_failing_first`], ending in `done`: the failure of the
-    /// one computed again goes on, as does one without an error, as running out of memory
-    /// has none, and any other is put aside. Its error is given up, what its scopes and
-    /// bindings hold is too (a lookup's index then null, so it is made again), the calls it
-    /// passed through are forgotten and the site is restored, and where the tuple is is kept
-    /// if it comes before the first to fail so far in canonical order, by
-    /// `trendy_rt_compare`. Then the loop goes on.
+    /// [`FunctionBuilder::each_at_hand_failing_first`], ending in `done`: the failure is
+    /// put aside ([`FunctionBuilder::forget_failure`]), and where the tuple is is kept if it
+    /// comes before the first to fail so far in canonical order, by `trendy_rt_compare`.
+    /// Then the loop goes on.
     fn put_aside(
         &mut self,
         failing: &FirstFailing,
@@ -8185,48 +8674,13 @@ impl<'a> FunctionBuilder<'a> {
         done: lir::BlockId,
         cx: &mut Lowering,
     ) {
-        let (aside, raise) = (self.new_block(), self.new_block());
-        self.end_block(
-            lir::Terminator::Branch {
-                condition: failing.again.clone(),
-                then: raise,
-                otherwise: aside,
-            },
-            aside,
-        );
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::EndSince,
-            args: vec![failing.scope.clone()],
-        });
-        for i in looped.bound.clone() {
-            let (slot, ty) = self.lets[i].clone();
-            self.release_place(&slot, &ty, cx);
-        }
-        let waiting = cx.waiting(self.program);
-        let error = waiting.error();
-        let waits = self.is_of(&error, &waiting.ty, cx);
-        let take = self.new_block();
-        self.end_block(
-            lir::Terminator::Branch {
-                condition: waits,
-                then: take,
-                otherwise: raise,
-            },
-            take,
-        );
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Untrace,
-            args: vec![failing.traced.clone()],
-        });
-        self.insts.push(lir::Inst::RestoreSite {
-            src: failing.site.clone(),
-        });
-        self.release_place(&error, &waiting.ty, cx);
+        let raise = self.new_block();
+        self.forget_failure(failing, looped.bound.clone(), raise, cx);
         let first = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Binary {
             dst: first.clone(),
             op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
-            lhs: failing.least.clone(),
+            lhs: failing.first.clone(),
             rhs: failing.none.clone(),
         });
         let (compare, keep) = (self.new_block(), self.new_block());
@@ -8238,7 +8692,7 @@ impl<'a> FunctionBuilder<'a> {
             },
             compare,
         );
-        let kept = self.element(src, &failing.least, cx.layout(tuple));
+        let kept = self.element(src, &failing.first, cx.layout(tuple));
         let order = self.slot(lir::Layout::I64);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(tuple)));
         self.insts.push(lir::Inst::CallRuntime {
@@ -8265,7 +8719,7 @@ impl<'a> FunctionBuilder<'a> {
             keep,
         );
         self.insts.push(lir::Inst::Copy {
-            dst: failing.least.clone(),
+            dst: failing.first.clone(),
             src: looped.index.clone(),
             layout: lir::Layout::Usize,
         });
@@ -10623,6 +11077,24 @@ fn zero_field(layout: &lir::Layout) -> lir::Field {
     }
 }
 
+/// Whether computing `expr` calls a function of the program's, an operator's or a type's,
+/// whose failure is traced through it, and leaves the site where it was.
+fn makes_calls(expr: &hir::Expr) -> bool {
+    if matches!(
+        expr,
+        hir::Expr::Call(_)
+            | hir::Expr::Select(..)
+            | hir::Expr::SelectIn(..)
+            | hir::Expr::TreatAs(..)
+            | hir::Expr::Run(..)
+    ) {
+        return true;
+    }
+    let mut calls = false;
+    expr.for_each_child(|child, _| calls |= makes_calls(child));
+    calls
+}
+
 /// A pointer-sized constant `n`, as a place.
 fn usize_constant(n: u64, cx: &mut Lowering) -> lir::Place {
     lir::Place {
@@ -12309,7 +12781,7 @@ mod tests {
             ])),
             2
         );
-        // After one that can't fail, which guards it.
+        // After one that can't fail, which decides it where it is false.
         assert_eq!(
             runs(and(vec![
                 compared(equal, "a", var(1)),
@@ -12317,8 +12789,8 @@ mod tests {
             ])),
             2
         );
-        // Not with one that can't fail left, which guards it, however few
-        // tuples it holds for.
+        // Not with one that can't fail left, which decides it where it is
+        // false, however few tuples it holds for.
         assert_eq!(
             runs(and(vec![
                 compared(equal, "a", failable()),

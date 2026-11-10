@@ -2,8 +2,9 @@
 //! to be of a type refers to its value as one of that type (*Type
 //! Inheritance and Relational Theory*, IM Prescriptions 14 and 15). Its
 //! value is then treated as one of the type, which would fail if the test
-//! were false, so the guard rule computes the test first, wherever it is
-//! written (see [`hir::Connective::And`]). A test that is false shows
+//! were false, but a false test decides the `and`, whatever the rest does,
+//! and the test, which can't fail, is computed first, wherever it is written
+//! (see [`hir::Connective::And`]). A test that is false shows
 //! nothing: a program can add subtypes to a union type, so a value that
 //! isn't of one of them needn't be of any other in particular.
 //!

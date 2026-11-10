@@ -2379,7 +2379,7 @@ pub(crate) fn is(value: hir::Expr, ty: hir::Type) -> hir::Expr {
 /// unless it is one (IM Prescription 14): evaluated if it is known to be
 /// one. A known value of another type is treated only when running, which
 /// never happens where it is narrowed: the test that narrows it is known
-/// to be false then, and decides what it guards without it.
+/// to be false then, and decides the `and` without it.
 pub(crate) fn treat_as(value: hir::Expr, ty: hir::Type) -> hir::Expr {
     match known_value(&value) {
         Some(known) if known.is_of(&ty) => typed(known.clone(), &ty),
@@ -2624,12 +2624,13 @@ fn substituted_elements(
     with_elements(sub(array)?, changes)
 }
 
-/// The `connective` of `operands`, with what `substitution` knows
-/// substituted, as [`substitute`] does. Of the operands of an `and` or an
-/// `or`, those that can fail are computed only when those that can't don't
-/// decide the result (see [`hir::Connective::guarded`]), and of those that
-/// can't, each only if those before it don't: since they can't fail, that
-/// only saves the work.
+/// The `connective` of `operands`, with what `substitution` knows substituted, as
+/// [`substitute`] does. An `and` or an `or` is decided by any operand known to decide it,
+/// false for `and` and true for `or`, whatever the others do, failing included (see
+/// [`hir::Connective::And`]). If every operand is known and none decides it, it fails as the
+/// first that fails does. One known to fail, of one not known whose operands may decide it
+/// when running, stays as it is written, to fail then only if none does. Every operand of
+/// an `xor` is computed, so it fails as the first that fails does.
 ///
 /// # Errors
 ///
@@ -2640,22 +2641,36 @@ fn substituted_connective(
     depth: usize,
     substitution: &Substitution,
 ) -> Result<hir::Expr, Failed> {
-    if let Some(guarded) = connective.guarded(&operands) {
-        return substitute(guarded, depth, substitution);
+    if connective == hir::Connective::Xor {
+        let substituted = operands
+            .into_iter()
+            .map(|operand| substitute(operand, depth, substitution))
+            .collect::<Result<_, _>>()?;
+        return Ok(connective.of(substituted));
     }
-    let guards = !operands.iter().any(hir::Expr::can_fail);
     let mut substituted = Vec::new();
+    let (mut failed, mut unknown) = (None, false);
     for operand in operands {
-        let operand = substitute(operand, depth, substitution)?;
-        if guards
-            && let hir::Expr::Constant(hir::Value::Boolean(value)) = operand
-            && let Some(result) = connective.decided(value)
-        {
-            return Ok(hir::Expr::Constant(hir::Value::Boolean(result)));
+        match substitute(operand.clone(), depth, substitution) {
+            Ok(hir::Expr::Constant(hir::Value::Boolean(value)))
+                if let Some(result) = connective.decided(value) =>
+            {
+                return Ok(hir::Expr::Constant(hir::Value::Boolean(result)));
+            }
+            Ok(computed) => {
+                unknown |= !matches!(computed, hir::Expr::Constant(_));
+                substituted.push(computed);
+            }
+            Err(failure) => {
+                failed.get_or_insert(failure);
+                substituted.push(operand);
+            }
         }
-        substituted.push(operand);
     }
-    Ok(connective.of(substituted))
+    match failed {
+        Some(failure) if !unknown => Err(failure),
+        _ => Ok(connective.of(substituted)),
+    }
 }
 
 /// `if condition then then else otherwise`, with what `substitution`

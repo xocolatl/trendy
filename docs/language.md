@@ -3556,8 +3556,7 @@ operator main{} [
   declared, when that first happens, after what the program has done by then. As a
   constant has one value, whenever it is computed, a read counts as unable to fail, so
   the compiler can compute it before the order things are written in says, as it can
-  move any operand that can't fail: another conjunct doesn't guard it (see
-  [Evaluation](#evaluation)).
+  move any operand that can't fail (see [Evaluation](#evaluation)).
 - **A local constant has the value its expression has where it is declared,** from
   the parameters and variables then, each time that runs: in a loop, each time round.
   But when it is computed is the compiler's to choose, as for the program's: if it has
@@ -4372,10 +4371,10 @@ operator main{} [
   (A0022), as it is in TypeScript's closed unions.
 - **The order doesn't matter:** `figure.a > 2e0 and figure is ellipse`
   is `wide` above too. A narrowed name's value is treated as one of the
-  type, which would fail if the test were false, so by the guard rule
-  (see [Boolean operators](#boolean-operators)) the test, which can't
-  fail, is computed first, and decides without the rest when it is
-  false.
+  type, which would fail if the test were false, but a false test decides
+  the `and` whatever the rest does (see [Boolean
+  operators](#boolean-operators)), and the test, which can't fail, is
+  computed first.
 - **A `where` narrows its result's heading:** `ellipses` is a relation
   of ellipses, so `figure.a` can be read in its `extend` with no test of
   its own.
@@ -5737,15 +5736,18 @@ as a boolean written as C writes it is likelier than bits.
   chain of `xor`s, as TTM's exercise 5.6 justifies its definition, though
   Tutorial D's braces would count it once: `xor{a, a}` is `false`. The
   operands have no names, as a call's arguments do (P0037).
-- **An operand that can't fail guards those that can.** In a chain of
-  `and`s, `a and b and c`, however it is grouped, or `and{a, b, c}`, the
-  operands that can't fail are computed first, and if one is `false`,
-  the result is `false` and the others aren't computed; otherwise every
-  one that can fail is. `or` is the same with `true`, and `implies` is
-  `not a or b`. So `y div x > 1 and x <> 0` never divides by zero,
-  wherever the guard is written, unlike in languages that guard only from
-  the left, or SQL, which doesn't say. As nothing depends on which
-  operand runs first, an optimizer can choose.
+- **Any operand that decides the result decides it.** In a chain of
+  `and`s, `a and b and c`, however it is grouped, or `and{a, b, c}`, an
+  operand that is `false` makes the result `false`, whatever the others
+  do, failing included, so they needn't be computed; the result fails only
+  if no operand is `false` and one fails, as the first written that fails
+  does. `or` is the same with `true`, and `implies` is `not a or b`. So
+  `y div x > 1 and x <> 0` is `false` where `x` is zero, wherever the `x
+  <> 0` is written, unlike in languages that decide only from the left, or
+  SQL, which doesn't say. As nothing depends on which operand is computed
+  first, the compiler chooses: those that can't fail first, then the others
+  in the order written, each only until one decides the result. So a
+  condition that is cheap and often false is best written first.
 - **An expression can fail** if it does arithmetic, `+`, `-`, `*`, `/`,
   `div`, `mod`, `shl`, `shr` or a prefix `-` of an integer, which can
   overflow or divide by zero; joins texts, `||`, or builds, changes, combines or loads a
@@ -7372,17 +7374,17 @@ fails for several fails as it does for the first of them in canonical order, the
 on the relation's value, which has no order of its own (TTM RM Proscription 2), not on
 how its tuples happen to be kept. Every operand is evaluated, so an error in
 one is never skipped, but for an `if`'s branches, only the one its
-condition takes, and for the operands of `and`, `or` and `implies` that
-can fail, which those that can't guard (see [Boolean
+condition takes, and for the operands of `and`, `or` and `implies`, each
+computed only until one decides the result (see [Boolean
 operators](#boolean-operators)), and for a constant's expression, evaluated
 when a read first needs it (see [Constants](#constants)). Whatever doesn't depend on parameters,
 variables or input is evaluated when compiling, and so is whatever a constant operand decides: `p
 and false` is just `false`, whatever `p` is, `true and p` is just `p`, and
 `n * 1` is just `n`. But `(n + 1) * 0` is still computed, since `n + 1` can
-overflow. A failure in an operand a guard known when compiling skips isn't
-reported, as one in an `if`'s branch not taken isn't; one known to fail
-behind a guard known only when the program runs is an error, since it
-fails whenever it is computed. Approximate numbers are simplified the same way, since
+overflow. A failure in an operand that another, known when compiling,
+decides the result without isn't reported, as one in an `if`'s branch not
+taken isn't; one known to fail beside others known only when the program
+runs is an error, as it fails whenever none of them decides the result. Approximate numbers are simplified the same way, since
 they are finite and have one zero: `x + 0e0` is `x`, and `x * 0e0` is `0e0`.
 
 ## Failures

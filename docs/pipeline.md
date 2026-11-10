@@ -1579,7 +1579,7 @@ whatever a constant operand decides (`p and false` is `false`, `true and p`
 is `p`, and `n * 1` is `n`): expressions have no side effects, so this never
 changes what a program does. An operand is dropped only if it can't fail,
 so that every operand is evaluated and no run-time error is skipped,
-but for those that guards skip. A
+but for those another operand decides the result without. A
 constant overflow, or a division by a constant zero, is a compile error
 (R0001, R0002). An `if` (`hir::Expr::If`) is one exception to
 evaluating every operand: only the branch its condition takes is
@@ -1588,22 +1588,35 @@ computed. A constant condition makes the `if` that branch
 not taken (`Checker::branches`), which it still checks; a call evaluated
 when compiling computes only the branch taken (`ops::substitute`).
 
-The other is `and` and `or` (`hir::Connective::And`): of the operands
-of a chain of `and`s, those that can't fail (`hir::Expr::can_fail`,
-which is part of the language) are computed first, and the others only
-if none of those is false, and likewise for `or` with true.
-`hir::Connective::guarded` writes such a chain as the `If` it means, the
-guards its condition, which folding (`ops::substitute`) and lowering
-both compute. The checker checks each operand of one with its own
-errors, dropping the failures of one a constant operand decides the
-result without (`Checker::connective`), as for an `if`'s branch; and a
-constant that decides it is the result, whatever the others
-(`hir::Connective::of`). Since a guard can't fail, which runs first changes
-nothing, which leaves an optimizer free to order them. Folding
-(`ops::substituted_connective`) and lowering compute the guards from
-the left, each only if those before it don't decide the result
-(`hir::Connective::decided`): as they can't fail, this only saves work,
-so lowering branches past one it computes, never one it only reads.
+The other is `and` and `or` (`hir::Connective::And`): an operand that is
+false decides a chain of `and`s, whatever the others do, failing included,
+and likewise true for `or`; it fails only if none decides it, as the first
+operand written that fails does. So no order of computing them changes the
+result, and each is computed only until one decides it. The checker checks
+each operand of one with its own errors, dropping the failures of one a
+constant operand decides the result without (`Checker::connective`), as for
+an `if`'s branch; and a constant that decides it is the result, whatever the
+others (`hir::Connective::of`). Folding (`ops::substituted_connective`)
+does the same with what it substitutes: any operand known to decide it does;
+if all are known and none does, the first written to fail fails; and one
+known to fail, beside one not known, stays as written, to fail when running
+only if nothing decides. Lowering computes those that can't fail first, each
+only if those before don't decide the result, branching past one it
+computes, never one it only reads; then those that can, in the order
+written, as steps that put a failure aside (`FunctionBuilder::deciding_connective`,
+`steps_put_aside`): its error given up, what its scopes and bindings hold
+too, the calls it passed through forgotten and the site restored, keeping
+which step failed first, as a later one may yet decide the result. If none
+does, the first to fail is computed again (`fail_again`), and fails as it
+did, as it is a function of what it reads (TTM RM Prescription 3). It is
+computed from a copy of its own, rather than by going back to the step, as
+going back would make a loop of the steps, out of which Cranelift hoists
+what only a failure needs, the addresses of constants, into every pass. For
+the same reason a failure is known to have an error by its type, null if
+none waits, not by the types it could be, each a constant. A
+constraint's parts are the operands of an `and` too, checked the same way
+(`variable_constraint_checked`): one that is false is reported broken even if
+another fails.
 
 `and`, `or` and `xor` are each one `hir::Expr::Connective` of any
 number of operands, as Tutorial D's n-adic `AND`, `OR` and `XOR` are
@@ -1642,13 +1655,10 @@ it, when a type parameter becomes a boolean or another scalar:
   (TTM's exercise 5.6), unlike its other braces, which are sets.
 - **Nothing is distributed**, so the result is neither conjunctive nor
   disjunctive normal form. Distributing can make an expression
-  exponentially larger, which is why PostgreSQL's planner gave it up,
-  and it can take an operand from under its guard:
-  `(x <> 0 and 1 div x = 1) or 1 div y = 1` is true for x = 0 and
-  y = 1, but its conjunctive form,
-  `(x <> 0 or 1 div y = 1) and (1 div x = 1 or 1 div y = 1)`, divides
-  by zero. Every rewrite here keeps each operand that can fail under the
-  same guards, and De Morgan's laws do, as they swap `and` and `or`
+  exponentially larger, which is why PostgreSQL's planner gave it up. It
+  would change no result: a failure is decided past as Kleene's unknown
+  is, by false for `and` and true for `or`, and his strong logic
+  distributes. De Morgan's laws hold too, as they swap `and` and `or`
   together with false and true.
 
 The operands' order doesn't matter, but they stay in it.
@@ -1689,8 +1699,8 @@ if true, of an `or` with what they show if false, an `if`'s branches with
 what its condition shows either way, and a `where`'s result heading
 takes what its condition shows of its attributes. A narrowed name
 (`narrowed::Narrowed`, a `check::Names`) refers to `TreatAs` of its value,
-which can fail, so the guard rule computes the tests, which can't, first,
-and only then what they guard: a narrowed value is never treated unless
+which can fail, but a false test decides the `and`, and lowering computes
+the tests, which can't fail, first: a narrowed value is never treated unless
 its test is true. A false test shows nothing: a program can add subtypes
 to a union type, so what isn't of one isn't known to be of any other.
 In an update operator's body, `body::Statements` keeps the facts of the
@@ -1900,18 +1910,20 @@ attribute is equal to a value of its type that's the same for every tuple
 and can't fail, those it holds for are a run, found by binary search
 (`FunctionBuilder::equal_runs`, `trendy_rt_equal_run`), and so on for the
 next attribute among them. The loop goes over only the run, for the other
-conjuncts: as an equality can't fail, it guards them, so they are computed
+conjuncts: an equality that is false decides the `and`, so they are computed
 for just those tuples anyway. So `r where key = x` costs the log of the
 relation's size when `key` comes first in name order, as lowering sees it;
 other attributes aren't indexed, and take the loop over every tuple. A value
-that can fail, as `x + 1` or a call can, is the same for every tuple but would
-be computed only where nothing guards it, and for every one where nothing does.
-So if each conjunct left says the next attribute is equal to such a value, those
-values are computed once, if there is a tuple, before any narrows them
-(`FunctionBuilder::failable_runs`), which fails just when going through them
-would. With anything else left, that can't fail, it may hold for no tuple, so the
-value mustn't be computed, or that can, it may fail for a tuple the run leaves
-out, so they take the loop.
+that can fail, as `x + 1` or a call can, is the same for every tuple. So if each
+conjunct left says the next attribute is equal to such a value, those values are
+computed once, if there is a tuple, as steps that put a failure aside, before any
+narrows them (`FunctionBuilder::failable_runs`). If none fails, they find the run.
+If one does, a tuple's condition fails only if no other conjunct is false of it,
+so the run's tuples are read for one with each value that didn't fail
+(`has_values`), and if one has them, the first failure is computed again, and
+otherwise none is kept. With anything else left, that can't fail, it may hold for
+no tuple, so the value mustn't be computed, or that can, it may fail for a tuple
+the run leaves out, so they take the loop.
 
 `tuple from` and `value from` (`FromExpr`) are prefix operators whose
 `value` and `from` are contextual keywords, recognized by a `tuple`
@@ -2659,10 +2671,10 @@ it, as a failure is rare and a sort isn't: the loop puts each tuple's failure as
 began and the bindings it made (a lookup's index then null, so it is made again), forgetting
 the calls it passed through and restoring the site, and keeps where the first tuple in
 canonical order to fail so far is, by `trendy_rt_compare`, and goes on. After the loop, that
-tuple's work is computed again, which fails as it did, as it is a function of the tuple (TTM
-RM Prescription 3), with its own error, trace and site, and that failure goes on; if it didn't,
-`trendy_rt_unfailed` stops the program with an internal error. If no tuple fails, nothing is
-sorted, and all it costs is a check after each tuple that it isn't the one computed again.
+tuple's work is computed again, from a copy of the loop's body of its own, which fails as it
+did, as it is a function of the tuple (TTM RM Prescription 3), with its own error, trace and
+site, and that failure goes on; if it didn't, `trendy_rt_unfailed` stops the program with an
+internal error. If no tuple fails, nothing is sorted, and nothing is done but the loop.
 
 A `Let`'s binding is loose if all that reads it, followed up through what passes order down,
 as far as a reader that wants it or doesn't, takes it so (`FunctionBuilder::read_want`,

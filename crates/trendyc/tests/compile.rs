@@ -1354,10 +1354,76 @@ fn keys_that_can_fail_find_what_going_through_the_tuples_does() {
     );
 }
 
-/// A key that fails fails just when going through the tuples would have: if
-/// there is a tuple to compute it for, each of them, whatever another key says,
-/// and not behind a guard that holds for none. A conjunct that can fail is still
-/// computed for every tuple, so a key doesn't narrow what it is computed for.
+/// Any operand that decides an `and` or an `or` decides it, whatever the others do,
+/// failing included: false for `and`, true for `or`. Only if none decides it does it fail,
+/// as the first written that fails does. A constraint's parts are an `and`: one that is
+/// false is broken though another fails.
+#[test]
+fn an_operand_that_decides_a_connective_decides_it_though_another_fails() {
+    let run = |name: &str, lines: &str| {
+        run_source(
+            name,
+            &format!(
+                "uses {{ trendy.process }};
+
+var divisor := 1;
+var v: relation {{ x: integer }} := relation {{}};
+constraint c := 10 div divisor > 0 and is_empty{{r: v where x = 3}};
+
+operator main{{}} [
+    const zero := length{{a: arguments}};
+    const big := 9223372036854775807 + zero;
+{lines}
+];
+"
+            ),
+        )
+    };
+    let (code, stderr) = run(
+        "connectives_decided",
+        "    call debug_value{v: 1 div zero = 1 and zero > 5};
+    call debug_value{v: big + 1 > 0 and 1 div zero = 1 and zero > 5};
+    call debug_value{v: 1 div zero = 1 or zero = 0};
+    call debug_value{v: zero = 0 implies 1 div zero = 1 or big > 0};
+    call debug_value{v: 1 div zero = 1 and big + 0 < 0};
+    call debug_value{v: 1 div zero = 1 or big + 0 > 0};",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["false", "false", "true", "true", "false", "true"]
+    );
+    // None decides it: the first written to fail fails.
+    let (code, stderr) = run(
+        "connective_undecided",
+        "    call debug_value{v: big + 1 > 0 and 1 div zero = 1 and zero = 0};",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with("error[R0001]: overflow: 9223372036854775807 + 1"),
+        "{stderr}"
+    );
+    // The constraint's second part is false, so it is broken, though its first fails.
+    let (code, stderr) = run(
+        "constraint_decided",
+        "    assign { divisor := zero; v := relation { { x: 3 } }; };",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error[R0023]: the constraint `c` is broken: `is_empty{r: v where x = 3}`"
+        ),
+        "{stderr}"
+    );
+    // Neither is false: it fails as its first part does.
+    let (code, stderr) = run("constraint_undecided", "    divisor := zero;");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.starts_with("error[R0002]"), "{stderr}");
+}
+
+/// A key that fails fails just when going through the tuples would have: for a tuple
+/// whose other conjuncts are all true, as one that is false decides it whatever this one
+/// does, whether it can fail or not, and not if there is no such tuple.
 #[test]
 fn keys_that_can_fail_fail_as_they_did() {
     let run = |name: &str, line: &str| {
@@ -1381,16 +1447,26 @@ fn keys_that_can_fail_fail_as_they_did() {
             "call debug_value{v: count{r: none where a = 1 div zero}};",
             false,
         ),
-        // Each computed, whatever the other finds, or none.
+        // For a tuple the other finds, or none: a key that can fail decides too.
         (
             "key_second_fails",
-            "call debug_value{v: r where a = zero + 99 and z = 1 div zero};",
+            "call debug_value{v: r where a = zero + 1 and z = 1 div zero};",
             true,
         ),
         (
             "key_first_fails",
-            "call debug_value{v: r where a = 1 div zero and z = zero + 99};",
+            "call debug_value{v: r where a = 1 div zero and z = zero + 1};",
             true,
+        ),
+        (
+            "key_second_decided",
+            "call debug_value{v: r where a = zero + 99 and z = 1 div zero};",
+            false,
+        ),
+        (
+            "key_first_decided",
+            "call debug_value{v: r where a = 1 div zero and z = zero + 99};",
+            false,
         ),
         // Behind a key that can't fail, only among those it finds.
         (
@@ -1414,11 +1490,16 @@ fn keys_that_can_fail_fail_as_they_did() {
             "call debug_value{v: count{r: r where a = 1 div zero and z > 0}};",
             true,
         ),
-        // Beside what can fail, computed for tuples the key doesn't find.
+        // Beside what can fail, which fails only for a tuple the key finds.
         (
             "key_beside_failure",
-            "call debug_value{v: count{r: r where a = zero + 1 and 1 div (z - 3) < 99}};",
+            "call debug_value{v: count{r: r where a = zero + 3 and 1 div (z - 3) < 99}};",
             true,
+        ),
+        (
+            "key_beside_failure_decided",
+            "call debug_value{v: count{r: r where a = zero + 1 and 1 div (z - 3) < 99}};",
+            false,
         ),
         // The same of a `delete`.
         ("delete_key_fails", "delete r where a = 1 div zero;", true),

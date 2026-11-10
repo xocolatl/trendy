@@ -8209,7 +8209,7 @@ operator main{} [
     fn guards_decide_which_operands_are_computed() {
         // A constant that decides the result: the other isn't computed.
         let vars = variables(
-            "var a := false and 1 div 0 = 1;\nvar b := 1 div 0 = 1 and false;\nvar c := true or 1 div 0 = 1;\nvar d := false implies 1 div 0 = 1;\nvar e := 1 div 0 = 1 implies true;\nvar g := and{1 div 0 = 1, true, false};\nvar h := or{1 div 0 = 1, 1 div 0 = 2, true};\nvar points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };\nvar steep := points where y div x > 1 and x <> 0;\nvar masked := points where y div x > 1 and (x and 0xFF) <> 0;\nvar expected := relation { { x: 2, y: 6 } };",
+            "var a := false and 1 div 0 = 1;\nvar b := 1 div 0 = 1 and false;\nvar c := true or 1 div 0 = 1;\nvar d := false implies 1 div 0 = 1;\nvar e := 1 div 0 = 1 implies true;\nvar g := and{1 div 0 = 1, true, false};\nvar h := or{1 div 0 = 1, 1 div 0 = 2, true};\nvar points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };\nvar steep := points where y div x > 1 and x <> 0;\nvar masked := points where y div x > 1 and (x and 0xFF) <> 0;\nvar decided := points where y div x > 1 and x + 1 > 1;\nvar expected := relation { { x: 2, y: 6 } };",
         );
         let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
         for (name, result) in [
@@ -8223,10 +8223,12 @@ operator main{} [
         ] {
             assert_eq!(value(name), &hir::Value::Boolean(result), "{name}");
         }
-        // A guard after what it guards guards it too, and the bits of an
-        // integer can't fail, so a comparison of them is one.
+        // A false operand decides it wherever it is written, and the bits of an
+        // integer can't fail, so a comparison of them is computed first.
         assert_eq!(value("steep"), value("expected"));
         assert_eq!(value("masked"), value("expected"));
+        // One that can fail, and is false, decides it too.
+        assert_eq!(value("decided"), value("expected"));
         // One that doesn't decide it leaves the division to be made, and
         // one known only when running leaves one known to fail an error.
         for source in [
@@ -8239,7 +8241,7 @@ operator main{} [
                 [Code::DivisionByZero]
             );
         }
-        // Guards known only when running are guards there.
+        // One known only when running decides it there: the `and` stays, of both.
         let program = analyze_str(
             "operator f{x: integer, y: integer}: boolean [ y div x > 1 and x <> 0 ];\noperator main{} [];",
         )
@@ -8249,13 +8251,10 @@ operator main{} [
             panic!("a read-only operator");
         };
         let value = unsited(value.clone());
-        let hir::Expr::Connective(connective, operands) = &value else {
-            panic!("{value:?}");
-        };
-        assert!(matches!(
-            connective.guarded(operands),
-            Some(hir::Expr::If(..))
-        ));
+        assert!(
+            matches!(&value, hir::Expr::Connective(hir::Connective::And, operands) if operands.len() == 2),
+            "{value:?}"
+        );
     }
 
     #[test]

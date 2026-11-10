@@ -2628,8 +2628,8 @@ impl<'a> Checker<'a> {
         };
         // What the others' tests show where each operand is computed: of
         // an `and`'s, if they are true, and of an `or`'s, if they are false,
-        // as the guard rule computes the others only then (see
-        // [`narrowed::Facts`]). An integer has no tests.
+        // as only then do the others matter: one that is false or true decides
+        // it (see [`narrowed::Facts`]). An integer has no tests.
         let shown: Vec<Facts> = operands
             .iter()
             .enumerate()

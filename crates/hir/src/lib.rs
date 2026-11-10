@@ -2998,8 +2998,8 @@ pub enum Expr {
     /// The value of the expression, as a value of the type, a subtype of
     /// its type: TREAT down (IM Prescription 14), which fails unless the
     /// value is of the type. A name narrowed by a test, `x is t`, is one,
-    /// which the guard rule computes only once the test is true (see
-    /// [`Connective::guarded`]).
+    /// which is computed only once the test, which can't fail, and decides the
+    /// `and` if false, is true (see [`Connective::And`]).
     TreatAs(Box<Type>, Box<Expr>),
     /// Whether the value of the expression is of the type, or one of its
     /// subtypes (IM Prescription 15).
@@ -3217,8 +3217,8 @@ impl Expr {
     /// only where it can't go further: `not not a` is `a`, `not (a and b)`
     /// is `not a or not b` and `not (a or b)` is `not a and not b` (De
     /// Morgan), `not (a < b)` is `a >= b`, and `not (a xor b)` is `a = b`.
-    /// None of these changes which operands can fail, nor which guard
-    /// which, as `and` and `or` swap together with false and true (see
+    /// None of these changes which operands can fail, nor what decides
+    /// what, as `and` and `or` swap together with false and true (see
     /// [`Connective::And`]). It stops at an `xor` of more than two, and at
     /// a comparison of relations by inclusion (see [`Comparison::negated`]).
     #[must_use]
@@ -3942,15 +3942,15 @@ impl UnaryOp {
 /// `not (a xor b)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Connective {
-    /// True when every operand is. Those that can't fail (see
-    /// [`Expr::can_fail`]) are computed first, and if one is false, the
-    /// result is false and the others aren't computed; otherwise every one
-    /// that can fail is. So a condition that can't fail guards the others,
-    /// wherever it is written: `x div y > 1 and y <> 0` never divides by
-    /// zero. Which runs first is then for an optimizer to choose.
+    /// True when every operand is. An operand that is false decides the result,
+    /// whatever the others do, failing included: so `x div y > 1 and y <> 0` is false
+    /// for `y` zero, wherever the `y <> 0` is written. It fails only if no operand
+    /// decides it, as the first operand written that fails does. So the operands can be
+    /// computed in any order, each only until one decides the result, which is for an
+    /// optimizer to choose, or the program as it runs.
     And,
     /// True when an operand is, its operands computed as `And`'s are, but
-    /// for true: one that can't fail and is true decides the result.
+    /// for true: an operand that is true decides the result.
     Or,
     /// True when an odd number of operands are, each counted as often as
     /// it is written, so that it is a chain of the dyadic `xor` (TTM,
@@ -3978,33 +3978,11 @@ impl Connective {
         self == Connective::And
     }
 
-    /// The connective of `operands` with those that can fail computed only
-    /// when those that can't don't decide its result, as an `If`, if it is
-    /// an `and` or an `or` with operands of both kinds (see
-    /// [`Connective::And`]).
-    #[must_use]
-    pub fn guarded(self, operands: &[Expr]) -> Option<Expr> {
-        let (failing, guards): (Vec<Expr>, Vec<Expr>) =
-            operands.iter().cloned().partition(Expr::can_fail);
-        // No operand decides an `xor`, so none guards another.
-        if self == Connective::Xor || failing.is_empty() || guards.is_empty() {
-            return None;
-        }
-        let (guards, failing) = (self.of(guards), self.of(failing));
-        let decided = Box::new(Expr::Constant(Value::Boolean(!self.identity())));
-        Some(if self == Connective::And {
-            Expr::If(Box::new(guards), Box::new(failing), decided)
-        } else {
-            Expr::If(Box::new(guards), decided, Box::new(failing))
-        })
-    }
-
     /// `operands`, booleans, combined by the connective, in normal form
     /// (see [`Expr::Connective`]): the operands of one of the same
     /// connective are its own, as a chain of them is one however it is
-    /// grouped. A constant that decides an `and` or an `or` is the result,
-    /// as it can't fail, and so guards the others; one that doesn't is
-    /// dropped. Of an `and` or an `or`, an operand written twice is kept
+    /// grouped. A constant that decides an `and` or an `or` is the result, whatever
+    /// the others do; one that doesn't is dropped. Of an `and` or an `or`, an operand written twice is kept
     /// once. Of an `xor`, two of one that can't fail cancel, and a true
     /// one, or a `not` on one, negates the rest, so that `a xor not b` is
     /// `not (a xor b)`, and `(a = b) xor c` is `not (a xor b xor c)`. Order
@@ -4491,7 +4469,7 @@ pub struct VariableConstraint {
     /// The condition, the conjunction of its parts, each the operand of an
     /// `and` it is, or itself, in the order they are checked: those that
     /// can't fail before those that can, as an `and` computes them (see
-    /// [`Connective::guarded`]), each in the order it is written.
+    /// [`Connective::And`]), each in the order it is written.
     pub parts: Vec<ConstraintPart>,
     /// The condition as it is written.
     pub written: String,
