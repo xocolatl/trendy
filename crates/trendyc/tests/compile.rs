@@ -1484,6 +1484,50 @@ operator main{} [
     assert_eq!((ran.code, ran.stderr.as_str()), (0, "20\n"));
 }
 
+/// Removing the duplicates of many tuples of few values hashes them, then sorts only the
+/// first of each, as a sample of them shows few differ: of integers, texts, approximate
+/// numbers and relations, each equal to those equal to it, and the result in canonical
+/// order, as sorting them all gives. The first of each value comes after other tuples, so
+/// that only the right tuples, gathered, make the result. Of `u`, the sample sees one value
+/// of many, and the table grows to hold them.
+#[test]
+fn many_tuples_of_few_values_lose_their_duplicates_by_hashing() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 20000;
+    const r := series{from: 1, to: n} extend {
+        i := value div 1000 mod 3,
+        t := to_text{from: value div 700 mod 4},
+        x := to_approximate{from: value div 500 mod 2} / 2e0,
+        s := relation { { v: value div 300 mod 2 } },
+        u := value * (value mod 19 - 1),
+    };
+    call debug_value{v: r{i}};
+    call debug_value{v: r{t}};
+    call debug_value{v: r{x}};
+    call debug_value{v: r{s}};
+    call debug_value{v: count{r: r{i, t}}};
+    call debug_value{v: count{r: r{u}}};
+    call debug_value{v: count{r: r{u, t}}};
+];
+";
+    let ran = ran_source("hashed_duplicates", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr.lines().collect::<Vec<_>>(),
+        [
+            "relation { i: integer } { { i: 0 }, { i: 1 }, { i: 2 } }",
+            "relation { t: text } { { t: \"0\" }, { t: \"1\" }, { t: \"2\" }, { t: \"3\" } }",
+            "relation { x: approximate } { { x: 0e0 }, { x: 5e-1 } }",
+            "relation { s: relation { v: integer } } { { s: relation { v: integer } { { v: 0 } } }, { s: relation { v: integer } { { v: 1 } } } }",
+            "12",
+            "17484",
+            "18553",
+        ]
+    );
+}
+
 /// A key that fails fails just when going through the tuples would have: for a tuple
 /// whose other conjuncts are all true, as one that is false decides it whatever this one
 /// does, whether it can fail or not, and not if there is no such tuple.

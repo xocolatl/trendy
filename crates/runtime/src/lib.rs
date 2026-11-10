@@ -5280,27 +5280,17 @@ fn place_in(hash: u64, shift: u32) -> usize {
 /// `tuple` must be a valid tuple of that operand.
 #[cfg(not(test))]
 unsafe fn hash_on(common: &[Common], tuple: *const u8, is_lhs: bool) -> u64 {
-    const MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
-    let mix = |hash: u64, word: u64| (hash ^ word).wrapping_mul(MULTIPLIER).rotate_left(29);
     let mut hash = 0;
     // SAFETY: guaranteed by the caller.
     unsafe {
         for c in common {
             let value = tuple.add(if is_lhs { c.lhs } else { c.rhs });
-            match (*c.desc).kind {
-                KIND_INTEGER => hash = mix(hash, value.cast::<u64>().read_unaligned()),
-                KIND_TEXT => {
-                    let (bytes, len) = read_slice(value);
-                    for &byte in array(bytes, len) {
-                        hash = mix(hash, u64::from(byte));
-                    }
-                    hash = mix(hash, len as u64);
-                }
-                _ => {}
+            if matches!((*c.desc).kind, KIND_INTEGER | KIND_TEXT) {
+                hash = hashed(hash, value, &*c.desc);
             }
         }
     }
-    hash.wrapping_mul(MULTIPLIER)
+    hash.wrapping_mul(MIXING)
 }
 
 /// How many indexes the program keeps at a time, past which the one least recently
@@ -5850,13 +5840,24 @@ unsafe fn canonical(
             adopt(out, count, desc.element());
             return Ok((out, count));
         }
-        let mut order = pointers(tuples, count, size)?;
+        // Pointers to every tuple, or, if few differ, only to the first of each.
+        let mut order = match distinct_by_hash(tuples, count, desc)? {
+            Some((mut firsts, differ)) => {
+                let order = Temp::<*const u8>::new(differ)?;
+                for (j, &i) in firsts.values()[..differ].iter().enumerate() {
+                    order.ptr().add(j).write(tuples.add(i * size));
+                }
+                order
+            }
+            None => pointers(tuples, count, size)?,
+        };
         let order = order.values();
+        let sorting = order.len();
         in_tuple_order!(desc, |by| {
             order.sort_unstable_by(move |a, b| by.compare(*a, *b));
-            let out = allocate_buffer(count * size, desc)?;
+            let out = allocate_buffer(sorting * size, desc)?;
             let mut kept = 0;
-            for i in 0..count {
+            for i in 0..sorting {
                 if i > 0 && by.compare(order[i - 1], order[i]).is_eq() {
                     continue;
                 }
@@ -5985,6 +5986,14 @@ unsafe fn sorted_in_place(
     unsafe {
         let kept = if in_canonical_order(out, count, desc) {
             count
+        } else if let Some((mut firsts, differ)) = distinct_by_hash(out, count, desc)? {
+            // The first of each, to the front, each to a place no later than its own, then
+            // only those sorted.
+            let size = desc.element().size;
+            for (j, &i) in firsts.values()[..differ].iter().enumerate() {
+                core::ptr::copy(out.add(i * size), out.add(j * size), size);
+            }
+            sort_integers(out, differ, desc.integers)
         } else {
             sort_integers(out, count, desc.integers)
         };
@@ -6036,6 +6045,267 @@ unsafe fn sort_integers(tuples: *mut u8, count: usize, integers: usize) -> usize
             7 => sort::<7>(tuples, count),
             8 => sort::<8>(tuples, count),
             _ => unreachable!("`sorts_in_place` allows no others"),
+        }
+    }
+}
+
+/// How many tuples whose duplicates are to go make it worth finding how many of them
+/// differ, by hashing a sample of them: fewer are sorted about as quickly as that is found.
+#[cfg(not(test))]
+const HASHED_FROM: usize = 16384;
+
+/// How many of those tuples, spread across them, are hashed to find how many differ.
+#[cfg(not(test))]
+const HASHED_SAMPLE: usize = 1024;
+
+/// Of the `count` tuples at `tuples`, of the relation `desc` describes, the index of the
+/// first of each that differs from those before, in the order they come, and how many
+/// there are, if finding them by hashing, and then sorting only them, is less work than
+/// sorting them all: if few of them differ, as no more than three in four of
+/// [`HASHED_SAMPLE`] spread across them do, a choice made of the tuples themselves as the
+/// program runs. Otherwise, or of fewer than [`HASHED_FROM`] tuples, none. Fails if there
+/// is no memory for the table.
+///
+/// # Safety
+///
+/// `tuples` must point to `count` valid tuples of that relation.
+#[cfg(not(test))]
+unsafe fn distinct_by_hash(
+    tuples: *const u8,
+    count: usize,
+    desc: &TypeDesc,
+) -> Fallible<Option<(Temp<usize>, usize)>> {
+    if count < HASHED_FROM {
+        return Ok(None);
+    }
+    // SAFETY: guaranteed by the caller.
+    let element = unsafe { desc.element() };
+    // SAFETY: guaranteed by the caller; each index is below `count`.
+    let at = |i: usize| unsafe { tuples.add(i * element.size) };
+    // Tuples of integers are hashed and compared as runs of them, with nothing else to ask.
+    if desc.integers > 0 {
+        let integers = desc.integers;
+        // SAFETY: as above.
+        let hash = |i: usize| unsafe {
+            (0..integers).fold(0, |hash, k| {
+                mixed(
+                    hash,
+                    at(i)
+                        .add(k * size_of::<u64>())
+                        .cast::<u64>()
+                        .read_unaligned(),
+                )
+            })
+        };
+        // SAFETY: as above.
+        let equal =
+            |a: usize, b: usize| unsafe { compare_integers(at(a), at(b), integers).is_eq() };
+        return distinct_by(count, hash, equal);
+    }
+    // SAFETY: as above.
+    let hash = |i: usize| unsafe { hashed(0, at(i), element) };
+    // SAFETY: as above.
+    let equal = |a: usize, b: usize| unsafe { compare_by_name(at(a), at(b), element).is_eq() };
+    distinct_by(count, hash, equal)
+}
+
+/// As for [`distinct_by_hash`], of `count` values, the `i`th of which `hash` hashes, and
+/// two of which `equal` says whether they are equal.
+#[cfg(not(test))]
+fn distinct_by(
+    count: usize,
+    hash: impl Fn(usize) -> u64,
+    equal: impl Fn(usize, usize) -> bool,
+) -> Fallible<Option<(Temp<usize>, usize)>> {
+    let mut sample = Distinct::new(2 * HASHED_SAMPLE)?;
+    let mut differ = 0;
+    for s in 0..HASHED_SAMPLE {
+        let i = s * (count / HASHED_SAMPLE);
+        differ += usize::from(sample.inserted(i, hash(i), &equal)?);
+    }
+    if differ * 4 > HASHED_SAMPLE * 3 {
+        return Ok(None);
+    }
+    let mut table = Distinct::new(4 * differ)?;
+    let firsts = Temp::<usize>::new(count)?;
+    let mut found = 0;
+    for i in 0..count {
+        if table.inserted(i, hash(i), &equal)? {
+            // SAFETY: `found` is below `count`, the room the memory has.
+            unsafe { firsts.ptr().add(found).write(i) };
+            found += 1;
+        }
+    }
+    Ok(Some((firsts, found)))
+}
+
+/// The tuples found so far that differ, each by its index and its hash, in a table of
+/// twice as many places at least, each looked for from where its hash says, then the
+/// place after that, and so on.
+#[cfg(not(test))]
+struct Distinct {
+    /// Each place's tuple's index, plus one, or zero where there is none.
+    places: Temp<usize>,
+    hashes: Temp<u64>,
+    /// How many tuples it holds.
+    held: usize,
+}
+
+#[cfg(not(test))]
+impl Distinct {
+    /// A table of a power of two places, at least `at_least`, holding none. Fails if there
+    /// is no memory for it.
+    fn new(at_least: usize) -> Fallible<Distinct> {
+        let Some(size) = at_least.max(16).checked_next_power_of_two() else {
+            return Err(out_of_memory());
+        };
+        Ok(Distinct {
+            places: Temp::zeroed(size)?,
+            hashes: Temp::zeroed(size)?,
+            held: 0,
+        })
+    }
+
+    /// Whether the value of index `i`, of the hash `hash`, is equal to none held so far, as
+    /// `equal` says of two indexes, which it is then held with. Fails if there is no memory
+    /// for a table twice as big, which it moves to once it is half full.
+    #[inline]
+    fn inserted(
+        &mut self,
+        i: usize,
+        hash: u64,
+        equal: &impl Fn(usize, usize) -> bool,
+    ) -> Fallible<bool> {
+        // SAFETY: each place and hash is set, to zero to begin with.
+        let (places, hashes) = unsafe { (self.places.values(), self.hashes.values()) };
+        let mask = places.len() - 1;
+        let mut place = hash_place(hash, mask);
+        while places[place] != 0 {
+            if hashes[place] == hash && equal(places[place] - 1, i) {
+                return Ok(false);
+            }
+            place = (place + 1) & mask;
+        }
+        places[place] = i + 1;
+        hashes[place] = hash;
+        self.held += 1;
+        if 2 * self.held > places.len() {
+            self.grown()?;
+        }
+        Ok(true)
+    }
+
+    /// Move to a table twice as big, with the same tuples. Fails if there is no memory for
+    /// it.
+    fn grown(&mut self) -> Fallible<()> {
+        // SAFETY: each table's places and hashes are all set, to zero to begin with.
+        let (old_places, old_hashes) = unsafe { (self.places.values(), self.hashes.values()) };
+        let mut bigger = Distinct::new(2 * old_places.len())?;
+        // SAFETY: as above.
+        let (places, hashes) = unsafe { (bigger.places.values(), bigger.hashes.values()) };
+        let mask = places.len() - 1;
+        for (&index, &hash) in old_places.iter().zip(old_hashes.iter()) {
+            if index == 0 {
+                continue;
+            }
+            let mut place = hash_place(hash, mask);
+            while places[place] != 0 {
+                place = (place + 1) & mask;
+            }
+            places[place] = index;
+            hashes[place] = hash;
+        }
+        bigger.held = self.held;
+        *self = bigger;
+        Ok(())
+    }
+}
+
+/// Where in a table of `mask + 1` places a hash is first looked for: by its top bits,
+/// which vary most.
+#[cfg(not(test))]
+fn hash_place(hash: u64, mask: usize) -> usize {
+    let bits = mask.count_ones();
+    if bits == 0 {
+        return 0;
+    }
+    usize::try_from(hash >> (64 - bits))
+        .unwrap_or_else(|_| internal_error("a place past the table"))
+}
+
+/// What mixes a word into a hash, in each hash here.
+#[cfg(not(test))]
+const MIXING: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// `hash` with `word` mixed into it.
+#[cfg(not(test))]
+fn mixed(hash: u64, word: u64) -> u64 {
+    (hash ^ word).wrapping_mul(MIXING).rotate_left(29)
+}
+
+/// `hash` with `bytes` mixed into it, and then how many there are.
+#[cfg(not(test))]
+fn bytes_mixed(hash: u64, bytes: &[u8]) -> u64 {
+    let hash = bytes
+        .iter()
+        .fold(hash, |hash, &byte| mixed(hash, u64::from(byte)));
+    mixed(hash, bytes.len() as u64)
+}
+
+/// `hash` with the value at `value`, of the type `desc` describes, mixed into it, so that
+/// it is the same for equal values, as [`order`] has them: an integer, or an approximate
+/// number, which has one zero and no NaN, by its bits; a boolean or an integer stored
+/// narrower by its value; a text or a character by its bytes; a tuple, or a value of a type
+/// of the program's own, by its attributes; one of a type in a hierarchy by its own type's
+/// name, then its components; and a relation or an array by its elements, in the order
+/// they are, as a relation is in canonical order inside another value.
+///
+/// # Safety
+///
+/// `value` must point to a valid value of that type.
+#[cfg(not(test))]
+unsafe fn hashed(hash: u64, value: *const u8, desc: &TypeDesc) -> u64 {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        match desc.kind {
+            KIND_INTEGER | KIND_APPROXIMATE => mixed(hash, value.cast::<u64>().read_unaligned()),
+            KIND_BOOLEAN => mixed(hash, u64::from(*value)),
+            KIND_U8 | KIND_U16 | KIND_U32 => mixed(hash, u64::from(narrow(value, desc.kind))),
+            KIND_TEXT | KIND_CHARACTER => {
+                let (bytes, len) = read_slice(value);
+                bytes_mixed(hash, array(bytes, len))
+            }
+            KIND_TUPLE | KIND_DEFINED if desc.integers > 0 => {
+                (0..desc.integers).fold(hash, |hash, i| {
+                    mixed(
+                        hash,
+                        value
+                            .add(i * size_of::<u64>())
+                            .cast::<u64>()
+                            .read_unaligned(),
+                    )
+                })
+            }
+            KIND_TUPLE | KIND_DEFINED => attributes(desc).iter().fold(hash, |hash, attr| {
+                hashed(hash, value.add(attr.offset), &*attr.desc)
+            }),
+            KIND_UNION => {
+                let (own, components) = own_type(value, desc);
+                hashed(
+                    bytes_mixed(hash, written_name(own).as_bytes()),
+                    components,
+                    own,
+                )
+            }
+            KIND_RELATION | KIND_ARRAY => {
+                let (elements, count) = read_slice(value);
+                let element = desc.element();
+                let hash = (0..count).fold(hash, |hash, i| {
+                    hashed(hash, elements.add(i * element.size), element)
+                });
+                mixed(hash, count as u64)
+            }
+            _ => hash,
         }
     }
 }

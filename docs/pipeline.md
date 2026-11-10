@@ -2967,6 +2967,19 @@ small, and each number of integers takes about 7 KB of code in every program. A
 result that lost more than half its tuples as duplicates moves to a buffer of its
 size, as what a relation holds lasts as long as it does.
 
+Whether hashing removes duplicates before sorting is decided as the program runs, by
+the tuples themselves, because no one can know when compiling how many of a
+projection's tuples will be equal. Of 16384 tuples or more (`HASHED_FROM`), the
+runtime hashes 1024 spread across them (`distinct_by_hash`, `HASHED_SAMPLE`). If no
+more than three in four of those differ, it hashes them all into a table (`Distinct`)
+to find the first of each value. Only those are then sorted, gathered at the front of
+the buffer when sorting in place, or through pointers to them. Otherwise it sorts them
+all, which the sample slows by about 0.3%.
+
+The hash (`hashed`) is the same for values `order` has as equal, and the table compares
+by `order`. A hash that differed for equal values would only cost time, since the sort
+still makes one of any equal tuples it puts side by side.
+
 A value of a type in a hierarchy, a union type or a subtype of one, is
 laid out as every value of the union type at its top: the address of its
 own type's `KIND_DEFINED` descriptor, then room for the components of any
