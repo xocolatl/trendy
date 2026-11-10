@@ -10412,27 +10412,71 @@ operator main{} [
     );
 }
 
-/// A rename named by a `const` reads what it renames in place, but only if that is already
+/// A rename named by a variable reads what it renames in place, but only if that is already
 /// computed: a rename of what could fail is computed where it was written, before what comes
-/// after it, as what it fails with says.
+/// after it, as what it fails with says. Named by a constant, it is computed where it is read,
+/// so what is read before it fails first.
 #[test]
 fn a_rename_of_what_is_computed_fails_where_it_was_named() {
-    let source = "operator f{p: relation { a: integer }, one: integer}: integer [
-    const renamed := (p extend { b := 9223372036854775800 + a }) rename {b as c};
+    let source = |declared: &str| {
+        format!(
+            "operator f{{p: relation {{ a: integer }}, one: integer}}: integer [
+    {declared} renamed := (p extend {{ b := 9223372036854775800 + a }}) rename {{b as c}};
     const later := 9223372036854775807 + one;
-    later + count{r: renamed rename {c as d}}
+    later + count{{r: renamed rename {{c as d}}}}
 ];
 
-operator main{} [
-    call debug_value{v: f{p: series{from: 10, to: 12} rename {value as a}, one: 1}};
+operator main{{}} [
+    call debug_value{{v: f{{p: series{{from: 10, to: 12}} rename {{value as a}}, one: 1}}}};
 ];
-";
-    let (code, stderr) = run_source("rename_fails_where_named", source);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(
-        stderr.contains("9223372036854775800 + 10 is out of"),
-        "{stderr}"
-    );
+"
+        )
+    };
+    for (declared, failure, line) in [
+        ("var", "9223372036854775800 + 10 is out of", 2),
+        ("const", "9223372036854775807 + 1 is out of", 3),
+    ] {
+        let (code, stderr) = run_source(
+            &format!("rename_fails_where_named_{declared}"),
+            &source(declared),
+        );
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains(failure), "{stderr}");
+        assert!(stderr.contains(&format!(".trendy:{line}:")), "{stderr}");
+    }
+}
+
+/// A local constant is computed when the compiler chooses: here where it is read, after
+/// what runs before that, so a failure in it comes after, though it says where the constant
+/// is declared, and one read nowhere isn't computed. A variable is computed where it is
+/// declared.
+#[test]
+fn a_local_constant_fails_where_it_is_read() {
+    let program = |declared: &str, read: &str| {
+        format!(
+            "uses {{ trendy.process }};
+
+operator main{{}} [
+    const zero := length{{a: arguments}};
+    {declared} q := 10 div zero;
+    call debug_value{{v: \"before\"}};
+    {read}
+];
+"
+        )
+    };
+    let read = "call debug_value{v: q};";
+    let ran = ran_source("constant_fails_where_read", &program("const", read), b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    let lines: Vec<&str> = ran.stderr.lines().collect();
+    assert_eq!(lines[0], "\"before\"", "{}", ran.stderr);
+    assert!(lines[1].starts_with("error[R0002]"), "{}", ran.stderr);
+    assert!(lines[2].ends_with(".trendy:5:5"), "{}", ran.stderr);
+    let ran = ran_source("constant_never_read", &program("const", ""), b"");
+    assert_eq!((ran.code, ran.stderr.as_str()), (0, "\"before\"\n"));
+    let ran = ran_source("variable_fails_where_declared", &program("var", read), b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert!(ran.stderr.starts_with("error[R0002]"), "{}", ran.stderr);
 }
 
 /// A rename named by a `const` is the value of what it renamed as it was then, whatever is
@@ -11370,6 +11414,12 @@ fn constants() {
             "stone_number{n: 3}",
             "4",
             "3",
+            "┌───────────┬────┬────┬───────┐",
+            "│ direction │ dx │ dy │ stone │",
+            "├───────────┼────┼────┼───────┤",
+            "│ east      │  1 │  0 │     2 │",
+            "│ north     │  0 │  1 │     1 │",
+            "└───────────┴────┴────┴───────┘",
             "-1e0",
         ]
     );

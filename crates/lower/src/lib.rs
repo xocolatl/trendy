@@ -13083,11 +13083,13 @@ mod tests {
             name: "r".to_string(),
             ty: hir::Type::Relation(heading.clone()),
             keys: vec![["v".to_string()].into()],
+            constant: false,
         };
         let n = hir::Local {
             name: "n".to_string(),
             ty: integer(),
             keys: Vec::new(),
+            constant: false,
         };
         let declared = |id, value| {
             hir::Statement::Assign(vec![hir::Assignment {
@@ -13172,6 +13174,7 @@ mod tests {
             name: name.to_string(),
             ty,
             keys: Vec::new(),
+            constant: false,
         };
         let declared = |id, value| {
             hir::Statement::Assign(vec![hir::Assignment {
@@ -13359,6 +13362,7 @@ mod tests {
                     name: "n".to_string(),
                     ty: integer(),
                     keys: Vec::new(),
+                    constant: false,
                 }],
                 value,
             },
@@ -13422,6 +13426,7 @@ mod tests {
             name: name.to_string(),
             ty: text(),
             keys: Vec::new(),
+            constant: false,
         };
         let f = hir::Operator {
             versions: Vec::new(),
@@ -14019,6 +14024,7 @@ mod tests {
             name: "t".to_string(),
             ty: hir::Type::Scalar(hir::Scalar::Text),
             keys: Vec::new(),
+            constant: false,
         };
         let condition = hir::Expr::Binary(
             hir::BinaryOp::Compare(

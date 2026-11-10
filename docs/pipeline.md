@@ -1274,7 +1274,8 @@ computed from it. Assignments are checked as an update operator's are,
 through `assign::Assigning`. A local constant is a `VarDecl` that starts with
 `const` (`ast::VarDecl::is_const`), checked as a local variable's is, but for
 having its value there (A0080), and each way of finding what to assign refuses it
-(A0026), so nothing after sema can tell it from a variable that is never assigned.
+(A0026). Its local variable says it is one (`hir::Local::constant`), as the optimizer
+computes it when it chooses, where a variable is computed where it is declared (see opt).
 A constant of the program's is evaluated as a variable is, on demand in `Globals`
 (`Globals::constant`, a `Global::Constant` while it is), and a reference to it is
 recorded, as one to an operator is, so that a cycle through it, of constants and
@@ -2082,9 +2083,9 @@ constraints on variables, which each assignment to one of them computes. It is
 a layer of its own so that sema checks and lower translates, and neither
 has to optimize. A rewrite never changes what a program means, which
 includes the failures it can have: every operand is still computed, and
-one that can fail only where it would be. A constant's failure is the one
-exception, as it happens when something first needs its value, wherever a
-rewrite puts that.
+one that can fail only where it would be. A constant's failure, the program's
+or a local one's, is the one exception, as it happens when something first
+needs its value, wherever a rewrite puts that.
 
 A constant means its expression, so each read can compute that where it is, or
 share one computed value (`inserted`). What is around the read can then need less of
@@ -2097,6 +2098,18 @@ one such place. It is done first, so that plans see what it writes. One with a k
 check stays shared, as checking takes all of it, and so does one with value blocks, as
 nothing around a statement can reduce it and their local variables are numbered among
 the constant's.
+
+A local constant is written where it is read in the same way, a statement's
+(`Optimizer::values_written_where_read`) and a binding's (`hir::Expr::Let`), so that
+`const t := r join s;` read as `t join u` is one join of three, in an order the plan
+chooses. It is if that is its only read, which runs once each time its declaration does
+(`read_at_most_once`), and nothing it reads changes before then (`stays_while`): no
+statement of its block assigns a local variable or a parameter it reads, nor a variable
+of the program's, which an operator it calls could assign too; a value block assigns
+only its own (A0034). Not one with a key to check, nor statements. It keeps its
+declaration's site, so that a failure in it says where it is declared. A variable is
+computed where it is declared, as a failure in it would say otherwise: only one that
+renames what is read moves, which computes nothing.
 
 An AND of relations, restricted or not, is planned (`Optimizer::planned`),
 as one AND of any number of operands, since a chain of `And`s is one

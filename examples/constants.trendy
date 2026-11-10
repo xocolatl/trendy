@@ -40,12 +40,19 @@ operator main{} [
     call debug_value{v: steps_per_day};
     call debug_value{v: last_stone};
     call debug_value{v: stone_number{n: 3}};
-    /* A constant in a body is computed where it is declared, here each time the
-       loop comes round. */
+    /* A constant in a body has the value it has where it is declared, here each
+       time the loop comes round, though when it is computed is the compiler's to
+       choose. */
     for stone in array [1, 2] loop [
         const left := last_stone - stone;
         call debug_value{v: left};
     ];
+    /* Read once, it is as if its expression were written where it is read: `route`,
+       `moves` and the milestones up to the second are one join of three, in whatever
+       order costs least, and neither `route` nor `stepped` is ever made. */
+    const route := milestones extend { direction := if stone mod 2 = 0 then "east" else "north" };
+    const stepped := route join moves;
+    call debug_table{r: stepped join (milestones where stone <= 2)};
     /* The prelude's `pi` is one too. */
     call debug_value{v: cos{of: pi}};
 ];

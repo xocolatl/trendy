@@ -263,6 +263,10 @@ pub struct Local {
     pub ty: Type,
     /// A relation's keys, as a variable's ([`Variable::keys`]).
     pub keys: Vec<Key>,
+    /// Whether it is declared `const`: it is never assigned, and is computed when the
+    /// compiler chooses, as a constant of the program's is, rather than where it is
+    /// declared, so that a failure in it may happen later, or not at all.
+    pub constant: bool,
 }
 
 impl Local {
@@ -273,6 +277,7 @@ impl Local {
             name: self.name.clone(),
             ty: self.ty.instantiated(types),
             keys: self.keys.clone(),
+            constant: self.constant,
         }
     }
 }

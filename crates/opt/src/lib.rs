@@ -6,7 +6,9 @@
 //! of constraints on variables, which is what this rewrites. A
 //! rewrite never changes what a program means, which includes the failures
 //! it can have: every operand is still computed, and an operand that can
-//! fail only where it would be (see `language.md`'s "Evaluation").
+//! fail only where it would be (see `language.md`'s "Evaluation"). A constant,
+//! the program's or a local one, is the exception: it is computed when something
+//! first needs it, so its failure happens there (see `language.md`'s "Constants").
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,7 +100,7 @@ fn optimized_operator(program: &hir::Program, operator: &hir::Operator) -> hir::
     let kind = match operator.kind.clone() {
         hir::OperatorKind::Update { locals, body } => hir::OperatorKind::Update {
             locals,
-            body: optimizer.renames_written_where_read(body, None).0,
+            body: optimizer.values_written_where_read(body, None).0,
         },
         kind => kind,
     };
@@ -119,17 +121,20 @@ struct Optimizer<'a> {
 
 impl Optimizer<'_> {
     /// `expr`, and every expression in it, optimized: an AND of relations,
-    /// restricted or not, is [`Optimizer::planned`].
+    /// restricted or not, is [`Optimizer::planned`], and a binding's value is written where
+    /// it is read if it can be ([`Optimizer::moves`]), so that the plan sees all of it.
     fn expr(&self, expr: hir::Expr) -> hir::Expr {
         match expr {
+            // What a binding's value reads can't change in its body: a read-only operator's
+            // variables are each bound once, and a value block assigns only its own (A0034).
             hir::Expr::Let(id, value, body)
-                if is_rename_of_a_read(without_site(&value))
-                    && self.read_once_through_a_rename(id, &[&*body]) =>
+                if self.moves(id, &value) && read_at_most_once(id, &[&*body]) =>
             {
-                self.expr(with_local_as(*body, id, without_site(&value)))
+                let value = self.moved(id, &value, None);
+                self.expr(with_local_as(*body, id, &value))
             }
             hir::Expr::Run(block, value) => {
-                let (block, value) = self.renames_written_where_read(*block, Some(*value));
+                let (block, value) = self.values_written_where_read(*block, Some(*value));
                 let value = value.expect("it was given one");
                 hir::Expr::Run(Box::new(block), Box::new(value))
                     .map_children(|child, _| self.expr(child))
@@ -150,16 +155,16 @@ impl Optimizer<'_> {
     }
 
     /// `block`, and the blocks in it, and `end`, its value if it has one, with each local
-    /// variable that only names a rename gone, and the rename written where it is read, as
-    /// for a binding: see [`Optimizer::named_rename`].
-    fn renames_written_where_read(
+    /// variable whose value can be written where it is read gone, and its value written
+    /// there: see [`Optimizer::named_value`].
+    fn values_written_where_read(
         &self,
         mut block: hir::Block,
         mut end: Option<hir::Expr>,
     ) -> (hir::Block, Option<hir::Expr>) {
         let mut at = 0;
         while at < block.statements.len() {
-            if let Some((id, value)) = self.named_rename(&block, end.as_ref(), at) {
+            if let Some((id, value)) = self.named_value(&block, end.as_ref(), at) {
                 block.statements.remove(at);
                 block.locals.retain(|local| *local != id);
                 block = block.map_exprs(&mut |expr| with_local_as(expr, id, &value));
@@ -173,24 +178,25 @@ impl Optimizer<'_> {
             .into_iter()
             .map(|(site, statement)| {
                 let statement = statement
-                    .map_blocks(&mut |inner| self.renames_written_where_read(inner, None).0);
+                    .map_blocks(&mut |inner| self.values_written_where_read(inner, None).0);
                 (site, statement)
             })
             .collect();
         (block, end)
     }
 
-    /// The local variable the statement of `block` at `at` declares, and its value, if that
-    /// is all the statement does and it is as good to read the value wherever `block`, or
-    /// `end`, reads the variable: assigned nowhere else, a rename of what is only read, which
-    /// doesn't change while `block` runs, and read only through a rename.
-    fn named_rename(
+    /// The local variable the statement of `block` at `at` declares, and its value, at the
+    /// statement's site, if that is all the statement does and its value can be written
+    /// wherever `block`, or `end`, reads it: it is assigned nowhere else, its value
+    /// [`Optimizer::moves`], what that reads doesn't change while `block` runs, and it is
+    /// read no more than once, by what runs no more than once each time `block` does.
+    fn named_value(
         &self,
         block: &hir::Block,
         end: Option<&hir::Expr>,
         at: usize,
     ) -> Option<(hir::LocalId, hir::Expr)> {
-        let (_, hir::Statement::Assign(assignments)) = &block.statements[at] else {
+        let (site, hir::Statement::Assign(assignments)) = &block.statements[at] else {
             return None;
         };
         let [
@@ -202,10 +208,9 @@ impl Optimizer<'_> {
         else {
             return None;
         };
-        let value = without_site(value);
-        if !is_rename_of_a_read(value)
-            || !block.locals.contains(id)
+        if !block.locals.contains(id)
             || block.times_assigned(*id) != 1
+            || !self.moves(*id, value)
             || !self.stays_while(value, block)
         {
             return None;
@@ -224,88 +229,65 @@ impl Optimizer<'_> {
                 statement.for_each_expr(&mut |expr| in_a_loop |= expr.reads_local(*id));
             }
         });
-        (!in_a_loop && self.read_once_through_a_rename(*id, &exprs)).then(|| (*id, value.clone()))
+        (!in_a_loop && read_at_most_once(*id, &exprs))
+            .then(|| (*id, self.moved(*id, value, Some(*site))))
     }
 
-    /// Whether `exprs` read the binding or local variable `id` no more than once, not again for
-    /// each tuple of something, and only through a rename. What is read more often than that is
-    /// better sorted once than searched each time.
-    fn read_once_through_a_rename(&self, id: hir::LocalId, exprs: &[&hir::Expr]) -> bool {
-        let mut reads = 0;
-        exprs
-            .iter()
-            .all(|expr| self.reads_only_through_renames(id, expr, false, &mut reads))
-            && reads <= 1
+    /// Whether the value of the local variable `id`, `value`, can be computed where it is
+    /// read rather than where it is assigned: if `id` is a constant, which is computed when
+    /// the compiler chooses, so that a failure in it happens where it is read, or if
+    /// `value` is a rename of what is only read, which computes nothing. Not if it has a
+    /// key to check, as checking takes all of it, nor statements, which nothing around it
+    /// can reduce.
+    fn moves(&self, id: hir::LocalId, value: &hir::Expr) -> bool {
+        let local = &self.locals[id.0];
+        (local.constant || is_rename_of_a_read(without_site(value)))
+            && !has_key_to_check(local)
+            && !runs(value)
     }
 
-    /// Whether what the rename `renamed` reads has the same value for as long as `block`
-    /// runs: nothing in it assigns it, unless it declares it there, before reading it.
-    fn stays_while(&self, renamed: &hir::Expr, block: &hir::Block) -> bool {
-        let mut read = renamed;
-        while let hir::Expr::Rename(inner, _) = read {
-            read = inner;
+    /// `value`, of the local variable `id`, as it is written where `id` is read: of the
+    /// type `id` is declared with, and computed at `site`, where it is assigned, if it isn't
+    /// already, so that a failure in it says so. A rename of what is only read has no site,
+    /// so that what reads it sees what it renames.
+    fn moved(&self, id: hir::LocalId, value: &hir::Expr, site: Option<hir::Site>) -> hir::Expr {
+        let value = if is_rename_of_a_read(without_site(value)) {
+            without_site(value).clone()
+        } else {
+            site.map_or_else(|| value.clone(), |site| hir::Expr::at(site, value.clone()))
+        };
+        let declared = &self.locals[id.0].ty;
+        if self.ty(&value) == *declared {
+            value
+        } else {
+            value.treated(declared)
         }
-        match read {
-            hir::Expr::Parameter(name) => self
-                .params
-                .get(name)
-                .is_some_and(|parameter| parameter.mode == hir::Mode::Const),
+    }
+
+    /// Whether what `value` reads has the same value for as long as `block` runs: nothing
+    /// in it assigns a local variable it reads, unless it declares it there, before reading
+    /// it, nor a parameter, nor a variable of the program's, which an operator it calls
+    /// could assign as well.
+    fn stays_while(&self, value: &hir::Expr, block: &hir::Block) -> bool {
+        let assigned = block.assigned();
+        let mut calls = false;
+        block.each_statement(&mut |statement| {
+            if let hir::Statement::Call(call) = statement {
+                calls |= !matches!(
+                    self.program.operator(call.operator).kind,
+                    hir::OperatorKind::Builtin(_)
+                );
+            }
+        });
+        let stays = |read: &hir::Expr| match read {
             hir::Expr::Local(id) => {
                 block.times_assigned(*id) <= usize::from(block.locals.contains(id))
             }
+            hir::Expr::Parameter(name) => !assigned.contains(&hir::Target::Parameter(name.clone())),
+            hir::Expr::Variable(id) => !calls && !assigned.contains(&hir::Target::Variable(*id)),
             _ => true,
-        }
-    }
-
-    /// Whether everything in `expr` that reads the binding `id` of a rename can read what
-    /// is renamed instead, through the rename, so that none of its tuples need moving: a
-    /// join, a semijoin, a projection, another rename, `count`, `sum` and `product`, and
-    /// `is_empty`, as lowering says. Then it isn't computed, for all those to read.
-    fn reads_only_through_renames(
-        &self,
-        id: hir::LocalId,
-        expr: &hir::Expr,
-        repeated: bool,
-        reads: &mut usize,
-    ) -> bool {
-        use hir::ReadOnlyBuiltin::{Count, Product, Sum};
-        match expr {
-            hir::Expr::Local(read) => *read != id,
-            hir::Expr::Let(bound, ..) if *bound == id => false,
-            _ => {
-                let through = |operand: &hir::Expr| match expr {
-                    hir::Expr::And(lhs, rhs)
-                    | hir::Expr::Semijoin(lhs, rhs)
-                    | hir::Expr::Antijoin(lhs, rhs) => {
-                        core::ptr::eq(operand, lhs.as_ref()) || core::ptr::eq(operand, rhs.as_ref())
-                    }
-                    hir::Expr::Remove(renamed, _) | hir::Expr::Rename(renamed, _) => {
-                        core::ptr::eq(operand, renamed.as_ref())
-                    }
-                    hir::Expr::Call(call) => {
-                        let callee = self.program.operator(call.operator);
-                        let counts = matches!(
-                            callee.kind,
-                            hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(
-                                Count | Sum | Product
-                            ))
-                        ) || callee.name == "is_empty";
-                        counts && call.args.values().any(|arg| core::ptr::eq(operand, arg))
-                    }
-                    _ => false,
-                };
-                let mut only = true;
-                expr.for_each_child(|child, _| {
-                    let is_read = matches!(child, hir::Expr::Local(read) if *read == id);
-                    *reads += usize::from(is_read);
-                    let again = repeated || expr.computes_again(child);
-                    only = only
-                        && ((is_read && !again && through(child))
-                            || self.reads_only_through_renames(id, child, again, reads));
-                });
-                only
-            }
-        }
+        };
+        every_read(value, &stays)
     }
 
     /// `and`, an AND of relations, restricted to the tuples every one of
@@ -389,8 +371,8 @@ struct Guard {
     reads: BTreeSet<String>,
 }
 
-/// Whether `expr` is a rename of what is only read, with nothing to compute or to fail,
-/// and the same wherever in a chain of bindings it is read.
+/// Whether `expr` is a rename of what is only read, with nothing to compute, and the same
+/// wherever in a chain of bindings it is read.
 fn is_rename_of_a_read(expr: &hir::Expr) -> bool {
     let mut operand = expr;
     while let hir::Expr::Rename(inner, _) = operand {
@@ -404,6 +386,79 @@ fn is_rename_of_a_read(expr: &hir::Expr) -> bool {
                 | hir::Expr::ComputedConstant(..)
                 | hir::Expr::Constant(_)
         )
+}
+
+/// `expr`, apart from where it is computed, which only says so of what can fail.
+fn without_site(expr: &hir::Expr) -> &hir::Expr {
+    match expr {
+        hir::Expr::At(_, inner) => without_site(inner),
+        expr => expr,
+    }
+}
+
+/// Whether `exprs` read the local variable `id` no more than once, and not again for each
+/// tuple of something, or by statements that can run again: what is read more often than
+/// that is better computed once than at each read.
+fn read_at_most_once(id: hir::LocalId, exprs: &[&hir::Expr]) -> bool {
+    let (mut reads, mut again) = (0, false);
+    for expr in exprs {
+        count_reads(id, expr, false, &mut reads, &mut again);
+    }
+    reads <= 1 && !again
+}
+
+/// Add to `reads` how many times `expr` reads the local variable `id`, and to `again`
+/// whether one of them is computed again, as `repeated` says `expr` is.
+fn count_reads(
+    id: hir::LocalId,
+    expr: &hir::Expr,
+    repeated: bool,
+    reads: &mut usize,
+    again: &mut bool,
+) {
+    if let hir::Expr::Local(read) = expr {
+        if *read == id {
+            *reads += 1;
+            *again |= repeated;
+        }
+        return;
+    }
+    expr.for_each_child(|child, tuples| {
+        let repeated = repeated || tuples > 0 || expr.computes_again(child);
+        count_reads(id, child, repeated, reads, again);
+    });
+}
+
+/// Whether `local`, a relation, can break a key: every relation satisfies one of all its
+/// attributes, which is what it has if it declares none.
+fn has_key_to_check(local: &hir::Local) -> bool {
+    let hir::Type::Relation(heading) = &local.ty else {
+        return false;
+    };
+    let attributes = heading.attributes().count();
+    local.keys.iter().any(|key| key.len() < attributes)
+}
+
+/// Whether `expr` has statements in it, which decide what runs next.
+fn runs(expr: &hir::Expr) -> bool {
+    if matches!(expr, hir::Expr::Run(..)) {
+        return true;
+    }
+    let mut found = false;
+    expr.for_each_child(|child, _| found |= runs(child));
+    found
+}
+
+/// Whether `stays` is true of every variable, parameter and local variable `expr` reads.
+fn every_read(expr: &hir::Expr, stays: &dyn Fn(&hir::Expr) -> bool) -> bool {
+    match expr {
+        hir::Expr::Local(_) | hir::Expr::Parameter(_) | hir::Expr::Variable(_) => stays(expr),
+        _ => {
+            let mut all = true;
+            expr.for_each_child(|child, _| all &= every_read(child, stays));
+            all
+        }
+    }
 }
 
 /// Each expression of `statement`, and of the blocks in it, into `exprs`.
@@ -429,14 +484,6 @@ fn collect_exprs<'e>(statement: &'e hir::Statement, exprs: &mut Vec<&'e hir::Exp
         for (_, inner) in &block.statements {
             collect_exprs(inner, exprs);
         }
-    }
-}
-
-/// `expr`, apart from where it is computed, which only says so of what can fail.
-fn without_site(expr: &hir::Expr) -> &hir::Expr {
-    match expr {
-        hir::Expr::At(_, inner) => without_site(inner),
-        expr => expr,
     }
 }
 
@@ -974,6 +1021,129 @@ mod tests {
             "const a := [ var n := 0; while n < 3 loop [ n := n + 1; ]; {SERIES} where value = n ];\n{table}"
         );
         assert_eq!(shared(&source), ["a"]);
+    }
+
+    /// The program of `main` doing nothing and `f`, of [`PARAMS`], with `body`.
+    fn f_body(body: &str) -> String {
+        format!("operator main{{}} [];\noperator f{{{PARAMS}}} [ {body} ];")
+    }
+
+    /// The local variables of the operator `f` in `source` that are computed where they are
+    /// declared, once optimized, rather than written where they are read.
+    fn declared_and_computed(source: &str) -> Vec<String> {
+        let program = program(source);
+        let f = program
+            .operators
+            .iter()
+            .find(|operator| operator.name == "f")
+            .expect("`f` is defined");
+        let name = |id: hir::LocalId| f.locals()[id.0].name.clone();
+        let mut computed = Vec::new();
+        match &f.kind {
+            hir::OperatorKind::Update { body, .. } => body.each_statement(&mut |statement| {
+                for target in statement.assigns() {
+                    if let hir::Target::Local(id) = target {
+                        computed.push(name(*id));
+                    }
+                }
+            }),
+            hir::OperatorKind::ReadOnly { value, .. } => bound(value, &name, &mut computed),
+            hir::OperatorKind::Builtin(_) | hir::OperatorKind::Specification { .. } => {}
+        }
+        computed.sort();
+        computed.dedup();
+        computed
+    }
+
+    /// The name of each local variable `expr` binds a value to, as `name` gives it.
+    fn bound(expr: &hir::Expr, name: &dyn Fn(hir::LocalId) -> String, names: &mut Vec<String>) {
+        if let hir::Expr::Let(id, ..) = expr {
+            names.push(name(*id));
+        }
+        expr.for_each_child(|child, _| bound(child, name, names));
+    }
+
+    #[test]
+    fn a_local_constants_only_read_is_its_value() {
+        // As if written where it is read, so that the plan sees all of it: one join of
+        // three, of a chain of constants too, restricted where it can be.
+        for (named, written) in [
+            (
+                "const t := a join d; call debug_table{r: t join b};",
+                "(a join d) join b",
+            ),
+            (
+                "const t := a join d; const u := t join b; call debug_table{r: u where y = 1};",
+                "((a join d) join b) where y = 1",
+            ),
+            (
+                "const t := a join d; call debug_table{r: t where x = 1};",
+                "(a join d) where x = 1",
+            ),
+        ] {
+            assert_eq!(planned(&f_body(named)), planned(&f(written)), "{named}");
+        }
+    }
+
+    #[test]
+    fn a_local_variables_value_is_written_where_it_is_read_if_nothing_can_tell() {
+        // A constant, which may fail where it is read; a variable that only renames what
+        // is read, which computes nothing; one read only in a branch, or by a read-only
+        // operator; one read nowhere, which nothing computes.
+        let overflows = "a extend { q := 9223372036854775807 + x }";
+        for source in [
+            f_body(&format!(
+                "const t := {overflows}; call debug_table{{r: t}};"
+            )),
+            f_body("var t := a rename {x as w}; call debug_table{r: t join e};"),
+            f_body("const t := a join d; if p then [ call debug_table{r: t}; ];"),
+            f_body("const t := a join d;"),
+            format!(
+                "operator main{{}} [];\noperator f{{{PARAMS}}}: integer [ const t := {overflows}; count{{r: t}} ];"
+            ),
+        ] {
+            assert_eq!(
+                declared_and_computed(&source),
+                Vec::<String>::new(),
+                "{source}"
+            );
+        }
+        // Read more than once, in a loop, or for each tuple; after what it reads changes,
+        // a variable of the program's by an operator it calls too; with a key to check, or
+        // statements; or a variable that computes something, where it is declared.
+        let changed = "var g: relation { x: integer };\noperator h{} [ g := relation {}; ];\n";
+        for source in [
+            f_body("const t := a join d; call debug_table{r: t}; call debug_table{r: t join b};"),
+            f_body(
+                "const t := a join d; var n := 0; while n < 2 loop [ call debug_table{r: t}; n := n + 1; ];",
+            ),
+            f_body("const t := a join d; call debug_table{r: b where y = count{r: t}};"),
+            f_body("var v := a; const t := v join d; v := a where x = 1; call debug_table{r: t};"),
+            format!(
+                "{changed}{}",
+                f_body("const t := g join d; g := relation {}; call debug_table{r: t};")
+            ),
+            format!(
+                "{changed}{}",
+                f_body("const t := g join d; call h{}; call debug_table{r: t};")
+            ),
+            f_body(
+                "const t: relation { x: integer, y: integer } := a join d key { x }; call debug_table{r: t};",
+            ),
+            f_body(
+                "const t := [ var i := 0; while i < 1 loop [ i := i + 1; ]; a ]; call debug_table{r: t};",
+            ),
+            f_body(&format!("var t := {overflows}; call debug_table{{r: t}};")),
+            f_body("var t := a join d; call debug_table{r: t};"),
+            format!(
+                "operator main{{}} [];\noperator f{{{PARAMS}}}: integer [ var t := {overflows}; count{{r: t}} ];"
+            ),
+        ] {
+            assert!(
+                declared_and_computed(&source).contains(&"t".to_string()),
+                "{source}"
+            );
+        }
     }
 
     #[test]

@@ -984,6 +984,7 @@ impl Statements<'_, '_> {
             name,
             ty: *element,
             keys: Vec::new(),
+            constant: false,
         };
         let (id, mut ok) = self.locals.enter_loop(
             &variable,

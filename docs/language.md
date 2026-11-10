@@ -3416,7 +3416,8 @@ operator main{} [
 
 - **A local variable starts with its initial value,** or its type's
   default, as the program's do; but its value is computed when its
-  declaration runs, from the parameters and variables then. A type
+  declaration runs, from the parameters and variables then (a local
+  constant's when the compiler chooses: see [Constants](#constants)). A type
   parameter has no default, since each call gives it a type, nor has a
   tuple with one, and a relation or an array with one starts empty, as any
   does. A local variable of a type with no default can be declared without a
@@ -3557,8 +3558,15 @@ operator main{} [
   the compiler can compute it before the order things are written in says, as it can
   move any operand that can't fail: another conjunct doesn't guard it (see
   [Evaluation](#evaluation)).
-- **A local constant is computed where it is declared,** from the parameters and
-  variables then, each time that runs: in a loop, each time round. A `const`
+- **A local constant has the value its expression has where it is declared,** from
+  the parameters and variables then, each time that runs: in a loop, each time round.
+  But when it is computed is the compiler's to choose, as for the program's: if it has
+  one read, which runs once each time the declaration does, and nothing it reads
+  changes before then, it is as if its expression were written there, so that
+  `const t := r join s;` read as `t join u` is one join of three, in whatever order
+  costs least. So a failure in computing it can come after what runs before its read,
+  though it says it is where the constant is declared, and one read nowhere fails
+  nowhere. A local variable, `var`, is computed where it is declared. A `const`
   parameter is the same thing, the value its caller gives.
 - **It has its value where it is declared** (A0080), as nothing could give it one
   later: `const limit: integer;` is an error, and a variable is what starts at its
