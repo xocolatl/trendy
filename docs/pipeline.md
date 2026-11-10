@@ -2819,10 +2819,15 @@ when compiling and computed when running. The runtime sorts a relation's
 tuples by its descriptor's sort order, `sorted_by`, the positions of the
 attributes it sorts by, most significant first. Where a tuple's fields are,
 their offsets, is apart from that order. Null is the attributes as listed, by
-name, the canonical order, which is how lowering makes every relation's. A tuple's
+name, the canonical order, which a relation has unless lowering keeps another. A tuple's
 attributes, and a value's inside another, as a relation-valued attribute's,
-are always compared by name. What follows a relation's order follows its sort
-order:
+are always compared by name. A loop that compares many of a relation's tuples, to
+sort, merge or search them, chooses how once, before it starts (`in_tuple_order!`):
+by name, or by the positions of its sort order, each in a copy of the loop of its
+own, which has its comparison inlined. Choosing for each pair made the comparison
+too big to be inlined into those loops, and each comparison a call, which cost
+relations sorted by name up to 10% more instructions. What follows a relation's
+order follows its sort order:
 - the runs `trendy_rt_equal_run` finds, by an attribute's position in it;
 - whether a join's operand is in order on the common attributes, which come
   first in it;

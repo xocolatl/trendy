@@ -51,6 +51,30 @@ mod csv;
 
 use unicode_width::UnicodeWidthStr;
 
+/// `$body`, with `$order` the [`TupleOrder`] of the relation `$desc` describes, chosen
+/// once: the body is made for each, [`ByName`] and [`BySortOrder`], so that a loop in it
+/// that compares many tuples has its comparison inlined, with nothing to choose for each
+/// pair. Choosing in each comparison made the comparison too big to be inlined into the
+/// loops that sort, merge and search, which then took a call for each.
+///
+/// It reads `$desc`'s sort order, so it is used where `$desc` is known to be a valid
+/// relation descriptor, inside `unsafe`.
+macro_rules! in_tuple_order {
+    ($desc:expr, |$order:ident| $body:expr) => {{
+        let desc: &TypeDesc = $desc;
+        match sort_positions(desc) {
+            None => {
+                let $order = ByName(desc);
+                $body
+            }
+            Some(positions) => {
+                let $order = BySortOrder { desc, positions };
+                $body
+            }
+        }
+    }};
+}
+
 pub const KIND_BOOLEAN: u8 = 0;
 pub const KIND_INTEGER: u8 = 1;
 pub const KIND_APPROXIMATE: u8 = 2;
@@ -2831,19 +2855,20 @@ pub unsafe extern "C" fn trendy_rt_subset(
         let size = desc.element().size;
         let mut j = 0;
         let mut subset = true;
-        for i in 0..lhs_count {
-            let tuple = lhs.add(i * size);
-            // Past the tuples of `rhs` before it, to it if `rhs` has it.
-            while j < rhs_count && compare_tuples(rhs.add(j * size), tuple, desc) == Ordering::Less
-            {
+        in_tuple_order!(desc, |by| {
+            for i in 0..lhs_count {
+                let tuple = lhs.add(i * size);
+                // Past the tuples of `rhs` before it, to it if `rhs` has it.
+                while j < rhs_count && by.compare(rhs.add(j * size), tuple) == Ordering::Less {
+                    j += 1;
+                }
+                if j == rhs_count || by.compare(rhs.add(j * size), tuple) != Ordering::Equal {
+                    subset = false;
+                    break;
+                }
                 j += 1;
             }
-            if j == rhs_count || compare_tuples(rhs.add(j * size), tuple, desc) != Ordering::Equal {
-                subset = false;
-                break;
-            }
-            j += 1;
-        }
+        });
         let proper = proper.read_unaligned() == 1;
         dst.write(u8::from(subset && (!proper || lhs_count < rhs_count)));
     }
@@ -2910,47 +2935,49 @@ pub unsafe extern "C" fn trendy_rt_combine(
             count += 1;
         };
         let (mut i, mut j) = (0, 0);
-        while i < lhs_count {
-            let l = lhs.add(i * size);
-            let order = if j < rhs_count {
-                compare_tuples(l, rhs.add(j * size), desc)
-            } else {
-                Ordering::Less
-            };
-            match order {
-                Ordering::Less => {
-                    keep(l);
-                    i += 1;
-                }
-                Ordering::Equal => {
-                    match combination {
-                        COMBINE_DISJOINT_UNION => {
-                            return Err(tuple_failed(SHARED_TUPLE, l, tuple_desc));
-                        }
-                        COMBINE_DISJOINT_CHANGES => {
-                            return Err(tuple_failed(TUPLE_REMOVED_TWICE, l, tuple_desc));
-                        }
-                        _ => {}
-                    }
-                    // A tuple of both is in an exclusive union's result
-                    // no more than in a minus's.
-                    if !minus && combination != COMBINE_EXCLUSIVE_UNION {
+        in_tuple_order!(desc, |by| {
+            while i < lhs_count {
+                let l = lhs.add(i * size);
+                let order = if j < rhs_count {
+                    by.compare(l, rhs.add(j * size))
+                } else {
+                    Ordering::Less
+                };
+                match order {
+                    Ordering::Less => {
                         keep(l);
+                        i += 1;
                     }
-                    i += 1;
-                    j += 1;
-                }
-                Ordering::Greater => {
-                    if combination == COMBINE_INCLUDED_MINUS {
-                        return Err(tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc));
+                    Ordering::Equal => {
+                        match combination {
+                            COMBINE_DISJOINT_UNION => {
+                                return Err(tuple_failed(SHARED_TUPLE, l, tuple_desc));
+                            }
+                            COMBINE_DISJOINT_CHANGES => {
+                                return Err(tuple_failed(TUPLE_REMOVED_TWICE, l, tuple_desc));
+                            }
+                            _ => {}
+                        }
+                        // A tuple of both is in an exclusive union's result
+                        // no more than in a minus's.
+                        if !minus && combination != COMBINE_EXCLUSIVE_UNION {
+                            keep(l);
+                        }
+                        i += 1;
+                        j += 1;
                     }
-                    if !minus {
-                        keep(rhs.add(j * size));
+                    Ordering::Greater => {
+                        if combination == COMBINE_INCLUDED_MINUS {
+                            return Err(tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc));
+                        }
+                        if !minus {
+                            keep(rhs.add(j * size));
+                        }
+                        j += 1;
                     }
-                    j += 1;
                 }
             }
-        }
+        });
         // What is left of `rhs` is in no tuple of `lhs`.
         if combination == COMBINE_INCLUDED_MINUS && j < rhs_count {
             return Err(tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc));
@@ -2969,22 +2996,23 @@ pub unsafe extern "C" fn trendy_rt_combine(
 }
 
 /// Where `tuple` goes among the first `end` of the `tuples`, of a relation
-/// `desc` describes: the place of the first that isn't less, and whether it
-/// is equal. Looks back from the end, one tuple, then two, then four, and so
-/// on, then between the last two it looked at, so finding the place of a tuple
-/// that goes last takes one comparison, and of `n` tuples in order among `m`
-/// no more than a merge would.
+/// whose tuples compare as `by` says: the place of the first that isn't less,
+/// and whether it is equal. Looks back from the end, one tuple, then two, then
+/// four, and so on, then between the last two it looked at, so finding the
+/// place of a tuple that goes last takes one comparison, and of `n` tuples in
+/// order among `m` no more than a merge would.
 ///
 /// # Safety
 ///
-/// `tuples` must point to at least `end` valid tuples, in canonical order, and
-/// `tuple` to a valid one.
+/// `tuples` must point to at least `end` valid tuples of `size` bytes, in the order `by`
+/// says, and `tuple` to a valid one.
 #[cfg(not(test))]
 unsafe fn place_from_end(
     tuples: *const u8,
     end: usize,
     tuple: *const u8,
-    desc: &TypeDesc,
+    size: usize,
+    by: impl TupleOrder,
 ) -> (usize, bool) {
     use core::cmp::Ordering;
     // Those before `lower` are less, and those from `upper` greater.
@@ -2992,10 +3020,9 @@ unsafe fn place_from_end(
     let mut step = 1;
     // SAFETY: guaranteed by the caller; each place compared is below `end`.
     unsafe {
-        let size = desc.element().size;
         while upper > 0 {
             let at = upper.saturating_sub(step);
-            match compare_tuples(tuples.add(at * size), tuple, desc) {
+            match by.compare(tuples.add(at * size), tuple) {
                 Ordering::Less => {
                     lower = at + 1;
                     break;
@@ -3007,7 +3034,7 @@ unsafe fn place_from_end(
         }
         while lower < upper {
             let at = lower + (upper - lower) / 2;
-            match compare_tuples(tuples.add(at * size), tuple, desc) {
+            match by.compare(tuples.add(at * size), tuple) {
                 Ordering::Less => lower = at + 1,
                 Ordering::Equal => return (at, true),
                 Ordering::Greater => upper = at,
@@ -3112,16 +3139,18 @@ pub unsafe extern "C" fn trendy_rt_insert(
         let places = Temp::<usize>::new(added_count)?;
         let mut end = count;
         let mut new = 0;
-        for j in (0..added_count).rev() {
-            let tuple = added.add(j * size);
-            let (at, equal) = place_from_end(have, end, tuple, desc);
-            if equal && combination.read_unaligned() == COMBINE_DISJOINT_UNION {
-                return Err(tuple_failed(SHARED_TUPLE, tuple, element));
+        in_tuple_order!(desc, |by| {
+            for j in (0..added_count).rev() {
+                let tuple = added.add(j * size);
+                let (at, equal) = place_from_end(have, end, tuple, size, by);
+                if equal && combination.read_unaligned() == COMBINE_DISJOINT_UNION {
+                    return Err(tuple_failed(SHARED_TUPLE, tuple, element));
+                }
+                places.ptr().add(j).write(if equal { THERE } else { at });
+                new += usize::from(!equal);
+                end = at;
             }
-            places.ptr().add(j).write(if equal { THERE } else { at });
-            new += usize::from(!equal);
-            end = at;
-        }
+        });
         if new == 0 {
             return Ok(());
         }
@@ -3280,17 +3309,19 @@ pub unsafe extern "C" fn trendy_rt_remove(
         let places = Temp::<usize>::new(taken_count)?;
         let mut end = count;
         let mut gone = 0;
-        for j in (0..taken_count).rev() {
-            let tuple = taken.add(j * size);
-            let (at, equal) = place_from_end(have, end, tuple, desc);
-            if equal {
-                gone += 1;
-                places.ptr().add(taken_count - gone).write(at);
-            } else if combination.read_unaligned() == COMBINE_INCLUDED_MINUS {
-                return Err(tuple_failed(MISSING_TUPLE, tuple, element));
+        in_tuple_order!(desc, |by| {
+            for j in (0..taken_count).rev() {
+                let tuple = taken.add(j * size);
+                let (at, equal) = place_from_end(have, end, tuple, size, by);
+                if equal {
+                    gone += 1;
+                    places.ptr().add(taken_count - gone).write(at);
+                } else if combination.read_unaligned() == COMBINE_INCLUDED_MINUS {
+                    return Err(tuple_failed(MISSING_TUPLE, tuple, element));
+                }
+                end = at;
             }
-            end = at;
-        }
+        });
         let places = array(places.ptr().add(taken_count - gone), gone);
         removed_from(value, desc, gone, ranges_of(places))
     })
@@ -5627,9 +5658,9 @@ pub unsafe extern "C" fn trendy_rt_load(
         let order = order.values();
         // A relation's tuples are distinct, so no two are equal in
         // canonical order, and the sort has one result.
-        order.sort_unstable_by(|a, b| {
-            on_items(items, *a, *b).then_with(|| compare_tuples(*a, *b, source))
-        });
+        in_tuple_order!(source, |by| order.sort_unstable_by(move |a, b| {
+            on_items(items, *a, *b).then_with(|| by.compare(*a, *b))
+        }));
         let element = result.element();
         let Some(bytes) = len.checked_mul(element.size) else {
             return Err(out_of_memory());
@@ -5763,17 +5794,19 @@ unsafe fn canonical(
         }
         let mut order = pointers(tuples, count, size)?;
         let order = order.values();
-        order.sort_unstable_by(|a, b| compare_tuples(*a, *b, desc));
-        let out = allocate_buffer(count * size, desc)?;
-        let mut kept = 0;
-        for i in 0..count {
-            if i > 0 && compare_tuples(order[i - 1], order[i], desc).is_eq() {
-                continue;
+        in_tuple_order!(desc, |by| {
+            order.sort_unstable_by(move |a, b| by.compare(*a, *b));
+            let out = allocate_buffer(count * size, desc)?;
+            let mut kept = 0;
+            for i in 0..count {
+                if i > 0 && by.compare(order[i - 1], order[i]).is_eq() {
+                    continue;
+                }
+                copy_element(out, out.add(kept * size), order[i], desc.element());
+                kept += 1;
             }
-            copy_element(out, out.add(kept * size), order[i], desc.element());
-            kept += 1;
-        }
-        Ok((out, kept))
+            Ok((out, kept))
+        })
     }
 }
 
@@ -5972,10 +6005,10 @@ unsafe fn in_canonical_order(tuples: *const u8, count: usize, desc: &TypeDesc) -
                 compare_integers(earlier, later, desc.integers).is_lt()
             });
         }
-        (1..count).all(|i| {
+        in_tuple_order!(desc, |by| (1..count).all(move |i| {
             let (earlier, later) = pair(i);
-            compare_tuples(earlier, later, desc).is_lt()
-        })
+            by.compare(earlier, later).is_lt()
+        }))
     }
 }
 
@@ -6025,7 +6058,7 @@ unsafe fn order_otherwise(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> co
                 core::slice::from_raw_parts(a.0, a.1).cmp(core::slice::from_raw_parts(b.0, b.1))
             }
             KIND_U8 | KIND_U16 | KIND_U32 => narrow(lhs, desc.kind).cmp(&narrow(rhs, desc.kind)),
-            KIND_TUPLE | KIND_DEFINED => compare_tuples(lhs, rhs, desc),
+            KIND_TUPLE | KIND_DEFINED => compare_by_name(lhs, rhs, desc),
             // By the names they are written with, then their components, as
             // `hir::DefinedValue` orders them: of a type and the subtypes a
             // constraint defines, written the same, in their components' order.
@@ -6081,23 +6114,19 @@ unsafe fn compare_integers(lhs: *const u8, rhs: *const u8, count: usize) -> core
     core::cmp::Ordering::Equal
 }
 
-/// The order of two tuples with the attributes of `desc`: of a relation's, its sort
-/// order, and of a tuple's or a component's, the canonical order, by name.
+/// The canonical order of two tuples with the attributes of `desc`, by name, as
+/// its descriptor lists them: of a tuple's or a component's, and of a relation's
+/// without a sort order of its own (see [`ByName`]).
 ///
 /// # Safety
 ///
-/// As for [`order`], with `desc` describing a tuple or relation.
-#[inline]
-unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cmp::Ordering {
+/// As for [`order`], with `desc` describing a tuple, a type of the program's own,
+/// or a relation.
+unsafe fn compare_by_name(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cmp::Ordering {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        // Sorting, merging and searching compare little else, so this is inlined into
-        // their loops, without a call for each.
         if desc.integers > 0 {
             return compare_integers(lhs, rhs, desc.integers);
-        }
-        if !desc.sorted_by.is_null() {
-            return compare_in_sort_order(lhs, rhs, desc);
         }
         for attr in attributes(desc) {
             let ordering = order(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc);
@@ -6109,29 +6138,55 @@ unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> cor
     }
 }
 
-/// [`compare_tuples`] of a relation's tuples sorted otherwise than by name, by the
-/// attributes of its sort order, in turn. It is never inlined into
-/// [`compare_tuples`], which would then be too big to be inlined into the loops
-/// that compare tuples by name, which would each take a call for each comparison.
-///
-/// # Safety
-///
-/// As for [`compare_tuples`], with `desc` describing such a relation.
-#[inline(never)]
-unsafe fn compare_in_sort_order(
-    lhs: *const u8,
-    rhs: *const u8,
-    desc: &TypeDesc,
-) -> core::cmp::Ordering {
-    // SAFETY: guaranteed by the caller.
-    unsafe {
-        for attr in in_sort_order(desc) {
-            let ordering = order(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc);
-            if ordering.is_ne() {
-                return ordering;
+/// How the tuples of a relation compare, in its sort order (see
+/// [`TypeDesc::sorted_by`]), chosen once for a loop that compares many of them by
+/// [`in_tuple_order!`], which makes the loop for each.
+trait TupleOrder: Copy {
+    /// The order of the tuples at `lhs` and `rhs`.
+    ///
+    /// # Safety
+    ///
+    /// `lhs` and `rhs` must point to valid tuples of the relation.
+    unsafe fn compare(self, lhs: *const u8, rhs: *const u8) -> core::cmp::Ordering;
+}
+
+/// The [`TupleOrder`] of a relation sorted by name, by its attributes as its
+/// descriptor lists them.
+#[derive(Clone, Copy)]
+struct ByName<'a>(&'a TypeDesc);
+
+impl TupleOrder for ByName<'_> {
+    unsafe fn compare(self, lhs: *const u8, rhs: *const u8) -> core::cmp::Ordering {
+        // SAFETY: guaranteed by the caller.
+        unsafe { compare_by_name(lhs, rhs, self.0) }
+    }
+}
+
+/// The [`TupleOrder`] of a relation sorted otherwise: by the attributes at
+/// `positions` among those its descriptor, `desc`, lists, in turn.
+#[derive(Clone, Copy)]
+struct BySortOrder<'a> {
+    desc: &'a TypeDesc,
+    positions: &'a [usize],
+}
+
+impl TupleOrder for BySortOrder<'_> {
+    unsafe fn compare(self, lhs: *const u8, rhs: *const u8) -> core::cmp::Ordering {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            if self.desc.integers > 0 {
+                return compare_integers(lhs, rhs, self.desc.integers);
             }
+            let attributes = attributes(self.desc);
+            for &position in self.positions {
+                let attr = &attributes[position];
+                let ordering = order(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc);
+                if ordering.is_ne() {
+                    return ordering;
+                }
+            }
+            core::cmp::Ordering::Equal
         }
-        core::cmp::Ordering::Equal
     }
 }
 
@@ -12539,16 +12594,16 @@ mod tests {
         // SAFETY: each is a tuple of those attributes, as each describes.
         unsafe {
             assert_eq!(
-                compare_tuples(nile, volga, &by_name),
+                in_tuple_order!(&by_name, |by| by.compare(nile, volga)),
                 core::cmp::Ordering::Greater
             );
             assert_eq!(
-                compare_tuples(nile, volga, &by_river),
+                in_tuple_order!(&by_river, |by| by.compare(nile, volga)),
                 core::cmp::Ordering::Less
             );
             // A tuple's attributes, as inside another value, are always by name.
             assert_eq!(
-                compare_tuples(nile, volga, &tuple),
+                compare_by_name(nile, volga, &tuple),
                 core::cmp::Ordering::Greater
             );
             // `name`, at 8, then `km`, at 0.
