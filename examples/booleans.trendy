@@ -33,6 +33,24 @@ operator guards{r: relation { x: integer, y: integer }, zero: integer} [
     call debug_value{v: and{5 div zero > 1, zero <> 0}};
 ];
 
+/* A call of an operator that can't fail, as `length` and `within` can't,
+   is computed as a comparison is, with nothing for a failure. */
+operator within{n: integer, size: integer}: boolean [
+    n >= 1 and n <= size
+];
+
+/* How many jumps, each by the element at the place reached, leave the
+   array. */
+operator walk{jumps: array integer} [
+    var at := 1;
+    var steps := 0;
+    while within{n: at, size: length{a: jumps}} loop [
+        steps := steps + 1;
+        at := at + jumps[at];
+    ];
+    call debug_value{v: steps};
+];
+
 /* The boolean `t` writes, read when the program runs. */
 operator parse{t: text} [
     call debug_value{v: parse_boolean{from: t}};
@@ -62,4 +80,5 @@ operator main{} [
     call debug_value{v: parsed};
     call parse{t: "N"};
     call parse{t: "TRUE"};
+    call walk{jumps: array [2, 3, -1, 1]};
 ];

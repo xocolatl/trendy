@@ -134,6 +134,19 @@ impl Program {
         &self.operators[id.0]
     }
 
+    /// A call of the read-only operator `operator`, without type parameters,
+    /// with `args` for its parameters, which can fail as it can.
+    #[must_use]
+    pub fn call_of(&self, operator: OperatorId, args: BTreeMap<String, Expr>) -> Call {
+        Call {
+            operator,
+            types: Vec::new(),
+            args,
+            updated: BTreeMap::new(),
+            can_fail: self.operator(operator).can_fail,
+        }
+    }
+
     #[must_use]
     pub fn variable(&self, id: VariableId) -> &Variable {
         &self.variables[id.0]
@@ -312,6 +325,9 @@ pub struct Operator {
     /// checks them of its arguments before anything else, and fails, where
     /// it is, if one is false (R0024). None for most operators.
     pub constraints: Vec<Constraint>,
+    /// Whether a call of it can fail, whatever its arguments are, as each
+    /// call of it says (see [`Call::can_fail`]).
+    pub can_fail: bool,
 }
 
 /// A version of an operator: another operator, with the same parameters,
@@ -445,6 +461,7 @@ impl Operator {
             kind,
             versions: self.versions.clone(),
             constraints: Vec::new(),
+            can_fail: self.can_fail,
         }
     }
 }
@@ -1479,6 +1496,25 @@ impl UpdateBuiltin {
 }
 
 impl ReadOnlyBuiltin {
+    /// Whether a call of it can fail, whatever its arguments are: `count` and
+    /// `length` only read how many there are, and an approximate number nearest
+    /// an integer, a sine, a cosine and an angle are there for any argument.
+    /// The others can, for an argument they have no value of, as `min` of no
+    /// tuples, or for memory, as one that makes a text or an array does, as
+    /// `||` can (see [`Expr::can_fail`]).
+    #[must_use]
+    pub fn can_fail(self) -> bool {
+        !matches!(
+            self,
+            ReadOnlyBuiltin::Count
+                | ReadOnlyBuiltin::Length
+                | ReadOnlyBuiltin::ToApproximate
+                | ReadOnlyBuiltin::Sin
+                | ReadOnlyBuiltin::Cos
+                | ReadOnlyBuiltin::Atan2
+        )
+    }
+
     /// Its parameters, as [`Builtin::params`] says, its type parameters' types
     /// `parameter` gives.
     fn params(
@@ -1575,6 +1611,17 @@ impl Builtin {
         Builtin::Update(UpdateBuiltin::ReadBytes),
         Builtin::Update(UpdateBuiltin::ReadBytesWithErrors),
     ];
+
+    /// Whether a call of it can fail, whatever its arguments are (see
+    /// [`Call::can_fail`]): a read-only one as [`ReadOnlyBuiltin::can_fail`]
+    /// says, and an update operator can.
+    #[must_use]
+    pub fn can_fail(self) -> bool {
+        match self {
+            Builtin::ReadOnly(builtin) => builtin.can_fail(),
+            Builtin::Update(_) => true,
+        }
+    }
 
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -2030,6 +2077,15 @@ pub struct Call {
     /// The variables for its `var` and `out` parameters, by name, which the
     /// call updates: each a different one. A read-only operator has none.
     pub updated: BTreeMap<String, Target>,
+    /// Whether computing the operator's value can fail, whatever the
+    /// arguments are, as sema works it out from what the operator is: a
+    /// built-in as [`ReadOnlyBuiltin::can_fail`] says, and one of the
+    /// program's from its value (see [`Expr::can_fail`]), its versions', and
+    /// the constraints on its parameters, which a call checks. One that
+    /// calls itself, directly or through others, can, as its calls can go
+    /// deeper than there is memory for (R0025), and an update operator can,
+    /// as nothing works out what its statements can do.
+    pub can_fail: bool,
 }
 
 impl Call {
@@ -2045,6 +2101,7 @@ impl Call {
                 .map(|(name, arg)| (name.clone(), arg.instantiated(types)))
                 .collect(),
             updated: self.updated.clone(),
+            can_fail: self.can_fail,
         }
     }
 }
@@ -3118,10 +3175,10 @@ impl Expr {
 impl Expr {
     /// Whether computing the expression can fail when the program runs:
     /// an integer overflow, a division by zero, running out of memory, or
-    /// a failure in an operator it calls. This is part of the language: of
-    /// the operands of `and` and `or`, those that can fail are computed
-    /// only when those that can't don't decide the result (see
-    /// [`Connective::And`]).
+    /// a failure in an operator it calls, if that can fail (see
+    /// [`Call::can_fail`]). Of the operands of `and` and `or`, those that
+    /// can't fail are computed first, and nothing is needed to put aside a
+    /// failure of theirs (see [`Connective::And`]).
     #[must_use]
     pub fn can_fail(&self) -> bool {
         match self {
@@ -3134,8 +3191,7 @@ impl Expr {
             // Negating the smallest integer overflows, and building a relation,
             // removing, renaming or adding attributes, joining or ungrouping it,
             // allocates the result, as building or loading an array does; adding
-            // attributes computes them, which can fail too, as can a call,
-            // which computes its operator's value, and an index can be out of
+            // attributes computes them, which can fail too, and an index can be out of
             // range, and a value treated as one of a subtype of its type
             // needn't be one; a selection in a representation calls its
             // `to`, as its constraints are checked.
@@ -3143,7 +3199,6 @@ impl Expr {
             | Expr::Fail(..)
             | Expr::Run(..)
             | Expr::TreatAs(..)
-            | Expr::Call(..)
             | Expr::SelectIn(..)
             | Expr::Remove(..)
             | Expr::Rename(..)
@@ -3162,9 +3217,12 @@ impl Expr {
             | Expr::Unload(..)
             | Expr::Index(..)
             | Expr::WithElements(..) => true,
-            // A value breaks a constraint, or a constraint's operator
-            // fails.
-            Expr::Select(defined, operand) => !defined.constraints.is_empty() || operand.can_fail(),
+            // A value breaks a constraint or a key of a component, or a
+            // constraint's operator fails, or is of two subtypes a constraint
+            // defines, neither of the other.
+            Expr::Select(defined, operand) => {
+                defined.is_constrained() || defined.specialized || operand.can_fail()
+            }
             // A value is a value of its type's supertypes.
             Expr::Unary(_, operand)
             | Expr::At(_, operand)
@@ -3174,10 +3232,16 @@ impl Expr {
             Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
             Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
+            Expr::Call(call) => call.can_fail || call.args.values().any(Expr::can_fail),
             Expr::Binary(op, lhs, rhs) => {
                 // Arithmetic, shifts and concatenation can fail
-                // themselves; comparisons and the bits of integers can't.
-                let itself = !matches!(op, BinaryOp::Compare(..) | BinaryOp::Bitwise(_));
+                // themselves; the bits of integers can't, and comparisons
+                // can't unless ordering converts.
+                let itself = match op {
+                    BinaryOp::Compare(comparison, compared) => compared.can_fail(*comparison),
+                    BinaryOp::Bitwise(_) => false,
+                    _ => true,
+                };
                 itself || lhs.can_fail() || rhs.can_fail()
             }
             Expr::Let(_, value, body) => value.can_fail() || body.can_fail(),
@@ -4121,15 +4185,21 @@ pub enum Compared {
     /// Tuples of one tuple type, equal when every attribute is.
     Tuple,
     /// Values of one of the program's own types, equal when their
-    /// components are, and ordered by the type's order, if it has one.
-    Defined,
+    /// components are, and ordered by the type's order, if it has one,
+    /// which `converts` them if it is in another representation than the
+    /// stored one, or through one (see [`Type::orders_by_converting`]).
+    Defined {
+        converts: bool,
+    },
     /// Relations of one relation type, equal when they have the same tuples,
     /// and one less than or equal to another when it is a subset of it.
     Relation,
     /// Arrays of one array type, equal when they have the same elements in
     /// the same order, and, if they are ordered ([`Type::has`]), ordered element
-    /// by element.
-    Array,
+    /// by element, which `converts` them if ordering the elements does.
+    Array {
+        converts: bool,
+    },
     /// Values of the type parameter with this index, compared as values of
     /// the type a call gives it: only `=` and `<>`, but for `any relation`,
     /// which is a relation, and a kind that requires an order.
@@ -4140,14 +4210,29 @@ impl Compared {
     /// What values of type `ty` are, for comparing them.
     #[must_use]
     pub fn of(ty: &Type) -> Compared {
+        let converts = ty.orders_by_converting();
         match ty {
             Type::Scalar(scalar) => Compared::Scalar(*scalar),
-            Type::Defined(_) | Type::Dummy(_) => Compared::Defined,
+            Type::Defined(_) | Type::Dummy(_) => Compared::Defined { converts },
             Type::Tuple(_) => Compared::Tuple,
             Type::Relation(_) => Compared::Relation,
-            Type::Array(_) => Compared::Array,
+            Type::Array(_) => Compared::Array { converts },
             Type::Parameter(p) => Compared::Parameter(p.index),
         }
+    }
+
+    /// Whether comparing values by `comparison` can fail: ordering them, as
+    /// `<` does, if that converts them, which calls a conversion, as ordering
+    /// values of a type parameter's type may, for the type it is given.
+    #[must_use]
+    pub fn can_fail(self, comparison: Comparison) -> bool {
+        let orders = !matches!(comparison, Comparison::Equal | Comparison::NotEqual);
+        orders
+            && match self {
+                Compared::Defined { converts } | Compared::Array { converts } => converts,
+                Compared::Parameter(_) => true,
+                Compared::Scalar(_) | Compared::Tuple | Compared::Relation => false,
+            }
     }
 
     /// What it compares, in an operator instantiated with `types`.
@@ -4332,10 +4417,10 @@ impl BinaryOp {
             BinaryOp::ConcatenateArrays
             | BinaryOp::Compare(
                 _,
-                Compared::Defined
+                Compared::Defined { .. }
                 | Compared::Tuple
                 | Compared::Relation
-                | Compared::Array
+                | Compared::Array { .. }
                 | Compared::Parameter(_),
             ) => None,
         }
@@ -4392,7 +4477,7 @@ impl BinaryOp {
                 return Ok(Value::Boolean(contains(comparison, lhs, rhs)));
             }
             // By the type's order, or element by element.
-            BinaryOp::Compare(comparison, Compared::Defined | Compared::Array) => {
+            BinaryOp::Compare(comparison, Compared::Defined { .. } | Compared::Array { .. }) => {
                 return Ok(Value::Boolean(comparison.holds(ordered())));
             }
             // Values of a type parameter's type, as the values are: of
@@ -6175,6 +6260,27 @@ impl Type {
             Type::Array(_) => requirement == Requirement::Order && self.orders_as_stored(),
             Type::Defined(defined) => requirement == Requirement::Order && defined.order.is_some(),
             _ => false,
+        }
+    }
+
+    /// Whether ordering its values, as `<` does, converts them, calling a
+    /// conversion: of a type ordered in another representation than the
+    /// stored one, or by a component of such a type, or an array of such
+    /// values, or of a type parameter's, which may be given one.
+    #[must_use]
+    pub fn orders_by_converting(&self) -> bool {
+        match self {
+            Type::Array(element) => element.orders_by_converting(),
+            Type::Defined(defined) => defined.ordered_by().is_some_and(|(order, components)| {
+                order.from.is_some()
+                    || order.items.iter().any(|item| {
+                        components
+                            .get(&item.attribute)
+                            .is_some_and(Type::orders_by_converting)
+                    })
+            }),
+            Type::Parameter(_) => true,
+            Type::Scalar(_) | Type::Tuple(_) | Type::Relation(_) | Type::Dummy(_) => false,
         }
     }
 

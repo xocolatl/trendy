@@ -64,7 +64,7 @@ impl Context<'_> {
     /// of its versions, or its own value, if it has a body.
     pub(crate) fn checked(&self, id: hir::OperatorId) -> bool {
         let signature = self.operators.get(id);
-        let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
+        let bodiless = signature.bodiless();
         let own = if bodiless {
             signature.valid
         } else {
@@ -1275,10 +1275,10 @@ impl Statements<'_, '_> {
         if !signature.valid {
             return None;
         }
-        let call =
+        let arguments =
             Checker::new(&mut self.names()).arguments(Written::Arguments(&args), signature, errors);
         self.outs_passed(&args, signature);
-        let call = call?;
+        let call = cx.bindings().call_of(signature.id, arguments?);
         if matches!(signature.builtin, Some(hir::Builtin::Update(b)) if b.reads_csv())
             && !self.csv_loadable(&call, signature, &args, errors)
         {

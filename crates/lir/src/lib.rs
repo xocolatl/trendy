@@ -154,6 +154,50 @@ pub struct Function {
 pub struct SlotId(pub usize);
 
 impl Function {
+    /// Whether it can return failing: whether a [`Terminator::Failed`] can be
+    /// reached from its entry, through jumps, branches, and the failure
+    /// targets of blocks that can fail, or a [`Terminator::TailCall`], whose
+    /// callee, in the same cycle of calls, can be.
+    #[must_use]
+    pub fn can_fail(&self) -> bool {
+        let mut seen = vec![false; self.blocks.len()];
+        let mut waiting = vec![BlockId(0)];
+        while let Some(at) = waiting.pop() {
+            if std::mem::replace(&mut seen[at.0], true) {
+                continue;
+            }
+            let block = &self.blocks[at.0];
+            if matches!(
+                block.terminator,
+                Terminator::Failed | Terminator::TailCall { .. }
+            ) {
+                return true;
+            }
+            waiting.extend(block.terminator.successors());
+            if block.can_fail() {
+                waiting.extend(block.failure);
+            }
+        }
+        false
+    }
+
+    /// The function without the sites it sets ([`Inst::Site`],
+    /// [`Inst::SaveSite`] and [`Inst::RestoreSite`]), which only a failure
+    /// reads, so that, of one that can't fail, a call leaves the program at
+    /// its caller's site.
+    #[must_use]
+    pub fn without_sites(mut self) -> Function {
+        for block in &mut self.blocks {
+            block.insts.retain(|inst| {
+                !matches!(
+                    inst,
+                    Inst::Site(_) | Inst::SaveSite { .. } | Inst::RestoreSite { .. }
+                )
+            });
+        }
+        self
+    }
+
     /// The data its instructions and terminators read or write: of the
     /// program's variables, those it uses.
     #[must_use]
@@ -1423,11 +1467,13 @@ pub enum Inst {
     /// Call a function, passing the address of its parameter struct, and
     /// of where its result goes. If the callee fails, so does this, as if
     /// the call were followed by a branch to the block's failure target,
-    /// which codegen emits.
+    /// which codegen emits only if it `can_fail`: otherwise the callee never
+    /// does, and nothing follows the call for a failure.
     Call {
         function: FunctionId,
         args: Option<Place>,
         result: Option<Place>,
+        can_fail: bool,
     },
     /// The program is at the site the data object describes, laid out as
     /// `trendy_runtime::Site`, until the next: a failure from here on
@@ -2215,13 +2261,14 @@ impl Block {
 }
 
 impl Inst {
-    /// Whether the instruction can fail: a call, whose callee can, a
+    /// Whether the instruction can fail: a call whose callee can, a
     /// runtime function's that can ([`RuntimeFn::fails`]), or an
     /// arithmetic instruction, whose result may not exist.
     #[must_use]
     pub fn can_fail(&self) -> bool {
         match self {
-            Inst::Call { .. } | Inst::CheckStack => true,
+            Inst::Call { can_fail, .. } => *can_fail,
+            Inst::CheckStack => true,
             Inst::CallRuntime { function, .. } => function.fails(),
             Inst::Unary { op, .. } => op.can_fail(),
             Inst::Binary { op, .. } => op.can_fail(),
@@ -2811,6 +2858,7 @@ mod tests {
             function: FunctionId(0),
             args: Some(slot(0)),
             result: None,
+            can_fail: true,
         };
         assert_eq!(loose_in(vec![made(), call], LOOSE_RESULT), found);
         let tail = Terminator::TailCall {

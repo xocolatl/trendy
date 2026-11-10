@@ -553,11 +553,22 @@ impl Checked {
             .message()
             .expect("a prelude without errors declares `message`")
             .id;
+        let bindings = ops::Bindings {
+            operators: &self.operators,
+            namespaces: &self.namespaces,
+            values: &self.evaluated.values,
+            recursive: &self.evaluated.recursive,
+        };
+        let can_fail: Vec<bool> = self
+            .operators
+            .iter()
+            .map(|signature| bindings.can_fail(signature.id))
+            .collect();
         let operators = self
             .operators
             .iter()
             .map(|signature| {
-                let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
+                let bodiless = signature.bodiless();
                 let kind = match (signature.builtin, &signature.result) {
                     (Some(builtin), _) => hir::OperatorKind::Builtin(builtin),
                     // Its versions compute it.
@@ -588,6 +599,7 @@ impl Checked {
                     kind,
                     versions: signature.versions.clone(),
                     constraints: signature.constraints.clone(),
+                    can_fail: can_fail[signature.id.0],
                 }
             })
             .collect();
@@ -2597,6 +2609,64 @@ mod tests {
         );
         let program = analyze_str(&twice).unwrap();
         assert_eq!(program.variables[2].init, hir::Value::Integer(132));
+    }
+
+    /// Whether a call of each operator can fail, whatever its arguments are,
+    /// is worked out from what it does: a built-in by its own rule, and one of
+    /// the program's from its value, its versions', the constraints on its
+    /// parameters, and whether it calls itself.
+    #[test]
+    fn calls_can_fail_as_their_operators_can() {
+        let program = analyze_str(
+            "type pair { { a: integer, b: integer } };
+type even_pair is pair { constraint a mod 2 = 0 };
+operator first{p: pair}: integer [ p.a ];
+operator half{n: integer}: integer [ n div 2 ];
+operator within{n: integer, size: integer}: boolean [ n >= 1 and n <= size ];
+operator shown{n: integer}: text [ to_text{from: n} ];
+operator positive{n: integer, constraint n > 0}: integer [ n ];
+operator flips{b: boolean}: boolean [ if b then not flips{b: b} else false ];
+operator side{p: pair}: integer [ 0 ];
+operator side{p: even_pair}: integer [ p.b ];
+operator other_side{p: pair}: integer [ 0 ];
+operator other_side{p: even_pair}: integer [ p.b div 2 ];
+operator main{} [];",
+        )
+        .unwrap();
+        // The operator itself, not an interface's declaration of it, which
+        // nothing calls.
+        let can_fail = |name: &str| {
+            let declared = |o: &hir::Operator| {
+                matches!(o.kind, hir::OperatorKind::Specification { .. }) && o.versions.is_empty()
+            };
+            program
+                .operators
+                .iter()
+                .find(|o| o.name == name && !declared(o))
+                .unwrap_or_else(|| panic!("no `{name}`"))
+                .can_fail
+        };
+        for name in [
+            "count",
+            "length",
+            "is_empty",
+            "to_approximate",
+            "sin",
+            "atan2",
+        ] {
+            assert!(!can_fail(name), "`{name}` can't fail");
+        }
+        for name in ["min", "sum", "to_text", "sqrt", "parse_integer", "some"] {
+            assert!(can_fail(name), "`{name}` can fail");
+        }
+        for name in ["first", "within", "side"] {
+            assert!(!can_fail(name), "`{name}` can't fail");
+        }
+        // Its value divides, makes a text, checks its parameter, calls itself,
+        // or has a version that divides.
+        for name in ["half", "shown", "positive", "flips", "other_side"] {
+            assert!(can_fail(name), "`{name}` can fail");
+        }
     }
 
     #[test]

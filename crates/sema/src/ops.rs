@@ -239,7 +239,7 @@ impl Operator {
             {
                 Some(Resolved::Binary(B::Compare(
                     comparison,
-                    hir::Compared::Array,
+                    hir::Compared::of(ty),
                 )))
             }
             (
@@ -257,7 +257,7 @@ impl Operator {
             {
                 Some(Resolved::Binary(B::Compare(
                     comparison,
-                    hir::Compared::Defined,
+                    hir::Compared::of(ty),
                 )))
             }
             (Operator::Compare(comparison), hir::Type::Parameter(p))
@@ -1757,12 +1757,7 @@ fn converted<'v>(
                     .attributes()
                     .map(|(c, v)| (c.to_string(), hir::Expr::Constant(v.clone())))
                     .collect();
-                let conversion = hir::Call {
-                    operator: from,
-                    types: Vec::new(),
-                    args,
-                    updated: BTreeMap::new(),
-                };
+                let conversion = bindings.call_of(from, Arguments::values(args));
                 let hir::Expr::Constant(hir::Value::Tuple(components)) =
                     call(conversion, bindings)?
                 else {
@@ -2333,6 +2328,66 @@ pub(crate) struct Bindings<'a> {
     pub(crate) recursive: &'a HashSet<hir::OperatorId>,
 }
 
+impl Bindings<'_> {
+    /// A call of `operator` with `arguments`, which can fail as
+    /// [`Bindings::can_fail`] says.
+    pub(crate) fn call_of(self, operator: hir::OperatorId, arguments: Arguments) -> hir::Call {
+        hir::Call {
+            operator,
+            types: arguments.types,
+            args: arguments.args,
+            updated: arguments.updated,
+            can_fail: self.can_fail(operator),
+        }
+    }
+
+    /// Whether a call of `operator` can fail, whatever its arguments are, as
+    /// [`hir::Call::can_fail`] says: a read-only operator of the program's
+    /// can if it has constraints on its parameters, a version that can, or a
+    /// value of its own that can, which is known once it is checked, as a
+    /// call's callee is before the call. Only a call that closes a cycle of
+    /// calls is made while its callee's value is being checked, so that it has
+    /// none yet: it can fail, as such calls can go on until there is no more
+    /// memory (R0025), and so can each operator in the cycle, whose value
+    /// reaches it.
+    pub(crate) fn can_fail(self, operator: hir::OperatorId) -> bool {
+        let signature = self.operators.get(operator);
+        if !signature.read_only {
+            return true;
+        }
+        if let Some(builtin) = signature.builtin {
+            return builtin.can_fail();
+        }
+        !signature.constraints.is_empty()
+            || signature
+                .versions
+                .iter()
+                .any(|version| self.can_fail(version.operator))
+            || (!signature.bodiless() && self.values.get(&operator).is_none_or(hir::Expr::can_fail))
+    }
+}
+
+/// What a call gives its operator besides which it is: the type of each of
+/// its type parameters, by index, and its arguments, for its `const`
+/// parameters and for its others (see [`hir::Call`]).
+pub(crate) struct Arguments {
+    pub(crate) types: Vec<hir::Type>,
+    pub(crate) args: BTreeMap<String, hir::Expr>,
+    pub(crate) updated: BTreeMap<String, hir::Target>,
+}
+
+impl Arguments {
+    /// `args`, for `const` parameters alone, of an operator without type
+    /// parameters.
+    pub(crate) fn values(args: BTreeMap<String, hir::Expr>) -> Arguments {
+        Arguments {
+            types: Vec::new(),
+            args,
+            updated: BTreeMap::new(),
+        }
+    }
+}
+
 /// What [`substitute`] replaces in an expression, which it then folds
 /// again.
 struct Substitution<'a> {
@@ -2454,14 +2509,12 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
             .iter()
             .map(|(name, value)| (name.clone(), typed(value.clone(), &typed_params[name].ty)))
             .collect();
-        let computed = self::call(
-            hir::Call {
-                operator: version.operator,
-                args,
-                ..call.clone()
-            },
-            bindings,
-        )?;
+        let arguments = Arguments {
+            types: call.types.clone(),
+            args,
+            updated: BTreeMap::new(),
+        };
+        let computed = self::call(bindings.call_of(version.operator, arguments), bindings)?;
         // Of the specification's type, which its versions' are subtypes
         // of; one known only when running is chosen then.
         return Ok(match (result, known_value(&computed)) {
@@ -2548,12 +2601,8 @@ fn own_failure(error: hir::Value, bindings: Bindings) -> Failed {
         // The prelude doesn't declare it, which is reported.
         return Failed::Own(error.to_string(), code);
     };
-    let call = hir::Call {
-        operator: message.id,
-        types: Vec::new(),
-        args: BTreeMap::from([("error".to_string(), hir::Expr::Constant(error))]),
-        updated: BTreeMap::new(),
-    };
+    let args = BTreeMap::from([("error".to_string(), hir::Expr::Constant(error))]);
+    let call = bindings.call_of(message.id, Arguments::values(args));
     match self::call(call, bindings) {
         Ok(hir::Expr::Constant(hir::Value::Text(text))) => Failed::Own(text, code),
         Ok(other) => unreachable!("an error's message is known with the error: {other:?}"),
@@ -2971,12 +3020,7 @@ pub(crate) fn select(
     let mut first = None;
     for constraint in &defined.constraints {
         let checked = call(
-            hir::Call {
-                operator: constraint.operator,
-                types: Vec::new(),
-                args: args.clone(),
-                updated: BTreeMap::new(),
-            },
+            bindings.call_of(constraint.operator, Arguments::values(args.clone())),
             bindings,
         )?;
         if checked != hir::Expr::Constant(hir::Value::Boolean(true)) {
@@ -3088,12 +3132,7 @@ pub(crate) fn select_in(
             (name.to_string(), typed(value.clone(), ty))
         })
         .collect();
-    let called = |operator| hir::Call {
-        operator,
-        types: Vec::new(),
-        args: args.clone(),
-        updated: BTreeMap::new(),
-    };
+    let called = |operator| bindings.call_of(operator, Arguments::values(args.clone()));
     for constraint in &representation.constraints {
         match call(called(constraint.operator), bindings)? {
             hir::Expr::Constant(hir::Value::Boolean(true)) => {}
@@ -3143,12 +3182,7 @@ fn keys_hold(
         let relation = match defined.representation(component) {
             Some((_, Some(other))) => {
                 let converted = call(
-                    hir::Call {
-                        operator: other.from,
-                        types: Vec::new(),
-                        args: args.clone(),
-                        updated: BTreeMap::new(),
-                    },
+                    bindings.call_of(other.from, Arguments::values(args.clone())),
                     bindings,
                 )?;
                 match known_value(&converted) {
@@ -3250,12 +3284,7 @@ fn most_specific(
         let mut holds = true;
         for constraint in subtype.own_constraints() {
             let checked = call(
-                hir::Call {
-                    operator: constraint.operator,
-                    types: Vec::new(),
-                    args: args.clone(),
-                    updated: BTreeMap::new(),
-                },
+                bindings.call_of(constraint.operator, Arguments::values(args.clone())),
                 bindings,
             )?;
             match checked {
@@ -3346,15 +3375,12 @@ pub(crate) fn constraints_hold(
         let Some(args) = args.filter(|_| bindings.values.contains_key(&constraint.operator)) else {
             continue;
         };
-        let checked = self::call(
-            hir::Call {
-                operator: constraint.operator,
-                types: call.types.clone(),
-                args,
-                updated: BTreeMap::new(),
-            },
-            bindings,
-        );
+        let arguments = Arguments {
+            types: call.types.clone(),
+            args,
+            updated: BTreeMap::new(),
+        };
+        let checked = self::call(bindings.call_of(constraint.operator, arguments), bindings);
         let Ok(hir::Expr::Constant(hir::Value::Boolean(false))) = checked else {
             continue;
         };

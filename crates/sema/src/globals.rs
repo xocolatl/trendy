@@ -461,7 +461,7 @@ impl<'a> Globals<'a> {
             for version in &signature.versions {
                 valid &= self.checked(version.operator, at, errors);
             }
-            let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
+            let bodiless = signature.bodiless();
             let valid = valid && (bodiless || self.checked_own(id, at, errors));
             if signature
                 .versions
@@ -1450,12 +1450,10 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
                 .attributes()
                 .map(|(k, _)| (k.to_string(), hir::Expr::Parameter(k.to_string())))
                 .collect();
-            let call = hir::Expr::Call(hir::Call {
-                operator: conversion,
-                types: Vec::new(),
-                args,
-                updated: BTreeMap::new(),
-            });
+            let call = hir::Expr::Call(
+                self.bindings()
+                    .call_of(conversion, ops::Arguments::values(args)),
+            );
             return Lookup::Found(hir::Expr::Extract(Box::new(call), name.to_string()));
         }
         if let Some(id) = self.globals.declared.find(name, span) {

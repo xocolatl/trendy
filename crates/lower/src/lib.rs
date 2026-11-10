@@ -95,6 +95,7 @@ fn entry(
             function: main,
             args: args.clone(),
             result: None,
+            can_fail: true,
         });
         // What it wrote to standard output and is still held, whose failure is
         // as any of main's, in a scope for its reason.
@@ -594,6 +595,14 @@ fn function(
             unreachable!("a specification's versions are called instead")
         }
     };
+    // One that can't fail has no use for its sites, so a call of it needs
+    // nothing for a failure, nor to go back to its own site.
+    let lowered = if lowered.can_fail() {
+        lowered
+    } else {
+        cx.unfailing.insert(function_id.0);
+        lowered.without_sites()
+    };
     cx.functions.insert(function_id.0, lowered);
     cx.functions_of.insert(key, (function_id, makes));
     (function_id, makes)
@@ -787,6 +796,9 @@ struct Lowering {
     /// The function of each operator and list of types lowered code calls
     /// it with, and whether a call of it makes a text, relation or array.
     functions_of: HashMap<(hir::OperatorId, Vec<hir::Type>), (lir::FunctionId, bool)>,
+    /// The functions lowered, by id, that can't fail, and so set no site: a
+    /// call of one needs nothing for a failure (see [`lir::Function::can_fail`]).
+    unfailing: BTreeSet<usize>,
     /// The function of each constraint's part that lowered code checks,
     /// and whether a call of it makes a text, relation or array.
     constraint_functions: HashMap<Checked, (lir::FunctionId, bool)>,
@@ -834,6 +846,7 @@ impl Lowering {
             empty: None,
             functions: BTreeMap::new(),
             functions_of: HashMap::new(),
+            unfailing: BTreeSet::new(),
             constraint_functions: HashMap::new(),
             files: files.to_vec(),
             sites: HashMap::new(),
@@ -3403,6 +3416,7 @@ impl<'a> FunctionBuilder<'a> {
             function,
             args: None,
             result: Some(result),
+            can_fail: true,
         });
         self.after_call(cx);
     }
@@ -3870,12 +3884,7 @@ impl<'a> FunctionBuilder<'a> {
             layout: cx.layout(&ty),
         });
         let message = self.slot(cx.layout(&hir::Type::Scalar(hir::Scalar::Text)));
-        let call = hir::Call {
-            operator: self.program.message,
-            types: Vec::new(),
-            args: BTreeMap::new(),
-            updated: BTreeMap::new(),
-        };
+        let call = self.program.call_of(self.program.message, BTreeMap::new());
         self.invoke(&call, Some(args), Some(&message), cx);
         message
     }
@@ -4794,12 +4803,7 @@ impl<'a> FunctionBuilder<'a> {
                 (name.to_string(), arg)
             })
             .collect();
-        let call = hir::Expr::Call(hir::Call {
-            operator: constraint.operator,
-            types: Vec::new(),
-            args,
-            updated: BTreeMap::new(),
-        });
+        let call = hir::Expr::Call(self.program.call_of(constraint.operator, args));
         self.tuples.push(AtHand::one(value.clone()));
         let holds = self.place(&call, cx);
         self.tuples.pop();
@@ -4824,12 +4828,7 @@ impl<'a> FunctionBuilder<'a> {
                 (c.to_string(), arg)
             })
             .collect();
-        let conversion = hir::Expr::Call(hir::Call {
-            operator,
-            types: Vec::new(),
-            args,
-            updated: BTreeMap::new(),
-        });
+        let conversion = hir::Expr::Call(self.program.call_of(operator, args));
         self.tuples.push(AtHand::one(value));
         let converted = self.place(&conversion, cx);
         self.tuples.pop();
@@ -5137,13 +5136,18 @@ impl<'a> FunctionBuilder<'a> {
                 });
             }
         }
+        // One being lowered, in a cycle of calls, may fail.
+        let can_fail = !cx.unfailing.contains(&function.0);
         self.insts.push(lir::Inst::Call {
             function,
             args,
             result,
+            can_fail,
         });
         // The callee leaves the program at its own site.
-        self.after_call(cx);
+        if can_fail {
+            self.after_call(cx);
+        }
     }
 
     /// The value of `call`, of the read-only built-in `builtin`, computed
@@ -5906,6 +5910,7 @@ impl<'a> FunctionBuilder<'a> {
             function: constant.function,
             args: None,
             result: None,
+            can_fail: true,
         });
         self.after_call(cx);
         self.end_block(lir::Terminator::Jump(computed), computed);
@@ -9867,7 +9872,13 @@ impl<'a> FunctionBuilder<'a> {
             relation,
             heading,
             leaves,
-        } = sorted(relation, &written, &loading.order, &cx.families);
+        } = sorted(
+            self.program,
+            relation,
+            &written,
+            &loading.order,
+            &cx.families,
+        );
         let relation_ty = hir::Type::Relation(heading.clone());
         let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         // Where an attribute is in the tuple, by name order.
@@ -10910,7 +10921,7 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Comparison::LessOrEqual
                 | hir::Comparison::Greater
                 | hir::Comparison::GreaterOrEqual),
-                hir::Compared::Defined | hir::Compared::Array,
+                hir::Compared::Defined { .. } | hir::Compared::Array { .. },
             ) => {
                 let ordering = self.ordering(operand_ty, lhs, rhs, cx);
                 let zero = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
@@ -10922,10 +10933,10 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::BinaryOp::Compare(
                 comparison,
-                hir::Compared::Defined
+                hir::Compared::Defined { .. }
                 | hir::Compared::Tuple
                 | hir::Compared::Relation
-                | hir::Compared::Array,
+                | hir::Compared::Array { .. },
             ) => return self.equality(comparison, operand_ty, lhs, rhs, cx),
             hir::BinaryOp::ConcatenateArrays => {
                 let dst = self.slot(cx.layout(operand_ty));
@@ -11171,10 +11182,10 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
                 hir::Compared::Scalar(
                     hir::Scalar::Text | hir::Scalar::Character | hir::Scalar::Narrow(_),
                 )
-                | hir::Compared::Defined
+                | hir::Compared::Defined { .. }
                 | hir::Compared::Tuple
                 | hir::Compared::Relation
-                | hir::Compared::Array => {
+                | hir::Compared::Array { .. } => {
                     unreachable!("compared by a runtime call, or never: no expression is narrow")
                 }
                 hir::Compared::Parameter(_) => {
@@ -11714,8 +11725,10 @@ fn bounded_by(condition: &hir::Expr, bounds: &mut IntegerBounds) {
 /// stored one, the runtime can't call the conversion to it, so the
 /// components it computes are an attribute of each tuple, which no source
 /// can name, computed by an `Extend` of the relation, one more for each
-/// conversion of another's components, and the runtime orders by those.
+/// conversion of another's components, and the runtime orders by those,
+/// each a call of an operator of `program`.
 fn sorted(
+    program: &hir::Program,
     relation: &hir::Expr,
     heading: &hir::Heading,
     order: &[hir::OrderItem],
@@ -11745,7 +11758,7 @@ fn sorted(
             .collect();
         let values = computed
             .iter()
-            .map(|c| (c.name.clone(), c.computed(&heading)))
+            .map(|c| (c.name.clone(), c.computed(&heading, program)))
             .collect();
         let added = hir::Heading::new(types);
         heading = hir::Heading::new(
@@ -11900,8 +11913,8 @@ struct Conversion {
 
 impl Conversion {
     /// The tuple of the components, computed from the tuple at hand, of
-    /// `heading`.
-    fn computed(&self, heading: &hir::Heading) -> hir::Expr {
+    /// `heading`, by the conversion, an operator of `program`.
+    fn computed(&self, heading: &hir::Heading, program: &hir::Program) -> hir::Expr {
         let at_hand = hir::Expr::Current(0, heading.clone());
         let mut value = hir::Expr::Extract(Box::new(at_hand), self.of.attribute.clone());
         let mut ty = heading
@@ -11927,12 +11940,7 @@ impl Conversion {
                 (k.to_string(), arg)
             })
             .collect();
-        hir::Expr::Call(hir::Call {
-            operator: self.from,
-            types: Vec::new(),
-            args,
-            updated: BTreeMap::new(),
-        })
+        hir::Expr::Call(program.call_of(self.from, args))
     }
 }
 
@@ -12487,6 +12495,7 @@ mod tests {
         hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             name: name.to_string(),
             types: Vec::new(),
             params: params
@@ -12572,6 +12581,7 @@ mod tests {
         hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             name: "debug_value".to_string(),
             types: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).types(),
             params: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params(&library()),
@@ -12646,6 +12656,7 @@ mod tests {
         operators.push(hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: false,
             name: "message".to_string(),
             types: Vec::new(),
             params: [(
@@ -12700,14 +12711,21 @@ mod tests {
             types: Vec::new(),
             args: args.into_iter().map(|(n, e)| (n.to_string(), e)).collect(),
             updated: BTreeMap::new(),
+            can_fail: true,
         })
     }
 
     #[test]
     fn statements_and_values_set_their_sites() {
-        // `main` calls `f`, then loops while `x < 1`, writing `x`; each
-        // statement on a line of its own.
+        // `main` calls `f`, which writes `x + 1`, which can overflow, then
+        // loops while `x < 1`, writing `x`; each statement on a line of its
+        // own.
         let x = || hir::Expr::Variable(hir::VariableId(0));
+        let next = hir::Expr::Binary(
+            hir::BinaryOp::Add(hir::Numeric::Integer),
+            Box::new(x()),
+            Box::new(hir::Expr::Constant(hir::Value::Integer(1))),
+        );
         let less = hir::Expr::Binary(
             hir::BinaryOp::Compare(
                 hir::Comparison::Less,
@@ -12723,7 +12741,7 @@ mod tests {
         let lowered = lower(&program(
             vec![
                 debug_value(),
-                user("f", &[], vec![call(0, vec![("v", x())])]),
+                user("f", &[], vec![call(0, vec![("v", next)])]),
                 user(
                     "main",
                     &[],
@@ -13276,6 +13294,7 @@ mod tests {
             types: Vec::new(),
             args: BTreeMap::new(),
             updated: [("n".to_string(), hir::Target::Variable(hir::VariableId(0)))].into(),
+            can_fail: true,
         });
         let lowered = lower_program(&program(
             vec![user("main", &[], vec![call]), set],
@@ -13286,7 +13305,8 @@ mod tests {
             place.path.push(i);
             place
         };
-        // The caller passes the variable's address.
+        // The caller passes the variable's address. Nothing in `set` can
+        // fail, so nothing follows the call for a failure.
         assert_eq!(
             lowered.functions[0].blocks[0].insts,
             [
@@ -13301,6 +13321,7 @@ mod tests {
                     function: lir::FunctionId(1),
                     args: Some(slot(0)),
                     result: None,
+                    can_fail: false,
                 },
             ]
         );
@@ -13874,14 +13895,15 @@ mod tests {
             ]))
         );
         let main = &lowered.functions[0];
-        // Then where the site `main` is entered at is saved, which its
-        // failure exit records.
+        // Nothing in `f` can fail, so `main` has no site to go back to after
+        // the call, nor a failure exit, and needs no slot for the site it is
+        // entered at.
         assert_eq!(
             main.slots,
-            [
-                lir::Layout::Struct(vec![lir::Layout::I64, lir::Layout::I64]),
-                lir::Layout::Address
-            ]
+            [lir::Layout::Struct(vec![
+                lir::Layout::I64,
+                lir::Layout::I64
+            ])]
         );
         let slot = |i| lir::Place {
             base: lir::Base::Slot(lir::SlotId(0)),
@@ -13915,6 +13937,7 @@ mod tests {
                     function: lir::FunctionId(1),
                     args: Some(lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))),
                     result: None,
+                    can_fail: false,
                 },
             ]
         );
@@ -13927,6 +13950,7 @@ mod tests {
         let f = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             types: Vec::new(),
             name: "f".to_string(),
             params: [(
@@ -13991,6 +14015,7 @@ mod tests {
                 types: Vec::new(),
                 args: [("n".to_string(), x())].into(),
                 updated: BTreeMap::new(),
+                can_fail: true,
             })
         };
         let compared = |comparison, lhs: hir::Expr, n: i64| {
@@ -14015,6 +14040,7 @@ mod tests {
             let half_of = hir::Operator {
                 versions: Vec::new(),
                 constraints: Vec::new(),
+                can_fail: true,
                 name: "half".to_string(),
                 types: Vec::new(),
                 params: [("n".to_string(), hir::Parameter::constant(integer()))].into(),
@@ -14080,9 +14106,10 @@ mod tests {
         // `shout{t: text}: text [ t || "!" ]`, called when running
         // as `debug_value{v: shout{t: t}}`, and `unused`, which isn't.
         let text = || hir::Type::Scalar(hir::Scalar::Text);
-        let read_only = |name: &str, value| hir::Operator {
+        let read_only = |name: &str, value: hir::Expr| hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: value.can_fail(),
             name: name.to_string(),
             types: Vec::new(),
             params: [("t".to_string(), hir::Parameter::constant(text()))].into(),
@@ -14103,6 +14130,7 @@ mod tests {
             types: Vec::new(),
             args: [("t".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
+            can_fail: true,
         });
         let lowered = lower_program(&program(
             vec![
@@ -14192,6 +14220,7 @@ mod tests {
         let show = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             name: "show".to_string(),
             types: vec![parameter.clone()],
             params: [(
@@ -14207,6 +14236,7 @@ mod tests {
                         types: vec![hir::Type::Parameter(parameter)],
                         args: [("v".to_string(), hir::Expr::Parameter("v".to_string()))].into(),
                         updated: BTreeMap::new(),
+                        can_fail: true,
                     })]),
                     locals: Vec::new(),
                 },
@@ -14219,6 +14249,7 @@ mod tests {
                 types: vec![ty.clone()],
                 args: [("v".to_string(), hir::Expr::Constant(value))].into(),
                 updated: BTreeMap::new(),
+                can_fail: true,
             })
         };
         let main_body = vec![
@@ -14265,6 +14296,7 @@ mod tests {
         let count = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: false,
             name: "count".to_string(),
             types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).types(),
             params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).params(&library()),
@@ -14280,6 +14312,7 @@ mod tests {
             types: vec![r.ty()],
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
+            can_fail: false,
         });
         let lowered = lower_program(&program(
             vec![
@@ -14314,6 +14347,7 @@ mod tests {
         let max = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             name: "max".to_string(),
             types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).types(),
             params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).params(&library()),
@@ -14347,6 +14381,7 @@ mod tests {
             types: vec![integer(), hir::Type::Tuple(own)],
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
+            can_fail: true,
         });
         let lowered = lower_program(&program(
             vec![
@@ -14414,6 +14449,7 @@ mod tests {
         let f = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             name: "f".to_string(),
             types: Vec::new(),
             params: BTreeMap::new(),
@@ -14499,6 +14535,7 @@ mod tests {
         let half = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             name: "half".to_string(),
             types: Vec::new(),
             params: [("n".to_string(), hir::Parameter::constant(integer()))].into(),
@@ -14517,10 +14554,12 @@ mod tests {
             types: Vec::new(),
             args: [("n".to_string(), hir::Expr::Local(hir::LocalId(1)))].into(),
             updated: BTreeMap::new(),
+            can_fail: true,
         });
         let f = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             name: "f".to_string(),
             types: Vec::new(),
             params: BTreeMap::new(),
@@ -14663,6 +14702,7 @@ mod tests {
         let f = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: value.can_fail(),
             name: "f".to_string(),
             types: Vec::new(),
             params: [("p".to_string(), hir::Parameter::constant(integer()))].into(),
@@ -14682,6 +14722,7 @@ mod tests {
             types: Vec::new(),
             args: [("p".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
+            can_fail: f.can_fail,
         });
         let lowered = lower_program(&program(
             vec![
@@ -14741,6 +14782,7 @@ mod tests {
         let f = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: value.can_fail(),
             name: "f".to_string(),
             types: Vec::new(),
             params: [("t".to_string(), hir::Parameter::constant(text()))].into(),
@@ -14755,6 +14797,7 @@ mod tests {
             types: Vec::new(),
             args: [("t".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
+            can_fail: f.can_fail,
         });
         let lowered = lower_program(&program(
             vec![
@@ -14806,6 +14849,7 @@ mod tests {
         let operator = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: builtin.can_fail(),
             name: builtin.name().to_string(),
             types: builtin.types(),
             params: builtin.params(&library()),
@@ -14827,6 +14871,7 @@ mod tests {
             types: vec![integer(), hir::Type::Tuple(own)],
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
+            can_fail: operator.can_fail,
         });
         let lowered = lower_program(&program(
             vec![
@@ -14858,25 +14903,39 @@ mod tests {
         let builtin = |builtin: hir::Builtin| hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: builtin.can_fail(),
             name: builtin.name().to_string(),
             types: builtin.types(),
             params: builtin.params(&library()),
             kind: hir::OperatorKind::Builtin(builtin),
         };
-        let converted = |operator, types| {
+        let converted = |operator, builtin: hir::ReadOnlyBuiltin, types| {
             hir::Expr::Call(hir::Call {
                 operator: hir::OperatorId(operator),
                 types,
                 args: [("from".to_string(), hir::Expr::Parameter("p".to_string()))].into(),
                 updated: BTreeMap::new(),
+                can_fail: builtin.can_fail(),
             })
         };
         let show = user(
             "show",
             &["p"],
             vec![
-                call(0, vec![("v", converted(1, vec![integer()]))]),
-                call(0, vec![("v", converted(2, Vec::new()))]),
+                call(
+                    0,
+                    vec![(
+                        "v",
+                        converted(1, hir::ReadOnlyBuiltin::ToText, vec![integer()]),
+                    )],
+                ),
+                call(
+                    0,
+                    vec![(
+                        "v",
+                        converted(2, hir::ReadOnlyBuiltin::ToApproximate, Vec::new()),
+                    )],
+                ),
             ],
         );
         let main_body = vec![call(
@@ -15364,6 +15423,7 @@ mod tests {
         let f = hir::Operator {
             versions: Vec::new(),
             constraints: Vec::new(),
+            can_fail: true,
             name: "f".to_string(),
             types: Vec::new(),
             params: [("p".to_string(), hir::Parameter::constant(integer()))].into(),

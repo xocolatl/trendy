@@ -5755,10 +5755,24 @@ as a boolean written as C writes it is likelier than bits.
   `div`, `mod`, `shl`, `shr` or a prefix `-` of an integer, which can
   overflow or divide by zero; joins texts, `||`, or builds, changes, combines or loads a
   relation or an array, which can run out of memory; takes an element or
-  the only tuple; or calls an operator. Comparisons, `not`, `and`, `or`,
-  `xor` and `implies`, of booleans or of integers, literals, names,
-  attributes and tuple selectors can't fail themselves; an expression made of them can fail only if a part of it
-  can.
+  the only tuple; selects a value of a type with constraints, keys of
+  components or subtypes defined by constraints, which it checks; orders
+  values, with `<`, `<=`, `>` or `>=`, of a type ordered in another
+  representation than the stored one, which converts them, or of a type
+  parameter's type, which may be given such a type; or calls an operator that
+  can fail. Comparisons, `not`, `and`, `or`, `xor` and `implies`, of booleans
+  or of integers, literals, names, attributes and tuple selectors can't fail
+  themselves; an expression made of them can fail only if a part of it can.
+- **An operator can fail** if it is a built-in other than `count`, `length`,
+  `to_approximate`, `sin`, `cos` and `atan2`, which have a value for any
+  argument, without making anything; or if its value can fail, or one of its
+  versions can, or its parameters have constraints, which a call checks; or if
+  it calls itself, directly or through others. A call needs no more memory than
+  the compiler knows of, so one of an operator that can't fail can't run out of
+  it, but a chain of calls that leads back to the same operator can go on until
+  there is no more (R0025). So `length{a: jumps}`, `is_empty{r: r}` and
+  `within{n: n, size: size}`, where `within` is `n >= 1 and n <= size`, can't
+  fail, and an `and` computes them as it does a comparison.
 
 ```trendy
 var points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };

@@ -1618,6 +1618,27 @@ constraint's parts are the operands of an `and` too, checked the same way
 (`variable_constraint_checked`): one that is false is reported broken even if
 another fails.
 
+What can fail, by the language's rule, is `hir::Expr::can_fail`. Of a call, it
+is the call's arguments and `hir::Call::can_fail`. Sema works that out from the
+operator as it makes the call (`ops::Bindings::call_of`, `can_fail`), since a
+callee is checked before a call of it. A built-in has a rule of its own
+(`hir::Builtin::can_fail`). An operator of the program's can fail by its value,
+its versions', or the constraints on its parameters, or because it reaches a
+cycle of calls. `hir::Operator::can_fail` keeps this for the calls lowering
+makes itself (`Program::call_of`). A comparison can fail where ordering
+converts (`Compared::can_fail`, `Type::orders_by_converting`), and a selection
+where it checks anything or finds a subtype.
+
+Whether a call can fail as it runs is LIR's question, answered from the
+callee's function, which is lowered before the call: whether a `Failed` can be
+reached from its entry (`lir::Function::can_fail`). A call of one that can't
+has nothing after it for a failure (`lir::Inst::Call`'s `can_fail`). The
+function also loses its sites (`without_sites`), which only a failure reads,
+so its caller needn't set its own again. The two answers differ where the
+rule isn't what runs. A read of a computed constant can't fail by the rule,
+as its failure is the constant's, but the function that reads it fails if
+computing it does, so a call of that function is checked.
+
 A restriction's condition, an `and` or an `or` of at least two operands that
 can fail, one of which calls a function, is ranked as the restriction runs
 (`FunctionBuilder::ranking_for`, `ranked_connective`): what is cheap costs less

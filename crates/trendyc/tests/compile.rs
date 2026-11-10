@@ -837,6 +837,8 @@ fn booleans() {
             "true",
             "false",
             "true",
+            // Jumps from 1 to 3, back to 2, then out at 5.
+            "3",
         ]
     );
 }
@@ -1419,6 +1421,164 @@ operator main{{}} [
     let (code, stderr) = run("constraint_undecided", "    divisor := zero;");
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.starts_with("error[R0002]"), "{stderr}");
+}
+
+/// A false operand decides an `and` beside a call that can fail, however it can: a
+/// built-in's, an operator's whose value can, whose parameters are constrained, which
+/// calls itself, or has a version that can, and a comparison that converts what it
+/// orders, a selection that checks a key of a component, or one that finds which of two
+/// subtypes a value is. Computed first, as what can't fail is, each would fail. Each
+/// reads parameters, which can't fail, so that nothing else does.
+#[test]
+fn a_false_operand_decides_an_and_beside_anything_that_can_fail() {
+    let source = "uses { trendy.process };
+
+type scaled {
+    { n: integer },
+    { big: integer } to { n := big div 1_000_000_000_000 } from { big := n * 1_000_000_000_000 },
+    order [asc big],
+};
+type outline { { vertices: relation { v_no: integer, x: integer } key { v_no } key { x } } };
+type pair { { a: integer, b: integer } };
+type wide is pair { constraint a > 1 };
+type tall is pair { constraint b > 1 };
+type ring { { r: integer } };
+type unit_ring is ring { constraint r = 1 };
+
+operator inverse{n: integer}: integer [ 100 div n ];
+operator positive{n: integer, constraint n > 0}: integer [ n ];
+operator flips{b: boolean}: boolean [ if b then not flips{b: b} else false ];
+operator inner{g: ring}: integer [ 0 ];
+operator inner{g: unit_ring}: integer [ 1 div (g.r - 1) ];
+
+operator show{
+    none: boolean,
+    zero: integer,
+    below: approximate,
+    yes: boolean,
+    x: scaled,
+    twice: relation { v_no: integer, x: integer },
+    two: integer,
+    g: ring,
+} [
+    call debug_value{v: sqrt{of: below} > 0e0 and none};
+    call debug_value{v: inverse{n: zero} > 0 and none};
+    call debug_value{v: positive{n: zero} > 0 and none};
+    call debug_value{v: flips{b: yes} and none};
+    call debug_value{v: inner{g: g} > 0 and none};
+    call debug_value{v: x < x and none};
+    call debug_value{v: count{r: outline{vertices: twice}.vertices} = 2 and none};
+    call debug_value{v: pair{a: two, b: two}.a = 2 and none};
+];
+
+operator main{} [
+    const zero := length{a: arguments};
+    call show{
+        none: zero > 5,
+        zero,
+        below: to_approximate{from: zero} - 1e0,
+        yes: zero = 0,
+        x: scaled{n: zero + 10_000_000_000},
+        twice: relation { { v_no: 1, x: zero }, { v_no: 2, x: zero } },
+        two: zero + 2,
+        g: ring{r: zero + 1},
+    };
+];
+";
+    let ran = ran_source("decided_beside_failing", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(ran.stderr.lines().collect::<Vec<_>>(), ["false"; 8]);
+}
+
+/// A call of an operator that can't fail as it runs leaves the program at its caller's
+/// site, though the operator's value can by the language's rules, as ordering a type
+/// parameter's values can: `lesser` of integers can't, so its function has no site, and
+/// what then overflows in the caller says where the caller is.
+#[test]
+fn a_call_that_cant_fail_leaves_the_site_where_it_was() {
+    let source = "uses { trendy.process };
+
+operator lesser{a: T, b: T}: T
+    types { T: any ordered }
+[
+    if a < b then a else b
+];
+
+operator main{} [
+    const top := 9_223_372_036_854_775_807 - length{a: arguments};
+    call debug_value{v: lesser{a: top, b: top} + 1};
+];
+";
+    let ran = ran_source("site_after_unfailing_call", source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr,
+        format!(
+            "error[R0001]: overflow: 9223372036854775807 + 1 is out of its type's range\n{}",
+            site("site_after_unfailing_call", 11)
+        )
+    );
+}
+
+/// A call of an operator whose value can't fail by the language's rules is still
+/// checked for a failure in what computing it calls: a conversion that ordering its
+/// values calls, or a constant it reads, computed when first read. Each fails, and stops
+/// the program, rather than being missed.
+#[test]
+fn a_failure_in_what_an_operators_value_calls_stops_the_program() {
+    let converted = "uses { trendy.process };
+
+type scaled {
+    { n: integer },
+    { big: integer } to { n := big div 1_000_000_000_000 } from { big := n * 1_000_000_000_000 },
+    order [asc big],
+};
+
+operator less{a: scaled, b: scaled}: boolean [
+    a < b
+];
+
+operator main{} [
+    const x := scaled{n: length{a: arguments} + 10_000_000_000};
+    call debug_value{v: less{a: x, b: x}};
+];
+";
+    let constant = "uses { trendy.process };
+
+operator doubled_past{n: integer}: integer [
+    var x := n;
+    while x > 0 loop [
+        x := x * 2;
+    ];
+    x
+];
+
+const huge := doubled_past{n: 1};
+
+operator pick{flag: boolean}: integer [
+    if flag then huge else 0
+];
+
+operator main{} [
+    call debug_value{v: pick{flag: length{a: arguments} = 0}};
+];
+";
+    for (name, source, failure) in [
+        (
+            "converted_in_a_call",
+            converted,
+            "error[R0001]: overflow: 10000000000 * 1000000000000",
+        ),
+        (
+            "constant_in_a_call",
+            constant,
+            "error[R0001]: overflow: 4611686018427387904 * 2",
+        ),
+    ] {
+        let ran = ran_source(name, source, b"");
+        assert_eq!(ran.code, 1, "{}", ran.stderr);
+        assert!(ran.stderr.starts_with(failure), "{}", ran.stderr);
+    }
 }
 
 /// A restriction computes the operands that can fail of its condition in the order that

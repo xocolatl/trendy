@@ -392,6 +392,7 @@ impl Functions {
                 function,
                 args,
                 result,
+                can_fail,
             } => {
                 let callee = self
                     .module
@@ -402,8 +403,10 @@ impl Functions {
                     .map(|place| self.address(place, frame, b))
                     .collect::<Result<Vec<_>, _>>()?;
                 let call = b.ins().call(callee, &addresses);
-                let failed = b.inst_results(call)[0];
-                self.unless_failed(failed, b)?;
+                if *can_fail {
+                    let failed = b.inst_results(call)[0];
+                    self.unless_failed(failed, b)?;
+                }
             }
             lir::Inst::Site(_) | lir::Inst::SaveSite { .. } | lir::Inst::RestoreSite { .. } => {
                 self.site_inst(inst, frame, b)?;
@@ -1444,6 +1447,7 @@ mod tests {
                             function: lir::FunctionId(0),
                             args: Some(lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))),
                             result: None,
+                            can_fail: true,
                         },
                     ],
                     terminator: lir::Terminator::Return,

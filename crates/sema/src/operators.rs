@@ -199,6 +199,12 @@ impl Signature {
         self.mode(name).is_some_and(|mode| mode != hir::Mode::Const)
     }
 
+    /// Whether its definition has no body: a specification, which its versions
+    /// compute (see [`hir::OperatorKind::Specification`]).
+    pub(crate) fn bodiless(&self) -> bool {
+        self.decl.as_ref().is_some_and(|d| d.body().is_none())
+    }
+
     /// Whether `name` is one of the parameters, with a type or without.
     pub(crate) fn is_parameter(&self, name: &str) -> bool {
         self.params.contains_key(name) || self.unresolved.contains(name)
@@ -627,7 +633,7 @@ impl Operators {
                 && s.written.keys().eq(["error"])
                 && matches!(error, Some(hir::Type::Dummy(d)) if **d == self.error)
                 && s.result == Some(hir::Type::Scalar(hir::Scalar::Text))
-                && s.decl.as_ref().is_some_and(|d| d.body().is_none())
+                && s.bodiless()
         })
     }
 
@@ -1278,7 +1284,7 @@ fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Di
     }
     // An operator without a body and without versions computes nothing.
     for signature in list.iter_mut() {
-        let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
+        let bodiless = signature.bodiless();
         if bodiless && signature.versions.is_empty() && signature.family == Family::Own {
             if let Some(decl) = &signature.decl {
                 errors.push(errors::bodiless_operator(decl));
@@ -1456,7 +1462,7 @@ fn uncovered(spec: &Signature, list: &[Signature], namespaces: &Namespaces) -> O
             })
             .collect();
     }
-    let bodiless = spec.decl.as_ref().is_some_and(|d| d.body().is_none());
+    let bodiless = spec.bodiless();
     let fits = |version: &hir::Version, combination: &BTreeMap<String, hir::Type>| {
         version
             .params

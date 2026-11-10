@@ -1304,8 +1304,8 @@ impl<'a> Checker<'a> {
         if !signature.valid {
             return None;
         }
-        let call = self.arguments(written, &signature, errors)?;
-        self.names.calling(&signature, &call.types, span);
+        let arguments = self.arguments(written, &signature, errors)?;
+        self.names.calling(&signature, &arguments.types, span);
         // A built-in's implementation is the compiler's, never checked, but
         // one that makes values of a type the library defines makes each as
         // selecting it would, which checks what that checks first.
@@ -1327,7 +1327,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         // Its value may compare the values of a type it is given.
-        if !call
+        if !arguments
             .types
             .iter()
             .all(|ty| self.orders_checked(ty, span, errors))
@@ -1335,6 +1335,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         let bindings = self.names.bindings();
+        let call = bindings.call_of(signature.id, arguments);
         let result = match ops::call(call, bindings) {
             Ok(result) => result,
             Err(failed) => {
@@ -1508,17 +1509,17 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A call of the operator `signature`, with `written` arguments for its
-    /// parameters: each named, each parameter given one, and each of its
-    /// parameter's type, once each type parameter in that type is given
-    /// the type of an argument, the same for every argument that gives it
-    /// one (see [`TypeArguments`]).
+    /// What a call of the operator `signature` gives it, with `written`
+    /// arguments for its parameters: each named, each parameter given one,
+    /// and each of its parameter's type, once each type parameter in that
+    /// type is given the type of an argument, the same for every argument
+    /// that gives it one (see [`TypeArguments`]).
     pub(crate) fn arguments(
         &mut self,
         written: Written,
         signature: &Signature,
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<hir::Call> {
+    ) -> Option<ops::Arguments> {
         let signature_text = self.names.operators().described(signature, written.span());
         let mut ok = true;
 
@@ -1587,8 +1588,7 @@ impl<'a> Checker<'a> {
         // Every type parameter has a type once every argument is given.
         let (types, mut args) = checked?;
         let updated = updated(&variables, &mut args, errors)?;
-        ok.then(|| hir::Call {
-            operator: signature.id,
+        ok.then(|| ops::Arguments {
             types: types.finish(),
             args,
             updated,
@@ -2171,7 +2171,7 @@ impl<'a> Checker<'a> {
         if !self.names.checked(operator, expr.span(), errors) {
             return None;
         }
-        let call = called_with(operator, heading);
+        let call = called_with(operator, heading, self.names.bindings());
         self.computed_from(tuple, result, call, expr, errors)
     }
 
@@ -4345,9 +4345,14 @@ fn checked_value(
     Some((value, ty))
 }
 
-/// A call of `operator` with each attribute of the tuple at hand, of
-/// `heading`, as the argument of the parameter of its name.
-fn called_with(operator: hir::OperatorId, heading: &hir::Heading) -> hir::Expr {
+/// A call of `operator`, checked, with each attribute of the tuple at hand,
+/// of `heading`, as the argument of the parameter of its name, as `bindings`
+/// makes it.
+fn called_with(
+    operator: hir::OperatorId,
+    heading: &hir::Heading,
+    bindings: ops::Bindings,
+) -> hir::Expr {
     let at_hand = hir::Expr::Current(0, heading.clone());
     let args = heading
         .attributes()
@@ -4356,12 +4361,7 @@ fn called_with(operator: hir::OperatorId, heading: &hir::Heading) -> hir::Expr {
             (k.to_string(), arg)
         })
         .collect();
-    hir::Expr::Call(hir::Call {
-        operator,
-        types: Vec::new(),
-        args,
-        updated: BTreeMap::new(),
-    })
+    hir::Expr::Call(bindings.call_of(operator, ops::Arguments::values(args)))
 }
 
 /// The names of the components of a value of the program's own type
@@ -4415,7 +4415,8 @@ impl Names for ComponentNames<'_> {
             if !self.outer.checked(conversion, span, errors) {
                 return Lookup::Reported;
             }
-            let converted = called_with(conversion, &self.defined.components);
+            let converted =
+                called_with(conversion, &self.defined.components, self.outer.bindings());
             return Lookup::Found(hir::Expr::Extract(Box::new(converted), name.to_string()));
         }
         match self.outer.resolve(name, span, errors) {
