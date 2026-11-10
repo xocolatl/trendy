@@ -1421,6 +1421,45 @@ operator main{{}} [
     assert!(stderr.starts_with("error[R0002]"), "{stderr}");
 }
 
+/// A restriction computes the operands that can fail of its condition in the order that
+/// decides it soonest, learned as it runs: here `second{x} = 0`, false for six tuples in
+/// seven, comes to be computed before `first{x} > 0`, never false. Whatever the order, a
+/// tuple that nothing decides fails as its first operand written does, though the second,
+/// computed first, failed first, and what is kept is the same.
+#[test]
+fn a_restrictions_condition_is_computed_in_the_order_learned_as_it_runs() {
+    let source = |fails: &str| {
+        format!(
+            "uses {{ trendy.process }};
+
+operator first{{x: integer}}: integer [
+    if x = {fails} then fail failure{{message: \"the first written fails\"}} else 1
+];
+
+operator second{{x: integer}}: integer [
+    if x = {fails} then fail failure{{message: \"the second fails\"}} else x mod 7
+];
+
+operator main{{}} [
+    const n := length{{a: arguments}} + 600;
+    const xs := series{{from: 1, to: n}} rename {{value as x}};
+    call debug_value{{v: count{{r: xs where first{{x}} > 0 and second{{x}} = 0}}}};
+];
+"
+        )
+    };
+    let ran = ran_source("ranked_kept", &source("0"), b"");
+    assert_eq!((ran.code, ran.stderr.as_str()), (0, "85\n"));
+    let ran = ran_source("ranked_fails", &source("500"), b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert!(
+        ran.stderr
+            .starts_with("error[R0021]: the first written fails"),
+        "{}",
+        ran.stderr
+    );
+}
+
 /// A key that fails fails just when going through the tuples would have: for a tuple
 /// whose other conjuncts are all true, as one that is false decides it whatever this one
 /// does, whether it can fail or not, and not if there is no such tuple.

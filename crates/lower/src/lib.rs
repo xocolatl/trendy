@@ -1920,6 +1920,22 @@ struct Steps {
     again: Vec<lir::BlockId>,
 }
 
+/// What a restriction's loop keeps of how the operands that can fail of its condition, an
+/// `and` or an `or`, have decided it, so as to compute them in the order likeliest to decide
+/// it soonest ([`FunctionBuilder::ranked_connective`]).
+struct Ranking {
+    /// How many operands it ranks.
+    count: usize,
+    /// One slot of `4 * count` usizes, as `trendy_rt_rank` orders them: the operand computed
+    /// in each place, in turn, then for each operand, as written, how many times it was
+    /// computed, how many times it decided the condition, and what it costs.
+    state: lir::Place,
+    /// How many tuples the condition has been computed for, and at how many it is ranked
+    /// next, twice as many each time.
+    seen: lir::Place,
+    next: lir::Place,
+}
+
 /// What the loop of [`FunctionBuilder::each_at_hand_failing_first`] gives the handler of a
 /// tuple's failure.
 struct Looped {
@@ -6920,28 +6936,11 @@ impl<'a> FunctionBuilder<'a> {
         let result = self.slot(scalar_layout(hir::Scalar::Boolean));
         let (settled, done) = (self.new_block(), self.new_block());
         let decides = !connective.identity();
-        // To `decided` if `value` decides it, and else on.
-        let decide = |this: &mut Self, value: lir::Place| {
-            let next = this.new_block();
-            let (then, otherwise) = if decides {
-                (settled, next)
-            } else {
-                (next, settled)
-            };
-            this.end_block(
-                lir::Terminator::Branch {
-                    condition: value,
-                    then,
-                    otherwise,
-                },
-                next,
-            );
-        };
         let (failing, safe): (Vec<&hir::Expr>, Vec<&hir::Expr>) =
             operands.iter().partition(|operand| operand.can_fail());
         for operand in safe {
             let value = self.place(operand, cx);
-            decide(self, value);
+            self.decide_or_on(value, decides, settled);
         }
         let calls = failing.iter().any(|operand| makes_calls(operand));
         let steps = self.steps_put_aside(
@@ -6949,7 +6948,7 @@ impl<'a> FunctionBuilder<'a> {
             calls,
             cx,
             |this, i, cx| this.place(failing[i], cx),
-            |this, _, value, _| decide(this, value),
+            |this, _, value, _| this.decide_or_on(value, decides, settled),
         );
         let failed = self.steps_failed(&steps);
         let (again, undecided) = (self.new_block(), self.new_block());
@@ -6962,19 +6961,7 @@ impl<'a> FunctionBuilder<'a> {
             again,
         );
         self.fail_again(&steps, cx);
-        self.end_block(lir::Terminator::Jump(done), undecided);
-        let set = |this: &mut Self, value: bool, cx: &mut Lowering| {
-            let src = u8_constant(u8::from(value), cx);
-            this.insts.push(lir::Inst::Copy {
-                dst: result.clone(),
-                src,
-                layout: lir::Layout::U8,
-            });
-        };
-        set(self, connective.identity(), cx);
-        self.end_block(lir::Terminator::Jump(done), settled);
-        set(self, decides, cx);
-        self.end_block(lir::Terminator::Jump(done), done);
+        self.settle_connective(&result, connective, [undecided, settled], done, cx);
         result
     }
 
@@ -7590,6 +7577,34 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
+    /// The relation `operand`, of type `ty`, as a restriction by `condition` reads it, and
+    /// how its tuples are ordered: as `want` asks, unless it is a constant, written sorted
+    /// by the attributes `condition` equates to values, so that its runs are found by binary
+    /// search, and if those values can fail and are all `condition` says, so that its runs
+    /// leave nothing of it to compute for each tuple.
+    fn restricted_operand(
+        &mut self,
+        operand: &hir::Expr,
+        ty: &hir::Type,
+        condition: &hir::Expr,
+        want: Want,
+        cx: &mut Lowering,
+    ) -> (lir::Place, Order) {
+        let hir::Type::Relation(heading) = ty else {
+            unreachable!("sema restricts only relations");
+        };
+        let Some(value) = constant_relation(operand) else {
+            return self.given(operand, want, cx);
+        };
+        let only = condition
+            .can_fail()
+            .then(|| self.only_equated_attributes(heading, condition))
+            .flatten();
+        let leading = only.unwrap_or_else(|| self.equated_attributes(heading, condition));
+        let order = Self::constant_order(value, &leading, cx);
+        (self.constant_in(value, ty, order, cx), order)
+    }
+
     /// The tuples of the relation `operand` for which `condition`, computed
     /// with each as the tuple at hand, is true, copied into a new relation, and how they are
     /// ordered: as they are in `operand`, so they need no sorting; the relation's
@@ -7616,26 +7631,9 @@ impl<'a> FunctionBuilder<'a> {
                 Order::Canonical,
                 Some(hir::Connective::And.of(rest)),
             ),
-            // A constant whose condition only equates attributes to values, some of which
-            // can fail, is written sorted by them, so that its runs leave nothing of the
-            // condition to compute for each tuple, and its order says nothing of which fails.
-            None if condition.can_fail()
-                && let Some(value) = constant_relation(operand)
-                && let Some(leading) = self.only_equated_attributes(heading, condition) =>
-            {
-                let order = Self::constant_order(value, &leading, cx);
-                (self.constant_in(value, &ty, order, cx), order, None)
-            }
-            // A constant is written sorted by the attributes the condition equates to
-            // values, so that its runs are found by binary search.
-            None if let Some(value) = constant_relation(operand) => {
-                let leading = self.equated_attributes(heading, condition);
-                let order = Self::constant_order(value, &leading, cx);
-                (self.constant_in(value, &ty, order, cx), order, None)
-            }
             None => {
-                let (place, order) = self.given(operand, want, cx);
-                (place, order, None)
+                let (whole, order) = self.restricted_operand(operand, &ty, condition, want, cx);
+                (whole, order, None)
             }
         };
         let condition = rest.as_ref().unwrap_or(condition);
@@ -7658,6 +7656,7 @@ impl<'a> FunctionBuilder<'a> {
         });
         let fails = condition.can_fail();
         let at_hand_ty = hir::Type::Tuple(heading.clone());
+        let ranking = self.ranking_for(&condition, cx);
         self.each_at_hand_in(
             &src,
             &at_hand_ty,
@@ -7669,7 +7668,10 @@ impl<'a> FunctionBuilder<'a> {
                 // which nothing it made outlives.
                 let keep = this.slot(lir::Layout::U8);
                 this.nested_scope(cx, |this, cx| {
-                    let computed = this.place(&condition, cx);
+                    let computed = match &ranking {
+                        Some(ranking) => this.ranked_connective(&condition, ranking, cx),
+                        None => this.place(&condition, cx),
+                    };
                     this.insts.push(lir::Inst::Copy {
                         dst: keep.clone(),
                         src: computed,
@@ -8579,8 +8581,19 @@ impl<'a> FunctionBuilder<'a> {
             self.end_block(lir::Terminator::Jump(next), raise);
         }
         self.end_block(lir::Terminator::Raise, done);
-        // Each step again, from a copy, which fails as it did; reached only from
-        // `fail_again`.
+        let again = self.copies_to_fail_again(count, cx, compute);
+        Steps { failing, again }
+    }
+
+    /// Where each of `count` steps, the `i`th computed by `compute`, is computed again, from a
+    /// copy of its own, to fail as it did, its failure going on, reached only from
+    /// [`FunctionBuilder::fail_again`]; building goes on after them.
+    fn copies_to_fail_again(
+        &mut self,
+        count: usize,
+        cx: &mut Lowering,
+        mut compute: impl FnMut(&mut Self, usize, &mut Lowering) -> lir::Place,
+    ) -> Vec<lir::BlockId> {
         let mut again = Vec::new();
         for i in 0..count {
             let copy = self.new_block();
@@ -8594,7 +8607,374 @@ impl<'a> FunctionBuilder<'a> {
             self.end_block(lir::Terminator::Jump(after_copies), after_copies);
             again.push(copy);
         }
-        Steps { failing, again }
+        again
+    }
+
+    /// The ranking of `condition`, a restriction's, as its loop begins, if it is worth it: an
+    /// `and` or an `or` of at least two operands that can fail, one of which calls a
+    /// function, for what is cheap costs less to compute than to rank. Each is computed
+    /// first in the place it is written, until it is ranked, with its cost estimated from
+    /// how much it computes ([`estimated_cost`]).
+    fn ranking_for(&mut self, condition: &hir::Expr, cx: &mut Lowering) -> Option<Ranking> {
+        let hir::Expr::Connective(hir::Connective::And | hir::Connective::Or, operands) = condition
+        else {
+            return None;
+        };
+        let failing: Vec<&hir::Expr> = operands.iter().filter(|o| o.can_fail()).collect();
+        if failing.len() < 2 || !failing.iter().any(|operand| makes_calls(operand)) {
+            return None;
+        }
+        let count = failing.len();
+        let state = self.slot(lir::Layout::Struct(vec![lir::Layout::Usize; 4 * count]));
+        let field = |at: usize| {
+            let mut field = state.clone();
+            field.path.push(at);
+            field
+        };
+        for (i, operand) in failing.iter().enumerate() {
+            for (at, n) in [
+                (i, len(i)),
+                (count + i, 0),
+                (2 * count + i, 0),
+                (3 * count + i, estimated_cost(operand)),
+            ] {
+                let value = usize_constant(n, cx);
+                self.insts.push(lir::Inst::Copy {
+                    dst: field(at),
+                    src: value,
+                    layout: lir::Layout::Usize,
+                });
+            }
+        }
+        let (seen, next) = (self.slot(lir::Layout::Usize), self.slot(lir::Layout::Usize));
+        for (slot, n) in [(&seen, 0), (&next, 16)] {
+            let value = usize_constant(n, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: slot.clone(),
+                src: value,
+                layout: lir::Layout::Usize,
+            });
+        }
+        Some(Ranking {
+            count,
+            state,
+            seen,
+            next,
+        })
+    }
+
+    /// `condition`, an `and` or an `or` as [`FunctionBuilder::ranking_for`] ranks, computed for
+    /// the tuple at hand as [`FunctionBuilder::deciding_connective`] computes one, but its
+    /// operands that can fail in the order `ranking` has them in, each only until one decides
+    /// it, counting how many times each is computed and decides it. Once enough tuples have
+    /// been, the runtime orders them again (`trendy_rt_rank`). A failure is put aside as a
+    /// step's is, keeping the first operand written to fail, as the order they are computed
+    /// in changes nothing: if none decides the result, that one is computed again, from a
+    /// copy, and fails as it did. The result is in a new slot.
+    fn ranked_connective(
+        &mut self,
+        condition: &hir::Expr,
+        ranking: &Ranking,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let hir::Expr::Connective(connective, operands) = condition else {
+            unreachable!("only a connective is ranked");
+        };
+        let result = self.slot(scalar_layout(hir::Scalar::Boolean));
+        let (settled, done) = (self.new_block(), self.new_block());
+        let decides = !connective.identity();
+        let (failing, safe): (Vec<&hir::Expr>, Vec<&hir::Expr>) =
+            operands.iter().partition(|operand| operand.can_fail());
+        for operand in safe {
+            let value = self.place(operand, cx);
+            self.decide_or_on(value, decides, settled);
+        }
+        self.rank_if_due(ranking, cx);
+        let calls = failing.iter().any(|operand| makes_calls(operand));
+        let start = self.position();
+        let mut failed = self.first_failing(false, calls, cx);
+        let place = self.slot(lir::Layout::Usize);
+        let zero = usize_constant(0, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: place.clone(),
+            src: zero,
+            layout: lir::Layout::Usize,
+        });
+        let dispatch = self.new_block();
+        self.end_block(lir::Terminator::Jump(dispatch), dispatch);
+        let (operand_blocks, after_all) = self.dispatch_ranked(ranking, &place, cx);
+        let raise = self.new_block();
+        let field = |at: usize| {
+            let mut field = ranking.state.clone();
+            field.path.push(at);
+            field
+        };
+        let mut handlers = Vec::new();
+        for (i, operand) in failing.iter().enumerate() {
+            // What comes before goes on to the next place in the order.
+            self.end_block(lir::Terminator::Jump(dispatch), operand_blocks[i]);
+            self.insts.push(lir::Inst::Increment {
+                place: field(ranking.count + i),
+            });
+            let handler = self.new_block();
+            let bound = self.lets.len();
+            let mut value = None;
+            self.catching(handler, |this| value = Some(this.place(operand, cx)));
+            let value = value.expect("an operand has a value");
+            let (counted, next) = (self.new_block(), self.new_block());
+            let (then, otherwise) = if decides {
+                (counted, next)
+            } else {
+                (next, counted)
+            };
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: value,
+                    then,
+                    otherwise,
+                },
+                counted,
+            );
+            self.insts.push(lir::Inst::Increment {
+                place: field(2 * ranking.count + i),
+            });
+            self.end_block(lir::Terminator::Jump(settled), next);
+            self.insts.push(lir::Inst::Increment {
+                place: place.clone(),
+            });
+            handlers.push((i, handler, bound..self.lets.len()));
+        }
+        if self.begins_scopes_since(start) {
+            let scope = self.slot(lir::Layout::Address);
+            self.insert(
+                start,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Innermost,
+                    args: vec![scope.clone()],
+                },
+            );
+            failed.scope = Some(scope);
+        }
+        self.ranked_failures(&failed, handlers, (dispatch, &place), raise, cx);
+        let undecided = self.new_block();
+        self.end_block(lir::Terminator::Raise, after_all);
+        let again =
+            self.copies_to_fail_again(failing.len(), cx, |this, i, cx| this.place(failing[i], cx));
+        let steps = Steps {
+            failing: failed,
+            again,
+        };
+        let one_failed = self.steps_failed(&steps);
+        let once_more = self.new_block();
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: one_failed,
+                then: once_more,
+                otherwise: undecided,
+            },
+            once_more,
+        );
+        self.fail_again(&steps, cx);
+        self.settle_connective(&result, *connective, [undecided, settled], done, cx);
+        result
+    }
+
+    /// The handlers of the failures of a ranked connective's operands, each with the
+    /// operand's place as written and the bindings it made, among
+    /// [`FunctionBuilder::lets`]: each puts its failure aside
+    /// ([`FunctionBuilder::forget_failure`]), keeps the operand if it was written before
+    /// the first to fail so far, whichever order they are computed in, counts its place
+    /// as done, at `cursor`, and goes back to `dispatch` (`cursor`'s dispatch), building going
+    /// on at `raise`.
+    fn ranked_failures(
+        &mut self,
+        failed: &FirstFailing,
+        handlers: Vec<(usize, lir::BlockId, std::ops::Range<usize>)>,
+        (dispatch, cursor): (lir::BlockId, &lir::Place),
+        raise: lir::BlockId,
+        cx: &mut Lowering,
+    ) {
+        for (i, handler, bound) in handlers {
+            self.end_block(lir::Terminator::Jump(dispatch), handler);
+            self.forget_failure(failed, bound, raise, cx);
+            let index = usize_constant(len(i), cx);
+            let earlier = self.slot(lir::Layout::U8);
+            self.insts.push(lir::Inst::Binary {
+                dst: earlier.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::Greater, lir::Operand::Usize),
+                lhs: failed.first.clone(),
+                rhs: index.clone(),
+            });
+            let (kept, on) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: earlier,
+                    then: kept,
+                    otherwise: on,
+                },
+                kept,
+            );
+            self.insts.push(lir::Inst::Copy {
+                dst: failed.first.clone(),
+                src: index,
+                layout: lir::Layout::Usize,
+            });
+            self.end_block(lir::Terminator::Jump(on), on);
+            self.insts.push(lir::Inst::Increment {
+                place: cursor.clone(),
+            });
+        }
+        self.end_block(lir::Terminator::Jump(dispatch), raise);
+    }
+
+    /// The end of a connective's computation, from a block nothing reaches: in `undecided`
+    /// its result, at `result`, is the connective's identity, and in `settled` the value
+    /// that decides it, and both go on to `done`, where building goes on.
+    fn settle_connective(
+        &mut self,
+        result: &lir::Place,
+        connective: hir::Connective,
+        [undecided, settled]: [lir::BlockId; 2],
+        done: lir::BlockId,
+        cx: &mut Lowering,
+    ) {
+        self.end_block(lir::Terminator::Jump(done), undecided);
+        let identity = u8_constant(u8::from(connective.identity()), cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: result.clone(),
+            src: identity,
+            layout: lir::Layout::U8,
+        });
+        self.end_block(lir::Terminator::Jump(done), settled);
+        let decides = u8_constant(u8::from(!connective.identity()), cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: result.clone(),
+            src: decides,
+            layout: lir::Layout::U8,
+        });
+        self.end_block(lir::Terminator::Jump(done), done);
+    }
+
+    /// To `settled` if `value` is `decides`, which decides a connective, and else on.
+    fn decide_or_on(&mut self, value: lir::Place, decides: bool, settled: lir::BlockId) {
+        let next = self.new_block();
+        let (then, otherwise) = if decides {
+            (settled, next)
+        } else {
+            (next, settled)
+        };
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: value,
+                then,
+                otherwise,
+            },
+            next,
+        );
+    }
+
+    /// Count a tuple `ranking`'s condition is computed for, and have the runtime order its
+    /// operands again if that is the one it is due at, and twice as many after.
+    fn rank_if_due(&mut self, ranking: &Ranking, cx: &mut Lowering) {
+        self.insts.push(lir::Inst::Increment {
+            place: ranking.seen.clone(),
+        });
+        let due = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: due.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+            lhs: ranking.seen.clone(),
+            rhs: ranking.next.clone(),
+        });
+        let (rank, on) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: due,
+                then: rank,
+                otherwise: on,
+            },
+            rank,
+        );
+        let count = usize_constant(len(ranking.count), cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Rank,
+            args: vec![ranking.state.clone(), count],
+        });
+        self.insts.push(lir::Inst::Binary {
+            dst: ranking.next.clone(),
+            op: lir::BinaryOp::Add(lir::Numeric::Integer),
+            lhs: ranking.next.clone(),
+            rhs: ranking.next.clone(),
+        });
+        self.end_block(lir::Terminator::Jump(on), on);
+    }
+
+    /// Where the operand computed in the place at `place` of `ranking`'s order begins, once
+    /// each operand's block is built, at the blocks given for each, as written, and where
+    /// the dispatch goes once every place has been: those blocks, and that one. The
+    /// dispatch is built here, in the block it begins in.
+    fn dispatch_ranked(
+        &mut self,
+        ranking: &Ranking,
+        place: &lir::Place,
+        cx: &mut Lowering,
+    ) -> (Vec<lir::BlockId>, lir::BlockId) {
+        let operands: Vec<lir::BlockId> = (0..ranking.count).map(|_| self.new_block()).collect();
+        let after_all = self.new_block();
+        let operand = self.slot(lir::Layout::Usize);
+        let chosen = self.new_block();
+        for at in 0..ranking.count {
+            let is = self.slot(lir::Layout::U8);
+            let index = usize_constant(len(at), cx);
+            self.insts.push(lir::Inst::Binary {
+                dst: is.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+                lhs: place.clone(),
+                rhs: index,
+            });
+            let (this_one, next) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: is,
+                    then: this_one,
+                    otherwise: next,
+                },
+                this_one,
+            );
+            let mut field = ranking.state.clone();
+            field.path.push(at);
+            self.insts.push(lir::Inst::Copy {
+                dst: operand.clone(),
+                src: field,
+                layout: lir::Layout::Usize,
+            });
+            self.end_block(lir::Terminator::Jump(chosen), next);
+        }
+        // Past the last place, every operand has been computed.
+        self.end_block(lir::Terminator::Jump(after_all), chosen);
+        let (last, before) = operands.split_last().expect("there are operands");
+        for (i, block) in before.iter().enumerate() {
+            let is = self.slot(lir::Layout::U8);
+            let index = usize_constant(len(i), cx);
+            self.insts.push(lir::Inst::Binary {
+                dst: is.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+                lhs: operand.clone(),
+                rhs: index,
+            });
+            let next = self.new_block();
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: is,
+                    then: *block,
+                    otherwise: next,
+                },
+                next,
+            );
+        }
+        let unreached = self.new_block();
+        self.end_block(lir::Terminator::Jump(*last), unreached);
+        (operands, after_all)
     }
 
     /// Whether one of `steps` failed, in a new slot.
@@ -11077,6 +11457,19 @@ fn zero_field(layout: &lir::Layout) -> lir::Field {
     }
 }
 
+/// About what computing `expr` costs, for ranking it against others: one for each
+/// expression in it, and a hundred for each call, whose work is unknown, at least one.
+fn estimated_cost(expr: &hir::Expr) -> u64 {
+    let own = if matches!(expr, hir::Expr::Call(_)) {
+        100
+    } else {
+        1
+    };
+    let mut cost = own;
+    expr.for_each_child(|child, _| cost += estimated_cost(child));
+    cost
+}
+
 /// Whether computing `expr` calls a function of the program's, an operator's or a type's,
 /// whose failure is traced through it, and leaves the site where it was.
 fn makes_calls(expr: &hir::Expr) -> bool {
@@ -13537,6 +13930,108 @@ mod tests {
             ]
         );
         assert!(matches!(insts[insts.len() - 2], lir::Inst::Call { .. }));
+    }
+
+    #[test]
+    fn only_a_condition_that_calls_functions_is_ranked() {
+        // `r where half{n: x} > 0 and half{n: x} < 5`, whose operands each call `half`, is
+        // ranked as the restriction runs; `r where x + 1 > 0 and x * 2 < 5` isn't, as its
+        // operands cost less to compute than to rank.
+        let heading = hir::Heading::new([("x".to_string(), integer())].into());
+        let x = || {
+            hir::Expr::Extract(
+                Box::new(hir::Expr::Current(0, heading.clone())),
+                "x".to_string(),
+            )
+        };
+        let half = || {
+            hir::Expr::Call(hir::Call {
+                operator: hir::OperatorId(1),
+                types: Vec::new(),
+                args: [("n".to_string(), x())].into(),
+                updated: BTreeMap::new(),
+            })
+        };
+        let compared = |comparison, lhs: hir::Expr, n: i64| {
+            hir::Expr::Binary(
+                hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Integer)),
+                Box::new(lhs),
+                Box::new(hir::Expr::Constant(hir::Value::Integer(n))),
+            )
+        };
+        let arithmetic = |op, n: i64| {
+            hir::Expr::Binary(
+                op,
+                Box::new(x()),
+                Box::new(hir::Expr::Constant(hir::Value::Integer(n))),
+            )
+        };
+        let ranks = |condition: hir::Expr| {
+            let restricted = hir::Expr::Restrict(
+                Box::new(hir::Expr::Variable(hir::VariableId(0))),
+                Box::new(condition),
+            );
+            let half_of = hir::Operator {
+                versions: Vec::new(),
+                constraints: Vec::new(),
+                name: "half".to_string(),
+                types: Vec::new(),
+                params: [("n".to_string(), hir::Parameter::constant(integer()))].into(),
+                kind: hir::OperatorKind::ReadOnly {
+                    result: integer(),
+                    locals: Vec::new(),
+                    value: hir::Expr::Binary(
+                        hir::BinaryOp::Div,
+                        Box::new(hir::Expr::Parameter("n".to_string())),
+                        Box::new(hir::Expr::Constant(hir::Value::Integer(2))),
+                    ),
+                },
+            };
+            let lowered = lower_program(&program(
+                vec![
+                    debug_value(),
+                    half_of,
+                    user("main", &[], vec![call(0, vec![("v", restricted)])]),
+                ],
+                vec![variable(
+                    "r",
+                    hir::Value::Relation(hir::RelationValue {
+                        heading: heading.clone(),
+                        tuples: std::collections::BTreeSet::new(),
+                    }),
+                )],
+            ));
+            lowered.functions[0]
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|inst| {
+                    matches!(
+                        inst,
+                        lir::Inst::CallRuntime {
+                            function: lir::RuntimeFn::Rank,
+                            ..
+                        }
+                    )
+                })
+        };
+        let and = |operands| hir::Expr::Connective(hir::Connective::And, operands);
+        assert!(ranks(and(vec![
+            compared(hir::Comparison::Greater, half(), 0),
+            compared(hir::Comparison::Less, half(), 5),
+        ])));
+        assert!(!ranks(and(vec![
+            compared(
+                hir::Comparison::Greater,
+                arithmetic(hir::BinaryOp::Add(hir::Numeric::Integer), 1),
+                0
+            ),
+            compared(
+                hir::Comparison::Less,
+                arithmetic(hir::BinaryOp::Multiply(hir::Numeric::Integer), 2),
+                5
+            ),
+        ])));
     }
 
     #[test]

@@ -335,6 +335,55 @@ pub extern "C" fn trendy_rt_unfailed() {
     internal_error("a tuple's work that failed didn't fail again");
 }
 
+/// Order the `*count` operands of a condition that can fail, which compiled code computes
+/// one after another until one decides it, by its state at `state`, `4 * count` usizes: for
+/// each place, in turn, the operand computed in it; then for each operand, as written, how
+/// many times it was computed, how many times it decided the condition, and what it costs,
+/// as lowering estimates it. An operand comes before another if it is likelier to decide the
+/// condition for what it costs, by how often it decided it when computed, as if it decided it
+/// once and didn't once more, so that one never computed yet counts as deciding half the
+/// time. Then the counts are halved, so that what comes next weighs as much as what came
+/// before.
+///
+/// # Safety
+///
+/// `state` must point to `4 * count` usizes, the first `count` a permutation of the places,
+/// and `count` to one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_rank(state: *mut usize, count: *const usize) {
+    // SAFETY: guaranteed by the caller.
+    let (state, count) = unsafe {
+        let count = count.read_unaligned();
+        (core::slice::from_raw_parts_mut(state, 4 * count), count)
+    };
+    let (order, counts) = state.split_at_mut(count);
+    let (computed, rest) = counts.split_at_mut(count);
+    let (decided, cost) = rest.split_at_mut(count);
+    // Whether `a` comes before `b`: (decided_a + 1) / (computed_a + 2) / cost_a is greater.
+    let before = |a: usize, b: usize| {
+        let likely = |i: usize| {
+            (
+                u128::from(decided[i] as u64) + 1,
+                u128::from(computed[i] as u64) + 2,
+            )
+        };
+        let ((da, ca), (db, cb)) = (likely(a), likely(b));
+        let (cost_a, cost_b) = (u128::from(cost[a] as u64), u128::from(cost[b] as u64));
+        da * cb * cost_b > db * ca * cost_a
+    };
+    // So few that inserting each in its place is the quickest.
+    for i in 1..count {
+        let mut j = i;
+        while j > 0 && before(order[j], order[j - 1]) {
+            order.swap(j, j - 1);
+            j -= 1;
+        }
+    }
+    for n in computed.iter_mut().chain(decided.iter_mut()) {
+        *n /= 2;
+    }
+}
+
 /// Store at `dst` -1, 0 or 1, as `lhs` is before, equal to or after `rhs`, of the type
 /// `desc` describes, in the order sorting does.
 ///
@@ -12581,6 +12630,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn what_decides_more_for_what_it_costs_is_ranked_first() {
+        // Each computed ten times, the first deciding once and the second nine times, each
+        // costing one: the second comes first, and the counts are halved.
+        let mut state = [0_usize, 1, 10, 10, 1, 9, 1, 1];
+        // SAFETY: the state of two operands, as the function reads it.
+        unsafe { trendy_rt_rank(state.as_mut_ptr(), &2) };
+        assert_eq!(state, [1, 0, 5, 5, 0, 4, 1, 1]);
+        // Costing ten times as much, it no longer does.
+        let mut state = [0_usize, 1, 10, 10, 1, 9, 1, 10];
+        // SAFETY: as above.
+        unsafe { trendy_rt_rank(state.as_mut_ptr(), &2) };
+        assert_eq!(state[..2], [0, 1]);
+        // Never computed, it counts as deciding half the time, more than once in ten.
+        let mut state = [0_usize, 1, 10, 0, 1, 0, 1, 1];
+        // SAFETY: as above.
+        unsafe { trendy_rt_rank(state.as_mut_ptr(), &2) };
+        assert_eq!(state[..2], [1, 0]);
     }
 
     #[test]

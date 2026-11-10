@@ -1618,6 +1618,22 @@ constraint's parts are the operands of an `and` too, checked the same way
 (`variable_constraint_checked`): one that is false is reported broken even if
 another fails.
 
+A restriction's condition, an `and` or an `or` of at least two operands that
+can fail, one of which calls a function, is ranked as the restriction runs
+(`FunctionBuilder::ranking_for`, `ranked_connective`): what is cheap costs less
+to compute than to rank. Before the loop, a slot of `4 * n` usizes holds the
+order to compute them in, as written at first, and for each how many times it
+was computed, how many times it decided the condition, and its cost, estimated
+from how much it computes, a call counting a hundred (`estimated_cost`). For
+each tuple, a dispatch on the place in the order computes the operand there,
+each only until one decides; a failure is put aside, keeping the first operand
+written to fail, which is computed again from a copy if none decides. At 16
+tuples, then 32, 64 and so on, `trendy_rt_rank` orders them by how often each
+decided when computed, as if it decided once and didn't once more, per cost,
+and halves the counts, so that what comes next weighs as much as what came
+before. So a condition written in its worst order costs about what it does in
+its best.
+
 `and`, `or` and `xor` are each one `hir::Expr::Connective` of any
 number of operands, as Tutorial D's n-adic `AND`, `OR` and `XOR` are
 (TTM, chapter 5), kept in a normal form that an optimizer can rely on.

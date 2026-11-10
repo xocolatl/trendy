@@ -1123,6 +1123,12 @@ runtime_functions! {
     /// whose work failed, computed again to fail as it did, didn't: it can't, as what is
     /// computed for a tuple is a function of it.
     Unfailed => "trendy_rt_unfailed", false;
+    /// `trendy_rt_rank(state, count)`: order the `count` (a [`Layout::Usize`]) operands of a
+    /// condition that can fail, whose state is at `state`, `4 * count` usizes: which is
+    /// computed in each place, in turn, then how many times each was computed, how many
+    /// times it decided the condition, and what it costs. Those likeliest to decide it for
+    /// what they cost come first, and the counts are halved.
+    Rank => "trendy_rt_rank", false;
     /// `trendy_rt_write_trace()`: write the calls the trace recorded, as
     /// notes after the failure's error, and forget them.
     WriteTrace => "trendy_rt_write_trace", false;

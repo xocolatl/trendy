@@ -5745,9 +5745,12 @@ as a boolean written as C writes it is likelier than bits.
   `y div x > 1 and x <> 0` is `false` where `x` is zero, wherever the `x
   <> 0` is written, unlike in languages that decide only from the left, or
   SQL, which doesn't say. As nothing depends on which operand is computed
-  first, the compiler chooses: those that can't fail first, then the others
-  in the order written, each only until one decides the result. So a
-  condition that is cheap and often false is best written first.
+  first, the program chooses, computing each only until one decides the
+  result: those that can't fail first, which are cheap, then the others.
+  In a restriction, those of the others that call operators are computed
+  in the order likeliest to decide it soonest for what each costs, which
+  the program learns as it goes through the tuples; elsewhere, in the order
+  written.
 - **An expression can fail** if it does arithmetic, `+`, `-`, `*`, `/`,
   `div`, `mod`, `shl`, `shr` or a prefix `-` of an integer, which can
   overflow or divide by zero; joins texts, `||`, or builds, changes, combines or loads a
