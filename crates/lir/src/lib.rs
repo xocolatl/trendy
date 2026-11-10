@@ -1119,6 +1119,10 @@ runtime_functions! {
     /// [`RuntimeFn::Traced`] counted: those of a failure a transaction
     /// takes.
     Untrace => "trendy_rt_untrace", false;
+    /// `trendy_rt_unfailed()`: stop the program with an internal error, as a tuple
+    /// whose work failed, computed again to fail as it did, didn't: it can't, as what is
+    /// computed for a tuple is a function of it.
+    Unfailed => "trendy_rt_unfailed", false;
     /// `trendy_rt_write_trace()`: write the calls the trace recorded, as
     /// notes after the failure's error, and forget them.
     WriteTrace => "trendy_rt_write_trace", false;

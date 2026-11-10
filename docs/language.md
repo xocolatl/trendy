@@ -7366,7 +7366,11 @@ operator main{} [];
 
 ### Evaluation
 
-Expressions have no side effects. Every operand is evaluated, so an error in
+Expressions have no side effects. What is computed for each tuple of a relation and
+fails for several fails as it does for the first of them in canonical order, the order
+`debug_value` writes a relation's tuples in, so that the failure, and the error a transaction collects, depends only
+on the relation's value, which has no order of its own (TTM RM Proscription 2), not on
+how its tuples happen to be kept. Every operand is evaluated, so an error in
 one is never skipped, but for an `if`'s branches, only the one its
 condition takes, and for the operands of `and`, `or` and `implies` that
 can fail, which those that can't guard (see [Boolean

@@ -9688,6 +9688,48 @@ fn what_fails_for_a_tuple_fails_for_the_same_one_in_any_order() {
     }
 }
 
+/// What fails for a tuple of a relation that comes in another order, which isn't sorted for
+/// it, fails as the first tuple in canonical order to fail does, though another is met first:
+/// here a product, made with its left operand's tuples outermost, by `a` and then `c`, where
+/// canonical order is by `a`, then `b`. The first met fails too, inside a call, with an error
+/// of its own, which is put aside, and the failure written is the first's, with its trace.
+#[test]
+fn the_first_tuple_to_fail_in_canonical_order_fails_however_they_come() {
+    let source = "uses { trendy.process };
+
+operator risky{a: integer, b: integer, c: integer}: integer [
+    if a = 2 and b = 1 and c = 3 then fail failure{message: \"first by name: \" || to_text{from: c}}
+    else if a = 2 and b = 3 and c = 1 then fail failure{message: \"met first: \" || to_text{from: c}}
+    else a + b + c
+];
+
+operator main{} [
+    const n := length{a: arguments} + 3;
+    const left := (series{from: 1, to: n} extend { a := value mod 2 + 1 }) rename {value as c};
+    const r := left times (series{from: 1, to: n} rename {value as b});
+    call debug_value{v: count{r: r extend { q := risky{a, b, c} }}};
+    call debug_value{v: count{r: r where risky{a, b, c} > 0}};
+];
+";
+    let ran = ran_source("first_to_fail_however_they_come", source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    let lines: Vec<&str> = ran.stderr.lines().collect();
+    assert_eq!(lines[0], "error[R0021]: first by name: 3", "{}", ran.stderr);
+    assert!(lines[2].contains("in `risky`, called at"), "{}", ran.stderr);
+    // The restriction's, with the extension's taken out.
+    let source = source.replace(
+        "    call debug_value{v: count{r: r extend { q := risky{a, b, c} }}};\n",
+        "",
+    );
+    let ran = ran_source("first_to_fail_however_they_come_where", &source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert!(
+        ran.stderr.starts_with("error[R0021]: first by name: 3"),
+        "{}",
+        ran.stderr
+    );
+}
+
 /// A closure is found from what it is matched with, in canonical order, whatever that is
 /// named: its binding is read once, gives up its reference once, and is right.
 #[test]

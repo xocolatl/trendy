@@ -326,6 +326,15 @@ pub unsafe extern "C" fn trendy_rt_concat_arrays(
     })
 }
 
+/// Stop the program with an internal error: a tuple whose work failed, computed again to
+/// fail as it did, didn't, which it can't, as what is computed for a tuple is a function of
+/// it (see lowering's `each_at_hand_failing_first`).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_unfailed() {
+    internal_error("a tuple's work that failed didn't fail again");
+}
+
 /// Store at `dst` -1, 0 or 1, as `lhs` is before, equal to or after `rhs`, of the type
 /// `desc` describes, in the order sorting does.
 ///

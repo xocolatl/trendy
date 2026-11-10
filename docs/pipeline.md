@@ -2645,11 +2645,24 @@ of a loose operand, and an `extend`'s of a new attribute, and so is the projecti
 
 What takes one is a join, a semijoin, a projection or a rename of it, `count`, `is_empty`,
 `sum` and `product`, which are exact, `min` and `max` of a type with no order of its own,
-`tuple from`, and, if nothing it computes for a tuple can fail, `where` and `extend`: what
-can fail says which tuple it failed for, so has to come to the same one first. A closure
+`tuple from`, and `where` and `extend`, whose failure is still the first tuple's in canonical
+order to fail, however they come (see below). A closure
 matched with a relation is found from its values, in canonical order, so that relation
 isn't taken loose. A `replace` can make two tuples equal, so it is sorted, unless a
 projection reads it, which removes those itself (`Order::Repeated`).
+
+What an extension or a restriction computes for a tuple can fail, and its failure says which
+tuple it failed for, so it has to be the same however the tuples come: the first tuple's in
+canonical order to fail. Tuples in canonical order come to it first. Others aren't sorted for
+it, as a failure is rare and a sort isn't: the loop puts each tuple's failure aside
+(`FunctionBuilder::each_at_hand_failing_first`), giving up its error, ending the scopes it
+began and the bindings it made (a lookup's index then null, so it is made again), forgetting
+the calls it passed through and restoring the site, and keeps where the first tuple in
+canonical order to fail so far is, by `trendy_rt_compare`, and goes on. After the loop, that
+tuple's work is computed again, which fails as it did, as it is a function of the tuple (TTM
+RM Prescription 3), with its own error, trace and site, and that failure goes on; if it didn't,
+`trendy_rt_unfailed` stops the program with an internal error. If no tuple fails, nothing is
+sorted, and all it costs is a check after each tuple that it isn't the one computed again.
 
 A `Let`'s binding is loose if all that reads it, followed up through what passes order down,
 as far as a reader that wants it or doesn't, takes it so (`FunctionBuilder::read_want`,
@@ -2713,12 +2726,11 @@ with some tuples the same, which `FunctionBuilder::given` sends where each is co
 - **An extension** that only adds attributes makes its tuples in its operand's order, all
   different, so they are sorted by the operand's order, then the attributes it adds, by
   name (`Lowering::extended_order`). It asks its operand for whatever sorted order is less
-  work, or for canonical order if what it computes can fail, as its failure says which tuple
-  it failed for. It says what it made with `lir::Inst::SortedAs`, with nothing to sort or
+  work, though what it computes can fail. It says what it made with `lir::Inst::SortedAs`, with nothing to sort or
   check (`Made::Kept`). One that replaces an attribute can make two tuples equal, so it is
   sorted into canonical order.
 - **A restriction** keeps its operand's order, as it always has (`InOrderOf`), and asks its
-  operand for what it is asked, unless its condition can fail. One of a sorted operand,
+  operand for what it is asked, though its condition can fail. One of a sorted operand,
   in any order, finds runs by binary search on the attributes its sort order begins with
   (`equal_runs`), each by its place in that order.
 - **A join** is merged on its common attributes, each run of tuples that agree on them

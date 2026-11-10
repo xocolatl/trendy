@@ -1896,6 +1896,39 @@ struct LocalPlace {
     holds: bool,
 }
 
+/// The slots [`FunctionBuilder::each_at_hand_failing_first`] keeps what it knows in, as its
+/// loop runs.
+struct FirstFailing {
+    /// Where the first tuple in canonical order to fail is, among those so far, or `none`.
+    least: lir::Place,
+    /// `usize::MAX`: where no tuple is.
+    none: lir::Place,
+    /// Whether that tuple's work is being computed again, to fail as it did.
+    again: lir::Place,
+    /// The scope innermost as the loop begins, which a failure's own end with it.
+    scope: lir::Place,
+    /// How many calls the trace has as the loop begins, after which a failure's are forgotten.
+    traced: lir::Place,
+    /// The site as the loop begins, which a failure in a call leaves at the call's.
+    site: lir::Place,
+}
+
+/// What the loop of [`FunctionBuilder::each_at_hand_failing_first`] gives what comes after it.
+struct Looped {
+    /// Where the work of a tuple begins, which computing one again goes back to.
+    start: lir::BlockId,
+    /// Where the loop goes on after a tuple's work, with the next.
+    next: lir::BlockId,
+    /// Where a tuple's failure goes.
+    handler: lir::BlockId,
+    /// The tuple at hand, which a slot points to.
+    at_hand: lir::Place,
+    /// Its index.
+    index: lir::Place,
+    /// The bindings its work makes, among [`FunctionBuilder::lets`], which a failure gives up.
+    bound: std::ops::Range<usize>,
+}
+
 /// A tuple at hand, which `Current` refers to: where it is, and, if it is
 /// each tuple of a relation in turn, the loop's lookups.
 struct AtHand {
@@ -5980,17 +6013,15 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Combine(_, lhs, rhs) => self.shared_order(lhs, rhs, cx),
             hir::Expr::Restrict(operand, condition) => {
                 match (constant_relation(operand), self.type_of(operand)) {
-                    (Some(value), hir::Type::Relation(heading)) if !condition.can_fail() => {
-                        let leading = self.equated_attributes(&heading, condition);
+                    (Some(value), hir::Type::Relation(heading)) => {
+                        let only = condition
+                            .can_fail()
+                            .then(|| self.only_equated_attributes(&heading, condition))
+                            .flatten();
+                        let leading =
+                            only.unwrap_or_else(|| self.equated_attributes(&heading, condition));
                         Self::constant_order(value, &leading, cx)
                     }
-                    (Some(value), hir::Type::Relation(heading)) => {
-                        match self.only_equated_attributes(&heading, condition) {
-                            Some(leading) => Self::constant_order(value, &leading, cx),
-                            None => Order::Canonical,
-                        }
-                    }
-                    _ if condition.can_fail() => Order::Canonical,
                     _ => self.sorted_order(operand, cx),
                 }
             }
@@ -6001,11 +6032,7 @@ impl<'a> FunctionBuilder<'a> {
                 if attributes.keys().any(|name| heading.get(name).is_some()) {
                     return Order::Canonical;
                 }
-                let order = if attributes.values().any(hir::Expr::can_fail) {
-                    Order::Canonical
-                } else {
-                    self.sorted_order(operand, cx)
-                };
+                let order = self.sorted_order(operand, cx);
                 cx.extended_order(order, &heading, attributes)
             }
             hir::Expr::And(lhs, rhs)
@@ -6193,8 +6220,8 @@ impl<'a> FunctionBuilder<'a> {
     /// Only what doesn't depend on the order of a relation may ask for one this way, and
     /// it has to say so to [`lir::Function::loose_read`], as [`FunctionBuilder::place`]
     /// always gives the canonical order, so that what doesn't ask needn't know of this.
-    /// What can fail for a tuple is computed in canonical order all the same, as its
-    /// failure says which, so that the first to fail is the same.
+    /// What can fail for a tuple fails for the same one, however they come (see
+    /// [`FunctionBuilder::each_at_hand_in`]).
     fn loose_place(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> (lir::Place, Order) {
         match expr {
             hir::Expr::Local(id) => self.local_place(*id),
@@ -6228,9 +6255,9 @@ impl<'a> FunctionBuilder<'a> {
 
     /// The operands of `expr` that it reads whatever order their tuples are in: which
     /// [`FunctionBuilder::loose_place`] may give them to it. A lookup in a loop has its
-    /// tuples in canonical order, and its result is theirs; a closure is found from the
-    /// values of what it is matched with, in canonical order; and what can fail for a tuple
-    /// must come to the same one first.
+    /// tuples in canonical order, and its result is theirs; and a closure is found from the
+    /// values of what it is matched with, in canonical order. What can fail for a tuple
+    /// fails for the same one, however they come (see [`FunctionBuilder::each_at_hand_in`]).
     fn reads_loosely<'e>(&self, expr: &'e hir::Expr) -> Vec<&'e hir::Expr> {
         let is_key = |operand: &hir::Expr| matches!(operand, hir::Expr::Relation(_, tuples) if tuples.len() == 1);
         let is_closure = |operand: &hir::Expr| arcs_of_closure(operand).is_some();
@@ -6244,13 +6271,9 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Antijoin(lhs, rhs) => vec![lhs, rhs],
             hir::Expr::Remove(operand, _)
             | hir::Expr::Rename(operand, _)
-            | hir::Expr::Only(operand) => vec![operand],
-            hir::Expr::Restrict(operand, condition) if !condition.can_fail() => vec![operand],
-            hir::Expr::Extend(operand, _, attributes)
-                if !attributes.values().any(hir::Expr::can_fail) =>
-            {
-                vec![operand]
-            }
+            | hir::Expr::Only(operand)
+            | hir::Expr::Restrict(operand, _)
+            | hir::Expr::Extend(operand, ..) => vec![operand],
             hir::Expr::Call(call) => self
                 .counted(call)
                 .or(self.summed(call))
@@ -7304,40 +7327,33 @@ impl<'a> FunctionBuilder<'a> {
             (hir::Type::Relation(heading), hir::Type::Relation(result)) => {
                 // A new attribute can't make two tuples equal, as replacing one can.
                 let adds = attributes.keys().all(|name| heading.get(name).is_none());
-                // What can fail for a tuple is computed in canonical order, as its failure
-                // says which, so that the first to fail is the same.
-                let can_fail = attributes.values().any(hir::Expr::can_fail);
-                let (src, made) = match want {
+                let (src, comes, made) = match want {
                     // Made in its operand's order, then by the attributes it adds.
                     Want::Sorted if adds => {
-                        let (src, order) = if can_fail {
-                            (self.place(operand, cx), Order::Canonical)
-                        } else {
-                            self.sorted_place(operand, cx)
-                        };
+                        let (src, order) = self.sorted_place(operand, cx);
                         (
                             src,
+                            order,
                             Made::Kept(cx.extended_order(order, heading, attributes)),
                         )
                     }
-                    Want::Canonical | Want::Sorted => {
-                        (self.place(operand, cx), Made::Wanted(Order::Canonical))
-                    }
+                    Want::Canonical | Want::Sorted => (
+                        self.place(operand, cx),
+                        Order::Canonical,
+                        Made::Wanted(Order::Canonical),
+                    ),
                     Want::Any | Want::Repeated => {
-                        let src = if can_fail {
-                            self.place(operand, cx)
-                        } else {
-                            self.loose_place(operand, cx).0
-                        };
+                        let (src, comes) = self.loose_place(operand, cx);
                         let order = if adds || want == Want::Repeated {
                             want.as_comes()
                         } else {
                             Order::Canonical
                         };
-                        (src, Made::Wanted(order))
+                        (src, comes, Made::Wanted(order))
                     }
                 };
-                let dst = self.extend_relation(heading, &src, attributes, result, made, cx);
+                let dst =
+                    self.extend_relation(heading, (&src, comes), attributes, result, made, cx);
                 self.operand_read(operand, &src, &ty, cx);
                 let (Made::Wanted(order) | Made::Kept(order)) = made;
                 (dst, order)
@@ -7381,29 +7397,31 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// The relation at `src`, with `heading`, with `attributes` added to or
-    /// replaced in each tuple, making one with the attributes of `result`: a
-    /// loop over the tuples, building each new tuple in a new relation,
-    /// which the runtime allocates and then sorts into the canonical order,
-    /// without the duplicates a `replace` can make, or leaves in the order they
-    /// come, as `order` says.
+    /// The relation at `src`, with `heading`, its tuples in the order `comes` says, with
+    /// `attributes` added to or replaced in each tuple, making one with the attributes of
+    /// `result`: a loop over the tuples, building each new tuple in a new relation, which
+    /// the runtime allocates and then sorts into the canonical order, without the
+    /// duplicates a `replace` can make, or leaves in the order they come, as `made` says.
+    /// What fails for a tuple is the first tuple's in canonical order to fail, however they
+    /// come (see [`FunctionBuilder::each_at_hand_in`]).
     fn extend_relation(
         &mut self,
         heading: &hir::Heading,
-        src: &lir::Place,
+        (src, comes): (&lir::Place, Order),
         attributes: &BTreeMap<String, hir::Expr>,
         result: &hir::Heading,
         made: Made,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
+        let tuple = hir::Type::Tuple(heading.clone());
+        let fails = attributes.values().any(hir::Expr::can_fail);
         let result_tuple = cx.layout(&hir::Type::Tuple(result.clone()));
         let result_ty = hir::Type::Relation(result.clone());
         let mut count = src.clone();
         count.path.push(1);
         let dst = self.allocated(&result_ty, count, cx);
         let built = hir::Type::Tuple(result.clone());
-        self.each_at_hand(src, tuple, cx, |this, at_hand, index, cx| {
+        self.each_at_hand_in(src, &tuple, comes, fails, cx, |this, at_hand, index, cx| {
             let to = this.element(&dst, index, result_tuple);
             // The work on each tuple in a scope of its own, which the
             // tuple built outlives.
@@ -7437,8 +7455,9 @@ impl<'a> FunctionBuilder<'a> {
     /// The tuples of the relation `operand` for which `condition`, computed
     /// with each as the tuple at hand, is true, copied into a new relation, and how they are
     /// ordered: as they are in `operand`, so they need no sorting; the relation's
-    /// count is then the number copied. A condition that can fail has `operand` in canonical
-    /// order, so that the same tuple is the first it fails for.
+    /// count is then the number copied. A condition that can fail fails for the first tuple
+    /// in canonical order it fails for, whatever order `operand` comes in (see
+    /// [`FunctionBuilder::each_at_hand_in`]).
     fn restrict(
         &mut self,
         operand: &hir::Expr,
@@ -7469,7 +7488,6 @@ impl<'a> FunctionBuilder<'a> {
                 let order = Self::constant_order(value, &leading, cx);
                 (self.constant_in(value, &ty, order, cx), order, None)
             }
-            None if condition.can_fail() => (self.place(operand, cx), Order::Canonical, None),
             // A constant is written sorted by the attributes the condition equates to
             // values, so that its runs are found by binary search.
             None if let Some(value) = constant_relation(operand) => {
@@ -7500,39 +7518,48 @@ impl<'a> FunctionBuilder<'a> {
             src: zero,
             layout: lir::Layout::Usize,
         });
-        self.each_at_hand(&src, tuple.clone(), cx, |this, at_hand, _, cx| {
-            // The condition, computed in a scope of its own for each tuple,
-            // which nothing it made outlives.
-            let keep = this.slot(lir::Layout::U8);
-            this.nested_scope(cx, |this, cx| {
-                let computed = this.place(&condition, cx);
-                this.insts.push(lir::Inst::Copy {
-                    dst: keep.clone(),
-                    src: computed,
-                    layout: lir::Layout::U8,
+        let fails = condition.can_fail();
+        let at_hand_ty = hir::Type::Tuple(heading.clone());
+        self.each_at_hand_in(
+            &src,
+            &at_hand_ty,
+            order,
+            fails,
+            cx,
+            |this, at_hand, _, cx| {
+                // The condition, computed in a scope of its own for each tuple,
+                // which nothing it made outlives.
+                let keep = this.slot(lir::Layout::U8);
+                this.nested_scope(cx, |this, cx| {
+                    let computed = this.place(&condition, cx);
+                    this.insts.push(lir::Inst::Copy {
+                        dst: keep.clone(),
+                        src: computed,
+                        layout: lir::Layout::U8,
+                    });
+                    Vec::new()
                 });
-                Vec::new()
-            });
-            let (copy, next) = (this.new_block(), this.new_block());
-            this.end_block(
-                lir::Terminator::Branch {
-                    condition: keep,
-                    then: copy,
-                    otherwise: next,
-                },
-                copy,
-            );
-            let to = this.element(&dst, &kept, tuple.clone());
-            this.insts.push(lir::Inst::Copy {
-                dst: to,
-                src: at_hand.clone(),
-                layout: tuple,
-            });
-            this.insts.push(lir::Inst::Increment {
-                place: kept.clone(),
-            });
-            this.end_block(lir::Terminator::Jump(next), next);
-        });
+                let (copy, next) = (this.new_block(), this.new_block());
+                this.end_block(
+                    lir::Terminator::Branch {
+                        condition: keep,
+                        then: copy,
+                        otherwise: next,
+                    },
+                    copy,
+                );
+                let to = this.element(&dst, &kept, tuple.clone());
+                this.insts.push(lir::Inst::Copy {
+                    dst: to,
+                    src: at_hand.clone(),
+                    layout: tuple,
+                });
+                this.insts.push(lir::Inst::Increment {
+                    place: kept.clone(),
+                });
+                this.end_block(lir::Terminator::Jump(next), next);
+            },
+        );
         let mut len = dst.clone();
         len.path.push(1);
         self.insts.push(lir::Inst::Copy {
@@ -7969,6 +7996,281 @@ impl<'a> FunctionBuilder<'a> {
             self.release_place(&lookup.kept, &lookup.ty, cx);
             self.release_place(&lookup.index, &index_type(), cx);
         }
+    }
+
+    /// `body` of each tuple of the relation at `src`, of `tuple`, which come as `comes`
+    /// says, as [`FunctionBuilder::each_at_hand`] gives them: if `body` can fail, as `fails`
+    /// says, and they aren't in canonical order, as
+    /// [`FunctionBuilder::each_at_hand_failing_first`] does, so that the failure is the same
+    /// whatever order they come in.
+    fn each_at_hand_in(
+        &mut self,
+        src: &lir::Place,
+        tuple: &hir::Type,
+        comes: Order,
+        fails: bool,
+        cx: &mut Lowering,
+        body: impl FnOnce(&mut Self, &lir::Place, &lir::Place, &mut Lowering),
+    ) {
+        if fails && comes != Order::Canonical {
+            self.each_at_hand_failing_first(src, tuple, cx, body);
+        } else {
+            let layout = cx.layout(tuple);
+            self.each_at_hand(src, layout, cx, body);
+        }
+    }
+
+    /// `body` of each tuple of the relation at `src`, as [`FunctionBuilder::each_at_hand`]
+    /// gives it, where its tuples, of `tuple`, come in an order other than the canonical one
+    /// and `body` can fail. The failure is the first tuple's in canonical order to fail, as
+    /// it is whatever order they come in (see `language.md`'s "Evaluation"), found without
+    /// sorting them: a tuple's failure is put aside ([`FunctionBuilder::put_aside`]), keeping
+    /// where the first in canonical order to fail so far is, and the loop goes on. Then that
+    /// tuple's `body` is computed again ([`FunctionBuilder::failing_again`]), which fails as it
+    /// did, as what is computed for a tuple is a function of it (TTM RM Prescription 3), and
+    /// that failure goes on. If none fails, all it costs is a check after each tuple that it
+    /// isn't the one computed again.
+    fn each_at_hand_failing_first(
+        &mut self,
+        src: &lir::Place,
+        tuple: &hir::Type,
+        cx: &mut Lowering,
+        body: impl FnOnce(&mut Self, &lir::Place, &lir::Place, &mut Lowering),
+    ) {
+        let layout = cx.layout(tuple);
+        let failing = self.first_failing(cx);
+        let bound = self.lets.len();
+        let handler = self.new_block();
+        let mut looped = None;
+        self.each_at_hand(src, layout, cx, |this, at_hand, index, cx| {
+            let start = this.new_block();
+            this.end_block(lir::Terminator::Jump(start), start);
+            this.catching(handler, |this| body(this, at_hand, index, cx));
+            let (unfailed, next) = (this.new_block(), this.new_block());
+            this.end_block(
+                lir::Terminator::Branch {
+                    condition: failing.again.clone(),
+                    then: unfailed,
+                    otherwise: next,
+                },
+                unfailed,
+            );
+            this.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Unfailed,
+                args: Vec::new(),
+            });
+            this.end_block(lir::Terminator::Jump(next), next);
+            looped = Some(Looped {
+                start,
+                next,
+                handler,
+                at_hand: at_hand.clone(),
+                index: index.clone(),
+                bound: bound..this.lets.len(),
+            });
+        });
+        let looped = looped.expect("the loop has a body");
+        let done = self.new_block();
+        self.failing_again(&failing, &looped, src, tuple, done, cx);
+        self.put_aside(&failing, &looped, src, tuple, done, cx);
+    }
+
+    /// The slots [`FunctionBuilder::each_at_hand_failing_first`] keeps what it knows in as
+    /// its loop runs, set as it begins.
+    fn first_failing(&mut self, cx: &mut Lowering) -> FirstFailing {
+        let none = usize_constant(u64::MAX, cx);
+        let least = self.slot(lir::Layout::Usize);
+        self.insts.push(lir::Inst::Copy {
+            dst: least.clone(),
+            src: none.clone(),
+            layout: lir::Layout::Usize,
+        });
+        let again = self.slot(lir::Layout::U8);
+        let no = u8_constant(0, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: again.clone(),
+            src: no,
+            layout: lir::Layout::U8,
+        });
+        let (scope, traced, site) = (
+            self.slot(lir::Layout::Address),
+            self.slot(lir::Layout::Usize),
+            self.slot(lir::Layout::Address),
+        );
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Innermost,
+            args: vec![scope.clone()],
+        });
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Traced,
+            args: vec![traced.clone()],
+        });
+        self.insts.push(lir::Inst::SaveSite { dst: site.clone() });
+        FirstFailing {
+            least,
+            none,
+            again,
+            scope,
+            traced,
+            site,
+        }
+    }
+
+    /// After the loop of [`FunctionBuilder::each_at_hand_failing_first`], the work of the
+    /// first tuple in canonical order to fail, if one did, computed again, from where
+    /// `looped` starts its body, its failure going to the loop's handler, which is built
+    /// next: the tuple at hand is that one, and `again` says so. If none did, on to `done`.
+    fn failing_again(
+        &mut self,
+        failing: &FirstFailing,
+        looped: &Looped,
+        src: &lir::Place,
+        tuple: &hir::Type,
+        done: lir::BlockId,
+        cx: &mut Lowering,
+    ) {
+        let failed = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: failed.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::NotEqual, lir::Operand::Usize),
+            lhs: failing.least.clone(),
+            rhs: failing.none.clone(),
+        });
+        let once_more = self.new_block();
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: failed,
+                then: once_more,
+                otherwise: done,
+            },
+            once_more,
+        );
+        let yes = u8_constant(1, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: failing.again.clone(),
+            src: yes,
+            layout: lir::Layout::U8,
+        });
+        self.insts.push(lir::Inst::Copy {
+            dst: looped.index.clone(),
+            src: failing.least.clone(),
+            layout: lir::Layout::Usize,
+        });
+        let lir::Base::Indirect { slot, .. } = looped.at_hand.base else {
+            unreachable!("the tuple at hand is where a slot points");
+        };
+        self.insts.push(lir::Inst::Element {
+            dst: lir::Place::whole(lir::Base::Slot(slot)),
+            array: src.clone(),
+            index: looped.index.clone(),
+            element: cx.layout(tuple),
+        });
+        self.end_block(lir::Terminator::Jump(looped.start), looped.handler);
+    }
+
+    /// The handler of a tuple's failure in the loop of
+    /// [`FunctionBuilder::each_at_hand_failing_first`], ending in `done`: the failure of the
+    /// one computed again goes on, as does one without an error, as running out of memory
+    /// has none, and any other is put aside. Its error is given up, what its scopes and
+    /// bindings hold is too (a lookup's index then null, so it is made again), the calls it
+    /// passed through are forgotten and the site is restored, and where the tuple is is kept
+    /// if it comes before the first to fail so far in canonical order, by
+    /// `trendy_rt_compare`. Then the loop goes on.
+    fn put_aside(
+        &mut self,
+        failing: &FirstFailing,
+        looped: &Looped,
+        src: &lir::Place,
+        tuple: &hir::Type,
+        done: lir::BlockId,
+        cx: &mut Lowering,
+    ) {
+        let (aside, raise) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: failing.again.clone(),
+                then: raise,
+                otherwise: aside,
+            },
+            aside,
+        );
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::EndSince,
+            args: vec![failing.scope.clone()],
+        });
+        for i in looped.bound.clone() {
+            let (slot, ty) = self.lets[i].clone();
+            self.release_place(&slot, &ty, cx);
+        }
+        let waiting = cx.waiting(self.program);
+        let error = waiting.error();
+        let waits = self.is_of(&error, &waiting.ty, cx);
+        let take = self.new_block();
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: waits,
+                then: take,
+                otherwise: raise,
+            },
+            take,
+        );
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Untrace,
+            args: vec![failing.traced.clone()],
+        });
+        self.insts.push(lir::Inst::RestoreSite {
+            src: failing.site.clone(),
+        });
+        self.release_place(&error, &waiting.ty, cx);
+        let first = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: first.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+            lhs: failing.least.clone(),
+            rhs: failing.none.clone(),
+        });
+        let (compare, keep) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: first,
+                then: keep,
+                otherwise: compare,
+            },
+            compare,
+        );
+        let kept = self.element(src, &failing.least, cx.layout(tuple));
+        let order = self.slot(lir::Layout::I64);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(tuple)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Compare,
+            args: vec![order.clone(), looped.at_hand.clone(), kept, descriptor],
+        });
+        let zero = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
+        let before = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: before.clone(),
+            op: lir::BinaryOp::Compare(
+                lir::Comparison::Less,
+                lir::Operand::Numeric(lir::Numeric::Integer),
+            ),
+            lhs: order,
+            rhs: zero,
+        });
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: before,
+                then: keep,
+                otherwise: looped.next,
+            },
+            keep,
+        );
+        self.insts.push(lir::Inst::Copy {
+            dst: failing.least.clone(),
+            src: looped.index.clone(),
+            layout: lir::Layout::Usize,
+        });
+        self.end_block(lir::Terminator::Jump(looped.next), raise);
+        self.end_block(lir::Terminator::Raise, done);
     }
 
     /// The element at `index`, from 0, of `array`, a relation's tuples or
