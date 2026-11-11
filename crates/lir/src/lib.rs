@@ -346,19 +346,32 @@ pub enum Arrangement {
     /// descriptor of its layout with that sort order, whatever its attributes are named,
     /// as through a rename that leaves each where it is.
     Sorted(DataId),
+    /// No value at all, which nothing reads until something gives it one
+    /// ([`Inst::NoValueYet`]): so in whatever order it is in on another way.
+    NoValue,
 }
 
 /// The arrangement of each slot's relation that isn't in canonical order, on every way
 /// to here: one that isn't there is in canonical order, so one in one order on one way and
-/// in another on another, canonical included, is loose.
+/// in another on another, canonical included, is loose, but where it has no value on one,
+/// it is in the order it is in on the other.
 impl Known for BTreeMap<SlotId, Arrangement> {
     fn join(&mut self, other: &Self) -> bool {
         let mut grows = false;
         let slots: BTreeSet<SlotId> = self.keys().chain(other.keys()).copied().collect();
         for slot in slots {
-            let (known, given) = (self.get(&slot), other.get(&slot));
-            if known != given && known != Some(&Arrangement::Loose) {
-                self.insert(slot, Arrangement::Loose);
+            let (known, given) = (self.get(&slot).copied(), other.get(&slot).copied());
+            let joined = match (known, given) {
+                (Some(Arrangement::NoValue), given) => given,
+                (known, Some(Arrangement::NoValue)) => known,
+                (known, given) if known == given => known,
+                _ => Some(Arrangement::Loose),
+            };
+            if joined != known {
+                match joined {
+                    Some(arrangement) => self.insert(slot, arrangement),
+                    None => self.remove(&slot),
+                };
                 grows = true;
             }
         }
@@ -401,12 +414,14 @@ fn read_as(
     arranged: &BTreeMap<SlotId, Arrangement>,
     found: &mut dyn FnMut(SlotId),
 ) {
+    // What has no value is never read where it hasn't.
     if let Base::Slot(slot) = &place.base
-        && arranged
+        && let arrangement = arranged
             .get(slot)
             .copied()
             .unwrap_or(Arrangement::Canonical)
-            != wanted
+        && arrangement != wanted
+        && arrangement != Arrangement::NoValue
         && place.path != [1]
     {
         found(*slot);
@@ -2127,6 +2142,7 @@ impl Inst {
     ) {
         match self {
             Inst::InAnyOrder(relation) => arrange(arranged, Some(relation), Arrangement::Loose),
+            Inst::NoValueYet(variable) => arrange(arranged, Some(variable), Arrangement::NoValue),
             Inst::SortedAs {
                 relation,
                 descriptor,
@@ -2792,6 +2808,25 @@ mod tests {
         };
         assert_eq!(checked(branches(1), 0), None);
         assert_eq!(checked(branches(2), 0), Some((3, 0)));
+        // With no value on one way, which nothing reads until it has one, it is as it is on
+        // the other: a local constant read before what computes it, as in a loop, is read
+        // only once it is computed. In canonical order on one, it is loose.
+        let unvalued = |first: Inst| {
+            vec![
+                block(
+                    vec![first],
+                    Terminator::Branch {
+                        condition: slot(7),
+                        then: BlockId(1),
+                        otherwise: BlockId(2),
+                    },
+                ),
+                block(vec![sorted()], Terminator::Jump(BlockId(2))),
+                block(vec![combined(1)], Terminator::Return),
+            ]
+        };
+        assert_eq!(checked(unvalued(Inst::NoValueYet(slot(0))), 0), None);
+        assert_eq!(checked(unvalued(copy(slot(0), slot(5))), 0), Some((2, 0)));
     }
 
     #[test]

@@ -1499,6 +1499,34 @@ operator main{} [
     );
 }
 
+/// A local constant computed when a read first needs it is kept as what reads it would have
+/// it, as one computed where it is declared is: here sorted by `v`, which comes after `k` by
+/// name, so that each of 60,000 lookups by `v` in a loop finds its tuple by a binary search,
+/// rather than going through them all, which took ten seconds.
+#[test]
+fn a_deferred_local_constant_is_kept_as_what_reads_it_would_have_it() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 60000;
+    const r := series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value};
+    var found := 0;
+    var i := 0;
+    while i < n loop [
+        found := found + count{r: r where v = i};
+        i := i + 1;
+    ];
+    call debug_value{v: found};
+];
+";
+    let start = std::time::Instant::now();
+    let ran = ran_source("deferred_lookups", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(ran.stderr.trim(), "60000");
+    let taken = start.elapsed();
+    assert!(taken.as_secs() < 5, "{taken:?}");
+}
+
 /// A constant's key is of all of it, and what reads it takes it to hold, the optimizer
 /// among them, so one broken anywhere fails every read, though the tuples a read narrows
 /// the constant to are fine.

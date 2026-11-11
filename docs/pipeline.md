@@ -1306,16 +1306,22 @@ the whole unless the read runs again, and from its next run on its shared form, 
 computes the whole: a static of its own (`__read_n`) says whether it has run. How often
 a read runs is known only as the program runs, and this is what a loop shows of it.
 Narrowing never leaves out what can fail, so the whole fails only where the narrowed
-form would too, but for running out of memory.
+form would too, but for running out of memory. Its tuples are in canonical order, unless
+its reader wants them in any (`loose_place`), when each form gives them as they come; and
+what each form reads is wanted as the read is (`read_want`), so that a local constant it
+narrows can be kept sorted for its lookups.
 
 A local constant of an update operator's body read more than once is adapted the same
 way (`Optimizer::locals_adapted`), if what its value reads doesn't change while its block
 runs, as one written where it is read must (`stays_while`): what narrows it is written
 both ways, and it is computed when a read first needs it, at most once each time its
 declaration runs (`hir::Local::deferred`). Its declaration computes nothing (`defer`):
-it leaves the local null, as it is from the function's entry on and after the block's
-last statement to mention it, and says nothing has computed it, nor run a read that
-narrows it, a bit of an integer each (`Deferred`). A read computes it first if nothing
+the local has no value until a read computes it (`lir::Inst::NoValueYet`), and is null,
+as it is from the function's entry on and after the block's last statement to mention
+it, and nothing has computed it, nor run a read that narrows it, a bit of an integer each
+(`Deferred`). A read that finds it computed reads it in the order what computed it gave,
+and on the way where it has no value, nothing reads it, so that way says nothing of its
+order (`lir::Arrangement::NoValue`). A read computes it first if nothing
 has (`read_local`), assigning it as its declaration would, so a statement that mentions
 it mentions what its value reads too, which lasts as long as it may be computed
 (`last_mentioned`). An interface's `const name: type;` has its value in the

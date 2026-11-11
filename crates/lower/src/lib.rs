@@ -5963,13 +5963,16 @@ impl<'a> FunctionBuilder<'a> {
     /// unless the read runs again, as one in a loop does. So the first time it
     /// runs, it computes its narrowed form, and after that its shared one, which
     /// computes the constant whole if nothing has. A failure in that is one the
-    /// narrowed form has too, as narrowing never leaves out what can fail.
+    /// narrowed form has too, as narrowing never leaves out what can fail. Its
+    /// tuples are in canonical order, unless its reader `want`s them in any, as
+    /// either form gives them, all different, and how they come.
     fn adapted_read(
         &mut self,
         expr: &hir::Expr,
         read: &hir::AdaptedRead,
+        want: Want,
         cx: &mut Lowering,
-    ) -> lir::Place {
+    ) -> (lir::Place, Order) {
         let layout = cx.layout(&self.type_of(expr));
         let dst = self.slot(layout.clone());
         let [shared, uncomputed, first, narrowed, after] =
@@ -5999,8 +6002,19 @@ impl<'a> FunctionBuilder<'a> {
         );
         self.mark_ran(mark, cx);
         self.end_block(lir::Terminator::Jump(narrowed), shared);
+        let ty = self.type_of(expr);
+        let loose = want == Want::Any;
         for (form, next) in [(&read.shared, narrowed), (&read.narrowed, after)] {
-            let src = self.place(form, cx);
+            let src = if loose {
+                let (src, order) = self.loose_place(form, cx);
+                if order == Order::Repeated {
+                    self.canonical(src, order, &ty, cx)
+                } else {
+                    src
+                }
+            } else {
+                self.place(form, cx)
+            };
             self.insts.push(lir::Inst::Copy {
                 dst: dst.clone(),
                 src,
@@ -6008,7 +6022,12 @@ impl<'a> FunctionBuilder<'a> {
             });
             self.end_block(lir::Terminator::Jump(after), next);
         }
-        dst
+        let order = if loose {
+            Order::Loose
+        } else {
+            Order::Canonical
+        };
+        (dst, order)
     }
 
     /// Whether a read that narrows `of` ([`FunctionBuilder::adapted_read`]) has run,
@@ -6095,23 +6114,13 @@ impl<'a> FunctionBuilder<'a> {
 
     /// The declaration of the local constant `id`, of `value`, computed when a read first
     /// needs it ([`hir::Local::deferred`]): nothing has computed it since, nor run a read of
-    /// it that narrows it. It holds nothing here, as what it held as its declaration last
-    /// ran was given up after the block's last statement to mention it, or as the block
-    /// was left, and it is null, as it is from the function's entry on, so that a read
-    /// that comes to it before anything computes it, as none does, would find nothing.
+    /// it that narrows it. It has no value until a read computes it, and holds nothing, as
+    /// what it held as its declaration last ran was given up after the block's last
+    /// statement to mention it, or as the block was left, and it is null, as it is from the
+    /// function's entry on, so that what assigns it gives up nothing.
     fn defer(&mut self, id: hir::LocalId, value: &hir::Expr, cx: &mut Lowering) {
-        if let Some(LocalPlace {
-            value: slot,
-            holds: true,
-        }) = self.local_places[id.0].clone()
-        {
-            let layout = cx.layout(&self.locals[id.0].ty);
-            self.insts.push(lir::Inst::Copy {
-                dst: slot,
-                src: zero_constant(&layout, cx),
-                layout,
-            });
-        }
+        let (slot, _) = self.local_place(id);
+        self.insts.push(lir::Inst::NoValueYet(slot));
         let (computed, ran) = (self.slot(lir::Layout::U8), self.slot(lir::Layout::I64));
         let none = u8_constant(0, cx);
         self.insts.push(lir::Inst::Copy {
@@ -6586,6 +6595,7 @@ impl<'a> FunctionBuilder<'a> {
                 given
             }
             hir::Expr::Let(..) => self.let_chain(expr, Want::Any, cx),
+            hir::Expr::AdaptedRead(read) => self.adapted_read(expr, read, Want::Any, cx),
             hir::Expr::Rename(..) => self.renamed(expr, Want::Any, cx),
             hir::Expr::Remove(operand, names) => self.removed(operand, names, Want::Any, None, cx),
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, Want::Any, cx),
@@ -6741,6 +6751,10 @@ impl<'a> FunctionBuilder<'a> {
                 }
             }
             hir::Expr::At(_, inner) => self.read_want(id, inner, around, reads),
+            // Either form is what its reader reads.
+            hir::Expr::AdaptedRead(read) => self
+                .read_want(id, &read.shared, around, reads)
+                .stronger(self.read_want(id, &read.narrowed, around, reads)),
             hir::Expr::Let(bound, ..) if *bound == id => Want::Canonical,
             hir::Expr::Let(_, value, body) => {
                 let value_around = Around {
@@ -7011,7 +7025,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Variable(id) => in_data(self.variable_data[id.0]),
             hir::Expr::ComputedConstant(id, _) => self.constant_read(*id, cx),
-            hir::Expr::AdaptedRead(read) => self.adapted_read(expr, read, cx),
+            hir::Expr::AdaptedRead(read) => self.adapted_read(expr, read, Want::Canonical, cx).0,
             hir::Expr::Local(id) => {
                 let (place, order) = self.read_local(*id, cx);
                 let ty = self.locals[id.0].ty.clone();
