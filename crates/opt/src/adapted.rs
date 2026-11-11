@@ -5,17 +5,26 @@
 //! it, rather than all of it, computed once and shared. Which costs less
 //! depends on how often each read runs, which only running says, so each is
 //! written both ways ([`hir::Expr::AdaptedRead`]), for the program to choose as
-//! it runs.
+//! it runs. But only where what narrows it does compute less of it: otherwise
+//! the narrowed form computes all of it, and then, if another read needs all
+//! of it, the shared form computes it again.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use trendy_hir as hir;
+
+use crate::{and_operands, guard_reads, is_and, names, without_site};
+
+/// The type of an expression, where it is.
+pub(crate) type TypeOf<'a> = dyn Fn(&hir::Expr) -> hir::Type + 'a;
 
 /// Writes what narrows each of these constants both ways.
 pub(crate) struct Adapting<'a> {
     /// The value of each constant to adapt, of the program's or a local one,
     /// which takes the place of a read of it where it is narrowed.
     pub(crate) values: &'a HashMap<hir::Adapted, hir::Expr>,
+    /// The type of an expression where the reads are, of those values too.
+    pub(crate) ty: &'a TypeOf<'a>,
 }
 
 impl Adapting<'_> {
@@ -68,7 +77,8 @@ impl Adapting<'_> {
 
     /// The constant to adapt that `expr` narrows, if it does: a restriction of
     /// it, or a join, a semijoin or an antijoin of it with another relation,
-    /// what reads it on the way, as a projection, a renaming or an extension
+    /// which computes less of it ([`Adapting::narrows`]), or of what narrows it,
+    /// what reads that on the way, as a projection, a renaming or an extension
     /// of it, passing it on.
     fn narrowed(&self, expr: &hir::Expr) -> Option<hir::Adapted> {
         let operands: &[&hir::Expr] = match expr {
@@ -78,17 +88,83 @@ impl Adapting<'_> {
             | hir::Expr::And(lhs, rhs) => &[&**lhs, &**rhs],
             _ => return None,
         };
-        operands
-            .iter()
-            .find_map(|operand| self.read_through(operand))
+        operands.iter().enumerate().find_map(|(i, &operand)| {
+            if let Some(of) = self.read_of(without_site(operand)) {
+                return self.narrows(expr, i == 0, &self.values[&of]).then_some(of);
+            }
+            self.read_through(operand)
+        })
     }
 
-    /// The constant to adapt that `expr` reads, passing it on as it is or
+    /// Whether `narrowing`, a restriction, a join, a semijoin or an antijoin whose
+    /// operand reads a constant, its left one if `left`, computes less of the
+    /// constant's value, `value`, than all of it, in its place, as what comes after
+    /// computes only what it needs of it:
+    ///
+    /// - of a transitive closure, restricted to the tuples whose attribute is equal to
+    ///   a value, the paths from that value ([`hir::Expr::looked_up`]), or joined with
+    ///   a relation, or matched with one, the paths from the values that has of the
+    ///   attributes they share;
+    /// - of an AND, restricted by a guard that reads attributes of some of its operands,
+    ///   that part of it, restricted as soon as it is joined, before the others are
+    ///   ([`crate::Optimizer::planned`]), or joined with another AND, its operands each
+    ///   joined with theirs, in the order the plan says.
+    ///
+    /// What comes after narrows nothing else: through what passes a value on, as a
+    /// renaming or an extension of it, and as an antijoin needs all of it.
+    fn narrows(&self, narrowing: &hir::Expr, left: bool, value: &hir::Expr) -> bool {
+        let value = without_site(value);
+        let closure = matches!(value, hir::Expr::Tclose(_));
+        let shares = |other: &hir::Expr| {
+            let (hir::Type::Relation(own), hir::Type::Relation(other)) =
+                ((self.ty)(value), (self.ty)(other))
+            else {
+                return false;
+            };
+            !names(&own).is_disjoint(&names(&other))
+        };
+        match narrowing {
+            hir::Expr::Restrict(_, condition) if closure => {
+                let hir::Type::Relation(heading) = (self.ty)(value) else {
+                    return false;
+                };
+                condition.looked_up(&heading, self.ty).is_some()
+            }
+            hir::Expr::Restrict(_, condition) if is_and(value) => {
+                let mut operands = Vec::new();
+                and_operands(value.clone(), &mut operands);
+                let headings: Vec<BTreeSet<String>> = operands
+                    .iter()
+                    .filter_map(|operand| match (self.ty)(operand) {
+                        hir::Type::Relation(heading) => Some(names(&heading)),
+                        _ => None,
+                    })
+                    .collect();
+                // Read by a guard, and had by the operands but the one at `left_out`.
+                let had_without = |reads: &BTreeSet<String>, left_out: usize| {
+                    reads.iter().all(|name| {
+                        headings
+                            .iter()
+                            .enumerate()
+                            .any(|(i, heading)| i != left_out && heading.contains(name))
+                    })
+                };
+                condition
+                    .conjuncts()
+                    .iter()
+                    .filter_map(guard_reads)
+                    .any(|reads| (0..headings.len()).any(|i| had_without(&reads, i)))
+            }
+            hir::Expr::And(lhs, rhs) if closure => shares(if left { rhs } else { lhs }),
+            hir::Expr::And(..) => is_and(value),
+            hir::Expr::Semijoin(_, rhs) if closure && left => shares(rhs),
+            _ => false,
+        }
+    }
+
+    /// The constant to adapt that `expr` narrows, passing it on as it is or
     /// narrowed, if it does.
     fn read_through(&self, expr: &hir::Expr) -> Option<hir::Adapted> {
-        if let Some(of) = self.read_of(expr) {
-            return Some(of);
-        }
         match expr {
             hir::Expr::Remove(operand, _)
             | hir::Expr::Rename(operand, _)

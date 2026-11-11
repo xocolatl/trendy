@@ -1477,9 +1477,9 @@ operator main{} [
         call debug_value{v: count{r: reach where a = start}};
     ];
     for round in array [1, 2] loop [
-        const shifted := edges extend { c := a + round };
-        call debug_value{v: count{r: shifted where c = 3}};
-        call debug_value{v: count{r: shifted where c = 4}};
+        const shifted := (edges where a > round) tclose;
+        call debug_value{v: count{r: shifted where a = 3}};
+        call debug_value{v: count{r: shifted where a = 2}};
     ];
     call debug_value{v: count{r: reach}};
     var limit := 3;
@@ -1494,7 +1494,7 @@ operator main{} [
     assert_eq!(
         ran.stderr.lines().collect::<Vec<_>>(),
         [
-            "30", "30", "29", "30", "29", "28", "1", "1", "1", "1", "465", "2", "3"
+            "30", "30", "29", "30", "29", "28", "28", "29", "28", "0", "465", "2", "3"
         ]
     );
 }
@@ -1559,16 +1559,17 @@ operator main{} [
 }
 
 /// A local constant computed when a read first needs it is kept as what reads it would have
-/// it, as one computed where it is declared is: here sorted by `v`, which comes after `k` by
-/// name, so that each of 60,000 lookups by `v` in a loop finds its tuple by a binary search,
-/// rather than going through them all, which took ten seconds.
+/// it, as one computed where it is declared is: here a join, which a lookup narrows, sorted by
+/// `v`, which comes after `k` by name, so that each of 60,000 lookups by `v` in a loop finds its
+/// tuple by a binary search, rather than going through them all, which took ten seconds.
 #[test]
 fn a_deferred_local_constant_is_kept_as_what_reads_it_would_have_it() {
     let source = "uses { trendy.process };
 
 operator main{} [
     const n := length{a: arguments} + 60000;
-    const r := series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value};
+    const r := (series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value})
+        join (series{from: 1, to: n} rename {value as k});
     var found := 0;
     var i := 0;
     while i < n loop [

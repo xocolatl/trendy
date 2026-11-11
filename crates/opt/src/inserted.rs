@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use trendy_hir as hir;
 
-use crate::adapted::Adapting;
+use crate::adapted::{Adapting, TypeOf};
 
 /// `program`, with each constant that can be written where it is read written
 /// there, and then what narrows one that can be adapted written both ways, as it
@@ -38,7 +38,7 @@ pub(crate) fn constants_inserted(program: hir::Program) -> hir::Program {
             program: &program,
             inserted: &inserted,
         };
-        rewritten(&program, &|expr| inserting.expr(expr))
+        rewritten(&program, &|expr, _| inserting.expr(expr))
     };
     if adapted.is_empty() {
         return program;
@@ -47,24 +47,40 @@ pub(crate) fn constants_inserted(program: hir::Program) -> hir::Program {
         .into_iter()
         .map(|id| (hir::Adapted::Constant(id), value_of(&program, id)))
         .collect();
-    let adapting = Adapting { values: &values };
-    rewritten(&program, &|expr| adapting.expr(expr))
+    rewritten(&program, &|expr, ty| {
+        Adapting {
+            values: &values,
+            ty,
+        }
+        .expr(expr)
+    })
 }
 
 /// `program`, with each expression in its operators, its constants' values and
-/// its constraints' parts rewritten by `rewrite`.
-fn rewritten(program: &hir::Program, rewrite: &dyn Fn(hir::Expr) -> hir::Expr) -> hir::Program {
+/// its constraints' parts rewritten by `rewrite`, given the type of an expression where
+/// that one is.
+fn rewritten(
+    program: &hir::Program,
+    rewrite: &dyn Fn(hir::Expr, &TypeOf) -> hir::Expr,
+) -> hir::Program {
+    let no_params = BTreeMap::new();
     let operators = program
         .operators
         .iter()
-        .map(|operator| operator.clone().map_exprs(&mut |expr| rewrite(expr)))
+        .map(|operator| {
+            let ty = |expr: &hir::Expr| program.type_of(expr, &operator.params, operator.locals());
+            operator.clone().map_exprs(&mut |expr| rewrite(expr, &ty))
+        })
         .collect();
     let constants = program
         .constants
         .iter()
-        .map(|constant| hir::Constant {
-            value: rewrite(constant.value.clone()),
-            ..constant.clone()
+        .map(|constant| {
+            let ty = |expr: &hir::Expr| program.type_of(expr, &no_params, &constant.locals);
+            hir::Constant {
+                value: rewrite(constant.value.clone(), &ty),
+                ..constant.clone()
+            }
         })
         .collect();
     let constraints = program
@@ -74,10 +90,13 @@ fn rewritten(program: &hir::Program, rewrite: &dyn Fn(hir::Expr) -> hir::Expr) -
             parts: constraint
                 .parts
                 .iter()
-                .map(|part| hir::ConstraintPart {
-                    condition: rewrite(part.condition.clone()),
-                    breaking: part.breaking.clone().map(rewrite),
-                    ..part.clone()
+                .map(|part| {
+                    let ty = |expr: &hir::Expr| program.type_of(expr, &no_params, &part.locals);
+                    hir::ConstraintPart {
+                        condition: rewrite(part.condition.clone(), &ty),
+                        breaking: part.breaking.clone().map(|breaking| rewrite(breaking, &ty)),
+                        ..part.clone()
+                    }
                 })
                 .collect(),
             ..constraint.clone()

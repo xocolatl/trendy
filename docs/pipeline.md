@@ -1288,16 +1288,27 @@ its expression were written there. Opt writes it there if that costs no more tha
 computing it once: if it is the constant's only read, and runs at most once
 (`constants_inserted`). Then, with those in their places, it writes both ways what
 narrows each other constant with no key to check, the outermost restriction, join,
-semijoin or antijoin whose relation operand reads it, through projections, renamings
-and extensions (`Adapting`): as an `Expr::AdaptedRead`, of the read, shared, and of the
-constant's value in its place, narrowed. The shared form reads any other such constant
-whole, and the narrowed one adapts the next in turn, so that what narrows `k` of them is
-written `k + 1` ways, not `2^k`. Each is planned as anything else is. One form of the two
-is computed, so a local variable read once in each is read once (`count_reads`), and a
-`Let`'s binding read once is written where it is read before any of this
-(`bindings_inlined`), so that it is in place in each form rather than copied into both. A
-constant with a key to check is always shared, as the key is of all of it, and what
-reads the constant, the planner among them, takes it to hold.
+semijoin or antijoin whose relation operand reads it, or reads what narrows it, through
+projections, renamings and extensions (`Adapting`): as an `Expr::AdaptedRead`, of the
+read, shared, and of the constant's value in its place, narrowed. Only what does narrow
+it, as what comes after computes only part of its value for it (`Adapting::narrows`): a
+transitive closure, restricted by an attribute equal to a value, whose paths are
+followed from that value (`Expr::looked_up`, which lowering's `closure_narrowed` takes
+too), or joined with a relation, or matched with one, that has an attribute of it, whose
+paths are followed from that relation's values; and an AND, restricted by a guard that
+reads attributes of some of its operands, which restricts them as soon as they are
+joined (`Optimizer::planned`), or joined with another AND, whose operands are planned
+with its own. Nothing else is narrowed by what comes after, nor is a read through a
+projection, a renaming or an extension, whose narrowed form would compute all of it, and
+then, if another read needs all of it, the shared form would compute it again. The
+shared form reads any other such constant whole, and the narrowed one adapts the next in
+turn, so that what narrows `k` of them is written `k + 1` ways, not `2^k`. Each is
+planned as anything else is. One form of the two is computed, so a local variable read
+once in each is read once (`count_reads`), and a `Let`'s binding read once is written
+where it is read before any of this (`bindings_inlined`), so that it is in place in each
+form rather than copied into both. A constant with a key to check is always shared, as
+the key is of all of it, and what reads the constant, the planner among them, takes it
+to hold.
 
 Lowering keeps a constant that is read in a static (`computed_constant`), with whether
 it has been computed, and a function that computes it, lowered as lowered code first

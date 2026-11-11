@@ -3371,6 +3371,61 @@ impl Expr {
         }
     }
 
+    /// The attribute of the tuple at hand that the expression, a conjunct of a condition on a
+    /// relation's tuples, says is equal to a value, and that value, if it says that of one
+    /// that is the same for every tuple: it reads none of the tuple at hand.
+    #[must_use]
+    pub fn equated(&self) -> Option<(&str, &Expr)> {
+        fn attribute(expr: &Expr) -> Option<&str> {
+            match expr {
+                Expr::Extract(tuple, name) if matches!(**tuple, Expr::Current(0, _)) => Some(name),
+                _ => None,
+            }
+        }
+        let Expr::Binary(BinaryOp::Compare(Comparison::Equal, _), lhs, rhs) = self else {
+            return None;
+        };
+        let (name, value) = match (attribute(lhs), attribute(rhs)) {
+            (Some(name), _) => (name, &**rhs),
+            (None, Some(name)) => (name, &**lhs),
+            (None, None) => return None,
+        };
+        let read = value.tuple_read(0);
+        (!read.whole && read.attributes.is_empty()).then_some((name, value))
+    }
+
+    /// What the expression, a condition on the tuples of a relation of `heading`, looks up
+    /// those tuples by, if one of its conjuncts equates an attribute to a value
+    /// ([`Expr::equated`]) of the attribute's type, as `ty` gives it: the first attribute in
+    /// name order equated to a value that can't fail, or else, if the condition says only
+    /// that, one that can, which every tuple would compute. Of that, the attribute's place in
+    /// name order, the conjunct's place, and the value.
+    #[must_use]
+    pub fn looked_up(
+        &self,
+        heading: &Heading,
+        ty: &dyn Fn(&Expr) -> Type,
+    ) -> Option<(usize, usize, &Expr)> {
+        let conjuncts = self.conjuncts();
+        let (mut found, mut can_fail) = (None, None);
+        'attributes: for (i, (name, attribute)) in heading.attributes().enumerate() {
+            for (at, conjunct) in conjuncts.iter().enumerate() {
+                let Some((_, value)) = conjunct
+                    .equated()
+                    .filter(|(equated, value)| *equated == name && ty(value) == *attribute)
+                else {
+                    continue;
+                };
+                if !value.can_fail() {
+                    found = Some((i, at, value));
+                    break 'attributes;
+                }
+                can_fail = can_fail.or(Some((i, at, value)));
+            }
+        }
+        found.or(can_fail.filter(|_| conjuncts.len() == 1))
+    }
+
     /// The operators called anywhere in the expression, in its parts too.
     #[must_use]
     pub fn calling(&self) -> Vec<OperatorId> {

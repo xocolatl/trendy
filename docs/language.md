@@ -3550,11 +3550,12 @@ operator main{} [
   read runs. One the compiler can compute is as if its value were written there.
   Otherwise, as `digits`' is above, with the loop in `series`, nothing is computed
   until a read needs it, and nothing if none does:
-  - **A read that narrows it**, as a restriction of it, or a join or a `matching` of it
-    with another relation, does, computes only as much of it as it needs the first time
-    it runs, as a restriction of a closure to one value needs only that value's paths.
-    From its next run on, as in a loop, it computes the constant whole, at most once,
-    and the reads after it share that.
+  - **A read that narrows it**, as a restriction of a closure to one value, which needs
+    only that value's paths, or of a join by what one of its operands has, computes only
+    as much of it as it needs the first time it runs. From its next run on, as in a
+    loop, it computes the constant whole, at most once, and the reads after it share
+    that. A read that would need all of it anyway, as a restriction by an attribute an
+    `extend` adds to it does, is a read of all of it.
   - **A read of all of it** computes it whole, at most once, and shares it too.
   - **A read that is its only one, and runs at most once,** always computes as far as
     it needs.

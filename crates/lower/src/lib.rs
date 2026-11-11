@@ -8247,20 +8247,7 @@ impl<'a> FunctionBuilder<'a> {
     ) -> Option<(lir::Place, Vec<hir::Expr>)> {
         let arcs = arcs_of_closure(operand)?;
         let conjuncts = condition.conjuncts();
-        let (mut found, mut can_fail) = (None, None);
-        'attributes: for (i, (name, ty)) in heading.attributes().enumerate() {
-            for (at, conjunct) in conjuncts.iter().enumerate() {
-                let Some(value) = self.equated(conjunct, name, ty) else {
-                    continue;
-                };
-                if !value.can_fail() {
-                    found = Some((i, at, value));
-                    break 'attributes;
-                }
-                can_fail = can_fail.or(Some((i, at, value)));
-            }
-        }
-        let (i, at, value) = found.or(can_fail.filter(|_| conjuncts.len() == 1))?;
+        let (i, at, value) = condition.looked_up(heading, &|value| self.type_of(value))?;
         let fails = value.can_fail();
         let ty = self.type_of(arcs);
         let src = self.place(arcs, cx);
@@ -8703,25 +8690,10 @@ impl<'a> FunctionBuilder<'a> {
         name: &str,
         attribute: &hir::Type,
     ) -> Option<&'e hir::Expr> {
-        let hir::Expr::Binary(hir::BinaryOp::Compare(hir::Comparison::Equal, _), lhs, rhs) =
-            conjunct
-        else {
-            return None;
-        };
-        let is_attribute = |expr: &hir::Expr| {
-            matches!(expr, hir::Expr::Extract(tuple, read)
-                if read == name && matches!(**tuple, hir::Expr::Current(0, _)))
-        };
-        let value = if is_attribute(lhs) {
-            rhs
-        } else if is_attribute(rhs) {
-            lhs
-        } else {
-            return None;
-        };
-        let read = value.tuple_read(0);
-        let same = !read.whole && read.attributes.is_empty() && self.type_of(value) == *attribute;
-        same.then_some(&**value)
+        conjunct
+            .equated()
+            .filter(|(equated, value)| *equated == name && self.type_of(value) == *attribute)
+            .map(|(_, value)| value)
     }
 
     /// A new relation or array of type `ty` with room for `count` tuples or

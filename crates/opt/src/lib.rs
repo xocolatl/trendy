@@ -190,7 +190,11 @@ impl<'a> Optimizer<'a> {
             {
                 let values =
                     HashMap::from([(hir::Adapted::Local(id), self.moved(id, &value, None))]);
-                let body = Adapting { values: &values }.expr(*body);
+                let body = Adapting {
+                    values: &values,
+                    ty: &|expr| self.ty(expr),
+                }
+                .expr(*body);
                 let mut adapted = BTreeSet::new();
                 adapted_locals(&body, &mut adapted);
                 if adapted.contains(&id) {
@@ -310,7 +314,10 @@ impl<'a> Optimizer<'a> {
         let (mut block, end) = if values.is_empty() {
             (block, end)
         } else {
-            let adapting = Adapting { values: &values };
+            let adapting = Adapting {
+                values: &values,
+                ty: &|expr| self.ty(expr),
+            };
             (
                 block.map_exprs(&mut |expr| adapting.expr(expr)),
                 end.map(|end| adapting.expr(end)),
@@ -468,14 +475,12 @@ impl<'a> Optimizer<'a> {
             .collect();
         let (mut guards, mut rest) = (Vec::new(), Vec::new());
         for conjunct in conjuncts {
-            let read = conjunct.tuple_read(0);
-            if conjunct.can_fail() || read.whole {
-                rest.push(conjunct);
-            } else {
-                guards.push(Guard {
+            match guard_reads(&conjunct) {
+                Some(reads) => guards.push(Guard {
                     expr: conjunct,
-                    reads: read.attributes,
-                });
+                    reads,
+                }),
+                None => rest.push(conjunct),
             }
         }
         let names: Vec<BTreeSet<String>> = operands
@@ -520,6 +525,13 @@ struct Guard {
     expr: hir::Expr,
     /// The attributes of the tuple at hand it reads.
     reads: BTreeSet<String>,
+}
+
+/// The attributes of the tuple at hand that `conjunct`, of a restriction's condition, reads,
+/// if it is a guard ([`Guard`]): it can't fail, and reads the tuple an attribute at a time.
+fn guard_reads(conjunct: &hir::Expr) -> Option<BTreeSet<String>> {
+    let read = conjunct.tuple_read(0);
+    (!conjunct.can_fail() && !read.whole).then_some(read.attributes)
 }
 
 /// Whether `expr` is a rename of what is only read, with nothing to compute, and the same
@@ -1190,29 +1202,88 @@ mod tests {
         let constants = format!(
             "const a := {SERIES} rename {{value as x}};\n\
              const b := {SERIES} rename {{value as y}};\n\
+             const c := ({SERIES} rename {{value as x}} extend {{ y := x + 1 }}) tclose;\n\
+             const p := times{{a, b}};\n\
+             const e := {SERIES} rename {{value as x}} extend {{ z := x * 2 }};\n\
              const k := ({SERIES} extend {{ same := value }}) key {{ same }};\n"
         );
+        let xs = format!("({SERIES} rename {{value as x}})");
+        let zs = format!("({SERIES} rename {{value as z}})");
         for (body, adapted) in [
-            // Each restriction, but not what reads it whole.
+            // A closure restricted to the paths from a value, but not what reads it whole,
+            // nor what restricts it otherwise, which follows all of them.
             (
-                "call debug_table{r: a where x = 1}; call debug_table{r: a where x = 2}; \
-                 call debug_value{v: count{r: a}};",
-                &["a", "a"][..],
+                "call debug_table{r: c where x = 1}; call debug_table{r: c where x = 2}; \
+                 call debug_value{v: count{r: c}};"
+                    .to_string(),
+                &["c", "c"][..],
             ),
-            // Through what passes it on.
             (
-                "call debug_table{r: (a rename {x as z}) where z = 1}; \
-                 call debug_table{r: (a extend {z := x}){z} where z = 2};",
-                &["a", "a"],
+                "call debug_table{r: c where x > 1}; call debug_table{r: c where x > 2};"
+                    .to_string(),
+                &[],
             ),
-            // Joined with another, as is that one, in what `a`'s value takes the place of.
+            // A join restricted by what reads one of its operands, before the other is
+            // joined, but not by what reads both.
             (
-                "call debug_table{r: times{a, b}}; call debug_table{r: times{a, b}};",
-                &["a", "b", "a", "b"],
+                "call debug_table{r: p where x = 1}; call debug_table{r: p where y = 2};"
+                    .to_string(),
+                &["p", "p"],
+            ),
+            (
+                "call debug_table{r: p where x = y}; call debug_table{r: p where x < y};"
+                    .to_string(),
+                &[],
+            ),
+            // What reads what narrows it, passing it on, but not what it passes on.
+            (
+                "call debug_table{r: (c where x = 1) rename {x as w}}; \
+                 call debug_table{r: (c where x = 2){y}};"
+                    .to_string(),
+                &["c", "c"],
+            ),
+            (
+                "call debug_table{r: (c rename {x as w}) where w = 1}; \
+                 call debug_table{r: (c extend {w := x}) where x = 2}; \
+                 call debug_table{r: (p extend {w := x}) where x = 1}; \
+                 call debug_table{r: (p extend {w := x}) where y = 1};"
+                    .to_string(),
+                &[],
+            ),
+            // A closure joined or matched with a relation that has an attribute of it, as
+            // its paths are followed from that relation's values, but not one that has none,
+            // nor what isn't matched.
+            (
+                format!(
+                    "call debug_table{{r: c join {xs}}}; call debug_table{{r: c matching {xs}}};"
+                ),
+                &["c", "c"],
+            ),
+            (
+                format!(
+                    "call debug_table{{r: times{{c, {zs}}}}}; \
+                     call debug_table{{r: {xs} matching c}}; \
+                     call debug_table{{r: c not matching {xs}}};"
+                ),
+                &[],
+            ),
+            // A join joined with another, whose operands are joined with its own.
+            (
+                format!(
+                    "call debug_table{{r: p join {xs}}}; call debug_table{{r: times{{p, {zs}}}}};"
+                ),
+                &["p", "p"],
+            ),
+            // Not what an extension computes, which computes all of it.
+            (
+                "call debug_table{r: e where z = 2}; call debug_table{r: e where z = 4};"
+                    .to_string(),
+                &[],
             ),
             // Not with a key to check, which is of all of it.
             (
-                "call debug_table{r: k where value = 1}; call debug_table{r: k where value = 2};",
+                "call debug_table{r: k where value = 1}; call debug_table{r: k where value = 2};"
+                    .to_string(),
                 &[],
             ),
         ] {
