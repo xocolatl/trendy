@@ -10408,6 +10408,40 @@ operator main{} [
     assert!(taken.as_secs() < 5, "{taken:?}");
 }
 
+/// A renaming that leaves its tuples where they are, as `{op as reader}` does, gives them in the
+/// order they are in, under the new names: here a union's, by `used` and then `op`, which
+/// `read_by`, looked up by `reader` with the names it has, is then sorted by. Given the old
+/// names, it panicked, as nothing of `read_by` has an `op`.
+#[test]
+fn a_renaming_gives_its_order_under_the_new_names() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("renamed_order");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("x"), "XOR\nOR\nAND\nXOR\n").unwrap();
+    let main = dir.join("renamed_order.trendy");
+    std::fs::write(
+        &main,
+        "uses { trendy.files };
+
+operator pairs_of{lines: array text}: relation { a: text, op: text } [
+    var listed: relation { line: text, n: integer };
+    load listed from lines as line numbered n;
+    (listed extend { a := line, op := line }){a, op}
+];
+
+operator main{} [
+    var lines: array text;
+    call load_text_file{path: file_path{text: \"x\"}, out lines};
+    const pairs := pairs_of{lines};
+    const read_by := (pairs rename {a as used} union pairs rename {a as used}) rename {op as reader};
+    call debug_value{v: count{r: read_by where reader = \"XOR\"} + count{r: read_by where reader = \"OR\"}};
+];
+",
+    )
+    .unwrap();
+    let (code, stderr) = build_and_run(&main, &dir.join("main"), &dir);
+    assert_eq!((code, stderr.as_str()), (0, "2\n"));
+}
+
 /// A local looked up again by an attribute is kept sorted by it, whatever wants what a lookup
 /// finds in another order: here a union, a match, with what is computed from the local, and
 /// an ungrouping, each of whose 50,000 lookups finds its run by a binary search, rather than

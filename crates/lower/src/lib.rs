@@ -7419,13 +7419,18 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// `expr`, a rename, of whatever it renames, computed in any order. It is where that is,
-    /// if that has the same layout and the same order: otherwise it is reshaped, sorted
-    /// unless `want` needn't be.
+    /// if that has the same layout, in the same order under the new names
+    /// ([`Lowering::read_order`]): otherwise it is reshaped, sorted unless `want` needn't be.
     fn renamed(&mut self, expr: &hir::Expr, want: Want, cx: &mut Lowering) -> (lir::Place, Order) {
         let view = self.view_of(expr);
         let (src, order) = self.given(view.inner, want, cx);
+        // Its tuples where they are, sorted by the same attributes under their new names; a
+        // tuple has no order.
         if view.shape.is_as_laid_out() {
-            return (src, order);
+            return match view.ty {
+                hir::Type::Relation(_) => (src, cx.read_order(order, &view)),
+                _ => (src, order),
+            };
         }
         let dst = self.reshape(
             &view.ty,
