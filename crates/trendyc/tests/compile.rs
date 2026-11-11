@@ -10354,6 +10354,83 @@ operator main{{}} [
     }
 }
 
+/// A restriction of a restriction whose condition can't fail is one by both conditions, which
+/// finds its tuples by both: here each of 50,000 lookups by `v`, through a restriction by `k`,
+/// by a binary search, which took most of a minute, going through all of them each time.
+#[test]
+fn a_restriction_of_a_restriction_looks_up_by_both_conditions() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 50000;
+    const r := series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value};
+    var found := 0;
+    var i := 0;
+    while i < n loop [
+        found := found + count{r: (r where k > 1) where v = i};
+        i := i + 1;
+    ];
+    call debug_value{v: found};
+];
+";
+    let start = std::time::Instant::now();
+    let ran = ran_source("restrictions_merged", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(ran.stderr.trim(), "49999");
+    let taken = start.elapsed();
+    assert!(taken.as_secs() < 5, "{taken:?}");
+}
+
+/// A restriction of a restriction fails as computing both would: one whose inner condition can
+/// fail for a tuple fails though the outer one is false of it, and one whose outer condition
+/// can fails only for a tuple the inner one keeps. A failure in what the inner one restricts
+/// says it is where that is written, though it is in another statement.
+#[test]
+fn a_restriction_of_a_restriction_fails_as_both_do() {
+    let name = "restrictions_merged_fail";
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments};
+    const r := series{from: n - 2, to: n + 3} rename {value as a};
+    call debug_value{v: count{r: (r where a <> 0) where 12 div a > 2}};
+    call debug_value{v: count{r: (r where 12 div a > 2) where a > 0}};
+];
+";
+    let ran = ran_source(name, source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr,
+        format!(
+            "3\nerror[R0002]: division by zero: 12 div 0 has no result\n{}",
+            site(name, 7)
+        )
+    );
+    let name = "restrictions_merged_site";
+    let source = "uses { trendy.process };
+
+operator inverse_steps{n: integer}: integer [
+    const steps := (series{from: 1, to: n} extend { d := 12 div (value - 3) })
+        where d <> 1;
+    count{r: steps where d < 5}
+];
+
+operator main{} [
+    call debug_value{v: inverse_steps{n: length{a: arguments} + 5}};
+];
+";
+    let ran = ran_source(name, source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr,
+        format!(
+            "error[R0002]: division by zero: 12 div 0 has no result\n{}{}",
+            site(name, 4),
+            called(name, "inverse_steps", 10)
+        )
+    );
+}
+
 /// What no tuple changes, computed once, still fails only for a tuple whose condition or value
 /// needs it: as computing it for that tuple, the first in canonical order to need it, would.
 /// So it is computed with the tuples further out at hand, as a part of it reads them, and isn't

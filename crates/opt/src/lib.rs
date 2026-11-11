@@ -174,6 +174,9 @@ impl<'a> Optimizer<'a> {
     /// restricted or not, is [`Optimizer::planned`], and a binding's value is written where
     /// it is read if it can be ([`Optimizer::moves`]), so that the plan sees all of it.
     fn expr(&self, expr: hir::Expr) -> hir::Expr {
+        if let Some(merged) = restrictions_merged(&expr) {
+            return self.expr(merged);
+        }
         match expr {
             // What a binding's value reads can't change in its body: a read-only operator's
             // variables are each bound once, and a value block assigns only its own (A0034).
@@ -678,6 +681,41 @@ fn adapted_locals(expr: &hir::Expr, deferred: &mut BTreeSet<hir::LocalId>) {
 
 /// Whether `expr` is an AND, at a site of its own or not, as a value written
 /// elsewhere is.
+/// `r where p and q`, of `expr`, if it is `(r where p) where q` and `p` can't fail, which
+/// is the same relation, and fails as it does: every operand is computed, so `r where p` is
+/// computed for each tuple of `r`, which a `p` that can fail would fail for where `q` decides
+/// the `and` without it; but `q` is computed only for the tuples `p` is true of either way,
+/// in the same canonical order, as a restriction's tuples have their operand's heading. What
+/// is around `r where p`, as where it is computed, is around `r`, as `p` can't fail.
+fn restrictions_merged(expr: &hir::Expr) -> Option<hir::Expr> {
+    let hir::Expr::Restrict(operand, outer) = expr else {
+        return None;
+    };
+    let mut sites = Vec::new();
+    let mut inner = &**operand;
+    while let hir::Expr::At(site, within) = inner {
+        sites.push(*site);
+        inner = within;
+    }
+    let hir::Expr::Restrict(restricted, condition) = inner else {
+        return None;
+    };
+    if condition.can_fail() {
+        return None;
+    }
+    let restricted = sites
+        .into_iter()
+        .rev()
+        .fold((**restricted).clone(), |restricted, site| {
+            hir::Expr::At(site, Box::new(restricted))
+        });
+    let condition = hir::Connective::And.of(vec![(**condition).clone(), (**outer).clone()]);
+    Some(hir::Expr::Restrict(
+        Box::new(restricted),
+        Box::new(condition),
+    ))
+}
+
 fn is_and(expr: &hir::Expr) -> bool {
     match expr {
         hir::Expr::And(..) => true,
@@ -1205,6 +1243,8 @@ mod tests {
              const c := ({SERIES} rename {{value as x}} extend {{ y := x + 1 }}) tclose;\n\
              const p := times{{a, b}};\n\
              const e := {SERIES} rename {{value as x}} extend {{ z := x * 2 }};\n\
+             const g := c where y > x;\n\
+             const h := c where x div y > 0;\n\
              const k := ({SERIES} extend {{ same := value }}) key {{ same }};\n"
         );
         let xs = format!("({SERIES} rename {{value as x}})");
@@ -1232,6 +1272,25 @@ mod tests {
             ),
             (
                 "call debug_table{r: p where x = y}; call debug_table{r: p where x < y};"
+                    .to_string(),
+                &[],
+            ),
+            // A restriction of a restriction, as one by both conditions, if the inner one
+            // can't fail: of a read, or of a constant's value.
+            (
+                "call debug_table{r: (c where y > x) where x = 1}; \
+                 call debug_table{r: (c where y > x) where x = 2};"
+                    .to_string(),
+                &["c", "c"],
+            ),
+            // `g`'s value reads `c`, which its narrowed form adapts in turn.
+            (
+                "call debug_table{r: g where x = 1}; call debug_table{r: g where x = 2};"
+                    .to_string(),
+                &["g", "c", "g", "c"],
+            ),
+            (
+                "call debug_table{r: h where x = 1}; call debug_table{r: h where x = 2};"
                     .to_string(),
                 &[],
             ),
@@ -1533,6 +1592,30 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn a_restriction_of_a_restriction_is_one_by_both_conditions() {
+        // Of an AND, planned as one, so that each part restricts its operands as soon as it
+        // can, and of more than two.
+        assert_eq!(
+            planned(&f("(times{a, b} where x = 1) where y > 1")),
+            planned(&f("times{a, b} where x = 1 and y > 1"))
+        );
+        assert_eq!(
+            planned(&f("((d where x = 1) where y > 1) where x = y")),
+            "(d where x = 1 and y > 1 and x = y)"
+        );
+        // Not if the inner condition can fail, as it is computed for every tuple, though
+        // the outer one would decide the `and` without it; but the outer one can.
+        assert_eq!(
+            planned(&f("(d where 1 div x = 1) where y > 1")),
+            "((d where 1 div x = 1) where y > 1)"
+        );
+        assert_eq!(
+            planned(&f("(d where y > 1) where 1 div x = 1")),
+            "(d where y > 1 and 1 div x = 1)"
+        );
     }
 
     #[test]

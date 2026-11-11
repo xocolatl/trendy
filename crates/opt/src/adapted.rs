@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use trendy_hir as hir;
 
-use crate::{and_operands, guard_reads, is_and, names, without_site};
+use crate::{and_operands, guard_reads, is_and, names, restrictions_merged, without_site};
 
 /// The type of an expression, where it is.
 pub(crate) type TypeOf<'a> = dyn Fn(&hir::Expr) -> hir::Type + 'a;
@@ -81,6 +81,10 @@ impl Adapting<'_> {
     /// what reads that on the way, as a projection, a renaming or an extension
     /// of it, passing it on.
     fn narrowed(&self, expr: &hir::Expr) -> Option<hir::Adapted> {
+        // As it will be, once optimized.
+        if let Some(merged) = restrictions_merged(expr) {
+            return self.narrowed(&merged);
+        }
         let operands: &[&hir::Expr] = match expr {
             hir::Expr::Restrict(operand, _) => &[&**operand],
             hir::Expr::Semijoin(lhs, rhs)
@@ -110,10 +114,29 @@ impl Adapting<'_> {
     ///   ([`crate::Optimizer::planned`]), or joined with another AND, its operands each
     ///   joined with theirs, in the order the plan says.
     ///
-    /// What comes after narrows nothing else: through what passes a value on, as a
-    /// renaming or an extension of it, and as an antijoin needs all of it.
+    /// A value that reads another constant to adapt is that one's, which the narrowed
+    /// form adapts in turn, and a restriction of a restriction is the one it is merged
+    /// into ([`crate::restrictions_merged`]). What comes after narrows nothing else:
+    /// through what passes a value on, as a renaming or an extension of it, and as an
+    /// antijoin needs all of it.
     fn narrows(&self, narrowing: &hir::Expr, left: bool, value: &hir::Expr) -> bool {
         let value = without_site(value);
+        // A read of another such constant, whose value the narrowed form adapts in turn.
+        if let Some(of) = self.read_of(value) {
+            return self.narrows(narrowing, left, &self.values[&of]);
+        }
+        // A restriction of a restriction, as it will be once optimized.
+        if let hir::Expr::Restrict(_, condition) = narrowing
+            && let Some(merged) = restrictions_merged(&hir::Expr::Restrict(
+                Box::new(value.clone()),
+                condition.clone(),
+            ))
+        {
+            let hir::Expr::Restrict(restricted, _) = &merged else {
+                unreachable!("restrictions merged are a restriction");
+            };
+            return self.narrows(&merged, true, restricted);
+        }
         let closure = matches!(value, hir::Expr::Tclose(_));
         let shares = |other: &hir::Expr| {
             let (hir::Type::Relation(own), hir::Type::Relation(other)) =

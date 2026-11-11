@@ -1298,17 +1298,19 @@ too), or joined with a relation, or matched with one, that has an attribute of i
 paths are followed from that relation's values; and an AND, restricted by a guard that
 reads attributes of some of its operands, which restricts them as soon as they are
 joined (`Optimizer::planned`), or joined with another AND, whose operands are planned
-with its own. Nothing else is narrowed by what comes after, nor is a read through a
-projection, a renaming or an extension, whose narrowed form would compute all of it, and
-then, if another read needs all of it, the shared form would compute it again. The
-shared form reads any other such constant whole, and the narrowed one adapts the next in
-turn, so that what narrows `k` of them is written `k + 1` ways, not `2^k`. Each is
-planned as anything else is. One form of the two is computed, so a local variable read
-once in each is read once (`count_reads`), and a `Let`'s binding read once is written
-where it is read before any of this (`bindings_inlined`), so that it is in place in each
-form rather than copied into both. A constant with a key to check is always shared, as
-the key is of all of it, and what reads the constant, the planner among them, takes it
-to hold.
+with its own. A restriction of a restriction is judged as the one it is merged into, and
+a constant whose value reads another such constant by that one's value, which the
+narrowed form adapts in turn. Nothing else is narrowed by what comes after, nor is a
+read through a projection, a renaming or an extension, whose narrowed form would compute
+all of it, and then, if another read needs all of it, the shared form would compute it
+again. The shared form reads any other such constant whole, and the narrowed one adapts
+the next in turn, so that what narrows `k` of them is written `k + 1` ways, not `2^k`.
+Each is planned as anything else is. One form of the two is computed, so a local
+variable read once in each is read once (`count_reads`), and a `Let`'s binding read once
+is written where it is read before any of this (`bindings_inlined`), so that it is in
+place in each form rather than copied into both. A constant with a key to check is
+always shared, as the key is of all of it, and what reads the constant, the planner
+among them, takes it to hold.
 
 Lowering keeps a constant that is read in a static (`computed_constant`), with whether
 it has been computed, and a function that computes it, lowered as lowered code first
@@ -2221,6 +2223,16 @@ only its own (A0034). Not one with a key to check, nor statements. It keeps its
 declaration's site, so that a failure in it says where it is declared. A variable is
 computed where it is declared, as a failure in it would say otherwise: only one that
 renames what is read moves, which computes nothing.
+
+A restriction of a restriction, `(r where p) where q`, is one by both conditions,
+`r where p and q`, if `p` can't fail (`restrictions_merged`), so that a plan, a lookup
+and a closure's paths see both, and the tuples go through one loop. Every operand is
+computed, so `r where p` is computed for every tuple of `r`, and a `p` that can fail
+would fail for a tuple that `q` is false of, where `p and q` is decided without it; but
+`q` is computed only for the tuples `p` is true of either way, in the same canonical
+order, as a restriction's tuples have its operand's heading. Where `r where p` is
+computed, its site, stays around `r`, so that a failure in that says where it is
+written.
 
 An AND of relations, restricted or not, is planned (`Optimizer::planned`),
 as one AND of any number of operands, since a chain of `And`s is one
