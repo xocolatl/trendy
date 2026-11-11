@@ -18,6 +18,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use trendy_hir as hir;
 
+use crate::adapted::Adapting;
+
 /// `program`, with each constant that can be written where it is read written
 /// there, and then what narrows one that can be adapted written both ways, as it
 /// is once those are in their places. What it has no more reads of stays, and
@@ -41,10 +43,11 @@ pub(crate) fn constants_inserted(program: hir::Program) -> hir::Program {
     if adapted.is_empty() {
         return program;
     }
-    let adapting = Adapting {
-        program: &program,
-        adapted: &adapted,
-    };
+    let values: HashMap<hir::Adapted, hir::Expr> = adapted
+        .into_iter()
+        .map(|id| (hir::Adapted::Constant(id), value_of(&program, id)))
+        .collect();
+    let adapting = Adapting { values: &values };
     rewritten(&program, &|expr| adapting.expr(expr, None))
 }
 
@@ -301,78 +304,4 @@ fn value_of(program: &hir::Program, id: hir::ConstantId) -> hir::Expr {
     } else {
         value.treated(&constant.ty)
     }
-}
-
-/// Writes what narrows these constants, `adapted`, both ways.
-struct Adapting<'a> {
-    program: &'a hir::Program,
-    adapted: &'a HashSet<hir::ConstantId>,
-}
-
-impl Adapting<'_> {
-    /// `expr`, with what narrows a constant to adapt, but `shared`, written both
-    /// ways ([`hir::AdaptedRead`]), the outermost of what narrows it.
-    fn expr(&self, expr: hir::Expr, shared: Option<hir::ConstantId>) -> hir::Expr {
-        if let Some(id) = self.narrowed(&expr).filter(|id| Some(*id) != shared)
-            && reads_of(&expr, id) == 1
-        {
-            let narrowed = self.expr(self.with_value(expr.clone(), id), None);
-            let shared = expr.map_children(|child, _| self.expr(child, Some(id)));
-            return hir::Expr::AdaptedRead(Box::new(hir::AdaptedRead {
-                constant: id,
-                shared,
-                narrowed,
-            }));
-        }
-        expr.map_children(|child, _| self.expr(child, shared))
-    }
-
-    /// `expr`, with the value of the constant `id` in place of each read of it.
-    fn with_value(&self, expr: hir::Expr, id: hir::ConstantId) -> hir::Expr {
-        match expr {
-            hir::Expr::ComputedConstant(read, _) if read == id => value_of(self.program, id),
-            expr => expr.map_children(|child, _| self.with_value(child, id)),
-        }
-    }
-
-    /// The constant to adapt that `expr` narrows, if it does: a restriction of
-    /// it, or a join, a semijoin or an antijoin of it with another relation,
-    /// what reads it on the way, as a projection, a renaming or an extension
-    /// of it, passing it on.
-    fn narrowed(&self, expr: &hir::Expr) -> Option<hir::ConstantId> {
-        let operands: &[&hir::Expr] = match expr {
-            hir::Expr::Restrict(operand, _) => &[&**operand],
-            hir::Expr::Semijoin(lhs, rhs)
-            | hir::Expr::Antijoin(lhs, rhs)
-            | hir::Expr::And(lhs, rhs) => &[&**lhs, &**rhs],
-            _ => return None,
-        };
-        operands
-            .iter()
-            .find_map(|operand| self.read_through(operand))
-    }
-
-    /// The constant to adapt that `expr` reads, passing it on as it is or
-    /// narrowed, if it does.
-    fn read_through(&self, expr: &hir::Expr) -> Option<hir::ConstantId> {
-        match expr {
-            hir::Expr::ComputedConstant(id, _) if self.adapted.contains(id) => Some(*id),
-            hir::Expr::Remove(operand, _)
-            | hir::Expr::Rename(operand, _)
-            | hir::Expr::Extend(operand, ..)
-            | hir::Expr::Treat(_, operand)
-            | hir::Expr::At(_, operand) => self.read_through(operand),
-            _ => self.narrowed(expr),
-        }
-    }
-}
-
-/// How many times `expr` reads the constant `id`.
-fn reads_of(expr: &hir::Expr, id: hir::ConstantId) -> usize {
-    if matches!(expr, hir::Expr::ComputedConstant(read, _) if *read == id) {
-        return 1;
-    }
-    let mut reads = 0;
-    expr.for_each_child(|child, _| reads += reads_of(child, id));
-    reads
 }

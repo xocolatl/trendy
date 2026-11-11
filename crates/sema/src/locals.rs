@@ -448,6 +448,7 @@ pub(crate) fn assignable(
             ty,
             keys,
             constant: decl.is_const(),
+            deferred: false,
         },
         value,
     ))

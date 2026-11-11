@@ -11,11 +11,14 @@
 //! first needs it, so its failure happens there (see `language.md`'s "Constants").
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_hir as hir;
 
+mod adapted;
 mod inserted;
+
+use adapted::Adapting;
 
 /// `program`, optimized.
 #[must_use]
@@ -98,10 +101,20 @@ fn optimized_operator(program: &hir::Program, operator: &hir::Operator) -> hir::
         locals: operator.locals(),
     };
     let kind = match operator.kind.clone() {
-        hir::OperatorKind::Update { locals, body } => hir::OperatorKind::Update {
-            locals,
-            body: optimizer.values_written_where_read(body, None).0,
-        },
+        hir::OperatorKind::Update { locals, body } => {
+            let body = optimizer.values_written_where_read(body, None).0;
+            let mut deferred = BTreeSet::new();
+            let body = optimizer.locals_adapted(body, &mut deferred);
+            let locals = locals
+                .into_iter()
+                .enumerate()
+                .map(|(i, local)| hir::Local {
+                    deferred: deferred.contains(&hir::LocalId(i)),
+                    ..local
+                })
+                .collect();
+            hir::OperatorKind::Update { locals, body }
+        }
         kind => kind,
     };
     hir::Operator {
@@ -183,6 +196,62 @@ impl Optimizer<'_> {
             })
             .collect();
         (block, end)
+    }
+
+    /// `block`, and the blocks in it, with what narrows each local constant read more than
+    /// once written both ways ([`Adapting`]), for the program to choose as it runs, if
+    /// its value can be written where it is read and what that reads doesn't change while
+    /// `block` runs, as for [`Optimizer::named_value`]. Each such constant is added to
+    /// `deferred`, as one computed when a read first needs it ([`hir::Local::deferred`]).
+    fn locals_adapted(
+        &self,
+        block: hir::Block,
+        deferred: &mut BTreeSet<hir::LocalId>,
+    ) -> hir::Block {
+        let mut values = HashMap::new();
+        for (site, statement) in &block.statements {
+            let hir::Statement::Assign(assignments) = statement else {
+                continue;
+            };
+            let [
+                hir::Assignment {
+                    target: hir::Target::Local(id),
+                    value,
+                },
+            ] = &assignments[..]
+            else {
+                continue;
+            };
+            if block.locals.contains(id)
+                && block.times_assigned(*id) == 1
+                && self.locals[id.0].constant
+                && self.moves(*id, value)
+                && self.stays_while(value, &block)
+            {
+                values.insert(
+                    hir::Adapted::Local(*id),
+                    self.moved(*id, value, Some(*site)),
+                );
+            }
+        }
+        let mut block = if values.is_empty() {
+            block
+        } else {
+            let adapting = Adapting { values: &values };
+            block.map_exprs(&mut |expr| adapting.expr(expr, None))
+        };
+        block.for_each_expr(&mut |expr| adapted_locals(expr, deferred));
+        block.statements = block
+            .statements
+            .into_iter()
+            .map(|(site, statement)| {
+                (
+                    site,
+                    statement.map_blocks(&mut |inner| self.locals_adapted(inner, deferred)),
+                )
+            })
+            .collect();
+        block
     }
 
     /// The local variable the statement of `block` at `at` declares, and its value, at the
@@ -493,6 +562,16 @@ fn with_local_as(expr: hir::Expr, id: hir::LocalId, value: &hir::Expr) -> hir::E
         hir::Expr::Local(read) if read == id => value.clone(),
         expr => expr.map_children(|child, _| with_local_as(child, id, value)),
     }
+}
+
+/// Add to `deferred` each local constant an adapted read in `expr` narrows.
+fn adapted_locals(expr: &hir::Expr, deferred: &mut BTreeSet<hir::LocalId>) {
+    if let hir::Expr::AdaptedRead(read) = expr
+        && let hir::Adapted::Local(id) = read.of
+    {
+        deferred.insert(id);
+    }
+    expr.for_each_child(|child, _| adapted_locals(child, deferred));
 }
 
 /// Whether `expr` is an AND, at a site of its own or not, as a value written
@@ -1077,8 +1156,10 @@ mod tests {
 
     /// The constant each read in `expr` adapts, as [`adapted_reads`] says.
     fn adapted_in(expr: &hir::Expr, program: &hir::Program, names: &mut Vec<String>) {
-        if let hir::Expr::AdaptedRead(read) = expr {
-            let name = &program.constants[read.constant.0].name;
+        if let hir::Expr::AdaptedRead(read) = expr
+            && let hir::Adapted::Constant(id) = read.of
+        {
+            let name = &program.constants[id.0].name;
             let mut narrowed = Vec::new();
             reads(&read.narrowed, program, &mut narrowed);
             assert!(
@@ -1150,6 +1231,57 @@ mod tests {
         ] {
             assert_eq!(planned(&f_body(named)), planned(&f(written)), "{named}");
         }
+    }
+
+    #[test]
+    fn what_narrows_a_local_constant_read_more_than_once_is_written_both_ways() {
+        let reads = "call debug_table{r: t where x = 1}; call debug_table{r: t where x = 2};";
+        for (declared, adapted) in [
+            ("const t := a join d;", &["t", "t"][..]),
+            (
+                "const t := a join d; call debug_value{v: count{r: t}};",
+                &["t", "t"],
+            ),
+            // Not a variable, nor a constant with a key, which is of all of it, nor one whose
+            // value reads what changes before a read.
+            ("var t := a join d;", &[]),
+            ("const t := (a join d) key { x };", &[]),
+            ("var n := 1; const t := a where x = n; n := 2;", &[]),
+        ] {
+            let source = f_body(&format!("{declared} {reads}"));
+            let program = program(&source);
+            let f = program
+                .operators
+                .iter()
+                .find(|operator| operator.name == "f")
+                .expect("`f` is defined");
+            let hir::OperatorKind::Update { locals, body } = &f.kind else {
+                panic!("`f` is an update operator");
+            };
+            let mut names = Vec::new();
+            body.for_each_expr(&mut |expr| adapted_local_reads(expr, locals, &mut names));
+            assert_eq!(names, adapted, "{source}");
+            let deferred: Vec<&str> = locals
+                .iter()
+                .filter(|local| local.deferred)
+                .map(|local| local.name.as_str())
+                .collect();
+            assert_eq!(deferred, &adapted[..adapted.len().min(1)], "{source}");
+        }
+    }
+
+    /// The name of the local constant each adapted read in `expr` narrows, of `locals`.
+    fn adapted_local_reads(expr: &hir::Expr, locals: &[hir::Local], names: &mut Vec<String>) {
+        if let hir::Expr::AdaptedRead(read) = expr
+            && let hir::Adapted::Local(id) = read.of
+        {
+            assert!(
+                !read.narrowed.reads_local(id),
+                "it is read where it is narrowed"
+            );
+            names.push(locals[id.0].name.clone());
+        }
+        expr.for_each_child(|child, _| adapted_local_reads(child, locals, names));
     }
 
     #[test]

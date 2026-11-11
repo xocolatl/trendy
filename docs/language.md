@@ -3573,14 +3573,17 @@ operator main{} [
   [Evaluation](#evaluation)).
 - **A local constant has the value its expression has where it is declared,** from
   the parameters and variables then, each time that runs: in a loop, each time round.
-  But when it is computed is the compiler's to choose, as for the program's: if it has
-  one read, which runs once each time the declaration does, and nothing it reads
-  changes before then, it is as if its expression were written there, so that
-  `const t := r join s;` read as `t join u` is one join of three, in whatever order
-  costs least. So a failure in computing it can come after what runs before its read,
-  though it says it is where the constant is declared, and one read nowhere fails
-  nowhere. A local variable, `var`, is computed where it is declared. A `const`
-  parameter is the same thing, the value its caller gives.
+  But when it is computed is the compiler's to choose, as for the program's, if nothing
+  it reads changes before its reads. If it has one read, which runs once each time the
+  declaration does, it is as if its expression were written there, so that `const t :=
+  r join s;` read as `t join u` is one join of three, in whatever order costs least. If
+  it has more, in an operator's body, a read that narrows it computes only what it needs
+  the first time it runs after the declaration does, and from its next run on the
+  constant is computed whole, once, and shared, as a constant of the program's is. So a
+  failure in computing it can come after what runs before its read, though it says it is
+  where the constant is declared, and one read nowhere fails nowhere. A local variable,
+  `var`, is computed where it is declared, and so is a constant with a key, which is of
+  all of it. A `const` parameter is the same thing, the value its caller gives.
 - **It has its value where it is declared** (A0080), as nothing could give it one
   later: `const limit: integer;` is an error, and a variable is what starts at its
   type's default. But an interface can leave it to the implementation, as an

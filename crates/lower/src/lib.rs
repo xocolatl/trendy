@@ -1597,6 +1597,9 @@ struct FunctionBuilder<'a> {
     /// no particular order (see [`FunctionBuilder::loose_place`]), or sorted otherwise
     /// (see [`FunctionBuilder::sorted_place`]).
     local_orders: HashMap<hir::LocalId, Order>,
+    /// Each local constant computed when a read first needs it ([`hir::Local::deferred`]),
+    /// as its declaration last lowered left it.
+    deferred: HashMap<hir::LocalId, Deferred>,
     /// The blocks' local variables that can be so, when they are assigned, with what all
     /// that reads each wants: any order, or a sorted one (see
     /// [`FunctionBuilder::note_loose_locals`]).
@@ -1909,6 +1912,29 @@ struct LocalPlace {
     holds: bool,
 }
 
+/// A local constant computed when a read first needs it ([`hir::Local::deferred`]), as its
+/// declaration leaves it each time it runs.
+struct Deferred {
+    /// Its value, as a read of it computes it.
+    value: hir::Expr,
+    /// Whether it has been computed since its declaration ran.
+    computed: lir::Place,
+    /// A bit of an integer for each read that narrows it ([`hir::Expr::AdaptedRead`]), by
+    /// the order they are lowered in, the last for all those past it, as nothing but
+    /// what is computed depends on it: whether the read has run since its declaration did.
+    ran: lir::Place,
+    /// How many of those reads are lowered.
+    reads: u32,
+}
+
+/// What says whether a read that narrows a constant has run ([`FunctionBuilder::read_ran`]).
+enum Ran {
+    /// A static of the read's own, of a constant of the program's.
+    Static(lir::Place),
+    /// The read's bit, `bit`, of `reads`, of a local constant ([`Deferred::ran`]).
+    Bit { reads: lir::Place, bit: lir::Place },
+}
+
 /// The slots what puts failures aside keeps what it knows in, as it runs: the loop of
 /// [`FunctionBuilder::each_at_hand_failing_first`], or the steps of
 /// [`FunctionBuilder::steps_put_aside`].
@@ -2124,6 +2150,7 @@ impl<'a> FunctionBuilder<'a> {
             outer_scope: None,
             last_read: Vec::new(),
             local_orders: HashMap::new(),
+            deferred: HashMap::new(),
             local_wants: HashMap::new(),
             local_leading: HashMap::new(),
         };
@@ -2422,7 +2449,7 @@ impl<'a> FunctionBuilder<'a> {
         self.note_loose_locals(block, None);
         self.exits.push(Exit::Block(block.locals.clone()));
         if let Some(((site, last), statements)) = block.statements.split_last() {
-            let last_mentioned = last_mentioned(block, None);
+            let last_mentioned = last_mentioned(block, None, &self.locals);
             for (at, (site, statement)) in statements.iter().enumerate() {
                 self.at(Some(*site), cx);
                 self.statement(statement, cx);
@@ -2461,7 +2488,7 @@ impl<'a> FunctionBuilder<'a> {
     /// is computed from them when it has run, so that a relation lasts no longer than its
     /// last use, as a binding's does (see [`FunctionBuilder::let_chain`]).
     fn statements_of(&mut self, block: &hir::Block, end: Option<&hir::Expr>, cx: &mut Lowering) {
-        let last_mentioned = last_mentioned(block, end);
+        let last_mentioned = last_mentioned(block, end, &self.locals);
         for (at, (site, statement)) in block.statements.iter().enumerate() {
             self.at(Some(*site), cx);
             self.statement(statement, cx);
@@ -3191,10 +3218,23 @@ impl<'a> FunctionBuilder<'a> {
                 this.call(call, cx);
                 this.constraints_checked(&assigns, cx);
             }),
-            hir::Statement::Assign(assignments) => self.scoped(|this| {
-                this.assign(assignments, cx);
-                this.constraints_checked(&assigns, cx);
-            }),
+            hir::Statement::Assign(assignments) => {
+                if let [
+                    hir::Assignment {
+                        target: hir::Target::Local(id),
+                        value,
+                    },
+                ] = &assignments[..]
+                    && self.locals[id.0].deferred
+                {
+                    self.defer(*id, value, cx);
+                    return;
+                }
+                self.scoped(|this| {
+                    this.assign(assignments, cx);
+                    this.constraints_checked(&assigns, cx);
+                });
+            }
             hir::Statement::If(condition, then, otherwise) => {
                 self.if_statement(condition, [then, otherwise], Self::block, cx);
             }
@@ -5931,39 +5971,33 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let layout = cx.layout(&self.type_of(expr));
-        let constant = computed_constant(self.program, self.variable_data, read.constant, cx);
-        // Whether this read has run, of each place it is lowered at.
-        let name = format!("__read_{}", cx.data.len());
-        let ran = in_data(cx.push(lir::Data {
-            kind: lir::DataKind::Variable { name },
-            writable: true,
-            fields: vec![lir::Field::U8(0)],
-        }));
         let dst = self.slot(layout.clone());
         let [shared, uncomputed, first, narrowed, after] =
             std::array::from_fn(|_| self.new_block());
+        let computed = match read.of {
+            hir::Adapted::Constant(id) => {
+                computed_constant(self.program, self.variable_data, id, cx).computed()
+            }
+            hir::Adapted::Local(id) => self.deferred[&id].computed.clone(),
+        };
         self.end_block(
             lir::Terminator::Branch {
-                condition: constant.computed(),
+                condition: computed,
                 then: shared,
                 otherwise: uncomputed,
             },
             uncomputed,
         );
+        let (ran, mark) = self.read_ran(read.of, cx);
         self.end_block(
             lir::Terminator::Branch {
-                condition: ran.clone(),
+                condition: ran,
                 then: shared,
                 otherwise: first,
             },
             first,
         );
-        let one = u8_constant(1, cx);
-        self.insts.push(lir::Inst::Copy {
-            dst: ran,
-            src: one,
-            layout: lir::Layout::U8,
-        });
+        self.mark_ran(mark, cx);
         self.end_block(lir::Terminator::Jump(narrowed), shared);
         for (form, next) in [(&read.shared, narrowed), (&read.narrowed, after)] {
             let src = self.place(form, cx);
@@ -5975,6 +6009,72 @@ impl<'a> FunctionBuilder<'a> {
             self.end_block(lir::Terminator::Jump(after), next);
         }
         dst
+    }
+
+    /// Whether a read that narrows `of` ([`FunctionBuilder::adapted_read`]) has run,
+    /// and what says so, for [`FunctionBuilder::mark_ran`]: of a constant of the
+    /// program's, a static of its own, for the whole run, and of a local one, its bit
+    /// of what the constant's declaration resets ([`Deferred::ran`]).
+    fn read_ran(&mut self, of: hir::Adapted, cx: &mut Lowering) -> (lir::Place, Ran) {
+        match of {
+            hir::Adapted::Constant(_) => {
+                let name = format!("__read_{}", cx.data.len());
+                let ran = in_data(cx.push(lir::Data {
+                    kind: lir::DataKind::Variable { name },
+                    writable: true,
+                    fields: vec![lir::Field::U8(0)],
+                }));
+                (ran.clone(), Ran::Static(ran))
+            }
+            hir::Adapted::Local(id) => {
+                let deferred = self
+                    .deferred
+                    .get_mut(&id)
+                    .expect("a local constant is read after its declaration");
+                let bit = 1_i64 << deferred.reads.min(62);
+                deferred.reads += 1;
+                let reads = deferred.ran.clone();
+                let bit = self.place(&hir::Expr::Constant(hir::Value::Integer(bit)), cx);
+                let (own, ran) = (self.slot(lir::Layout::I64), self.slot(lir::Layout::U8));
+                self.insts.push(lir::Inst::Binary {
+                    dst: own.clone(),
+                    op: lir::BinaryOp::And(lir::Bits::Integer),
+                    lhs: reads.clone(),
+                    rhs: bit.clone(),
+                });
+                let none = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
+                self.insts.push(lir::Inst::Binary {
+                    dst: ran.clone(),
+                    op: lir::BinaryOp::Compare(
+                        lir::Comparison::NotEqual,
+                        lir::Operand::Numeric(lir::Numeric::Integer),
+                    ),
+                    lhs: own,
+                    rhs: none,
+                });
+                (ran, Ran::Bit { reads, bit })
+            }
+        }
+    }
+
+    /// Record that the read `ran` says of has run.
+    fn mark_ran(&mut self, ran: Ran, cx: &mut Lowering) {
+        match ran {
+            Ran::Static(ran) => {
+                let one = u8_constant(1, cx);
+                self.insts.push(lir::Inst::Copy {
+                    dst: ran,
+                    src: one,
+                    layout: lir::Layout::U8,
+                });
+            }
+            Ran::Bit { reads, bit } => self.insts.push(lir::Inst::Binary {
+                dst: reads.clone(),
+                op: lir::BinaryOp::Or(lir::Bits::Integer),
+                lhs: reads,
+                rhs: bit,
+            }),
+        }
     }
 
     /// Where the parameter `name` is, among the arguments the function is given,
@@ -5991,6 +6091,83 @@ impl<'a> FunctionBuilder<'a> {
             .unwrap_or_else(|| lir::Place::whole(lir::Base::Params));
         parameter.path.push(index);
         parameter
+    }
+
+    /// The declaration of the local constant `id`, of `value`, computed when a read first
+    /// needs it ([`hir::Local::deferred`]): nothing has computed it since, nor run a read of
+    /// it that narrows it. It holds nothing here, as what it held as its declaration last
+    /// ran was given up after the block's last statement to mention it, or as the block
+    /// was left, and it is null, as it is from the function's entry on, so that a read
+    /// that comes to it before anything computes it, as none does, would find nothing.
+    fn defer(&mut self, id: hir::LocalId, value: &hir::Expr, cx: &mut Lowering) {
+        if let Some(LocalPlace {
+            value: slot,
+            holds: true,
+        }) = self.local_places[id.0].clone()
+        {
+            let layout = cx.layout(&self.locals[id.0].ty);
+            self.insts.push(lir::Inst::Copy {
+                dst: slot,
+                src: zero_constant(&layout, cx),
+                layout,
+            });
+        }
+        let (computed, ran) = (self.slot(lir::Layout::U8), self.slot(lir::Layout::I64));
+        let none = u8_constant(0, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: computed.clone(),
+            src: none,
+            layout: lir::Layout::U8,
+        });
+        let none = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: ran.clone(),
+            src: none,
+            layout: lir::Layout::I64,
+        });
+        self.deferred.insert(
+            id,
+            Deferred {
+                value: value.clone(),
+                computed,
+                ran,
+                reads: 0,
+            },
+        );
+    }
+
+    /// Where the local variable `id` is, and how its tuples are ordered, as
+    /// [`FunctionBuilder::local_place`] says, once it has its value: one computed when a
+    /// read first needs it is computed here if nothing has since its declaration ran,
+    /// assigned as its declaration would.
+    fn read_local(&mut self, id: hir::LocalId, cx: &mut Lowering) -> (lir::Place, Order) {
+        if let Some(deferred) = self.deferred.get(&id) {
+            let (computed, value) = (deferred.computed.clone(), deferred.value.clone());
+            let (compute, after) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: computed.clone(),
+                    then: after,
+                    otherwise: compute,
+                },
+                compute,
+            );
+            self.assign(
+                &[hir::Assignment {
+                    target: hir::Target::Local(id),
+                    value,
+                }],
+                cx,
+            );
+            let one = u8_constant(1, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: computed,
+                src: one,
+                layout: lir::Layout::U8,
+            });
+            self.end_block(lir::Terminator::Jump(after), after);
+        }
+        self.local_place(id)
     }
 
     /// Where the local variable `id` is, and how its tuples are ordered, if it is a
@@ -6338,7 +6515,7 @@ impl<'a> FunctionBuilder<'a> {
                 given
             }
             hir::Expr::Local(id) => {
-                let (place, order) = self.local_place(*id);
+                let (place, order) = self.read_local(*id, cx);
                 if matches!(order, Order::Loose | Order::Repeated) {
                     let ty = self.locals[id.0].ty.clone();
                     (self.canonical(place, order, &ty, cx), Order::Canonical)
@@ -6398,7 +6575,7 @@ impl<'a> FunctionBuilder<'a> {
     /// [`FunctionBuilder::each_at_hand_in`]).
     fn loose_place(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> (lir::Place, Order) {
         match expr {
-            hir::Expr::Local(id) => self.local_place(*id),
+            hir::Expr::Local(id) => self.read_local(*id, cx),
             hir::Expr::At(site, inner) => {
                 let outer = self.site;
                 self.at(Some(*site), cx);
@@ -6836,7 +7013,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::ComputedConstant(id, _) => self.constant_read(*id, cx),
             hir::Expr::AdaptedRead(read) => self.adapted_read(expr, read, cx),
             hir::Expr::Local(id) => {
-                let (place, order) = self.local_place(*id);
+                let (place, order) = self.read_local(*id, cx);
                 let ty = self.locals[id.0].ty.clone();
                 self.canonical(place, order, &ty, cx)
             }
@@ -11416,18 +11593,45 @@ fn arcs_of_closure(mut expr: &hir::Expr) -> Option<&hir::Expr> {
     }
 }
 
-/// Each local variable of `block` that the block holds to no later than one of its
-/// statements, with where that is: the last that mentions it, unless `end`, what is computed
-/// from them when they have run, reads it too. A statement in a loop in the block runs again,
-/// but is one statement of it, so what it mentions lasts as long as the loop does.
-fn last_mentioned(block: &hir::Block, end: Option<&hir::Expr>) -> Vec<(hir::LocalId, usize)> {
+/// Each local variable of `block`, of `locals`, that the block holds to no later than one
+/// of its statements, with where that is: the last that mentions it, unless `end`, what is
+/// computed from them when they have run, reads it too. A statement in a loop in the block
+/// runs again, but is one statement of it, so what it mentions lasts as long as the loop
+/// does. One that mentions a local constant the block declares, computed when a read first
+/// needs it ([`hir::Local::deferred`]), mentions what its value reads too, as a read
+/// computes it there.
+fn last_mentioned(
+    block: &hir::Block,
+    end: Option<&hir::Expr>,
+    locals: &[hir::Local],
+) -> Vec<(hir::LocalId, usize)> {
+    let deferred: Vec<(hir::LocalId, &hir::Expr)> = block
+        .statements
+        .iter()
+        .filter_map(|(_, statement)| match statement {
+            hir::Statement::Assign(assignments) => match &assignments[..] {
+                [
+                    hir::Assignment {
+                        target: hir::Target::Local(id),
+                        value,
+                    },
+                ] if locals[id.0].deferred => Some((*id, value)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
     block
         .locals
         .iter()
         .filter(|id| end.is_none_or(|end| !end.reads_local(**id)))
         .filter_map(|id| {
-            let mentions =
-                |(_, statement): &(hir::Site, hir::Statement)| statement.mentions_local(*id);
+            let mentions = |(_, statement): &(hir::Site, hir::Statement)| {
+                statement.mentions_local(*id)
+                    || deferred.iter().any(|(constant, value)| {
+                        value.reads_local(*id) && statement.mentions_local(*constant)
+                    })
+            };
             let last = block.statements.iter().rposition(mentions)?;
             Some((*id, last))
         })
@@ -14494,12 +14698,14 @@ mod tests {
             ty: hir::Type::Relation(heading.clone()),
             keys: vec![["v".to_string()].into()],
             constant: false,
+            deferred: false,
         };
         let n = hir::Local {
             name: "n".to_string(),
             ty: integer(),
             keys: Vec::new(),
             constant: false,
+            deferred: false,
         };
         let declared = |id, value| {
             hir::Statement::Assign(vec![hir::Assignment {
@@ -14586,6 +14792,7 @@ mod tests {
             ty,
             keys: Vec::new(),
             constant: false,
+            deferred: false,
         };
         let declared = |id, value| {
             hir::Statement::Assign(vec![hir::Assignment {
@@ -14778,6 +14985,7 @@ mod tests {
                     ty: integer(),
                     keys: Vec::new(),
                     constant: false,
+                    deferred: false,
                 }],
                 value,
             },
@@ -14843,6 +15051,7 @@ mod tests {
             ty: text(),
             keys: Vec::new(),
             constant: false,
+            deferred: false,
         };
         let f = hir::Operator {
             versions: Vec::new(),
@@ -15459,6 +15668,7 @@ mod tests {
             ty: hir::Type::Scalar(hir::Scalar::Text),
             keys: Vec::new(),
             constant: false,
+            deferred: false,
         };
         let condition = hir::Expr::Binary(
             hir::BinaryOp::Compare(

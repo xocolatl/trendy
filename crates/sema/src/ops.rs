@@ -2787,7 +2787,7 @@ fn substituted_adapted(
     }
     let shared = substitute(read.shared, depth, substitution)?;
     Ok(hir::Expr::AdaptedRead(Box::new(hir::AdaptedRead {
-        constant: read.constant,
+        of: read.of,
         shared,
         narrowed,
     })))

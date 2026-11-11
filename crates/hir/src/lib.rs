@@ -280,6 +280,12 @@ pub struct Local {
     /// compiler chooses, as a constant of the program's is, rather than where it is
     /// declared, so that a failure in it may happen later, or not at all.
     pub constant: bool,
+    /// Whether it is computed when a read first needs it, at most once each time its
+    /// declaration runs, rather than where it is declared: a constant read more than
+    /// once, which opt makes so where nothing it reads changes until its reads, so
+    /// that a read that narrows it can compute only what it needs
+    /// ([`Expr::AdaptedRead`]).
+    pub deferred: bool,
 }
 
 impl Local {
@@ -291,6 +297,7 @@ impl Local {
             ty: self.ty.instantiated(types),
             keys: self.keys.clone(),
             constant: self.constant,
+            deferred: self.deferred,
         }
     }
 }
@@ -3059,7 +3066,8 @@ pub enum Expr {
     /// far as what narrows it needs. The two have the same value, and fail
     /// alike, as narrowing never leaves out what can fail, but running out of
     /// memory, which the whole can where its narrowed form doesn't. Opt makes
-    /// it, of a constant with no key to check ([`AdaptedRead`]).
+    /// it, of a constant with no key to check, the program's or a local one
+    /// ([`AdaptedRead`]).
     AdaptedRead(Box<AdaptedRead>),
     /// The value of the expression, as a value of the type, a subtype of
     /// its type: TREAT down (IM Prescription 14), which fails unless the
@@ -4626,12 +4634,21 @@ pub struct Constant {
 /// runs (see [`Expr::AdaptedRead`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdaptedRead {
-    pub constant: ConstantId,
-    /// It, reading the constant ([`Expr::ComputedConstant`]), computed whole
-    /// once.
+    pub of: Adapted,
+    /// It, reading the constant ([`Expr::ComputedConstant`], or [`Expr::Local`]
+    /// of one [`Local::deferred`]), computed whole once.
     pub shared: Expr,
     /// It, with the constant's expression in place of that read.
     pub narrowed: Expr,
+}
+
+/// The constant an [`AdaptedRead`] narrows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Adapted {
+    /// One of the program's.
+    Constant(ConstantId),
+    /// A local one, [`Local::deferred`].
+    Local(LocalId),
 }
 
 impl AdaptedRead {
@@ -4639,7 +4656,7 @@ impl AdaptedRead {
     #[must_use]
     pub fn mapped(self, mut f: impl FnMut(Expr) -> Expr) -> AdaptedRead {
         AdaptedRead {
-            constant: self.constant,
+            of: self.of,
             shared: f(self.shared),
             narrowed: f(self.narrowed),
         }

@@ -1456,6 +1456,49 @@ operator main{} [
     );
 }
 
+/// A local constant read more than once is computed as a constant of the program's is: as far
+/// as a read that narrows it needs the first time it runs, and from its next run on whole,
+/// when a read first needs it, and then shared, each time its declaration runs. What its value
+/// reads is kept as long as a read can compute it: `edges` here, mentioned last before the
+/// read of all of `reach`, which can compute it. One whose value reads what changes before its
+/// reads, as `below` does, has the value it has where it is declared.
+#[test]
+fn a_local_constant_read_more_than_once_is_computed_as_far_as_each_read_needs() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const s := length{a: arguments} + 1;
+    const edges := series{from: s, to: 30} rename {value as a} extend { b := a + 1 };
+    call debug_value{v: count{r: edges}};
+    const reach := edges tclose;
+    call debug_value{v: count{r: reach where a = s}};
+    call debug_value{v: count{r: reach where a = s + 1}};
+    for start in array [1, 2, 3] loop [
+        call debug_value{v: count{r: reach where a = start}};
+    ];
+    for round in array [1, 2] loop [
+        const shifted := edges extend { c := a + round };
+        call debug_value{v: count{r: shifted where c = 3}};
+        call debug_value{v: count{r: shifted where c = 4}};
+    ];
+    call debug_value{v: count{r: reach}};
+    var limit := 3;
+    const below := series{from: s, to: 10} where value <= limit;
+    limit := 10;
+    call debug_value{v: count{r: below where value >= 2}};
+    call debug_value{v: count{r: below where value >= 1}};
+];
+";
+    let ran = ran_source("adapted_locals", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr.lines().collect::<Vec<_>>(),
+        [
+            "30", "30", "29", "30", "29", "28", "1", "1", "1", "1", "465", "2", "3"
+        ]
+    );
+}
+
 /// A constant's key is of all of it, and what reads it takes it to hold, the optimizer
 /// among them, so one broken anywhere fails every read, though the tuples a read narrows
 /// the constant to are fine.
@@ -1472,6 +1515,25 @@ operator main{} [
 ];
 ";
     let ran = ran_source("keyed_reads", source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert!(
+        ran.stderr.starts_with(
+            "error[R0008]: two tuples of `parities` have the same values for its key { parity }"
+        ),
+        "{}",
+        ran.stderr
+    );
+    // A local one too.
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const s := length{a: arguments} + 1;
+    const parities := series{from: s, to: 5} extend { parity := value mod 2 } key { parity };
+    call debug_value{v: parities where value = s};
+    call debug_value{v: parities where value = s + 1};
+];
+";
+    let ran = ran_source("keyed_local_reads", source, b"");
     assert_eq!(ran.code, 1, "{}", ran.stderr);
     assert!(
         ran.stderr.starts_with(
@@ -11875,6 +11937,9 @@ fn constants() {
             "5",
             "4",
             "3",
+            // The trail from stone 1, and the one to stone 3.
+            "1",
+            "1",
             "-1e0",
         ]
     );
@@ -14463,7 +14528,8 @@ fn a_join_of_several_gives_up_what_it_makes_on_the_way() {
 
 /// Operands that nothing else reads are given up as soon as they are joined, before what they
 /// make is joined with the rest, which is what takes most of the memory here. A `const` read
-/// again later can't be, which is what the two are compared with.
+/// whole before it is joined, which computes it then and keeps it, can't be, which is what
+/// the two are compared with.
 #[test]
 fn a_join_of_several_gives_up_what_it_has_joined() {
     let wide = "series{from: 1, to: LEFT} extend { k := value * one, a1 := value, a2 := value, a3 := value } remove {value}";
@@ -14472,12 +14538,12 @@ fn a_join_of_several_gives_up_what_it_has_joined() {
     let left = 400_000;
     let program =
         |body: String| format!("operator main{{}} [\n    var one := 1;\n    {rest}\n{body}\n];\n");
-    let read_later = peak_memory_of(
-        "several_read_later",
+    let kept = peak_memory_of(
+        "several_kept",
         &program(format!(
             "    const wide := {wide};
-    call debug_value{{v: count{{r: join{{wide, keys, many}}}}}};
-    call debug_value{{v: count{{r: wide}}}};"
+    call debug_value{{v: count{{r: wide}}}};
+    call debug_value{{v: count{{r: join{{wide, keys, many}}}}}};"
         )),
         left,
     );
@@ -14499,8 +14565,8 @@ fn a_join_of_several_gives_up_what_it_has_joined() {
     ] {
         let peak = peak_memory_of(name, &program(body), left);
         assert!(
-            peak < read_later - read_later / 8,
-            "{name}: {peak} bytes at the peak, and {read_later} with the operand kept"
+            peak < kept - kept / 8,
+            "{name}: {peak} bytes at the peak, and {kept} with the operand kept"
         );
     }
 }

@@ -65,6 +65,10 @@ operator main{} [
     for stone in array [1, 2, 3] loop [
         call debug_value{v: count{r: reachable where start = stone}};
     ];
+    /* So is a constant in a body, each time its declaration runs. */
+    const ahead := milestones join (trails rename {start as stone});
+    call debug_value{v: count{r: ahead where stone = 1}};
+    call debug_value{v: count{r: ahead where next = 3}};
     /* The prelude's `pi` is one too. */
     call debug_value{v: cos{of: pi}};
 ];
