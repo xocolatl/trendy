@@ -2763,6 +2763,64 @@ pub unsafe extern "C" fn trendy_rt_equal_run(
     }
 }
 
+/// Store at `found` 1, and at `dst` the tuples of the relation at `src`, which `desc`
+/// describes, whose `*on_count` attributes `on` are equal to those of the tuple at `values`,
+/// in the order they are in `src`, in memory the statement owns, if `src` has an index on
+/// them that the program keeps, or has now earned one (`Kept`): found by binary search in
+/// it. Otherwise store 0 at `found`, and nothing at `dst`, as the caller goes through all of
+/// the tuples, which counts towards earning one.
+///
+/// # Safety
+///
+/// `src` must hold a relation `desc` describes, and `values` a tuple, of whose attributes
+/// each of `on`, `*on_count` of them, gives the offset in a tuple of the relation, its
+/// offset in `values`, and its type's descriptor.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_kept_lookup(
+    dst: *mut Text,
+    src: *const u8,
+    values: *const u8,
+    desc: *const TypeDesc,
+    on: *const Common,
+    on_count: *const usize,
+    found: *mut u8,
+) -> bool {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout of the value
+    // it describes, and each position in the index is of one of the tuples.
+    status(|| unsafe {
+        let desc = &*desc;
+        let (tuples, count) = read_slice(src);
+        let common = array(on, on_count.read_unaligned());
+        let size = desc.element().size;
+        let operand = Operand {
+            tuples,
+            count,
+            size,
+            is_lhs: true,
+            in_order: false,
+            sorts_here: None,
+        };
+        let Some(positions) = KEPT.positions(common, operand, 1) else {
+            found.write(0);
+            return Ok(());
+        };
+        let tuple = |i: usize| tuples.add(positions[i] as usize * size);
+        let compared = |i: usize| on_common(common, (tuple(i), true), (values, false));
+        let start = partition_point(0, count, |i| compared(i).is_lt());
+        let end = partition_point(start, count, |i| compared(i).is_eq());
+        // Those that agree are in the order they are in `src`, by position.
+        let (bytes, len) = made_in_order(end - start, desc, |out| {
+            for (k, i) in (start..end).enumerate() {
+                core::ptr::copy_nonoverlapping(tuple(i), out.add(k * size), size);
+            }
+        })?;
+        dst.write_unaligned(Text { bytes, len });
+        found.write(1);
+        Ok(())
+    })
+}
+
 /// The first of `start..end` for which `before` is false, all those before
 /// it being those for which it is true, by binary search.
 #[cfg(not(test))]

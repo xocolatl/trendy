@@ -2748,6 +2748,16 @@ the address and number of the tuples, so it must go when those stop meaning the 
 tuples: `release_buffer` when the buffer is freed, and `with_room` and `removed_from`,
 the only things that change a relation's tuples where they are.
 
+A restriction earns one the same way, for what its condition equates to values that
+can't fail that its operand's order doesn't begin with, as when another lookup's order,
+or canonical order, is the one it is kept in (`FunctionBuilder::kept_lookup`): it asks
+`trendy_rt_kept_lookup` for those tuples first, which finds them by binary search in the
+index, if there is one or has now been earned, and copies them out, in the order they
+are in the operand, as the index has those that agree in the order they are in. If there
+is none, it says so, and the restriction goes through all of them, as before, which
+counts towards earning one; either way, with all of its condition. Below `KEPT_FROM`
+tuples, it says so at once.
+
 The plan fixed when compiling (see opt) knows nothing of how big anything is, and what
 it makes on the way can be far larger than another order would. So an AND of at least
 three operands with nothing between them (`several_joined`) can choose

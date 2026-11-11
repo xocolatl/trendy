@@ -529,8 +529,8 @@ fn runtime_loosely(
             arrange(arranged, args.first(), result);
         }
         // It searches the relation as the descriptor says it is sorted, and its run is a
-        // part of it, sorted alike.
-        RuntimeFn::EqualRun => {
+        // part of it, sorted alike; a kept lookup's tuples are in the order they are in it.
+        RuntimeFn::EqualRun | RuntimeFn::KeptLookup => {
             let described = arranged_as(args.get(3), data);
             if let Some(src) = args.get(1) {
                 read_as(src, described, arranged, found);
@@ -1272,6 +1272,14 @@ runtime_functions! {
     /// them: the address of the first in `src`'s buffer, and their number,
     /// so only to be read while `src` holds them.
     EqualRun => "trendy_rt_equal_run", false;
+    /// `trendy_rt_kept_lookup(dst, src, values, descriptor, on, on_count, found)`: store
+    /// at `found` (a [`Layout::U8`]) 1, and at `dst` the tuples of the relation at `src`,
+    /// of the type the descriptor describes, sorted as it says, whose attributes `on`, an
+    /// array of `on_count` structs as [`RuntimeFn::And`]'s `common`, are equal to those of
+    /// the tuple `values`, in the order they are in `src`, in memory the statement owns,
+    /// if the runtime keeps an index of `src` on them, or `src` has now earned one; and
+    /// otherwise 0, storing nothing at `dst`, for the caller to go through all of it.
+    KeptLookup => "trendy_rt_kept_lookup", true;
     /// `trendy_rt_ungroup(dst, src, result, source, sources, ungrouped,
     /// ungrouped_count)`: store at `dst` the relation, of the type the
     /// descriptor `result` describes, of every tuple made of a tuple of
@@ -1444,6 +1452,7 @@ impl RuntimeFn {
                 | RuntimeFn::And
                 | RuntimeFn::Index
                 | RuntimeFn::EqualRun
+                | RuntimeFn::KeptLookup
                 | RuntimeFn::Ungroup
                 | RuntimeFn::Matching
                 | RuntimeFn::Tclose
@@ -2837,6 +2846,7 @@ mod tests {
         for function in [
             RuntimeFn::Combine,
             RuntimeFn::EqualRun,
+            RuntimeFn::KeptLookup,
             RuntimeFn::Index,
             RuntimeFn::Tclose,
             RuntimeFn::DebugValue,

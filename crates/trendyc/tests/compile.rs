@@ -10470,6 +10470,68 @@ operator main{} [
     }
 }
 
+/// A local looked up again by two attributes is kept sorted by one, and the other earns an
+/// index the runtime keeps, once it has been gone through about as often as sorting it would
+/// take: so each of 50,000 lookups by each finds its tuple by a binary search, where one of
+/// them went through all of them, which took most of a minute.
+#[test]
+fn a_local_looked_up_by_two_attributes_earns_an_index_for_the_other() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 50000;
+    const r := series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value};
+    var found := 0;
+    var i := 0;
+    while i < n loop [
+        found := found + count{r: r where k = i} + count{r: r where v = i};
+        i := i + 1;
+    ];
+    call debug_value{v: found};
+];
+";
+    let start = std::time::Instant::now();
+    let ran = ran_source("kept_lookup", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(ran.stderr.trim(), "99999");
+    let taken = start.elapsed();
+    assert!(taken.as_secs() < 5, "{taken:?}");
+}
+
+/// What a kept index finds is in the order it is in what it indexes, which here a union of it
+/// with itself relies on, merging the two, and it follows what changes that: here a variable's
+/// tuples, deleted and inserted where they are.
+#[test]
+fn what_a_kept_index_finds_is_as_what_it_indexes_is() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 20000;
+    var r := series{from: 1, to: n} extend { k := value, v := value mod 100, w := value mod 7 } remove {value};
+    var same := 0;
+    var i := 0;
+    while i < 100 loop [
+        same := same + count{r: (r where v = i and w = 3) union (r where v = i and w = 3)}
+            + count{r: r where k = i};
+        i := i + 1;
+    ];
+    call debug_value{v: same};
+    delete r where w = 3;
+    insert r relation { { k: n + 1, v: 5, w: 3 } };
+    var after := 0;
+    i := 0;
+    while i < 100 loop [
+        after := after + count{r: r where v = i and w = 3} + count{r: r where k = i};
+        i := i + 1;
+    ];
+    call debug_value{v: after};
+];
+";
+    let ran = ran_source("kept_lookup_order", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(ran.stderr, "2956\n86\n");
+}
+
 /// A condition restricts what the operation it restricts computes from only as far as it
 /// would be the same and fail the same: not what can fail, whose first tuple to fail is the
 /// first in canonical order of what it restricts, by `b` and then `z` here, rather than by

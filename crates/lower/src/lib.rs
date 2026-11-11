@@ -8035,7 +8035,15 @@ impl<'a> FunctionBuilder<'a> {
         // Tuples that agree are together only if they are sorted, by the attributes their
         // sort order begins with.
         let (src, condition) = if matches!(order, Order::Canonical | Order::SortedBy(_)) {
-            self.equal_runs(whole.clone(), &ty, order, heading, condition, cx)
+            let (src, condition) =
+                self.equal_runs(whole.clone(), &ty, order, heading, condition, cx);
+            // What it equates that its order doesn't begin with, an index can find.
+            let src = if src == whole {
+                self.kept_lookup(src, &ty, order, &condition, cx)
+            } else {
+                src
+            };
+            (src, condition)
         } else {
             (whole.clone(), condition.clone())
         };
@@ -8412,6 +8420,95 @@ impl<'a> FunctionBuilder<'a> {
         }
         let rest = rest.into_iter().cloned().collect();
         (src, hir::Connective::And.of(rest))
+    }
+
+    /// The relation at `src`, of type `ty`, sorted in `order`, or, in a new slot, the tuples
+    /// of it whose attributes `condition` equates to values that can't fail are equal to
+    /// those values, if the runtime keeps an index of it on them, or it has now earned one
+    /// ([`lir::RuntimeFn::KeptLookup`]): so a restriction repeated by attributes its order
+    /// doesn't begin with, as one that another lookup's order or a canonical order has,
+    /// finds its tuples by binary search once that pays, and goes through all of them until
+    /// then, as before. Either way, it goes through them with all of `condition`.
+    fn kept_lookup(
+        &mut self,
+        src: lir::Place,
+        ty: &hir::Type,
+        order: Order,
+        condition: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let hir::Type::Relation(heading) = ty else {
+            unreachable!("only a relation is restricted");
+        };
+        let equated: Vec<(String, hir::Type, hir::Expr)> = heading
+            .attributes()
+            .filter_map(|(name, attribute)| {
+                condition.conjuncts().iter().find_map(|conjunct| {
+                    let value = self.equated(conjunct, name, attribute)?;
+                    (!value.can_fail())
+                        .then(|| (name.to_string(), attribute.clone(), value.clone()))
+                })
+            })
+            .collect();
+        if equated.is_empty() {
+            return src;
+        }
+        let on = hir::Heading::new(
+            equated
+                .iter()
+                .map(|(name, attribute, _)| (name.clone(), attribute.clone()))
+                .collect(),
+        );
+        let values = hir::Expr::Tuple(
+            equated
+                .into_iter()
+                .map(|(name, _, value)| (name, value))
+                .collect(),
+        );
+        // Computed before the tuples are: the values read none of them, but what's further
+        // out is further out from them than from here.
+        self.tuples.push(AtHand::one(src.clone()));
+        let values = self.place(&values, cx);
+        self.tuples.pop();
+        let common = common_attributes(&Shape::plain(heading), &Shape::plain(&on), cx);
+        let common_count = usize_constant(len(common.len()), cx);
+        let (run, found) = (self.slot(cx.layout(ty)), self.slot(lir::Layout::U8));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.described(ty, order)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::KeptLookup,
+            args: vec![
+                run.clone(),
+                src.clone(),
+                values,
+                descriptor,
+                lir::Place::whole(lir::Base::Data(cx.constant(common))),
+                common_count,
+                found.clone(),
+            ],
+        });
+        self.scoped = true;
+        let chosen = self.slot(cx.layout(ty));
+        self.insts.push(lir::Inst::Copy {
+            dst: chosen.clone(),
+            src,
+            layout: cx.layout(ty),
+        });
+        let (indexed, after) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: found,
+                then: indexed,
+                otherwise: after,
+            },
+            indexed,
+        );
+        self.insts.push(lir::Inst::Copy {
+            dst: chosen.clone(),
+            src: run,
+            layout: cx.layout(ty),
+        });
+        self.end_block(lir::Terminator::Jump(after), after);
+        chosen
     }
 
     /// The run of tuples of the relation or run at `src`, of type `ty`, sorted in
