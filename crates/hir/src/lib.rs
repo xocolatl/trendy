@@ -3052,6 +3052,15 @@ pub enum Expr {
     /// fail, and a rewrite can move it, as its value is the same whenever it is
     /// computed.
     ComputedConstant(ConstantId, Box<Type>),
+    /// What narrows a constant's value, as a restriction of it does, which
+    /// is as if the constant's expression were written in its place, and the
+    /// program chooses as it runs how to compute: with the constant computed
+    /// whole and shared, or with its expression in its place, computed only as
+    /// far as what narrows it needs. The two have the same value, and fail
+    /// alike, as narrowing never leaves out what can fail, but running out of
+    /// memory, which the whole can where its narrowed form doesn't. Opt makes
+    /// it, of a constant with no key to check ([`AdaptedRead`]).
+    AdaptedRead(Box<AdaptedRead>),
     /// The value of the expression, as a value of the type, a subtype of
     /// its type: TREAT down (IM Prescription 14), which fails unless the
     /// value is of the type. A name narrowed by a test, `x is t`, is one,
@@ -3103,6 +3112,7 @@ impl Expr {
             Expr::Constant(value) => value.ty(),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) | Expr::Call(_) => leaf(self),
             Expr::Let(_, _, body) | Expr::At(_, body) | Expr::Run(_, body) => body.type_with(leaf),
+            Expr::AdaptedRead(read) => read.shared.type_with(leaf),
             Expr::Array(element, _) => Type::Array(Box::new(element.clone())),
             Expr::Index(array, _) => match array.type_with(leaf) {
                 Type::Array(element) => *element,
@@ -3232,6 +3242,9 @@ impl Expr {
             Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
             Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
+            // Its failure is the narrowed one's, which computes all the other
+            // does but the constant.
+            Expr::AdaptedRead(read) => read.narrowed.can_fail(),
             Expr::Call(call) => call.can_fail || call.args.values().any(Expr::can_fail),
             Expr::Binary(op, lhs, rhs) => {
                 // Arithmetic, shifts and concatenation can fail
@@ -3398,6 +3411,7 @@ impl Expr {
                 let block = block.map_exprs(&mut |e| f(e, 0));
                 Expr::Run(Box::new(block), Box::new(f(*value, 0)))
             }
+            Expr::AdaptedRead(read) => Expr::AdaptedRead(Box::new(read.mapped(|e| f(e, 0)))),
             Expr::At(site, expr) => Expr::At(site, Box::new(f(*expr, 0))),
             Expr::Unary(op, operand) => Expr::Unary(op, Box::new(f(*operand, 0))),
             Expr::Binary(op, lhs, rhs) => {
@@ -3490,6 +3504,10 @@ impl Expr {
             Expr::Run(block, value) => {
                 block.for_each_expr(&mut |e| f(e, 0));
                 f(value, 0);
+            }
+            Expr::AdaptedRead(read) => {
+                f(&read.shared, 0);
+                f(&read.narrowed, 0);
             }
             Expr::Unary(_, operand)
             | Expr::At(_, operand)
@@ -3676,6 +3694,9 @@ impl Expr {
             | Expr::Local(_) => self.clone(),
             Expr::Let(local, value, body) => Expr::Let(*local, inst(value), inst(body)),
             Expr::Run(block, value) => Expr::Run(Box::new(block.instantiated(types)), inst(value)),
+            Expr::AdaptedRead(read) => {
+                Expr::AdaptedRead(Box::new((**read).clone().mapped(|e| e.instantiated(types))))
+            }
             Expr::At(site, expr) => Expr::At(*site, inst(expr)),
             Expr::Array(element, elements) => Expr::Array(
                 element.instantiated(types),
@@ -4599,6 +4620,30 @@ pub struct Constant {
     /// The local variables of the value blocks in `value`.
     pub locals: Vec<Local>,
     pub value: Expr,
+}
+
+/// What narrows a constant's value, computed as the program chooses as it
+/// runs (see [`Expr::AdaptedRead`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptedRead {
+    pub constant: ConstantId,
+    /// It, reading the constant ([`Expr::ComputedConstant`]), computed whole
+    /// once.
+    pub shared: Expr,
+    /// It, with the constant's expression in place of that read.
+    pub narrowed: Expr,
+}
+
+impl AdaptedRead {
+    /// It with each of its forms replaced by what `f` makes of it.
+    #[must_use]
+    pub fn mapped(self, mut f: impl FnMut(Expr) -> Expr) -> AdaptedRead {
+        AdaptedRead {
+            constant: self.constant,
+            shared: f(self.shared),
+            narrowed: f(self.narrowed),
+        }
+    }
 }
 
 /// A variable defined at the top level of the program.

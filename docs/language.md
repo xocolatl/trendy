@@ -3544,19 +3544,33 @@ operator main{} [
   value can: literals, other constants, in any order, and read-only operators. So
   its value is the same whenever it is computed. One that reads itself, directly or
   through the operators it calls, is an error (A0021).
-- **When it is computed is the compiler's to choose.** One the compiler can compute
-  is as if its value were written where it is read. Otherwise, as `digits`' is above,
-  with the loop in `series`, the program computes it when a read first needs it, at
-  most once, and not at all if nothing does. If it has one read, which runs at most
-  once, it is as if its expression were written there, so that what is around that
-  can need less of it, as a restriction of a closure to one value needs only that
-  value's paths. A variable's initial value, known when compiling, can't read one of
-  those (A0077).
-- **A failure in computing it stops the program as any other does,** where it is
-  declared, when that first happens, after what the program has done by then. As a
-  constant has one value, whenever it is computed, a read counts as unable to fail, so
-  the compiler can compute it before the order things are written in says, as it can
-  move any operand that can't fail (see [Evaluation](#evaluation)).
+- **A read is as if the constant's expression were written there,** in parentheses,
+  as Tutorial D's `WITH` defines a name (TTM, chapter 5), and how much of it to
+  compute, and when, is chosen as the program runs, since only that says how often each
+  read runs. One the compiler can compute is as if its value were written there.
+  Otherwise, as `digits`' is above, with the loop in `series`, nothing is computed
+  until a read needs it, and nothing if none does:
+  - **A read that narrows it**, as a restriction of it, or a join or a `matching` of it
+    with another relation, does, computes only as much of it as it needs the first time
+    it runs, as a restriction of a closure to one value needs only that value's paths.
+    From its next run on, as in a loop, it computes the constant whole, at most once,
+    and the reads after it share that.
+  - **A read of all of it** computes it whole, at most once, and shares it too.
+  - **A read that is its only one, and runs at most once,** always computes as far as
+    it needs.
+
+  A variable's initial value, known when compiling, can't read one of those (A0077).
+- **A constant's key is of all of it.** What reads it, the compiler too, takes the key
+  to hold, so the constant is computed whole before any read, and a key broken anywhere
+  fails every read, though the tuples a read narrows it to are fine.
+- **A failure in computing what a read needs stops the program as any other does,**
+  when that first happens, after what the program has done by then: where the constant
+  is declared. Narrowing never leaves out what can fail, so computing the whole fails
+  just where a read of part of it would, but for running out of memory, which the whole
+  can where a part doesn't. As a constant has one value, whenever it is computed, a read
+  of all of it counts as unable to fail, so the compiler can compute it before the order
+  things are written in says, as it can move any operand that can't fail (see
+  [Evaluation](#evaluation)).
 - **A local constant has the value its expression has where it is declared,** from
   the parameters and variables then, each time that runs: in a loop, each time round.
   But when it is computed is the compiler's to choose, as for the program's: if it has

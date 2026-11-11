@@ -1423,6 +1423,65 @@ operator main{{}} [
     assert!(stderr.starts_with("error[R0002]"), "{stderr}");
 }
 
+/// A constant read more than once is as if its expression were written at each read, which
+/// the program computes as far as the read needs the first time it runs, and from its next
+/// run on with the constant whole, shared: each read's value is the same either way, whether
+/// it narrows the constant or reads all of it.
+#[test]
+fn a_constant_read_more_than_once_is_computed_as_far_as_each_read_needs() {
+    let source = "uses { trendy.process };
+
+const edges := series{from: 1, to: 30} rename {value as a} extend { b := a + 1 };
+const reach := edges tclose;
+
+operator main{} [
+    const s := length{a: arguments} + 1;
+    call debug_value{v: count{r: reach where a = s}};
+    call debug_value{v: count{r: reach where a = s + 1}};
+    var i := s;
+    var total := 0;
+    while i <= 30 loop [
+        total := total + count{r: reach where a = i};
+        i := i + 1;
+    ];
+    call debug_value{v: total};
+    call debug_value{v: count{r: reach}};
+];
+";
+    let ran = ran_source("adapted_reads", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr.lines().collect::<Vec<_>>(),
+        ["30", "29", "465", "465"]
+    );
+}
+
+/// A constant's key is of all of it, and what reads it takes it to hold, the optimizer
+/// among them, so one broken anywhere fails every read, though the tuples a read narrows
+/// the constant to are fine.
+#[test]
+fn a_constants_key_is_checked_of_all_of_it_for_every_read() {
+    let source = "uses { trendy.process };
+
+const parities := series{from: 1, to: 5} extend { parity := value mod 2 } key { parity };
+
+operator main{} [
+    const s := length{a: arguments} + 1;
+    call debug_value{v: parities where value = s};
+    call debug_value{v: parities where value = s + 1};
+];
+";
+    let ran = ran_source("keyed_reads", source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert!(
+        ran.stderr.starts_with(
+            "error[R0008]: two tuples of `parities` have the same values for its key { parity }"
+        ),
+        "{}",
+        ran.stderr
+    );
+}
+
 /// A false operand decides an `and` beside a call that can fail, however it can: a
 /// built-in's, an operator's whose value can, whose parameters are constrained, which
 /// calls itself, or has a version that can, and a comparison that converts what it
@@ -11810,6 +11869,12 @@ fn constants() {
             "│ east      │  1 │  0 │     2 │",
             "│ north     │  0 │  1 │     1 │",
             "└───────────┴────┴────┴───────┘",
+            // The paths from stones 1 and 4, then from each of 1 to 3 in a loop.
+            "5",
+            "2",
+            "5",
+            "4",
+            "3",
             "-1e0",
         ]
     );

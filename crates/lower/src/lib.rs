@@ -5917,6 +5917,82 @@ impl<'a> FunctionBuilder<'a> {
         in_data(constant.data)
     }
 
+    /// The value of `expr`, `read`, as the program chooses as it runs (see
+    /// [`hir::Expr::AdaptedRead`]): the shared form, once the constant is
+    /// computed, and otherwise the narrowed one, which costs less than the whole
+    /// unless the read runs again, as one in a loop does. So the first time it
+    /// runs, it computes its narrowed form, and after that its shared one, which
+    /// computes the constant whole if nothing has. A failure in that is one the
+    /// narrowed form has too, as narrowing never leaves out what can fail.
+    fn adapted_read(
+        &mut self,
+        expr: &hir::Expr,
+        read: &hir::AdaptedRead,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let layout = cx.layout(&self.type_of(expr));
+        let constant = computed_constant(self.program, self.variable_data, read.constant, cx);
+        // Whether this read has run, of each place it is lowered at.
+        let name = format!("__read_{}", cx.data.len());
+        let ran = in_data(cx.push(lir::Data {
+            kind: lir::DataKind::Variable { name },
+            writable: true,
+            fields: vec![lir::Field::U8(0)],
+        }));
+        let dst = self.slot(layout.clone());
+        let [shared, uncomputed, first, narrowed, after] =
+            std::array::from_fn(|_| self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: constant.computed(),
+                then: shared,
+                otherwise: uncomputed,
+            },
+            uncomputed,
+        );
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: ran.clone(),
+                then: shared,
+                otherwise: first,
+            },
+            first,
+        );
+        let one = u8_constant(1, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: ran,
+            src: one,
+            layout: lir::Layout::U8,
+        });
+        self.end_block(lir::Terminator::Jump(narrowed), shared);
+        for (form, next) in [(&read.shared, narrowed), (&read.narrowed, after)] {
+            let src = self.place(form, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: dst.clone(),
+                src,
+                layout: layout.clone(),
+            });
+            self.end_block(lir::Terminator::Jump(after), next);
+        }
+        dst
+    }
+
+    /// Where the parameter `name` is, among the arguments the function is given,
+    /// of one that isn't a pointer to what it is.
+    fn parameter_place(&self, name: &str) -> lir::Place {
+        let index = self
+            .params
+            .keys()
+            .position(|p| p == name)
+            .expect("sema resolved the parameter");
+        let mut parameter = self
+            .arguments
+            .clone()
+            .unwrap_or_else(|| lir::Place::whole(lir::Base::Params));
+        parameter.path.push(index);
+        parameter
+    }
+
     /// Where the local variable `id` is, and how its tuples are ordered, if it is a
     /// relation.
     fn local_place(&self, id: hir::LocalId) -> (lir::Place, Order) {
@@ -6758,6 +6834,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Variable(id) => in_data(self.variable_data[id.0]),
             hir::Expr::ComputedConstant(id, _) => self.constant_read(*id, cx),
+            hir::Expr::AdaptedRead(read) => self.adapted_read(expr, read, cx),
             hir::Expr::Local(id) => {
                 let (place, order) = self.local_place(*id);
                 let ty = self.locals[id.0].ty.clone();
@@ -6769,19 +6846,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Parameter(name) if self.pointers.contains_key(name) => {
                 self.pointee(name, cx)
             }
-            hir::Expr::Parameter(name) => {
-                let index = self
-                    .params
-                    .keys()
-                    .position(|p| p == name)
-                    .expect("sema resolved the parameter");
-                let mut parameter = self
-                    .arguments
-                    .clone()
-                    .unwrap_or_else(|| lir::Place::whole(lir::Base::Params));
-                parameter.path.push(index);
-                parameter
-            }
+            hir::Expr::Parameter(name) => self.parameter_place(name),
             hir::Expr::Unary(op, operand) => {
                 let src = self.place(operand, cx);
                 self.unary(*op, src)

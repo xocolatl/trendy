@@ -733,6 +733,9 @@ mod tests {
             hir::Expr::Variable(id) => optimizer.program.variables[id.0].name.clone(),
             hir::Expr::ComputedConstant(id, _) => optimizer.program.constants[id.0].name.clone(),
             hir::Expr::At(_, inner) => shorthand(optimizer, inner),
+            // As it reads the constant: the narrowed form, with its value in its place, is
+            // planned alike.
+            hir::Expr::AdaptedRead(read) => shorthand(optimizer, &read.shared),
             hir::Expr::And(lhs, rhs) => format!(
                 "({} and {})",
                 shorthand(optimizer, lhs),
@@ -1021,6 +1024,70 @@ mod tests {
             "const a := [ var n := 0; while n < 3 loop [ n := n + 1; ]; {SERIES} where value = n ];\n{table}"
         );
         assert_eq!(shared(&source), ["a"]);
+    }
+
+    #[test]
+    fn what_narrows_a_constant_read_more_than_once_is_written_both_ways() {
+        let constants = format!(
+            "const a := {SERIES} rename {{value as x}};\n\
+             const b := {SERIES} rename {{value as y}};\n\
+             const k := ({SERIES} extend {{ same := value }}) key {{ same }};\n"
+        );
+        for (body, adapted) in [
+            // Each restriction, but not what reads it whole.
+            (
+                "call debug_table{r: a where x = 1}; call debug_table{r: a where x = 2}; \
+                 call debug_value{v: count{r: a}};",
+                &["a", "a"][..],
+            ),
+            // Through what passes it on.
+            (
+                "call debug_table{r: (a rename {x as z}) where z = 1}; \
+                 call debug_table{r: (a extend {z := x}){z} where z = 2};",
+                &["a", "a"],
+            ),
+            // Joined with another, as is that one, in what `a`'s value takes the place of.
+            (
+                "call debug_table{r: times{a, b}}; call debug_table{r: times{a, b}};",
+                &["a", "b", "a", "b"],
+            ),
+            // Not with a key to check, which is of all of it.
+            (
+                "call debug_table{r: k where value = 1}; call debug_table{r: k where value = 2};",
+                &[],
+            ),
+        ] {
+            let source = format!("{constants}operator main{{}} [ {body} ];");
+            assert_eq!(adapted_reads(&source), adapted, "{source}");
+        }
+    }
+
+    /// The constant each read in `main` of `source` adapts, once optimized, in order,
+    /// those in a narrowed form too, each of which reads its value, not it.
+    fn adapted_reads(source: &str) -> Vec<String> {
+        let program = program(source);
+        let main = program.operator(program.entry);
+        let hir::OperatorKind::Update { body, .. } = &main.kind else {
+            panic!("`main` is an update operator");
+        };
+        let mut names = Vec::new();
+        body.for_each_expr(&mut |expr| adapted_in(expr, &program, &mut names));
+        names
+    }
+
+    /// The constant each read in `expr` adapts, as [`adapted_reads`] says.
+    fn adapted_in(expr: &hir::Expr, program: &hir::Program, names: &mut Vec<String>) {
+        if let hir::Expr::AdaptedRead(read) = expr {
+            let name = &program.constants[read.constant.0].name;
+            let mut narrowed = Vec::new();
+            reads(&read.narrowed, program, &mut narrowed);
+            assert!(
+                !narrowed.contains(name),
+                "{name} is read where it is narrowed"
+            );
+            names.push(name.clone());
+        }
+        expr.for_each_child(|child, _| adapted_in(child, program, names));
     }
 
     /// The program of `main` doing nothing and `f`, of [`PARAMS`], with `body`.

@@ -21,6 +21,13 @@ const steps_per_leg := 4;
 const milestones := series{from: 1, to: 5} rename {value as stone};
 const last_stone := max{r: milestones, of: stone};
 
+/* Read more than once, how much of it to compute is chosen as the program runs: a
+   read that narrows it computes only what it needs the first time it runs, as a
+   restriction of `reachable` to one stone needs only that stone's paths, and once
+   a read runs again, as in a loop, the whole is computed once and shared. */
+const trails := milestones rename {stone as start} extend { next := start + 1 };
+const reachable := trails tclose;
+
 /* A type's constraint can read one, as it couldn't a variable. */
 type stone_number {
     { n: integer },
@@ -53,6 +60,11 @@ operator main{} [
     const route := milestones extend { direction := if stone mod 2 = 0 then "east" else "north" };
     const stepped := route join moves;
     call debug_table{r: stepped join (milestones where stone <= 2)};
+    call debug_value{v: count{r: reachable where start = 1}};
+    call debug_value{v: count{r: reachable where start = 4}};
+    for stone in array [1, 2, 3] loop [
+        call debug_value{v: count{r: reachable where start = stone}};
+    ];
     /* The prelude's `pi` is one too. */
     call debug_value{v: cos{of: pi}};
 ];

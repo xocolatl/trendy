@@ -2,49 +2,89 @@
 //!
 //! A constant means its expression: it reads no variable, and what it calls are
 //! functions of their arguments, so every read has the same value (TTM RM
-//! Prescription 3). So for each read it is the compiler's to choose whether to
-//! compute that expression there, where what is around it can need less of it, or
-//! to share one computed value. Computing it again at each read can cost far more
-//! than it saves, so a constant is written where it is read only if that costs no
-//! more than computing it once: if that is its only read, which runs at most once.
-//! Others are shared, which lowering computes when a read first needs it.
+//! Prescription 3), and each read is as if the expression were written there. So
+//! for each read it is the compiler's to choose whether to compute that expression
+//! there, where what is around it can need less of it, or to share one computed
+//! value. A constant is written where it is read if that costs no more than
+//! computing it once: if that is its only read, which runs at most once. Otherwise
+//! which costs less depends on how often each read runs, which only running says:
+//! what narrows a constant, as a restriction of it does, is written both ways
+//! ([`hir::Expr::AdaptedRead`]), for the program to choose as it runs, and other
+//! reads are shared, which lowering computes when a read first needs it. A
+//! constant with a key to check is always shared, as the key is of all of it, and
+//! what reads it, the optimizer among them, takes it to hold.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use trendy_hir as hir;
 
 /// `program`, with each constant that can be written where it is read written
-/// there. What it has no more reads of stays, and nothing computes it.
+/// there, and then what narrows one that can be adapted written both ways, as it
+/// is once those are in their places. What it has no more reads of stays, and
+/// nothing computes it.
 pub(crate) fn constants_inserted(program: hir::Program) -> hir::Program {
     let sites = Sites::of(&program);
-    let inserted: HashSet<hir::ConstantId> = (0..program.constants.len())
-        .map(hir::ConstantId)
-        .filter(|id| sites.can_be_inserted(*id, &program))
-        .collect();
-    if inserted.is_empty() {
+    let (inserted, adapted): (HashSet<hir::ConstantId>, HashSet<hir::ConstantId>) =
+        (0..program.constants.len())
+            .map(hir::ConstantId)
+            .filter(|id| can_be_written_where_read(&program.constants[id.0]))
+            .partition(|id| sites.runs_once(*id, &program));
+    let program = if inserted.is_empty() {
+        program
+    } else {
+        let inserting = Inserting {
+            program: &program,
+            inserted: &inserted,
+        };
+        rewritten(&program, &|expr| inserting.expr(expr))
+    };
+    if adapted.is_empty() {
         return program;
     }
-    let inserting = Inserting {
+    let adapting = Adapting {
         program: &program,
-        inserted: &inserted,
+        adapted: &adapted,
     };
+    rewritten(&program, &|expr| adapting.expr(expr, None))
+}
+
+/// `program`, with each expression in its operators, its constants' values and
+/// its constraints' parts rewritten by `rewrite`.
+fn rewritten(program: &hir::Program, rewrite: &dyn Fn(hir::Expr) -> hir::Expr) -> hir::Program {
     let operators = program
         .operators
         .iter()
-        .map(|operator| operator.clone().map_exprs(&mut |expr| inserting.expr(expr)))
+        .map(|operator| operator.clone().map_exprs(&mut |expr| rewrite(expr)))
         .collect();
     let constants = program
         .constants
         .iter()
         .map(|constant| hir::Constant {
-            value: inserting.expr(constant.value.clone()),
+            value: rewrite(constant.value.clone()),
             ..constant.clone()
+        })
+        .collect();
+    let constraints = program
+        .constraints
+        .iter()
+        .map(|constraint| hir::VariableConstraint {
+            parts: constraint
+                .parts
+                .iter()
+                .map(|part| hir::ConstraintPart {
+                    condition: rewrite(part.condition.clone()),
+                    breaking: part.breaking.clone().map(rewrite),
+                    ..part.clone()
+                })
+                .collect(),
+            ..constraint.clone()
         })
         .collect();
     hir::Program {
         operators,
         constants,
-        ..program
+        constraints,
+        ..program.clone()
     }
 }
 
@@ -168,18 +208,12 @@ impl Sites {
         }
     }
 
-    /// Whether the constant `id` can be written where it is read: that is its
-    /// only read, which runs at most once. Not one with a key to check, which
-    /// takes all of it, nor one with local variables, of value blocks, which what
-    /// reads it doesn't have and whose statements nothing around them can reduce.
-    fn can_be_inserted(&self, id: hir::ConstantId, program: &hir::Program) -> bool {
-        let constant = &program.constants[id.0];
+    /// Whether the constant `id` has one read, which runs at most once.
+    fn runs_once(&self, id: hir::ConstantId, program: &hir::Program) -> bool {
         let [only] = self.reads.get(&id).map_or(&[][..], Vec::as_slice) else {
             return false;
         };
-        !has_key_to_check(constant)
-            && !has_locals(&constant.value)
-            && self.runs_at_most_once(*only, program.entry)
+        self.runs_at_most_once(*only, program.entry)
     }
 
     /// Whether what is at `site` runs at most once in the whole of a run. An
@@ -208,6 +242,14 @@ impl Sites {
     }
 }
 
+/// Whether `constant` can be written where it is read. Not one with a key to
+/// check, which takes all of it, and which what reads it takes to hold, nor one
+/// with local variables, of value blocks, which what reads it doesn't have and
+/// whose statements nothing around them can reduce.
+fn can_be_written_where_read(constant: &hir::Constant) -> bool {
+    !has_key_to_check(constant) && !has_locals(&constant.value)
+}
+
 /// Whether `constant` can break a key: every relation satisfies one of all its
 /// attributes, which is what it has if it declares none.
 fn has_key_to_check(constant: &hir::Constant) -> bool {
@@ -231,7 +273,7 @@ fn has_locals(expr: &hir::Expr) -> bool {
     found
 }
 
-/// Writes these constants where they are read.
+/// Writes these constants, `inserted`, where they are read.
 struct Inserting<'a> {
     program: &'a hir::Program,
     inserted: &'a HashSet<hir::ConstantId>,
@@ -243,15 +285,94 @@ impl Inserting<'_> {
     fn expr(&self, expr: hir::Expr) -> hir::Expr {
         match expr {
             hir::Expr::ComputedConstant(id, _) if self.inserted.contains(&id) => {
-                let constant = &self.program.constants[id.0];
-                let value = self.expr(constant.value.clone());
-                if self.program.type_of(&value, &BTreeMap::new(), &[]) == constant.ty {
-                    value
-                } else {
-                    value.treated(&constant.ty)
-                }
+                self.expr(value_of(self.program, id))
             }
             expr => expr.map_children(|child, _| self.expr(child)),
         }
     }
+}
+
+/// The value of the constant `id` of `program`, of its type.
+fn value_of(program: &hir::Program, id: hir::ConstantId) -> hir::Expr {
+    let constant = &program.constants[id.0];
+    let value = constant.value.clone();
+    if program.type_of(&value, &BTreeMap::new(), &[]) == constant.ty {
+        value
+    } else {
+        value.treated(&constant.ty)
+    }
+}
+
+/// Writes what narrows these constants, `adapted`, both ways.
+struct Adapting<'a> {
+    program: &'a hir::Program,
+    adapted: &'a HashSet<hir::ConstantId>,
+}
+
+impl Adapting<'_> {
+    /// `expr`, with what narrows a constant to adapt, but `shared`, written both
+    /// ways ([`hir::AdaptedRead`]), the outermost of what narrows it.
+    fn expr(&self, expr: hir::Expr, shared: Option<hir::ConstantId>) -> hir::Expr {
+        if let Some(id) = self.narrowed(&expr).filter(|id| Some(*id) != shared)
+            && reads_of(&expr, id) == 1
+        {
+            let narrowed = self.expr(self.with_value(expr.clone(), id), None);
+            let shared = expr.map_children(|child, _| self.expr(child, Some(id)));
+            return hir::Expr::AdaptedRead(Box::new(hir::AdaptedRead {
+                constant: id,
+                shared,
+                narrowed,
+            }));
+        }
+        expr.map_children(|child, _| self.expr(child, shared))
+    }
+
+    /// `expr`, with the value of the constant `id` in place of each read of it.
+    fn with_value(&self, expr: hir::Expr, id: hir::ConstantId) -> hir::Expr {
+        match expr {
+            hir::Expr::ComputedConstant(read, _) if read == id => value_of(self.program, id),
+            expr => expr.map_children(|child, _| self.with_value(child, id)),
+        }
+    }
+
+    /// The constant to adapt that `expr` narrows, if it does: a restriction of
+    /// it, or a join, a semijoin or an antijoin of it with another relation,
+    /// what reads it on the way, as a projection, a renaming or an extension
+    /// of it, passing it on.
+    fn narrowed(&self, expr: &hir::Expr) -> Option<hir::ConstantId> {
+        let operands: &[&hir::Expr] = match expr {
+            hir::Expr::Restrict(operand, _) => &[&**operand],
+            hir::Expr::Semijoin(lhs, rhs)
+            | hir::Expr::Antijoin(lhs, rhs)
+            | hir::Expr::And(lhs, rhs) => &[&**lhs, &**rhs],
+            _ => return None,
+        };
+        operands
+            .iter()
+            .find_map(|operand| self.read_through(operand))
+    }
+
+    /// The constant to adapt that `expr` reads, passing it on as it is or
+    /// narrowed, if it does.
+    fn read_through(&self, expr: &hir::Expr) -> Option<hir::ConstantId> {
+        match expr {
+            hir::Expr::ComputedConstant(id, _) if self.adapted.contains(id) => Some(*id),
+            hir::Expr::Remove(operand, _)
+            | hir::Expr::Rename(operand, _)
+            | hir::Expr::Extend(operand, ..)
+            | hir::Expr::Treat(_, operand)
+            | hir::Expr::At(_, operand) => self.read_through(operand),
+            _ => self.narrowed(expr),
+        }
+    }
+}
+
+/// How many times `expr` reads the constant `id`.
+fn reads_of(expr: &hir::Expr, id: hir::ConstantId) -> usize {
+    if matches!(expr, hir::Expr::ComputedConstant(read, _) if *read == id) {
+        return 1;
+    }
+    let mut reads = 0;
+    expr.for_each_child(|child, _| reads += reads_of(child, id));
+    reads
 }

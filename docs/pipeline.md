@@ -1283,14 +1283,30 @@ read-only operators, is found however it is reached (A0021). One whose value is 
 then is read as that value (`globals::read_of`); and what isn't, as what a loop or a
 recursion computes, stays an expression: the HIR's `Program::constants`, which
 `Expr::ComputedConstant` reads. It is only known that a constant's value depends on
-nothing that can change, so when it is computed doesn't matter, and opt writes it where
-it is read if that is worth it (`constants_inserted`). Lowering keeps any other in a
-static (`computed_constant`), with whether it has been computed, and a function that
-computes it, lowered as lowered code first reads it. Each read branches on that, and
-calls the function if it hasn't, so a failure in that goes where a call's does, with
-the read in its trace. A read counts as unable to fail (`Expr::can_fail`), so that a
-restriction that reads one can still be planned, as what is shared is computed at most
-once, whichever read that is. An interface's `const name: type;` has its value in the
+nothing that can change, so when it is computed doesn't matter, and each read is as if
+its expression were written there. Opt writes it there if that costs no more than
+computing it once: if it is the constant's only read, and runs at most once
+(`constants_inserted`). Then, with those in their places, it writes both ways what
+narrows each other constant with no key to check, the outermost restriction, join,
+semijoin or antijoin whose relation operand reads it, through projections, renamings
+and extensions (`Adapting`): as an `Expr::AdaptedRead`, of the read, shared, and of the
+constant's value in its place, narrowed. Each is planned as anything else is. A
+constant with a key to check is always shared, as the key is of all of it, and what
+reads the constant, the planner among them, takes it to hold.
+
+Lowering keeps a constant that is read in a static (`computed_constant`), with whether
+it has been computed, and a function that computes it, lowered as lowered code first
+reads it. Each read branches on that, and calls the function if it hasn't, so a failure
+in that goes where a call's does, with the read in its trace. A read counts as unable to
+fail (`Expr::can_fail`), so that a restriction that reads one can still be planned, as
+what is shared is computed at most once, whichever read that is. An `AdaptedRead`
+(`adapted_read`) is its shared form once the constant is computed. Otherwise, the first
+time each place it is lowered at runs, it is its narrowed form, which costs less than
+the whole unless the read runs again, and from its next run on its shared form, which
+computes the whole: a static of its own (`__read_n`) says whether it has run. How often
+a read runs is known only as the program runs, and this is what a loop shows of it.
+Narrowing never leaves out what can fail, so the whole fails only where the narrowed
+form would too, but for running out of memory. An interface's `const name: type;` has its value in the
 implementation (`scope::ConstantDecl::completed`).
 Evaluating a call substitutes a `Let`'s value
 in the rest once it is known (`ops::Substitution::locals`); lowering places

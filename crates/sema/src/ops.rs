@@ -2750,6 +2750,49 @@ fn substituted_if(
     })
 }
 
+/// The call `called` with what `substitution` says replaced in its arguments,
+/// as for [`substitute`], and evaluated if they are then all known.
+///
+/// # Errors
+///
+/// As for [`substitute`].
+fn substituted_call(
+    called: hir::Call,
+    depth: usize,
+    substitution: &Substitution,
+) -> Result<hir::Expr, Failed> {
+    let args = called
+        .args
+        .into_iter()
+        .map(|(name, arg)| Ok((name, substitute(arg, depth, substitution)?)))
+        .collect::<Result<_, _>>()?;
+    call(hir::Call { args, ..called }, substitution.bindings)
+}
+
+/// The read `read` with what `substitution` says replaced, as for
+/// [`substitute`]: the two forms have one value, and fail alike, so the narrowed
+/// one, if it is then known.
+///
+/// # Errors
+///
+/// As for [`substitute`].
+fn substituted_adapted(
+    read: hir::AdaptedRead,
+    depth: usize,
+    substitution: &Substitution,
+) -> Result<hir::Expr, Failed> {
+    let narrowed = substitute(read.narrowed, depth, substitution)?;
+    if known_value(&narrowed).is_some() {
+        return Ok(narrowed);
+    }
+    let shared = substitute(read.shared, depth, substitution)?;
+    Ok(hir::Expr::AdaptedRead(Box::new(hir::AdaptedRead {
+        constant: read.constant,
+        shared,
+        narrowed,
+    })))
+}
+
 /// `expr` with what `substitution` says replaced, and simplified as when
 /// it was checked, so that what then depends only on constants is
 /// evaluated: the tuple at hand `depth` `Extend`s out, and the parameters
@@ -2783,6 +2826,7 @@ fn substitute(
             None => expr,
         },
         hir::Expr::Let(id, value, body) => substituted_let(id, *value, *body, depth, substitution)?,
+        hir::Expr::AdaptedRead(read) => substituted_adapted(*read, depth, substitution)?,
         // Known, it needs no site.
         hir::Expr::At(site, expr) => hir::Expr::at(site, sub(expr)?),
         // A variable of the program's is known only when running: a
@@ -2794,14 +2838,7 @@ fn substitute(
         | hir::Expr::Variable(_)
         | hir::Expr::ComputedConstant(..)
         | hir::Expr::Run(..) => expr,
-        hir::Expr::Call(called) => {
-            let args = called
-                .args
-                .into_iter()
-                .map(|(name, arg)| Ok((name, substitute(arg, depth, substitution)?)))
-                .collect::<Result<_, _>>()?;
-            call(hir::Call { args, ..called }, substitution.bindings)?
-        }
+        hir::Expr::Call(called) => substituted_call(called, depth, substitution)?,
         hir::Expr::Unary(op, operand) => unary(op, sub(operand)?).map_err(Failed::Scalar)?,
         hir::Expr::Binary(op, lhs, rhs) => binary(op, sub(lhs)?, sub(rhs)?, substitution.bindings)?,
         hir::Expr::Connective(connective, operands) => {
