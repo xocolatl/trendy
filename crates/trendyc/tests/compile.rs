@@ -1586,6 +1586,38 @@ operator main{} [
     assert!(taken.as_secs() < 5, "{taken:?}");
 }
 
+/// Of tuples that break a key, the first, in canonical order, to have the same values for it
+/// as one before it is written, with the first of those, as the compiler writes them of a
+/// value it computes: here `{ a: 3, k: 2 }`, with `{ a: 1, k: 2 }`, though `k: 1` is less.
+/// So too where only the tuples inserted can break it.
+#[test]
+fn a_broken_key_is_written_of_the_first_tuple_to_break_it() {
+    let declared = "uses { trendy.process };
+
+var r: relation { a: integer, k: integer } := relation { { a: 1, k: 2 }, { a: 4, k: 1 } } key { k };
+
+operator main{} [
+    const s := length{a: arguments};
+";
+    let broken = "error[R0008]: two tuples of `r` have the same values for its key { k }: \
+                  tuple { a: 1, k: 2 } and tuple { a: 3, k: 2 }";
+    for (name, statement) in [
+        (
+            "key_assigned",
+            "    r := relation { { a: s + 1, k: 2 }, { a: s + 2, k: 1 }, { a: s + 3, k: 2 }, { a: s + 4, k: 1 } };",
+        ),
+        (
+            "key_inserted",
+            "    insert r relation { { a: s + 2, k: 1 }, { a: s + 3, k: 2 } };",
+        ),
+    ] {
+        let source = format!("{declared}{statement}\n];\n");
+        let ran = ran_source(name, &source, b"");
+        assert_eq!(ran.code, 1, "{name}: {}", ran.stderr);
+        assert!(ran.stderr.starts_with(broken), "{name}: {}", ran.stderr);
+    }
+}
+
 /// A constant's key is of all of it, and what reads it takes it to hold, the optimizer
 /// among them, so one broken anywhere fails every read, though the tuples a read narrows
 /// the constant to are fine.

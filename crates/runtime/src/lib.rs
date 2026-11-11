@@ -6176,13 +6176,26 @@ impl Distinct {
         hash: u64,
         equal: &impl Fn(usize, usize) -> bool,
     ) -> Fallible<bool> {
+        Ok(self.held_or_inserted(i, hash, equal)?.is_none())
+    }
+
+    /// The index of the value held that is equal to the one of index `i`, of the hash
+    /// `hash`, as `equal` says of two indexes, if there is one, and otherwise none, and the
+    /// value of `i` is then held. Fails as [`Distinct::inserted`] does.
+    #[inline]
+    fn held_or_inserted(
+        &mut self,
+        i: usize,
+        hash: u64,
+        equal: &impl Fn(usize, usize) -> bool,
+    ) -> Fallible<Option<usize>> {
         // SAFETY: each place and hash is set, to zero to begin with.
         let (places, hashes) = unsafe { (self.places.values(), self.hashes.values()) };
         let mask = places.len() - 1;
         let mut place = hash_place(hash, mask);
         while places[place] != 0 {
             if hashes[place] == hash && equal(places[place] - 1, i) {
-                return Ok(false);
+                return Ok(Some(places[place] - 1));
             }
             place = (place + 1) & mask;
         }
@@ -6192,7 +6205,24 @@ impl Distinct {
         if 2 * self.held > places.len() {
             self.grown()?;
         }
-        Ok(true)
+        Ok(None)
+    }
+
+    /// The index of a value held, of the hash `hash`, that `sought` says is the one sought,
+    /// if there is one.
+    #[inline]
+    fn found(&mut self, hash: u64, sought: impl Fn(usize) -> bool) -> Option<usize> {
+        // SAFETY: each place and hash is set, to zero to begin with.
+        let (places, hashes) = unsafe { (self.places.values(), self.hashes.values()) };
+        let mask = places.len() - 1;
+        let mut place = hash_place(hash, mask);
+        while places[place] != 0 {
+            if hashes[place] == hash && sought(places[place] - 1) {
+                return Some(places[place] - 1);
+            }
+            place = (place + 1) & mask;
+        }
+        None
     }
 
     /// Move to a table twice as big, with the same tuples. Fails if there is no memory for
@@ -7100,8 +7130,12 @@ unsafe fn tuple_failed(kind: usize, tuple: *const u8, desc: &TypeDesc) -> Failed
 /// Store at `shared`, a byte, 1 if the relation `value`, of the type `desc`
 /// describes, has two tuples with the same values for the attributes of
 /// `key`, the descriptor of its projection on one of its keys, and the
-/// positions of two such tuples at `pair`, two `usize`s; else 0. Fails if
-/// there is no memory to compare them in.
+/// positions of two such tuples at `pair`, two `usize`s; else 0. They are the
+/// first tuple, in canonical order, that has the same values for it as one
+/// before it, and the first of those, as the compiler reports of a value it
+/// computes (`keys::sharing`): found by the hashes of the tuples' values for
+/// the key, in order, so that none need sorting, and those after it needn't be
+/// looked at. Fails if there is no memory for the table of them.
 ///
 /// # Safety
 ///
@@ -7117,8 +7151,8 @@ pub unsafe extern "C" fn trendy_rt_key_shared(
     desc: *const TypeDesc,
     key: *const TypeDesc,
 ) -> bool {
-    // SAFETY: guaranteed by the caller; the key's attributes and the
-    // tuples' positions are written before they are read.
+    // SAFETY: guaranteed by the caller; the key's attributes are written
+    // before they are read.
     status(|| unsafe {
         shared.write(0);
         let (tuples, count) = read_slice(value);
@@ -7127,50 +7161,107 @@ pub unsafe extern "C" fn trendy_rt_key_shared(
         }
         let (desc, key) = (&*desc, attributes(&*key));
         let element = desc.element();
-        // The tuples' own attributes in the key, by name.
         let found = Temp::<*const Attr>::new(key.len())?;
-        let mut len = 0;
-        for attr in attributes(element) {
-            if key.iter().any(|k| name(k) == name(attr)) {
-                found.ptr().add(len).write(attr);
-                len += 1;
-            }
-        }
-        let compared = array(found.ptr(), len);
-        let on_key = |i: usize, j: usize| {
-            let (a, b) = (tuples.add(i * element.size), tuples.add(j * element.size));
-            compared
-                .iter()
-                .map(|&attr| order(a.add((*attr).offset), b.add((*attr).offset), &*(*attr).desc))
-                .find(|o| o.is_ne())
-                .unwrap_or(core::cmp::Ordering::Equal)
-        };
-        // The tuples' positions, in their keys' order, which puts tuples
-        // with the same values for it next to each other.
-        let mut slots = Temp::<usize>::new(count)?;
+        let compared = key_attributes(element, key, &found).0;
+        let at = |i: usize| tuples.add(i * element.size);
+        let equal = |i: usize, j: usize| same_key(at(i), at(j), compared);
+        let mut seen = Distinct::new(2 * count)?;
         for i in 0..count {
-            slots.ptr().add(i).write(i);
-        }
-        let positions = slots.values();
-        positions.sort_unstable_by(|&i, &j| on_key(i, j).then(i.cmp(&j)));
-        if let Some(&[first, second]) = positions
-            .windows(2)
-            .find(|pair| on_key(pair[0], pair[1]).is_eq())
-        {
-            shared.write(1);
-            pair.write_unaligned(first);
-            pair.add(1).write_unaligned(second);
+            if let Some(earlier) = seen.held_or_inserted(i, key_hash(at(i), compared), &equal)? {
+                shared.write(1);
+                pair.write_unaligned(earlier);
+                pair.add(1).write_unaligned(i);
+                return Ok(());
+            }
         }
         Ok(())
     })
 }
 
+/// The attributes of tuples of the type `element` describes that are in `key`, which a
+/// key's descriptor lists, written to `found`, in the tuples' order, and whether they are
+/// the first of them.
+///
+/// # Safety
+///
+/// `found` must have room for as many attributes as `key` has, each of `element`.
+#[cfg(not(test))]
+unsafe fn key_attributes<'a>(
+    element: &TypeDesc,
+    key: &[Attr],
+    found: &'a Temp<*const Attr>,
+) -> (&'a [*const Attr], bool) {
+    let mut len = 0;
+    let (mut first, mut others) = (true, false);
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        for attr in attributes(element) {
+            if key.iter().any(|k| name(k) == name(attr)) {
+                found.ptr().add(len).write(attr);
+                len += 1;
+                first &= !others;
+            } else {
+                others = true;
+            }
+        }
+        (array(found.ptr(), len), first)
+    }
+}
+
+/// The order of the tuples at `a` and `b`, of their values for the attributes `on`, in
+/// turn.
+///
+/// # Safety
+///
+/// `a` and `b` must point to valid tuples, each of which has the attributes `on`.
+#[cfg(not(test))]
+unsafe fn key_order(a: *const u8, b: *const u8, on: &[*const Attr]) -> core::cmp::Ordering {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        on.iter()
+            .map(|&attr| order(a.add((*attr).offset), b.add((*attr).offset), &*(*attr).desc))
+            .find(|o| o.is_ne())
+            .unwrap_or(core::cmp::Ordering::Equal)
+    }
+}
+
+/// Whether the tuples at `a` and `b` have the same values for the attributes `on`.
+///
+/// # Safety
+///
+/// As for [`key_order`].
+#[cfg(not(test))]
+unsafe fn same_key(a: *const u8, b: *const u8, on: &[*const Attr]) -> bool {
+    // SAFETY: guaranteed by the caller.
+    unsafe { key_order(a, b, on).is_eq() }
+}
+
+/// The hash of the values for the attributes `on` of the tuple at `tuple`, the same of
+/// tuples [`same_key`] says have the same.
+///
+/// # Safety
+///
+/// `tuple` must point to a valid tuple that has the attributes `on`.
+#[cfg(not(test))]
+unsafe fn key_hash(tuple: *const u8, on: &[*const Attr]) -> u64 {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        on.iter().fold(0, |hash, &attr| {
+            hashed(hash, tuple.add((*attr).offset), &*(*attr).desc)
+        })
+    }
+}
+
 /// As [`trendy_rt_key_shared`], of a relation that has been without two such
 /// tuples but for the tuples of the relation `added`, which it has now: only
-/// they can share a key's values with another, so only they are looked for,
-/// by a binary search where the key's attributes are the first in the tuples'
-/// order, as those that share them are together then, and otherwise by going
-/// through the tuples, either way without sorting them all.
+/// they can share a key's values with another, so only theirs are looked for.
+/// The first tuple, in canonical order, to have the same values for the key as
+/// one before it is the earliest second of those with an added tuple's values,
+/// found without sorting them all: by a binary search for each added tuple, where
+/// the key's attributes are the first in the tuples' order, as those that share
+/// them are together then, and otherwise by going through the tuples in order,
+/// each looked up among the added tuples' values for the key, until one is a
+/// second with them.
 ///
 /// # Safety
 ///
@@ -7195,57 +7286,87 @@ pub unsafe extern "C" fn trendy_rt_key_added(
         let (desc, key) = (&*desc, attributes(&*key));
         let element = desc.element();
         let found = Temp::<*const Attr>::new(key.len())?;
-        let mut len = 0;
-        // Whether they are the first attributes, in the tuples' order.
-        let mut first = true;
-        let mut others = false;
-        for attr in attributes(element) {
-            if key.iter().any(|k| name(k) == name(attr)) {
-                found.ptr().add(len).write(attr);
-                len += 1;
-                first &= !others;
-            } else {
-                others = true;
-            }
-        }
-        let compared = array(found.ptr(), len);
+        let (compared, first) = key_attributes(element, key, &found);
         let size = element.size;
-        let on_key = |a: *const u8, b: *const u8| {
-            compared
-                .iter()
-                .map(|&attr| order(a.add((*attr).offset), b.add((*attr).offset), &*(*attr).desc))
-                .find(|o| o.is_ne())
-                .unwrap_or(core::cmp::Ordering::Equal)
-        };
-        for j in 0..added_count {
-            let tuple = added.add(j * size);
-            let two = if first {
+        let at = |i: usize| tuples.add(i * size);
+        let two = if first {
+            let mut earliest: Option<(usize, usize)> = None;
+            for j in 0..added_count {
+                let tuple = added.add(j * size);
                 // The first of those with its values for the key.
                 let (mut lower, mut upper) = (0, count);
                 while lower < upper {
-                    let at = lower + (upper - lower) / 2;
-                    if on_key(tuples.add(at * size), tuple).is_lt() {
-                        lower = at + 1;
+                    let middle = lower + (upper - lower) / 2;
+                    if key_order(at(middle), tuple, compared).is_lt() {
+                        lower = middle + 1;
                     } else {
-                        upper = at;
+                        upper = middle;
                     }
                 }
-                (lower + 1 < count && on_key(tuples.add((lower + 1) * size), tuple).is_eq())
-                    .then_some((lower, lower + 1))
-            } else {
-                let mut sharing =
-                    (0..count).filter(|&i| on_key(tuples.add(i * size), tuple).is_eq());
-                sharing.next().zip(sharing.next())
-            };
-            if let Some((a, b)) = two {
-                shared.write(1);
-                pair.write_unaligned(a);
-                pair.add(1).write_unaligned(b);
-                return Ok(());
+                if lower + 1 < count
+                    && same_key(at(lower + 1), tuple, compared)
+                    && earliest.is_none_or(|(_, second)| lower + 1 < second)
+                {
+                    earliest = Some((lower, lower + 1));
+                }
             }
+            earliest
+        } else {
+            first_second_of_added(at, count, added, added_count, size, compared)?
+        };
+        if let Some((a, b)) = two {
+            shared.write(1);
+            pair.write_unaligned(a);
+            pair.add(1).write_unaligned(b);
         }
         Ok(())
     })
+}
+
+/// Of the `count` tuples `at` gives, by position, the first, in order, to have the same
+/// values for the attributes `on` as one before it, if one of `added_count` tuples of
+/// `size` bytes at `added` has them, and the first of those: the added tuples' values are
+/// held in a table, by their hashes, and each tuple is looked up in it until one is a
+/// second with them. Fails if there is no memory for the table.
+///
+/// # Safety
+///
+/// Each position below `count` must give a valid tuple, and `added` must point to
+/// `added_count` valid tuples of the same type, each of which has the attributes `on`.
+#[cfg(not(test))]
+unsafe fn first_second_of_added(
+    at: impl Fn(usize) -> *const u8,
+    count: usize,
+    added: *const u8,
+    added_count: usize,
+    size: usize,
+    on: &[*const Attr],
+) -> Fallible<Option<(usize, usize)>> {
+    // SAFETY: guaranteed by the caller; each index is below the count it is of.
+    unsafe {
+        let added_at = |j: usize| added.add(j * size);
+        let mut keys = Distinct::new(2 * added_count)?;
+        let equal = |i: usize, j: usize| same_key(added_at(i), added_at(j), on);
+        for j in 0..added_count {
+            keys.held_or_inserted(j, key_hash(added_at(j), on), &equal)?;
+        }
+        // Where the first tuple with each added tuple's values is, plus one, by that
+        // added tuple, if one has been found.
+        let mut firsts = Temp::<usize>::zeroed(added_count.max(1))?;
+        let firsts = firsts.values();
+        for i in 0..count {
+            let tuple = at(i);
+            let Some(j) = keys.found(key_hash(tuple, on), |j| same_key(added_at(j), tuple, on))
+            else {
+                continue;
+            };
+            if firsts[j] != 0 {
+                return Ok(Some((firsts[j] - 1, i)));
+            }
+            firsts[j] = i + 1;
+        }
+        Ok(None)
+    }
 }
 
 /// Fail with the error of the tuples at the positions `pair` of the

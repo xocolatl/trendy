@@ -4851,7 +4851,9 @@ operator main{} [];
   value is checked when the assignment is made, or, in an `assign` block,
   once all of the block's are (see [Assignment](#assignment)), and a value
   known only when the program runs stops it, writing the variable, the
-  key and the two tuples.
+  key and the two tuples. Of several, they are the first tuple, in
+  canonical order, to have the same values for the key as one before it,
+  and the first of those, when compiling as when running.
 - `key` is a keyword only there, so it can still be a name: an attribute or
   a variable can be called `key`.
 

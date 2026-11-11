@@ -2543,11 +2543,13 @@ carries on.
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another
 variable of the statement would change. Then each variable's keys are
-checked against its value (`trendy_rt_key_shared`): the runtime sorts the
-tuples' positions by each key the variable declares, and gives two next
-to each other with the same values for it, if there are any, for which
-the program stops (R0008), writing the variable, the key and the two
-tuples. Only then are the variables assigned. A selected value's
+checked against its value (`trendy_rt_key_shared`): the runtime goes
+through the tuples in canonical order, each looked up by the hash of its
+values for each key the variable declares (`key_hash`) among those before
+it, and stops at the first that has the same values as one of them, which
+it gives with that one, as sema does of a value it computes
+(`keys::sharing`), with no tuples sorted; the program stops then (R0008),
+writing the variable, the key and the two tuples. Only then are the variables assigned. A selected value's
 components' keys are checked the same way, before its constraints, and
 a failure writes the type and the component, or, for a value `load_csv`
 read, the record too (`Layout::record`).
@@ -2586,9 +2588,11 @@ comparison, and places are found before anything moves, so a `d_insert` that
 fails leaves it as it was, and tuples that come from its own buffer, all of
 which it has, add nothing. With other assignments, which read the variable as it
 was, it is an ordinary union. Keys are checked after, of what was added alone
-(`trendy_rt_key_added`), as nothing else can have broken them: by a binary search
-where the key's attributes come first in the tuples' order, and otherwise by
-going through them. A failure there leaves the variable changed, which only
+(`trendy_rt_key_added`), as nothing else can have broken them, and the same two
+are given: the earliest second with an added tuple's values, by a binary search
+for each where the key's attributes come first in the tuples' order, and
+otherwise by going through the tuples once, each looked up among the added
+tuples' values (`first_second_of_added`). A failure there leaves the variable changed, which only
 stops the program, or a transaction, which holds the old value, so its first
 `insert` copied, and restores it.
 
