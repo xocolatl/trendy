@@ -2840,8 +2840,14 @@ which joins its operands in the order its plan says as it runs (`Around::planned
 that is sorted anyway, as one that can make two tuples equal is, is sorted so
 (`FunctionBuilder::given_local`, `removed`), and one that a restriction looks up again, for
 each tuple or time round a loop, is put in that order once, as finding it by binary search
-pays for that (`leading_want`). So `r where v = i` in a loop finds its run by binary search
-however `r`'s attributes are named, and `r join s` of two projections sorts neither again. What a
+pays for that (`leading_want`). A lookup reads the local as the lookup has it, whatever
+reads what it finds: a restriction asked for canonical order takes its operand in a sorted
+one, as it is kept, and puts only what it keeps in canonical order
+(`FunctionBuilder::restrict`, `looks_up`). And what wants the local in canonical order once,
+not again, sorts a copy once, which a lookup that runs again pays for. So `r where v = i` in
+a loop finds its run by binary search however `r`'s attributes are named, and whatever reads
+the run, as a union, a match or an ungrouping does, and `r join s` of two projections sorts
+neither again. What a
 join or a semijoin searches more than once, or once for each tuple of something, is sorted
 all the same, as sorting it once is less work, and so is what is wanted in a sorted order
 again for each tuple, or time round a loop, as each time might sort it into another. Read another way, a loose one is sorted there,

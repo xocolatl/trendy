@@ -10408,6 +10408,68 @@ operator main{} [
     assert!(taken.as_secs() < 5, "{taken:?}");
 }
 
+/// A local looked up again by an attribute is kept sorted by it, whatever wants what a lookup
+/// finds in another order: here a union, a match, with what is computed from the local, and
+/// an ungrouping, each of whose 50,000 lookups finds its run by a binary search, rather than
+/// going through all of the local, which took most of a minute. What wants the local in
+/// canonical order once, as a comparison does, sorts it once, and a restriction of it is in
+/// canonical order all the same.
+#[test]
+fn a_local_looked_up_inside_what_wants_an_order_is_kept_for_the_lookups() {
+    let program = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 50000;
+    const r := series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value};
+    const s := r where k mod 3 = 0;
+    const t := series{from: 1, to: n} extend { k := value + n, v := value * 11 mod n } remove {value};
+    const g := (series{from: 1, to: n} extend { k := value, v := value * 13 mod n } remove {value})
+        group { inner := {v} };
+    var found := 0;
+    var i := 0;
+    while i < n loop [
+        found := found + LOOKUP;
+        i := i + 1;
+    ];
+    call debug_value{v: found};
+    call debug_value{v: r = t};
+    call debug_value{v: r where k < 4};
+];
+";
+    for (name, lookup, found) in [
+        (
+            "looked_up_in_union",
+            "count{r: (r union t) where v = i}",
+            "100000",
+        ),
+        (
+            "looked_up_in_match",
+            "count{r: (r matching s) where v = i}",
+            "16666",
+        ),
+        (
+            "looked_up_in_ungroup",
+            "count{r: (g ungroup {inner}) where k = i}",
+            "49999",
+        ),
+    ] {
+        let source = program.replace("LOOKUP", lookup);
+        let start = std::time::Instant::now();
+        let ran = ran_source(name, &source, b"");
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        assert_eq!(
+            ran.stderr,
+            format!(
+                "{found}\nfalse\n\
+                 relation {{ k: integer, v: integer }} {{ {{ k: 1, v: 7 }}, {{ k: 2, v: 14 }}, {{ k: 3, v: 21 }} }}\n"
+            ),
+            "{name}"
+        );
+        let taken = start.elapsed();
+        assert!(taken.as_secs() < 5, "{name}: {taken:?}");
+    }
+}
+
 /// A condition restricts what the operation it restricts computes from only as far as it
 /// would be the same and fail the same: not what can fail, whose first tuple to fail is the
 /// first in canonical order of what it restricts, by `b` and then `z` here, rather than by

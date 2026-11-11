@@ -1626,6 +1626,10 @@ struct ReadsOf {
     /// Whether a restriction finds its equated attributes in it again for each tuple of
     /// something, or time round a loop, which sorting it once by them pays for.
     looked_up_again: bool,
+    /// Whether what reads it wants it in canonical order more than once: searched again, or
+    /// for each tuple of something, or time round a loop, which would sort it each time if
+    /// it were kept in another order.
+    canonical_again: bool,
 }
 
 impl ReadsOf {
@@ -6820,14 +6824,13 @@ impl<'a> FunctionBuilder<'a> {
         match expr {
             hir::Expr::Local(read) if *read == id => {
                 reads.searches += usize::from(around.searched);
-                if reads.searches > 1
+                let again = reads.searches > 1
                     || (around.searched && around.repeated)
-                    || (around.want == Want::Sorted && around.repeated)
-                {
-                    Want::Canonical
-                } else {
-                    around.want
+                    || (around.want == Want::Sorted && around.repeated);
+                if again || (around.want == Want::Canonical && around.repeated) {
+                    reads.canonical_again = true;
                 }
+                if again { Want::Canonical } else { around.want }
             }
             hir::Expr::At(_, inner) => self.read_want(id, inner, around, reads),
             // Either form is what its reader reads.
@@ -6854,6 +6857,10 @@ impl<'a> FunctionBuilder<'a> {
                     || matches!(expr, hir::Expr::And(lhs, rhs) if several_joined(lhs, rhs).is_some());
                 let mut wanted = Want::Any;
                 expr.for_each_child(|child, _| {
+                    // What a restriction looks up is read only as the lookup has it: what
+                    // reads the restriction reads the run it finds, which is put in the order
+                    // that wants ([`FunctionBuilder::restrict`]).
+                    let looked_up = local_read(child) == Some(id) && self.looks_up(expr, child);
                     let is_loose = loosely.iter().any(|operand| core::ptr::eq(*operand, child));
                     let want = if is_loose && passes_order_down {
                         self.passed_down(expr, around.want)
@@ -6868,8 +6875,8 @@ impl<'a> FunctionBuilder<'a> {
                         Want::Canonical
                     };
                     let child_around = Around {
-                        want,
-                        searched: around.searched || searches_it,
+                        want: if looked_up { Want::Any } else { want },
+                        searched: !looked_up && (around.searched || searches_it),
                         repeated: around.repeated || expr.computes_again(child),
                         planned,
                     };
@@ -6881,6 +6888,18 @@ impl<'a> FunctionBuilder<'a> {
                 wanted
             }
         }
+    }
+
+    /// Whether `expr` is a restriction that looks its operand `child` up: its condition
+    /// equates attributes of it to values that can't fail, whose runs are found in it sorted
+    /// by them first.
+    fn looks_up(&self, expr: &hir::Expr, child: &hir::Expr) -> bool {
+        let (hir::Expr::Restrict(_, condition), hir::Type::Relation(heading)) =
+            (expr, self.type_of(child))
+        else {
+            return false;
+        };
+        !self.equated_attributes(&heading, condition).is_empty()
     }
 
     /// Note in `reads` what `expr` would have its operand `child`, a local variable or a
@@ -6940,9 +6959,12 @@ impl<'a> FunctionBuilder<'a> {
 
     /// What the local variable or binding `id`, wanted as `want` by what reads it, as `reads`
     /// gathered them, is computed in: sorted, if it is looked up again by what they would
-    /// have it sorted by first, which is noted, unless it is wanted in canonical order.
+    /// have it sorted by first, which is noted, unless it is wanted in canonical order more
+    /// than once, or wanted so and not looked up again. What wants it in canonical order
+    /// once sorts it once, where a lookup that runs again would go through all of it each
+    /// time.
     fn leading_want(&mut self, id: hir::LocalId, want: Want, reads: ReadsOf) -> Want {
-        if want == Want::Canonical {
+        if want == Want::Canonical && (reads.canonical_again || !reads.looked_up_again) {
             return want;
         }
         let Some(leading) = reads.leading else {
@@ -7995,7 +8017,17 @@ impl<'a> FunctionBuilder<'a> {
                 Some(hir::Connective::And.of(rest)),
             ),
             None => {
-                let (whole, order) = self.restricted_operand(operand, &ty, condition, want, cx);
+                // Asked for canonical order, the operand is taken in a sorted one, as it is if it
+                // is sorted, and only what is kept put in canonical order, which costs no more
+                // than sorting the whole, and nothing if it is in canonical order already; so
+                // a local looked up by another attribute can be kept sorted by that one.
+                let operand_want = if want == Want::Canonical {
+                    Want::Sorted
+                } else {
+                    want
+                };
+                let (whole, order) =
+                    self.restricted_operand(operand, &ty, condition, operand_want, cx);
                 (whole, order, None)
             }
         };
@@ -8041,6 +8073,9 @@ impl<'a> FunctionBuilder<'a> {
             src: whole.clone(),
         });
         self.operand_read(operand, &whole, &ty, cx);
+        if want == Want::Canonical && order != Order::Canonical {
+            return (self.canonical(dst, order, &ty, cx), Order::Canonical);
+        }
         (dst, order)
     }
 
@@ -10921,7 +10956,13 @@ impl<'a> FunctionBuilder<'a> {
             }
         }
         self.end_block(lir::Terminator::Jump(after), fixed);
-        let planned = self.joined_by_the_fixed_plan(lhs, rhs, &views, &given, want, cx);
+        // Either way gives the order the runtime does, canonical for a sorted one.
+        let fixed_want = if want == Want::Sorted {
+            Want::Canonical
+        } else {
+            want
+        };
+        let planned = self.joined_by_the_fixed_plan(lhs, rhs, &views, &given, fixed_want, cx);
         self.insts.push(lir::Inst::Copy {
             dst: dst.clone(),
             src: planned,
