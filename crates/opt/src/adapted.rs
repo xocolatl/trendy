@@ -19,22 +19,23 @@ pub(crate) struct Adapting<'a> {
 }
 
 impl Adapting<'_> {
-    /// `expr`, with what narrows a constant to adapt, but `shared`, written both
-    /// ways ([`hir::AdaptedRead`]), the outermost of what narrows it, if it reads
-    /// the constant once.
-    pub(crate) fn expr(&self, expr: hir::Expr, shared: Option<hir::Adapted>) -> hir::Expr {
-        if let Some(of) = self.narrowed(&expr).filter(|of| Some(*of) != shared)
+    /// `expr`, with what narrows a constant to adapt written both ways
+    /// ([`hir::AdaptedRead`]), the outermost of what narrows it, if it reads the
+    /// constant once. The shared form reads the others it reads whole, and the
+    /// narrowed one adapts them in turn, so that what reads `k` of them is written
+    /// `k + 1` ways, not `2^k`.
+    pub(crate) fn expr(&self, expr: hir::Expr) -> hir::Expr {
+        if let Some(of) = self.narrowed(&expr)
             && self.reads_of(&expr, of) == 1
         {
-            let narrowed = self.expr(self.with_value(expr.clone(), of), None);
-            let shared = expr.map_children(|child, _| self.expr(child, Some(of)));
+            let narrowed = self.expr(self.with_value(expr.clone(), of));
             return hir::Expr::AdaptedRead(Box::new(hir::AdaptedRead {
                 of,
-                shared,
+                shared: expr,
                 narrowed,
             }));
         }
-        expr.map_children(|child, _| self.expr(child, shared))
+        expr.map_children(|child, _| self.expr(child))
     }
 
     /// The constant to adapt that `expr` reads, if it is a read of one.

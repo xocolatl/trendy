@@ -1499,6 +1499,65 @@ operator main{} [
     );
 }
 
+/// A local constant of a value block, or a read-only operator's, read more than once, is
+/// computed as far as each read needs, as an update operator's is: by statements, or by the
+/// bindings of a value. What its value reads is kept as long as a read may compute it: `edges`
+/// in `chained`, which nothing after `first` reads but through `reach`, and in
+/// `operand_first`, which the end reads once as an operand, before the read of all of `reach`
+/// computes it.
+#[test]
+fn local_constants_of_values_are_computed_as_far_as_each_read_needs() {
+    let source = "uses { trendy.process };
+
+operator in_statements{n: integer}: integer [
+    const reach := (series{from: 1, to: n} rename {value as a} extend { b := a + 1 }) tclose;
+    var t := 0;
+    if n > 0 then [
+        t := count{r: reach where a = 1};
+    ];
+    t + count{r: reach where a = 2}
+];
+
+operator bound{n: integer}: integer [
+    const reach := (series{from: 1, to: n} rename {value as a} extend { b := a + 1 }) tclose;
+    count{r: reach where a = 1} + count{r: reach where a = 2}
+];
+
+operator chained{n: integer}: integer [
+    const edges := series{from: 1, to: n} rename {value as a} extend { b := a + 1 };
+    const size := count{r: edges};
+    const reach := edges tclose;
+    const first := count{r: reach where a = 1};
+    size + size + first + first + count{r: reach}
+];
+
+operator operand_first{n: integer}: relation { a: integer, b: integer } [
+    const edges := series{from: 1, to: n} rename {value as a} extend { b := a + 1 };
+    const reach := edges tclose;
+    const from_one := reach where a = 1;
+    ((edges union from_one) union from_one) union reach
+];
+
+operator main{} [
+    const n := length{a: arguments} + 30;
+    call debug_value{v: in_statements{n}};
+    call debug_value{v: bound{n}};
+    call debug_value{v: chained{n}};
+    call debug_value{v: count{r: operand_first{n}}};
+    call debug_value{v: [
+        const reach := (series{from: 1, to: n} rename {value as a} extend { b := a + 1 }) tclose;
+        count{r: reach where a = 1} + count{r: reach where a = 3}
+    ]};
+];
+";
+    let ran = ran_source("adapted_values", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr.lines().collect::<Vec<_>>(),
+        ["59", "59", "585", "465", "58"]
+    );
+}
+
 /// A local constant computed when a read first needs it is kept as what reads it would have
 /// it, as one computed where it is declared is: here sorted by `v`, which comes after `k` by
 /// name, so that each of 60,000 lookups by `v` in a loop finds its tuple by a binary search,

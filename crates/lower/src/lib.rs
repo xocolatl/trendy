@@ -2729,11 +2729,72 @@ impl<'a> FunctionBuilder<'a> {
         lower: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let outer = self.last_read.len();
-        self.last_read
-            .extend(bound.filter(|id| value.reads_last_as_operand(*id)));
+        let bound: Vec<hir::LocalId> = bound
+            .filter(|id| value.reads_last_as_operand(*id) && !self.read_by_deferred(value, *id))
+            .collect();
+        self.last_read.extend(bound);
         let lowered = lower(self);
         self.last_read.truncate(outer);
         lowered
+    }
+
+    /// What computes each local constant computed when a read first needs it
+    /// ([`hir::Local::deferred`]), of the chain of `Let`s `expr` or around it, which such a
+    /// read reads.
+    fn deferred_values(&self, expr: &hir::Expr) -> Vec<(hir::LocalId, hir::Expr)> {
+        let mut deferred: Vec<(hir::LocalId, hir::Expr)> = self
+            .deferred
+            .iter()
+            .map(|(id, deferred)| (*id, deferred.value.clone()))
+            .collect();
+        let mut at = expr;
+        loop {
+            match at {
+                hir::Expr::At(_, inner) if matches!(**inner, hir::Expr::Let(..)) => at = inner,
+                hir::Expr::Let(id, value, body) => {
+                    if self.locals[id.0].deferred {
+                        deferred.push((*id, (**value).clone()));
+                    }
+                    at = body;
+                }
+                _ => return deferred,
+            }
+        }
+    }
+
+    /// Whether what computes a local constant `expr` reads, computed when a read first
+    /// needs it ([`hir::Local::deferred`]), reads the local variable `id`, as that read may
+    /// compute it there.
+    fn read_by_deferred(&self, expr: &hir::Expr, id: hir::LocalId) -> bool {
+        self.deferred.iter().any(|(constant, deferred)| {
+            deferred.value.reads_local(id) && expr.reads_local(*constant)
+        })
+    }
+
+    /// The binding of the local constant `id`, of `value`, computed when a read first
+    /// needs it ([`hir::Local::deferred`]), as [`FunctionBuilder::defer`] declares one in a
+    /// block: null from the function's entry on, as a binding that points to anything is,
+    /// and assigned as `want` says, as its readers would have it, by the read that computes
+    /// it.
+    fn deferred_binding(
+        &mut self,
+        id: hir::LocalId,
+        value: &hir::Expr,
+        want: Want,
+        cx: &mut Lowering,
+    ) -> (lir::Place, hir::Type) {
+        let ty = self.locals[id.0].ty.clone();
+        let slot = self.slot(cx.layout(&ty));
+        self.lets.push((slot.clone(), ty.clone()));
+        self.local_places[id.0] = Some(LocalPlace {
+            value: slot.clone(),
+            holds: false,
+        });
+        if want != Want::Canonical {
+            self.local_wants.insert(id, want);
+        }
+        self.defer(id, value, cx);
+        (slot, ty)
     }
 
     /// The operand `operand`, of type `ty`, at `place`, which the relational
@@ -2819,12 +2880,14 @@ impl<'a> FunctionBuilder<'a> {
                 _ => break,
             }
         }
+        let deferred = self.deferred_values(expr);
         // Whether the binding of `id` is read after the part at `k`: by a
-        // later binding's value, before one binds it again, or by the end.
+        // later binding's value, before one binds it again, or by the end, or by
+        // what computes a binding computed when a read first needs it.
         let read_after = |k: usize, id: hir::LocalId| {
             for part in &parts[k + 1..] {
                 if let Part::Let(bound, value) = part {
-                    if value.reads_local(id) {
+                    if reads_through_deferred(value, id, &deferred) {
                         return true;
                     }
                     if *bound == id {
@@ -2832,7 +2895,7 @@ impl<'a> FunctionBuilder<'a> {
                     }
                 }
             }
-            end.reads_local(id)
+            reads_through_deferred(end, id, &deferred)
         };
         // What each binding is wanted in by all that reads it: the last first, as what one is
         // wanted in says what those it is computed from are.
@@ -2918,6 +2981,9 @@ impl<'a> FunctionBuilder<'a> {
     ) -> (lir::Place, hir::Type) {
         self.bound_in_loops(&[id]);
         let ty = self.locals[id.0].ty.clone();
+        if self.locals[id.0].deferred {
+            return self.deferred_binding(id, value, want, cx);
+        }
         let points = cx.points(&ty);
         if !points {
             let mut place = None;
@@ -11605,6 +11671,20 @@ fn arcs_of_closure(mut expr: &hir::Expr) -> Option<&hir::Expr> {
         hir::Expr::Tclose(arcs) => Some(arcs),
         _ => None,
     }
+}
+
+/// Whether `expr` reads the local variable `id`, directly or through what computes a local
+/// constant it reads that is computed when a read first needs it, of `deferred`, as that read
+/// may compute it there ([`hir::Local::deferred`]).
+fn reads_through_deferred(
+    expr: &hir::Expr,
+    id: hir::LocalId,
+    deferred: &[(hir::LocalId, hir::Expr)],
+) -> bool {
+    expr.reads_local(id)
+        || deferred
+            .iter()
+            .any(|(constant, value)| value.reads_local(id) && expr.reads_local(*constant))
 }
 
 /// Each local variable of `block`, of `locals`, that the block holds to no later than one

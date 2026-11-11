@@ -3577,9 +3577,9 @@ operator main{} [
   it reads changes before its reads. If it has one read, which runs once each time the
   declaration does, it is as if its expression were written there, so that `const t :=
   r join s;` read as `t join u` is one join of three, in whatever order costs least. If
-  it has more, in an operator's body, a read that narrows it computes only what it needs
-  the first time it runs after the declaration does, and from its next run on the
-  constant is computed whole, once, and shared, as a constant of the program's is. So a
+  it has more, a read that narrows it computes only what it needs the first time it runs
+  after the declaration does, and from its next run on the constant is computed whole,
+  once, and shared, as a constant of the program's is. So a
   failure in computing it can come after what runs before its read, though it says it is
   where the constant is declared, and one read nowhere fails nowhere. A local variable,
   `var`, is computed where it is declared, and so is a constant with a key, which is of

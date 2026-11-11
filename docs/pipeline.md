@@ -1290,7 +1290,12 @@ computing it once: if it is the constant's only read, and runs at most once
 narrows each other constant with no key to check, the outermost restriction, join,
 semijoin or antijoin whose relation operand reads it, through projections, renamings
 and extensions (`Adapting`): as an `Expr::AdaptedRead`, of the read, shared, and of the
-constant's value in its place, narrowed. Each is planned as anything else is. A
+constant's value in its place, narrowed. The shared form reads any other such constant
+whole, and the narrowed one adapts the next in turn, so that what narrows `k` of them is
+written `k + 1` ways, not `2^k`. Each is planned as anything else is. One form of the two
+is computed, so a local variable read once in each is read once (`count_reads`), and a
+`Let`'s binding read once is written where it is read before any of this
+(`bindings_inlined`), so that it is in place in each form rather than copied into both. A
 constant with a key to check is always shared, as the key is of all of it, and what
 reads the constant, the planner among them, takes it to hold.
 
@@ -1311,20 +1316,24 @@ its reader wants them in any (`loose_place`), when each form gives them as they 
 what each form reads is wanted as the read is (`read_want`), so that a local constant it
 narrows can be kept sorted for its lookups.
 
-A local constant of an update operator's body read more than once is adapted the same
-way (`Optimizer::locals_adapted`), if what its value reads doesn't change while its block
-runs, as one written where it is read must (`stays_while`): what narrows it is written
-both ways, and it is computed when a read first needs it, at most once each time its
-declaration runs (`hir::Local::deferred`). Its declaration computes nothing (`defer`):
+A local constant read more than once is adapted the same way: one an update operator's
+body or a value block declares (`Optimizer::locals_adapted`), if what its value reads
+doesn't change while its block runs, as one written where it is read must
+(`stays_while`), and one a `Let` binds, as nothing changes while a value is computed.
+What narrows it is written both ways, and it is computed when a read first needs it, at
+most once each time its declaration or its `Let` runs (`hir::Local::deferred`). Its declaration computes nothing (`defer`):
 the local has no value until a read computes it (`lir::Inst::NoValueYet`), and is null,
 as it is from the function's entry on and after the block's last statement to mention
 it, and nothing has computed it, nor run a read that narrows it, a bit of an integer each
 (`Deferred`). A read that finds it computed reads it in the order what computed it gave,
 and on the way where it has no value, nothing reads it, so that way says nothing of its
-order (`lir::Arrangement::NoValue`). A read computes it first if nothing
-has (`read_local`), assigning it as its declaration would, so a statement that mentions
-it mentions what its value reads too, which lasts as long as it may be computed
-(`last_mentioned`). An interface's `const name: type;` has its value in the
+order (`lir::Arrangement::NoValue`). A `Let` binds it the same way, kept as its readers
+would have it (`deferred_binding`). A read computes it first if nothing has
+(`read_local`), assigning it as its declaration would, so what reads it reads what its
+value reads too, which lasts as long as it may be computed: a statement that mentions
+it mentions that (`last_mentioned`), a later binding or the end of a chain of `Let`s that
+reads it reads that (`reads_through_deferred`), and a binding that value reads isn't
+given up at what reads it last as an operand (`read_by_deferred`). An interface's `const name: type;` has its value in the
 implementation (`scope::ConstantDecl::completed`).
 Evaluating a call substitutes a `Let`'s value
 in the rest once it is known (`ops::Substitution::locals`); lowering places

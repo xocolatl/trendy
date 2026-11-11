@@ -48,7 +48,7 @@ pub(crate) fn constants_inserted(program: hir::Program) -> hir::Program {
         .map(|id| (hir::Adapted::Constant(id), value_of(&program, id)))
         .collect();
     let adapting = Adapting { values: &values };
-    rewritten(&program, &|expr| adapting.expr(expr, None))
+    rewritten(&program, &|expr| adapting.expr(expr))
 }
 
 /// `program`, with each expression in its operators, its constants' values and
