@@ -6891,21 +6891,39 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// Whether `expr` is a restriction that looks its operand `child` up: its condition
-    /// equates attributes of it to values that can't fail, whose runs are found in it sorted
-    /// by them first.
+    /// equates attributes of it to values the same for every tuple
+    /// ([`FunctionBuilder::looked_up_attributes`]), whose runs are found in it sorted by them
+    /// first.
     fn looks_up(&self, expr: &hir::Expr, child: &hir::Expr) -> bool {
         let (hir::Expr::Restrict(_, condition), hir::Type::Relation(heading)) =
             (expr, self.type_of(child))
         else {
             return false;
         };
-        !self.equated_attributes(&heading, condition).is_empty()
+        !self.looked_up_attributes(&heading, condition).is_empty()
+    }
+
+    /// The attributes of `heading` that `condition`, on the tuples of a relation of it,
+    /// equates to values the same for every tuple ([`FunctionBuilder::equated`]): what a
+    /// restriction looks its tuples up by, as what can fail in those values is computed once,
+    /// before it does ([`FunctionBuilder::each_reading_invariants`]).
+    fn looked_up_attributes(&self, heading: &hir::Heading, condition: &hir::Expr) -> Vec<String> {
+        let conjuncts = condition.conjuncts();
+        heading
+            .attributes()
+            .filter(|(name, ty)| {
+                conjuncts
+                    .iter()
+                    .any(|conjunct| self.equated(conjunct, name, ty).is_some())
+            })
+            .map(|(name, _)| name.to_string())
+            .collect()
     }
 
     /// Note in `reads` what `expr` would have its operand `child`, a local variable or a
-    /// binding, sorted by first: a restriction's attributes it equates to a value that
-    /// can't fail, by name, and a join's or a semijoin's common attributes, by name, as it
-    /// compares them. A restriction found again for each tuple, or time round a loop, if
+    /// binding, sorted by first: a restriction's attributes it looks up, by name
+    /// ([`FunctionBuilder::looked_up_attributes`]), and a join's or a semijoin's common
+    /// attributes, by name, as it compares them. A restriction found again for each tuple, or time round a loop, if
     /// `repeated`, is looked up again.
     fn note_leading(
         &self,
@@ -6919,7 +6937,7 @@ impl<'a> FunctionBuilder<'a> {
         };
         match expr {
             hir::Expr::Restrict(_, condition) => {
-                let equated = self.equated_attributes(&heading, condition);
+                let equated = self.looked_up_attributes(&heading, condition);
                 if !equated.is_empty() && repeated {
                     reads.looked_up_again = true;
                 }
@@ -8007,7 +8025,6 @@ impl<'a> FunctionBuilder<'a> {
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("sema restricts only relations");
         };
-        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         let narrowed = self.closure_narrowed(operand, heading, condition, cx);
         let (whole, order, rest) = match narrowed {
             Some((closure, rest)) if rest.is_empty() => return (closure, Order::Canonical),
@@ -8032,14 +8049,44 @@ impl<'a> FunctionBuilder<'a> {
             }
         };
         let condition = rest.as_ref().unwrap_or(condition);
+        // What its condition reads that no tuple changes, computed once, is what it looks its
+        // tuples up by, which then can't fail.
+        let result = self.slot(cx.layout(&ty));
+        self.each_reading_invariants(&whole, &[condition], cx, |this, condition, cx| {
+            this.restricted_into(&whole, &ty, order, condition[0], &result, cx);
+        });
+        self.operand_read(operand, &whole, &ty, cx);
+        if want == Want::Canonical && order != Order::Canonical {
+            return (self.canonical(result, order, &ty, cx), Order::Canonical);
+        }
+        (result, order)
+    }
+
+    /// Store at `result` the tuples of the relation at `whole`, of type `ty`, which come as
+    /// `order` says, for which `condition` is true: those of the runs it looks up, found by
+    /// binary search if they are sorted by what it equates to values ([`FunctionBuilder::equal_runs`]),
+    /// or by an index ([`FunctionBuilder::kept_lookup`]), or else all of them, in a loop.
+    fn restricted_into(
+        &mut self,
+        whole: &lir::Place,
+        ty: &hir::Type,
+        order: Order,
+        condition: &hir::Expr,
+        result: &lir::Place,
+        cx: &mut Lowering,
+    ) {
+        let hir::Type::Relation(heading) = ty else {
+            unreachable!("only a relation is restricted");
+        };
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         // Tuples that agree are together only if they are sorted, by the attributes their
         // sort order begins with.
         let (src, condition) = if matches!(order, Order::Canonical | Order::SortedBy(_)) {
             let (src, condition) =
-                self.equal_runs(whole.clone(), &ty, order, heading, condition, cx);
+                self.equal_runs(whole.clone(), ty, order, heading, condition, cx);
             // What it equates that its order doesn't begin with, an index can find.
-            let src = if src == whole {
-                self.kept_lookup(src, &ty, order, &condition, cx)
+            let src = if src == *whole {
+                self.kept_lookup(src, ty, order, &condition, cx)
             } else {
                 src
             };
@@ -8049,7 +8096,7 @@ impl<'a> FunctionBuilder<'a> {
         };
         let mut count = src.clone();
         count.path.push(1);
-        let dst = self.allocated(&ty, count, cx);
+        let dst = self.allocated(ty, count, cx);
         let kept = self.slot(lir::Layout::Usize);
         let zero = usize_constant(0, cx);
         self.insts.push(lir::Inst::Copy {
@@ -8065,9 +8112,7 @@ impl<'a> FunctionBuilder<'a> {
             kept: &kept,
             tuple: &tuple,
         };
-        self.each_reading_invariants(&src, &[&condition], cx, |this, condition, cx| {
-            this.restriction_loop(&restricted, condition[0], cx);
-        });
+        self.restriction_loop(&restricted, &condition, cx);
         let mut len = dst.clone();
         len.path.push(1);
         self.insts.push(lir::Inst::Copy {
@@ -8075,16 +8120,16 @@ impl<'a> FunctionBuilder<'a> {
             src: kept,
             layout: lir::Layout::Usize,
         });
-        self.adopt(&dst, &ty, cx);
+        self.adopt(&dst, ty, cx);
         self.insts.push(lir::Inst::InOrderOf {
             dst: dst.clone(),
             src: whole.clone(),
         });
-        self.operand_read(operand, &whole, &ty, cx);
-        if want == Want::Canonical && order != Order::Canonical {
-            return (self.canonical(dst, order, &ty, cx), Order::Canonical);
-        }
-        (dst, order)
+        self.insts.push(lir::Inst::Copy {
+            dst: result.clone(),
+            src: dst,
+            layout: cx.layout(ty),
+        });
     }
 
     /// The tuples of `restricted` for which `condition` is true, each kept as it says, in a
@@ -13905,7 +13950,7 @@ mod tests {
     }
 
     #[test]
-    fn a_value_that_can_fail_finds_a_run_if_nothing_else_is_left() {
+    fn a_value_that_can_fail_finds_a_run_once_computed() {
         let heading = || {
             hir::Heading::new(BTreeMap::from([
                 ("a".to_string(), hir::Type::Scalar(hir::Scalar::Integer)),
@@ -13961,15 +14006,18 @@ mod tests {
         };
         let and = |operands| hir::Connective::And.of(operands);
         let equal = hir::Comparison::Equal;
-        // All that is said.
-        assert_eq!(runs(compared(equal, "a", failable())), 1);
+        // Each is lowered twice: with what can fail computed first, which finds the runs of
+        // whatever it equates the first attributes to, beside anything else; and as it is,
+        // for if that fails, which finds the runs only if nothing else is left. So: all that
+        // is said, once each way.
+        assert_eq!(runs(compared(equal, "a", failable())), 2);
         // Of both attributes, which are the first two.
         assert_eq!(
             runs(and(vec![
                 compared(equal, "a", failable()),
                 compared(equal, "z", failable()),
             ])),
-            2
+            4
         );
         // After one that can't fail, which decides it where it is false.
         assert_eq!(
@@ -13977,31 +14025,31 @@ mod tests {
                 compared(equal, "a", var(1)),
                 compared(equal, "z", failable()),
             ])),
-            2
+            4
         );
-        // Not with one that can't fail left, which decides it where it is
-        // false, however few tuples it holds for.
+        // With one that can't fail left, which decides it where it is false, however few
+        // tuples it holds for, only once computed.
         assert_eq!(
             runs(and(vec![
                 compared(equal, "a", failable()),
                 compared(hir::Comparison::Greater, "z", var(1)),
             ])),
-            0
+            1
         );
         assert_eq!(
             runs(and(vec![
                 compared(equal, "a", failable()),
                 compared(equal, "z", var(1)),
             ])),
-            0
+            2
         );
-        // Not with another that can fail, computed for every tuple.
+        // With another that can fail, computed for every tuple, only once computed.
         assert_eq!(
             runs(and(vec![
                 compared(equal, "a", failable()),
                 compared(hir::Comparison::Greater, "z", failable()),
             ])),
-            0
+            1
         );
         // Not of an attribute that isn't next.
         assert_eq!(runs(compared(equal, "z", failable())), 0);
@@ -14530,10 +14578,10 @@ mod tests {
         assert_eq!(runs(equal(attribute("b"), one())), 0);
         // Another attribute's value differs from tuple to tuple.
         assert_eq!(runs(equal(attribute("a"), attribute("b"))), 0);
-        // A value that can fail, if it is all that's left, is computed once,
-        // if there is a tuple (see the test after this one for when not).
+        // A value that can fail is computed once, if there is a tuple, before its run is
+        // found, and found again as it is, for if it fails (see the test after this one).
         let can_fail = hir::Expr::Binary(hir::BinaryOp::Div, Box::new(one()), Box::new(one()));
-        assert_eq!(runs(equal(attribute("a"), can_fail)), 1);
+        assert_eq!(runs(equal(attribute("a"), can_fail)), 2);
     }
 
     #[test]

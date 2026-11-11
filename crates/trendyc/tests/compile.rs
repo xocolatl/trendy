@@ -10532,6 +10532,55 @@ operator main{} [
     assert_eq!(ran.stderr, "2956\n86\n");
 }
 
+/// A restriction that equates an attribute to a value that can fail, as `v = i + 1` does,
+/// computes that once, before it looks its tuples up, beside another condition too, and a
+/// local it looks up again is sorted for it, so that each of 50,000 lookups, and each of a
+/// million in a relation too small for an index to be kept of it, finds its run by a binary
+/// search, where going through all of them took most of a minute; and the value fails as
+/// it would have, only where a tuple's condition needs it.
+#[test]
+fn a_lookup_by_a_value_that_can_fail_finds_its_run() {
+    let name = "lookup_that_can_fail";
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 50000;
+    const top := 9223372036854775807 - length{a: arguments};
+    const r := series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value};
+    var found := 0;
+    var i := 0;
+    while i < n loop [
+        found := found + count{r: r where v = i + 1 and k > 0};
+        i := i + 1;
+    ];
+    call debug_value{v: found};
+    const m := length{a: arguments} + 4000;
+    const small := series{from: 1, to: m} extend { k := value, v := value * 7 mod m } remove {value};
+    var hits := 0;
+    i := 0;
+    while i < 1000000 loop [
+        hits := hits + count{r: small where v = i mod m + 1};
+        i := i + 1;
+    ];
+    call debug_value{v: hits};
+    call debug_value{v: count{r: r where v = top + 1 and k < 0}};
+    call debug_value{v: count{r: r where v = top + 1}};
+];
+";
+    let start = std::time::Instant::now();
+    let ran = ran_source(name, source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr,
+        format!(
+            "49999\n999750\n0\nerror[R0001]: overflow: 9223372036854775807 + 1 is out of its type's range\n{}",
+            site(name, 24)
+        )
+    );
+    let taken = start.elapsed();
+    assert!(taken.as_secs() < 5, "{taken:?}");
+}
+
 /// What can fail only where it reads none of the tuple's attributes fails alike for every
 /// tuple, so it restricts what an operation that keeps each tuple computes from, but fails
 /// only as it would have: not for no tuple, as of an empty relation, nor where another

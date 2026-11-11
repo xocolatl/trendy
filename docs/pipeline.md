@@ -2841,7 +2841,9 @@ hand around the loop's, which the loop reads in its place (`with_invariants`), s
 needn't put failures aside if they were all that could fail. One that fails would fail for
 every tuple, but a tuple fails only if what it computes needs it, which an `and` or an `or` may
 not, so the loop is then the one that computes each tuple's work as it is written, which finds
-the first tuple to fail, as above.
+the first tuple to fail, as above. A restriction computes them before it looks up its tuples,
+by binary search or an index (`FunctionBuilder::restricted_into`), so that what it equates to a
+value that can fail, as `v = i + 1` does, finds its run as one that can't does.
 
 A `Let`'s binding is loose if all that reads it, followed up through what passes order down,
 as far as a reader that wants it or doesn't, takes it so (`FunctionBuilder::read_want`,
@@ -2850,8 +2852,10 @@ if it is assigned only where it is declared (`FunctionBuilder::note_loose_locals
 all read in a sorted order, any one, as a union's operand is (`passed_down`), is computed in
 whatever sorted order is less work, which its readers are given (`local_orders`). What
 reads a local variable or a binding directly says what it would have it sorted by first
-(`ReadsOf`, `note_leading`): a restriction, the attributes it equates to a value that can't
-fail, and a join or a semijoin, its common attributes, but not one of a join of several,
+(`ReadsOf`, `note_leading`): a restriction, the attributes it equates to a value the same
+for every tuple, which can fail, as `v = i + 1` can, as the restriction computes that once
+before it looks its tuples up (`FunctionBuilder::restrict`, `each_reading_invariants`), and
+a join or a semijoin, its common attributes, but not one of a join of several,
 which joins its operands in the order its plan says as it runs (`Around::planned`). If all that would agree, a projection
 that is sorted anyway, as one that can make two tuples equal is, is sorted so
 (`FunctionBuilder::given_local`, `removed`), and one that a restriction looks up again, for
