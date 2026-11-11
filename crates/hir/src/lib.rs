@@ -3200,12 +3200,22 @@ impl Expr {
     #[must_use]
     pub fn can_fail(&self) -> bool {
         match self {
-            Expr::Constant(_)
-            | Expr::Variable(_)
-            | Expr::ComputedConstant(..)
-            | Expr::Parameter(_)
-            | Expr::Local(_)
-            | Expr::Current(..) => false,
+            // Its failure is the narrowed one's, which computes all the other
+            // does but the constant.
+            Expr::AdaptedRead(read) => read.narrowed.can_fail(),
+            expr => {
+                let mut parts = false;
+                expr.for_each_child(|child, _| parts |= child.can_fail());
+                expr.fails_itself() || parts
+            }
+        }
+    }
+
+    /// Whether what the expression does can fail, apart from what its parts do, which
+    /// [`Expr::can_fail`] says too.
+    #[must_use]
+    pub fn fails_itself(&self) -> bool {
+        match self {
             // Negating the smallest integer overflows, and building a relation,
             // removing, renaming or adding attributes, joining or ungrouping it,
             // allocates the result, as building or loading an array does; adding
@@ -3238,37 +3248,34 @@ impl Expr {
             // A value breaks a constraint or a key of a component, or a
             // constraint's operator fails, or is of two subtypes a constraint
             // defines, neither of the other.
-            Expr::Select(defined, operand) => {
-                defined.is_constrained() || defined.specialized || operand.can_fail()
-            }
-            // A value is a value of its type's supertypes.
-            Expr::Unary(_, operand)
-            | Expr::At(_, operand)
-            | Expr::Components(operand)
-            | Expr::Treat(_, operand)
-            | Expr::Is(operand, _) => operand.can_fail(),
-            Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
-            Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
-            Expr::Extract(tuple, _) => tuple.can_fail(),
-            // Its failure is the narrowed one's, which computes all the other
-            // does but the constant.
-            Expr::AdaptedRead(read) => read.narrowed.can_fail(),
-            Expr::Call(call) => call.can_fail || call.args.values().any(Expr::can_fail),
-            Expr::Binary(op, lhs, rhs) => {
-                // Arithmetic, shifts and concatenation can fail
-                // themselves; the bits of integers can't, and comparisons
-                // can't unless ordering converts.
-                let itself = match op {
-                    BinaryOp::Compare(comparison, compared) => compared.can_fail(*comparison),
-                    BinaryOp::Bitwise(_) => false,
-                    _ => true,
-                };
-                itself || lhs.can_fail() || rhs.can_fail()
-            }
-            Expr::Let(_, value, body) => value.can_fail() || body.can_fail(),
-            Expr::If(condition, then, otherwise) => {
-                condition.can_fail() || then.can_fail() || otherwise.can_fail()
-            }
+            Expr::Select(defined, _) => defined.is_constrained() || defined.specialized,
+            Expr::Call(call) => call.can_fail,
+            // Arithmetic, shifts and concatenation can fail themselves; the bits of
+            // integers can't, and comparisons can't unless ordering converts.
+            Expr::Binary(op, ..) => match op {
+                BinaryOp::Compare(comparison, compared) => compared.can_fail(*comparison),
+                BinaryOp::Bitwise(_) => false,
+                _ => true,
+            },
+            // A value is a value of its type's supertypes, and what reads or combines
+            // values computes nothing that can fail.
+            Expr::Constant(_)
+            | Expr::Variable(_)
+            | Expr::ComputedConstant(..)
+            | Expr::Parameter(_)
+            | Expr::Local(_)
+            | Expr::Current(..)
+            | Expr::Unary(..)
+            | Expr::At(..)
+            | Expr::Components(_)
+            | Expr::Treat(..)
+            | Expr::Is(..)
+            | Expr::Tuple(_)
+            | Expr::Connective(..)
+            | Expr::Extract(..)
+            | Expr::AdaptedRead(_)
+            | Expr::Let(..)
+            | Expr::If(..) => false,
         }
     }
 

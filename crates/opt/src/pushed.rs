@@ -36,10 +36,18 @@ impl Pushing<'_> {
             return None;
         };
         let (sites, inner) = under_sites(operand);
-        let (moved, kept): (Vec<&hir::Expr>, Vec<&hir::Expr>) = condition
+        let (mut moved, mut kept): (Vec<&hir::Expr>, Vec<&hir::Expr>) = condition
             .conjuncts()
             .iter()
             .partition(|conjunct| self.passes(inner, conjunct));
+        // One that can fail, alike for every tuple, goes only with all of the condition: what
+        // stays could decide that no tuple computes it.
+        if !kept.is_empty() {
+            let (cannot, can): (Vec<&hir::Expr>, Vec<&hir::Expr>) =
+                moved.into_iter().partition(|conjunct| !conjunct.can_fail());
+            moved = cannot;
+            kept.extend(can);
+        }
         if moved.is_empty() {
             return None;
         }
@@ -54,20 +62,25 @@ impl Pushing<'_> {
     }
 
     /// Whether `conjunct`, of a condition restricting `inner`, can restrict what `inner`
-    /// computes from instead, with the same result and failing as it would: only if it
-    /// can't fail, as it could fail for another tuple first in canonical order, which
-    /// renaming or extending tuples changes, or for a tuple `inner` drops, and only if it
-    /// skips nothing that can fail, as every operand is computed. It reads attributes that
-    /// `inner` passes on as they are, of a renaming, a projection, an extension whose values
-    /// can't fail, which it doesn't read, or an ungrouping, but for those ungrouped; or all
-    /// of a tuple, of a union, a symmetric difference or a difference, if each operand has
-    /// what it reads of the types the result has, which can be its subtypes, or of a match
-    /// or a mismatch, whose result's tuples are its left operand's. Restricting first computes it for tuples `inner` drops, as a
-    /// projection does duplicates, or merges, so then only if it is [`cheap`]; but it is
-    /// computed once for each tuple of what an ungrouping ungroups, rather than for each it
-    /// makes.
+    /// computes from instead, with the same result and failing as it would. What it reads,
+    /// `inner` passes on as it is: attributes of a renaming, a projection, an extension
+    /// whose values can't fail, which it doesn't read, or an ungrouping, but for those
+    /// ungrouped; or all of a tuple, of a union, a symmetric difference or a difference, if
+    /// each operand has what it reads of the types the result has, which can be its
+    /// subtypes, or of a match or a mismatch, whose result's tuples are its left operand's.
+    ///
+    /// It skips nothing that can fail there, as every operand is computed. If it can fail
+    /// itself, it fails for another tuple first in canonical order, which renaming or
+    /// extending tuples changes, and for a tuple `inner` drops, so it doesn't go, unless
+    /// what fails in it fails alike for every tuple ([`fails_alike`]): then it goes only
+    /// where each tuple of what `inner` computes from goes on, through a renaming, a
+    /// projection, an extension or a union. Restricting first computes it for tuples `inner`
+    /// drops, as a projection does duplicates, or merges, so then only if it is [`cheap`];
+    /// but it is computed once for each tuple of what an ungrouping ungroups, rather than
+    /// for each it makes.
     fn passes(&self, inner: &hir::Expr, conjunct: &hir::Expr) -> bool {
-        if conjunct.can_fail() {
+        let fails = conjunct.can_fail();
+        if fails && !fails_alike(conjunct) {
             return false;
         }
         let read = conjunct.tuple_read(0);
@@ -106,20 +119,22 @@ impl Pushing<'_> {
                     })
                     .flat_map(|group| group.attributes().map(|(name, _)| name))
                     .collect();
-                !read.whole
+                !fails
+                    && !read.whole
                     && read
                         .attributes
                         .iter()
                         .all(|name| !ungrouped.contains(name.as_str()))
             }
+            hir::Expr::Combine(hir::Combination::Union, lhs, rhs) => {
+                cheap && reads_alike(lhs) && reads_alike(rhs)
+            }
             hir::Expr::Combine(
-                hir::Combination::Union
-                | hir::Combination::ExclusiveUnion
-                | hir::Combination::Minus,
+                hir::Combination::ExclusiveUnion | hir::Combination::Minus,
                 lhs,
                 rhs,
-            ) => cheap && reads_alike(lhs) && reads_alike(rhs),
-            hir::Expr::Semijoin(..) | hir::Expr::Antijoin(..) => cheap,
+            ) => !fails && cheap && reads_alike(lhs) && reads_alike(rhs),
+            hir::Expr::Semijoin(..) | hir::Expr::Antijoin(..) => !fails && cheap,
             _ => false,
         }
     }
@@ -212,6 +227,30 @@ fn with_sites(sites: &[hir::Site], expr: hir::Expr) -> hir::Expr {
         .iter()
         .rev()
         .fold(expr, |expr, site| hir::Expr::At(*site, Box::new(expr)))
+}
+
+/// Whether `expr`, of a condition on the tuples of a relation, fails alike for every tuple
+/// that computes it, if it fails: what in it can fail itself reads none of the tuple's
+/// attributes, so it fails the same for any tuple, whichever is first to compute it. What
+/// it computes for each tuple of a relation of its own, as an aggregate's argument, can't
+/// fail at all.
+fn fails_alike(expr: &hir::Expr) -> bool {
+    let read = expr.tuple_read(0);
+    if read.attributes.is_empty() && !read.whole {
+        return true;
+    }
+    if expr.fails_itself() {
+        return false;
+    }
+    let mut alike = true;
+    expr.for_each_child(|child, tuples| {
+        alike &= if tuples == 0 {
+            fails_alike(child)
+        } else {
+            !child.can_fail()
+        };
+    });
+    alike
 }
 
 /// Whether computing `expr` costs about what keeping a tuple does, whatever the values it

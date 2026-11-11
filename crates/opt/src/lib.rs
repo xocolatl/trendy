@@ -1072,6 +1072,7 @@ mod tests {
         d: relation { x: integer, y: integer }, \
         e: relation { w: integer }, \
         groups: relation { z: integer, inner: relation { x: integer } }, \
+        size: integer, \
         p: boolean";
 
     fn f(r: &str) -> String {
@@ -1678,6 +1679,49 @@ mod tests {
                 declared_and_computed(&source).contains(&"t".to_string()),
                 "{source}"
             );
+        }
+    }
+
+    #[test]
+    fn what_fails_alike_for_every_tuple_restricts_what_keeps_each_tuple() {
+        // What can fail only where it reads no attribute fails alike for every tuple, so it
+        // goes below what keeps each tuple, with all of the condition, but not where what
+        // stays could decide it isn't computed, nor below what drops tuples.
+        for (restriction, pushed) in [
+            (
+                "(d rename {x as w}) where w = size + 1",
+                "((d where x = size + 1) rename {x as w})",
+            ),
+            (
+                "d{x} where x = size + 1",
+                "((d where x = size + 1) remove {y})",
+            ),
+            (
+                "(d extend {w := x}) where y = size + 1",
+                "((d where y = size + 1) extend { w := x })",
+            ),
+            (
+                "(d union d) where x = size + 1",
+                "((d where x = size + 1) union (d where x = size + 1))",
+            ),
+            (
+                "(d extend {w := x}) where w = 1 and y = size + 1",
+                "((d extend { w := x }) where w = 1 and y = size + 1)",
+            ),
+            (
+                "(groups ungroup {inner}) where z = size + 1",
+                "((groups ungroup {inner}) where z = size + 1)",
+            ),
+            (
+                "(d minus d) where x = size + 1",
+                "((d minus d) where x = size + 1)",
+            ),
+            (
+                "(d matching a) where y = size + 1",
+                "((d matching a) where y = size + 1)",
+            ),
+        ] {
+            assert_eq!(planned(&f(restriction)), pushed, "{restriction}");
         }
     }
 

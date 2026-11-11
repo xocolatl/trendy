@@ -10532,6 +10532,38 @@ operator main{} [
     assert_eq!(ran.stderr, "2956\n86\n");
 }
 
+/// What can fail only where it reads none of the tuple's attributes fails alike for every
+/// tuple, so it restricts what an operation that keeps each tuple computes from, but fails
+/// only as it would have: not for no tuple, as of an empty relation, nor where another
+/// condition decides first, nor for tuples a difference drops; and for a tuple that computes
+/// it, as it would have, though a renaming changes which is first in canonical order.
+#[test]
+fn what_fails_alike_for_every_tuple_fails_as_it_would_have() {
+    let name = "fails_alike";
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments};
+    const top := 9223372036854775807 - n;
+    const r := series{from: n + 1, to: n + 50} rename {value as k};
+    const none := r where k > n + 100;
+    call debug_value{v: count{r: (none rename {k as w}) where w = top + 1}};
+    call debug_value{v: count{r: (r extend {z := k = 0}) where z and k = top + 1}};
+    call debug_value{v: count{r: (r minus r) where k = top + 1}};
+    call debug_value{v: count{r: (r rename {k as w}) where w = top + 1}};
+];
+";
+    let ran = ran_source(name, source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr,
+        format!(
+            "0\n0\n0\nerror[R0001]: overflow: 9223372036854775807 + 1 is out of its type's range\n{}",
+            site(name, 11)
+        )
+    );
+}
+
 /// A condition restricts what the operation it restricts computes from only as far as it
 /// would be the same and fail the same: not what can fail, whose first tuple to fail is the
 /// first in canonical order of what it restricts, by `b` and then `z` here, rather than by
