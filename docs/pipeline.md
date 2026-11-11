@@ -1298,10 +1298,12 @@ too), or joined with a relation, or matched with one, that has an attribute of i
 paths are followed from that relation's values; and an AND, restricted by a guard that
 reads attributes of some of its operands, which restricts them as soon as they are
 joined (`Optimizer::planned`), or joined with another AND, whose operands are planned
-with its own. A restriction of a restriction is judged as the one it is merged into, and
-a constant whose value reads another such constant by that one's value, which the
-narrowed form adapts in turn. Nothing else is narrowed by what comes after, nor is a
-read through a projection, a renaming or an extension, whose narrowed form would compute
+with its own. Each read is judged as it will be once optimized: a restriction of a
+restriction merged, and a condition restricting what the operation it restricts computes
+from, where it can (`Pushing`), so that a restriction of a renaming of a closure narrows
+the closure; and a constant whose value reads another such constant by that one's value,
+which the narrowed form adapts in turn. Nothing else is narrowed by what comes after,
+nor is a read through what a condition can't go below, whose narrowed form would compute
 all of it, and then, if another read needs all of it, the shared form would compute it
 again. The shared form reads any other such constant whole, and the narrowed one adapts
 the next in turn, so that what narrows `k` of them is written `k + 1` ways, not `2^k`.
@@ -2236,7 +2238,7 @@ written.
 
 A conjunct of a restriction's condition restricts what the operation it restricts
 computes from, if that passes on the attributes the conjunct reads as they are
-(`Optimizer::pushed_down`, `passes`), so that less is computed and what finds tuples
+(`Pushing::pushed_down`, `passes`), so that less is computed and what finds tuples
 sees it: a renaming's operand, the conjunct renamed back; a projection's; an
 extension's, if the conjunct doesn't read what it adds and its values can't fail; an
 ungrouping's, if the conjunct doesn't read what it ungroups; both operands of a `union`,

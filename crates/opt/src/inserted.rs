@@ -18,7 +18,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use trendy_hir as hir;
 
-use crate::adapted::{Adapting, TypeOf};
+use crate::TypeOf;
+use crate::adapted::Adapting;
 
 /// `program`, with each constant that can be written where it is read written
 /// there, and then what narrows one that can be adapted written both ways, as it

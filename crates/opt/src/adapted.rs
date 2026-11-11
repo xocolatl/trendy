@@ -13,10 +13,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use trendy_hir as hir;
 
-use crate::{and_operands, guard_reads, is_and, names, restrictions_merged, without_site};
-
-/// The type of an expression, where it is.
-pub(crate) type TypeOf<'a> = dyn Fn(&hir::Expr) -> hir::Type + 'a;
+use crate::pushed::{Pushing, restrictions_merged};
+use crate::{TypeOf, and_operands, guard_reads, is_and, names, without_site};
 
 /// Writes what narrows each of these constants both ways.
 pub(crate) struct Adapting<'a> {
@@ -34,6 +32,13 @@ impl Adapting<'_> {
     /// narrowed one adapts them in turn, so that what reads `k` of them is written
     /// `k + 1` ways, not `2^k`.
     pub(crate) fn expr(&self, expr: hir::Expr) -> hir::Expr {
+        // As it will be once optimized, so that what narrows a constant is where it will be.
+        if let Some(merged) = restrictions_merged(&expr) {
+            return self.expr(merged);
+        }
+        if let Some(pushed) = self.pushing().pushed_down(&expr) {
+            return self.expr(pushed);
+        }
         if let Some(of) = self.narrowed(&expr)
             && self.reads_of(&expr, of) == 1
         {
@@ -81,10 +86,6 @@ impl Adapting<'_> {
     /// what reads that on the way, as a projection, a renaming or an extension
     /// of it, passing it on.
     fn narrowed(&self, expr: &hir::Expr) -> Option<hir::Adapted> {
-        // As it will be, once optimized.
-        if let Some(merged) = restrictions_merged(expr) {
-            return self.narrowed(&merged);
-        }
         let operands: &[&hir::Expr] = match expr {
             hir::Expr::Restrict(operand, _) => &[&**operand],
             hir::Expr::Semijoin(lhs, rhs)
@@ -125,17 +126,19 @@ impl Adapting<'_> {
         if let Some(of) = self.read_of(value) {
             return self.narrows(narrowing, left, &self.values[&of]);
         }
-        // A restriction of a restriction, as it will be once optimized.
-        if let hir::Expr::Restrict(_, condition) = narrowing
-            && let Some(merged) = restrictions_merged(&hir::Expr::Restrict(
-                Box::new(value.clone()),
-                condition.clone(),
-            ))
-        {
-            let hir::Expr::Restrict(restricted, _) = &merged else {
-                unreachable!("restrictions merged are a restriction");
-            };
-            return self.narrows(&merged, true, restricted);
+        // A restriction of a restriction, or of what passes it down, as it will be once
+        // optimized.
+        if let hir::Expr::Restrict(_, condition) = narrowing {
+            let restriction = hir::Expr::Restrict(Box::new(value.clone()), condition.clone());
+            if let Some(merged) = restrictions_merged(&restriction) {
+                let hir::Expr::Restrict(restricted, _) = &merged else {
+                    unreachable!("restrictions merged are a restriction");
+                };
+                return self.narrows(&merged, true, restricted);
+            }
+            if let Some(pushed) = self.pushing().pushed_down(&restriction) {
+                return self.narrows_in(&pushed);
+            }
         }
         let closure = matches!(value, hir::Expr::Tclose(_));
         let shares = |other: &hir::Expr| {
@@ -183,6 +186,30 @@ impl Adapting<'_> {
             hir::Expr::Semijoin(_, rhs) if closure && left => shares(rhs),
             _ => false,
         }
+    }
+
+    /// Whether `expr`, a constant's value with a restriction pushed into it
+    /// ([`Pushing::pushed_down`]), has one where it went that narrows what it restricts
+    /// ([`Adapting::narrows`]): through what passed it on, as a renaming does, into
+    /// both operands of a union, and the left one of a match.
+    fn narrows_in(&self, expr: &hir::Expr) -> bool {
+        match expr {
+            hir::Expr::Restrict(operand, _) => self.narrows(expr, true, operand),
+            hir::Expr::Rename(operand, _)
+            | hir::Expr::Remove(operand, _)
+            | hir::Expr::Extend(operand, ..)
+            | hir::Expr::Ungroup(operand, _)
+            | hir::Expr::Semijoin(operand, _)
+            | hir::Expr::Antijoin(operand, _)
+            | hir::Expr::At(_, operand) => self.narrows_in(operand),
+            hir::Expr::Combine(_, lhs, rhs) => self.narrows_in(lhs) || self.narrows_in(rhs),
+            _ => false,
+        }
+    }
+
+    /// What rewrites restrictions as the optimizer will, given the types here.
+    fn pushing(&self) -> Pushing<'_> {
+        Pushing { ty: self.ty }
     }
 
     /// The constant to adapt that `expr` narrows, passing it on as it is or

@@ -18,8 +18,13 @@ use trendy_hir as hir;
 
 mod adapted;
 mod inserted;
+mod pushed;
 
 use adapted::Adapting;
+use pushed::{Pushing, restrictions_merged};
+
+/// The type of an expression, where it is.
+pub(crate) type TypeOf<'a> = dyn Fn(&hir::Expr) -> hir::Type + 'a;
 
 /// `program`, optimized.
 #[must_use]
@@ -177,7 +182,10 @@ impl<'a> Optimizer<'a> {
         if let Some(merged) = restrictions_merged(&expr) {
             return self.expr(merged);
         }
-        if let Some(pushed) = self.pushed_down(&expr) {
+        let pushing = Pushing {
+            ty: &|expr| self.ty(expr),
+        };
+        if let Some(pushed) = pushing.pushed_down(&expr) {
             return self.expr(pushed);
         }
         match expr {
@@ -230,157 +238,6 @@ impl<'a> Optimizer<'a> {
 
     fn ty(&self, expr: &hir::Expr) -> hir::Type {
         self.program.type_of(expr, self.params, self.locals)
-    }
-
-    /// The heading of `expr`, a relation.
-    fn heading(&self, expr: &hir::Expr) -> hir::Heading {
-        let hir::Type::Relation(heading) = self.ty(expr) else {
-            unreachable!("only a relation is restricted");
-        };
-        heading
-    }
-
-    /// `expr`, if it is a restriction of what passes the attributes of each tuple of a
-    /// relation on as they are, with the conjuncts of its condition that can restrict that
-    /// relation instead ([`Optimizer::passes`]) restricting it, so that what computes it
-    /// computes less, and what finds its tuples, as a lookup, sees them; the rest restrict
-    /// what they did. Where what it restricts is computed, its site, stays where it is.
-    fn pushed_down(&self, expr: &hir::Expr) -> Option<hir::Expr> {
-        let hir::Expr::Restrict(operand, condition) = expr else {
-            return None;
-        };
-        let (sites, inner) = under_sites(operand);
-        let (moved, kept): (Vec<&hir::Expr>, Vec<&hir::Expr>) = condition
-            .conjuncts()
-            .iter()
-            .partition(|conjunct| self.passes(inner, conjunct));
-        if moved.is_empty() {
-            return None;
-        }
-        let moved = hir::Connective::And.of(moved.into_iter().cloned().collect());
-        let below = with_sites(&sites, self.restricted_below(inner, moved));
-        Some(if kept.is_empty() {
-            below
-        } else {
-            let kept = hir::Connective::And.of(kept.into_iter().cloned().collect());
-            hir::Expr::Restrict(Box::new(below), Box::new(kept))
-        })
-    }
-
-    /// Whether `conjunct`, of a condition restricting `inner`, can restrict what `inner`
-    /// computes from instead, with the same result and failing as it would: only if it
-    /// can't fail, as it could fail for another tuple first in canonical order, which
-    /// renaming or extending tuples changes, or for a tuple `inner` drops, and only if it
-    /// skips nothing that can fail, as every operand is computed. It reads attributes that
-    /// `inner` passes on as they are, of a renaming, a projection, an extension whose values
-    /// can't fail, which it doesn't read, or an ungrouping, but for those ungrouped; or all
-    /// of a tuple, of a union, a symmetric difference or a difference, if each operand has
-    /// what it reads of the types the result has, which can be its subtypes, or of a match
-    /// or a mismatch, whose result's tuples are its left operand's. Restricting first computes it for tuples `inner` drops, as a
-    /// projection does duplicates, or merges, so then only if it is [`cheap`]; but it is
-    /// computed once for each tuple of what an ungrouping ungroups, rather than for each it
-    /// makes.
-    fn passes(&self, inner: &hir::Expr, conjunct: &hir::Expr) -> bool {
-        if conjunct.can_fail() {
-            return false;
-        }
-        let read = conjunct.tuple_read(0);
-        let cheap = cheap(conjunct);
-        // Whether `operand`'s tuples have what it reads, of the types the result's have.
-        let reads_alike = |operand: &hir::Expr| {
-            let (own, result) = (self.heading(operand), self.heading(inner));
-            if read.whole {
-                own == result
-            } else {
-                read.attributes
-                    .iter()
-                    .all(|name| own.get(name) == result.get(name))
-            }
-        };
-        match inner {
-            hir::Expr::Rename(..) => !read.whole,
-            hir::Expr::Remove(..) => !read.whole && cheap,
-            hir::Expr::Extend(operand, _, attributes) => {
-                let own = self.heading(operand);
-                let merges = attributes.keys().any(|name| own.get(name).is_some());
-                !read.whole
-                    && attributes.values().all(|value| !value.can_fail())
-                    && attributes
-                        .keys()
-                        .all(|name| !read.attributes.contains(name))
-                    && (cheap || !merges)
-            }
-            hir::Expr::Ungroup(operand, attributes) => {
-                let own = self.heading(operand);
-                let ungrouped: BTreeSet<&str> = attributes
-                    .iter()
-                    .filter_map(|name| match own.get(name) {
-                        Some(hir::Type::Relation(group)) => Some(group),
-                        _ => None,
-                    })
-                    .flat_map(|group| group.attributes().map(|(name, _)| name))
-                    .collect();
-                !read.whole
-                    && read
-                        .attributes
-                        .iter()
-                        .all(|name| !ungrouped.contains(name.as_str()))
-            }
-            hir::Expr::Combine(
-                hir::Combination::Union
-                | hir::Combination::ExclusiveUnion
-                | hir::Combination::Minus,
-                lhs,
-                rhs,
-            ) => cheap && reads_alike(lhs) && reads_alike(rhs),
-            hir::Expr::Semijoin(..) | hir::Expr::Antijoin(..) => cheap,
-            _ => false,
-        }
-    }
-
-    /// `inner`, which [`Optimizer::passes`] the conjuncts of `condition`, with what it
-    /// computes from restricted by them, renamed to what it renames from.
-    fn restricted_below(&self, inner: &hir::Expr, condition: hir::Expr) -> hir::Expr {
-        let restricted = |operand: &hir::Expr, condition: hir::Expr| {
-            let heading = self.heading(operand);
-            Box::new(hir::Expr::Restrict(
-                Box::new(operand.clone()),
-                Box::new(at_hand(condition, 0, &heading)),
-            ))
-        };
-        match inner {
-            hir::Expr::Rename(operand, renaming) => {
-                let from: BTreeMap<&str, &str> = renaming
-                    .iter()
-                    .map(|(old, new)| (new.as_str(), old.as_str()))
-                    .collect();
-                let condition = renamed_at_hand(condition, 0, &from);
-                hir::Expr::Rename(restricted(operand, condition), renaming.clone())
-            }
-            hir::Expr::Remove(operand, removed) => {
-                hir::Expr::Remove(restricted(operand, condition), removed.clone())
-            }
-            hir::Expr::Extend(operand, heading, attributes) => hir::Expr::Extend(
-                restricted(operand, condition),
-                heading.clone(),
-                attributes.clone(),
-            ),
-            hir::Expr::Ungroup(operand, ungrouped) => {
-                hir::Expr::Ungroup(restricted(operand, condition), ungrouped.clone())
-            }
-            hir::Expr::Combine(combination, lhs, rhs) => hir::Expr::Combine(
-                *combination,
-                restricted(lhs, condition.clone()),
-                restricted(rhs, condition),
-            ),
-            hir::Expr::Semijoin(lhs, rhs) => {
-                hir::Expr::Semijoin(restricted(lhs, condition), rhs.clone())
-            }
-            hir::Expr::Antijoin(lhs, rhs) => {
-                hir::Expr::Antijoin(restricted(lhs, condition), rhs.clone())
-            }
-            _ => unreachable!("only what passes a conjunct is restricted below"),
-        }
     }
 
     /// `block`, and the blocks in it, and `end`, its value if it has one, with each local
@@ -835,102 +692,6 @@ fn adapted_locals(expr: &hir::Expr, deferred: &mut BTreeSet<hir::LocalId>) {
 
 /// Whether `expr` is an AND, at a site of its own or not, as a value written
 /// elsewhere is.
-/// `r where p and q`, of `expr`, if it is `(r where p) where q` and `p` can't fail, which
-/// is the same relation, and fails as it does: every operand is computed, so `r where p` is
-/// computed for each tuple of `r`, which a `p` that can fail would fail for where `q` decides
-/// the `and` without it; but `q` is computed only for the tuples `p` is true of either way,
-/// in the same canonical order, as a restriction's tuples have their operand's heading. What
-/// is around `r where p`, as where it is computed, is around `r`, as `p` can't fail.
-fn restrictions_merged(expr: &hir::Expr) -> Option<hir::Expr> {
-    let hir::Expr::Restrict(operand, outer) = expr else {
-        return None;
-    };
-    let (sites, inner) = under_sites(operand);
-    let hir::Expr::Restrict(restricted, condition) = inner else {
-        return None;
-    };
-    if condition.can_fail() {
-        return None;
-    }
-    let restricted = with_sites(&sites, (**restricted).clone());
-    let condition = hir::Connective::And.of(vec![(**condition).clone(), (**outer).clone()]);
-    Some(hir::Expr::Restrict(
-        Box::new(restricted),
-        Box::new(condition),
-    ))
-}
-
-/// The sites `expr` is at, outermost first, and what is computed there.
-fn under_sites(expr: &hir::Expr) -> (Vec<hir::Site>, &hir::Expr) {
-    let mut sites = Vec::new();
-    let mut inner = expr;
-    while let hir::Expr::At(site, within) = inner {
-        sites.push(*site);
-        inner = within;
-    }
-    (sites, inner)
-}
-
-/// `expr`, at `sites`, outermost first.
-fn with_sites(sites: &[hir::Site], expr: hir::Expr) -> hir::Expr {
-    sites
-        .iter()
-        .rev()
-        .fold(expr, |expr, site| hir::Expr::At(*site, Box::new(expr)))
-}
-
-/// Whether computing `expr` costs about what keeping a tuple does, whatever the values it
-/// reads: it computes scalars by the language's own operators, and tuples of them, from
-/// what it reads, with no call, which can cost anything, nor a relation or an array, which
-/// can be as large as anything.
-fn cheap(expr: &hir::Expr) -> bool {
-    let own = match expr {
-        hir::Expr::Constant(_)
-        | hir::Expr::Variable(_)
-        | hir::Expr::Parameter(_)
-        | hir::Expr::Local(_)
-        | hir::Expr::ComputedConstant(..)
-        | hir::Expr::Current(..)
-        | hir::Expr::Extract(..)
-        | hir::Expr::Unary(..)
-        | hir::Expr::Connective(..)
-        | hir::Expr::If(..)
-        | hir::Expr::Tuple(_)
-        | hir::Expr::At(..) => true,
-        hir::Expr::Binary(op, ..) => !matches!(
-            op,
-            hir::BinaryOp::ConcatenateArrays
-                | hir::BinaryOp::Compare(
-                    _,
-                    hir::Compared::Relation
-                        | hir::Compared::Array { .. }
-                        | hir::Compared::Defined { converts: true }
-                        | hir::Compared::Parameter(_)
-                )
-        ),
-        _ => false,
-    };
-    let mut children = true;
-    expr.for_each_child(|child, _| children &= cheap(child));
-    own && children
-}
-
-/// `expr`, which reads attributes of the tuple at hand `depth` of them out from it, with
-/// each read under the name `from` gives it, if it gives one, as a condition on a renaming
-/// is on what it renames.
-fn renamed_at_hand(expr: hir::Expr, depth: usize, from: &BTreeMap<&str, &str>) -> hir::Expr {
-    match expr {
-        hir::Expr::Extract(tuple, name) if matches!(*tuple, hir::Expr::Current(d, _) if d == depth) =>
-        {
-            let name = from
-                .get(name.as_str())
-                .map_or(name, |old| (*old).to_string());
-            hir::Expr::Extract(tuple, name)
-        }
-        expr => expr.map_children(|child, deeper| renamed_at_hand(child, depth + deeper, from)),
-    }
-}
-
 fn is_and(expr: &hir::Expr) -> bool {
     match expr {
         hir::Expr::And(..) => true,
@@ -1516,9 +1277,17 @@ mod tests {
         assert_eq!(shared(&source), ["a"]);
     }
 
-    #[test]
-    fn what_narrows_a_constant_read_more_than_once_is_written_both_ways() {
-        let constants = format!(
+    /// The constant each read of what narrows it in `main` adapts, of the constants of
+    /// [`narrowed_constants`], once optimized, as [`adapted_reads`] says.
+    fn narrowing_adapts(body: &str) -> Vec<String> {
+        let constants = narrowed_constants();
+        adapted_reads(&format!("{constants}operator main{{}} [ {body} ];"))
+    }
+
+    /// Constants of closures, joins and what passes them on, read in the cases of
+    /// [`narrowing_adapts`].
+    fn narrowed_constants() -> String {
+        format!(
             "const a := {SERIES} rename {{value as x}};\n\
              const b := {SERIES} rename {{value as y}};\n\
              const c := ({SERIES} rename {{value as x}} extend {{ y := x + 1 }}) tclose;\n\
@@ -1526,8 +1295,14 @@ mod tests {
              const e := {SERIES} rename {{value as x}} extend {{ z := x * 2 }};\n\
              const g := c where y > x;\n\
              const h := c where x div y > 0;\n\
+             const cr := c rename {{x as w}};\n\
+             const cu := c union (c where y > x);\n\
              const k := ({SERIES} extend {{ same := value }}) key {{ same }};\n"
-        );
+        )
+    }
+
+    #[test]
+    fn what_narrows_a_constant_read_more_than_once_is_written_both_ways() {
         let xs = format!("({SERIES} rename {{value as x}})");
         let zs = format!("({SERIES} rename {{value as z}})");
         for (body, adapted) in [
@@ -1553,40 +1328,6 @@ mod tests {
             ),
             (
                 "call debug_table{r: p where x = y}; call debug_table{r: p where x < y};"
-                    .to_string(),
-                &[],
-            ),
-            // A restriction of a restriction, as one by both conditions, if the inner one
-            // can't fail: of a read, or of a constant's value.
-            (
-                "call debug_table{r: (c where y > x) where x = 1}; \
-                 call debug_table{r: (c where y > x) where x = 2};"
-                    .to_string(),
-                &["c", "c"],
-            ),
-            // `g`'s value reads `c`, which its narrowed form adapts in turn.
-            (
-                "call debug_table{r: g where x = 1}; call debug_table{r: g where x = 2};"
-                    .to_string(),
-                &["g", "c", "g", "c"],
-            ),
-            (
-                "call debug_table{r: h where x = 1}; call debug_table{r: h where x = 2};"
-                    .to_string(),
-                &[],
-            ),
-            // What reads what narrows it, passing it on, but not what it passes on.
-            (
-                "call debug_table{r: (c where x = 1) rename {x as w}}; \
-                 call debug_table{r: (c where x = 2){y}};"
-                    .to_string(),
-                &["c", "c"],
-            ),
-            (
-                "call debug_table{r: (c rename {x as w}) where w = 1}; \
-                 call debug_table{r: (c extend {w := x}) where x = 2}; \
-                 call debug_table{r: (p extend {w := x}) where x = 1}; \
-                 call debug_table{r: (p extend {w := x}) where y = 1};"
                     .to_string(),
                 &[],
             ),
@@ -1627,8 +1368,73 @@ mod tests {
                 &[],
             ),
         ] {
-            let source = format!("{constants}operator main{{}} [ {body} ];");
-            assert_eq!(adapted_reads(&source), adapted, "{source}");
+            assert_eq!(narrowing_adapts(&body), adapted, "{body}");
+        }
+    }
+
+    #[test]
+    fn what_narrows_a_constant_is_judged_as_it_will_be_once_optimized() {
+        for (body, adapted) in [
+            // A restriction of a restriction, as one by both conditions, if the inner one
+            // can't fail: of a read, or of a constant's value.
+            (
+                "call debug_table{r: (c where y > x) where x = 1}; \
+                 call debug_table{r: (c where y > x) where x = 2};"
+                    .to_string(),
+                &["c", "c"][..],
+            ),
+            // `g`'s value reads `c`, which its narrowed form adapts in turn.
+            (
+                "call debug_table{r: g where x = 1}; call debug_table{r: g where x = 2};"
+                    .to_string(),
+                &["g", "c", "g", "c"],
+            ),
+            (
+                "call debug_table{r: h where x = 1}; call debug_table{r: h where x = 2};"
+                    .to_string(),
+                &[],
+            ),
+            // What reads what narrows it, passing it on, and what it passes on, as the
+            // condition will restrict what that computes from.
+            (
+                "call debug_table{r: (c where x = 1) rename {x as w}}; \
+                 call debug_table{r: (c where x = 2){y}};"
+                    .to_string(),
+                &["c", "c"],
+            ),
+            (
+                "call debug_table{r: (c rename {x as w}) where w = 1}; \
+                 call debug_table{r: (c extend {w := x}) where x = 2}; \
+                 call debug_table{r: (p extend {w := x}) where x = 1}; \
+                 call debug_table{r: (p extend {w := x}) where y = 1};"
+                    .to_string(),
+                &["c", "c", "p", "p"],
+            ),
+            // Into both operands of a union, and through what a constant's value passes on,
+            // its narrowed form adapting the constant that reads in turn.
+            (
+                "call debug_table{r: (c union c) where x = 1};".to_string(),
+                &["c", "c"],
+            ),
+            (
+                "call debug_table{r: cr where w = 1}; call debug_table{r: cr where w = 2};"
+                    .to_string(),
+                &["cr", "c", "cr", "c"],
+            ),
+            (
+                "call debug_table{r: cu where x = 1}; call debug_table{r: cu where x = 2};"
+                    .to_string(),
+                &["cu", "c", "c", "cu", "c", "c"],
+            ),
+            // Not where the condition can't go, below an extension whose values can fail.
+            (
+                "call debug_table{r: (c extend {w := x + 1}) where x = 2}; \
+                 call debug_table{r: (c extend {w := x + 1}) where x = 3};"
+                    .to_string(),
+                &[],
+            ),
+        ] {
+            assert_eq!(narrowing_adapts(&body), adapted, "{body}");
         }
     }
 
