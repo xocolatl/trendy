@@ -2234,6 +2234,27 @@ order, as a restriction's tuples have its operand's heading. Where `r where p` i
 computed, its site, stays around `r`, so that a failure in that says where it is
 written.
 
+A conjunct of a restriction's condition restricts what the operation it restricts
+computes from, if that passes on the attributes the conjunct reads as they are
+(`Optimizer::pushed_down`, `passes`), so that less is computed and what finds tuples
+sees it: a renaming's operand, the conjunct renamed back; a projection's; an
+extension's, if the conjunct doesn't read what it adds and its values can't fail; an
+ungrouping's, if the conjunct doesn't read what it ungroups; both operands of a `union`,
+an `xunion` or a `minus`, if each has what the conjunct reads of the types the result
+does, which can be its subtypes; and the left one of `matching` or `not matching`. Only
+a conjunct that can't fail moves: what can fail fails for the first tuple in canonical
+order of what it restricts, which a renaming, a projection or an extension changes, and
+for tuples the operation drops, and below an extension or a restriction it would skip
+what can fail there, as every operand is computed. Nor does one go into a `d_union`, an
+`i_minus` or an assignment's changes, whose operands must not overlap or must be
+included. Below what drops or merges tuples, a projection, a `replace`, a union, a
+difference or a match, the conjunct is computed for tuples it wouldn't have been, so it
+moves there only if it is `cheap`: scalars by the language's own operators, with no
+call, which can cost anything, nor a relation or an array; below a renaming, an
+extension that only adds or an ungrouping, it is computed for no more tuples than it
+was. The rest of the condition stays where it was, which sees the same tuples in the
+same order.
+
 An AND of relations, restricted or not, is planned (`Optimizer::planned`),
 as one AND of any number of operands, since a chain of `And`s is one
 however it is grouped:

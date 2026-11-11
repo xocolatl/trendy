@@ -177,6 +177,9 @@ impl<'a> Optimizer<'a> {
         if let Some(merged) = restrictions_merged(&expr) {
             return self.expr(merged);
         }
+        if let Some(pushed) = self.pushed_down(&expr) {
+            return self.expr(pushed);
+        }
         match expr {
             // What a binding's value reads can't change in its body: a read-only operator's
             // variables are each bound once, and a value block assigns only its own (A0034).
@@ -227,6 +230,157 @@ impl<'a> Optimizer<'a> {
 
     fn ty(&self, expr: &hir::Expr) -> hir::Type {
         self.program.type_of(expr, self.params, self.locals)
+    }
+
+    /// The heading of `expr`, a relation.
+    fn heading(&self, expr: &hir::Expr) -> hir::Heading {
+        let hir::Type::Relation(heading) = self.ty(expr) else {
+            unreachable!("only a relation is restricted");
+        };
+        heading
+    }
+
+    /// `expr`, if it is a restriction of what passes the attributes of each tuple of a
+    /// relation on as they are, with the conjuncts of its condition that can restrict that
+    /// relation instead ([`Optimizer::passes`]) restricting it, so that what computes it
+    /// computes less, and what finds its tuples, as a lookup, sees them; the rest restrict
+    /// what they did. Where what it restricts is computed, its site, stays where it is.
+    fn pushed_down(&self, expr: &hir::Expr) -> Option<hir::Expr> {
+        let hir::Expr::Restrict(operand, condition) = expr else {
+            return None;
+        };
+        let (sites, inner) = under_sites(operand);
+        let (moved, kept): (Vec<&hir::Expr>, Vec<&hir::Expr>) = condition
+            .conjuncts()
+            .iter()
+            .partition(|conjunct| self.passes(inner, conjunct));
+        if moved.is_empty() {
+            return None;
+        }
+        let moved = hir::Connective::And.of(moved.into_iter().cloned().collect());
+        let below = with_sites(&sites, self.restricted_below(inner, moved));
+        Some(if kept.is_empty() {
+            below
+        } else {
+            let kept = hir::Connective::And.of(kept.into_iter().cloned().collect());
+            hir::Expr::Restrict(Box::new(below), Box::new(kept))
+        })
+    }
+
+    /// Whether `conjunct`, of a condition restricting `inner`, can restrict what `inner`
+    /// computes from instead, with the same result and failing as it would: only if it
+    /// can't fail, as it could fail for another tuple first in canonical order, which
+    /// renaming or extending tuples changes, or for a tuple `inner` drops, and only if it
+    /// skips nothing that can fail, as every operand is computed. It reads attributes that
+    /// `inner` passes on as they are, of a renaming, a projection, an extension whose values
+    /// can't fail, which it doesn't read, or an ungrouping, but for those ungrouped; or all
+    /// of a tuple, of a union, a symmetric difference or a difference, if each operand has
+    /// what it reads of the types the result has, which can be its subtypes, or of a match
+    /// or a mismatch, whose result's tuples are its left operand's. Restricting first computes it for tuples `inner` drops, as a
+    /// projection does duplicates, or merges, so then only if it is [`cheap`]; but it is
+    /// computed once for each tuple of what an ungrouping ungroups, rather than for each it
+    /// makes.
+    fn passes(&self, inner: &hir::Expr, conjunct: &hir::Expr) -> bool {
+        if conjunct.can_fail() {
+            return false;
+        }
+        let read = conjunct.tuple_read(0);
+        let cheap = cheap(conjunct);
+        // Whether `operand`'s tuples have what it reads, of the types the result's have.
+        let reads_alike = |operand: &hir::Expr| {
+            let (own, result) = (self.heading(operand), self.heading(inner));
+            if read.whole {
+                own == result
+            } else {
+                read.attributes
+                    .iter()
+                    .all(|name| own.get(name) == result.get(name))
+            }
+        };
+        match inner {
+            hir::Expr::Rename(..) => !read.whole,
+            hir::Expr::Remove(..) => !read.whole && cheap,
+            hir::Expr::Extend(operand, _, attributes) => {
+                let own = self.heading(operand);
+                let merges = attributes.keys().any(|name| own.get(name).is_some());
+                !read.whole
+                    && attributes.values().all(|value| !value.can_fail())
+                    && attributes
+                        .keys()
+                        .all(|name| !read.attributes.contains(name))
+                    && (cheap || !merges)
+            }
+            hir::Expr::Ungroup(operand, attributes) => {
+                let own = self.heading(operand);
+                let ungrouped: BTreeSet<&str> = attributes
+                    .iter()
+                    .filter_map(|name| match own.get(name) {
+                        Some(hir::Type::Relation(group)) => Some(group),
+                        _ => None,
+                    })
+                    .flat_map(|group| group.attributes().map(|(name, _)| name))
+                    .collect();
+                !read.whole
+                    && read
+                        .attributes
+                        .iter()
+                        .all(|name| !ungrouped.contains(name.as_str()))
+            }
+            hir::Expr::Combine(
+                hir::Combination::Union
+                | hir::Combination::ExclusiveUnion
+                | hir::Combination::Minus,
+                lhs,
+                rhs,
+            ) => cheap && reads_alike(lhs) && reads_alike(rhs),
+            hir::Expr::Semijoin(..) | hir::Expr::Antijoin(..) => cheap,
+            _ => false,
+        }
+    }
+
+    /// `inner`, which [`Optimizer::passes`] the conjuncts of `condition`, with what it
+    /// computes from restricted by them, renamed to what it renames from.
+    fn restricted_below(&self, inner: &hir::Expr, condition: hir::Expr) -> hir::Expr {
+        let restricted = |operand: &hir::Expr, condition: hir::Expr| {
+            let heading = self.heading(operand);
+            Box::new(hir::Expr::Restrict(
+                Box::new(operand.clone()),
+                Box::new(at_hand(condition, 0, &heading)),
+            ))
+        };
+        match inner {
+            hir::Expr::Rename(operand, renaming) => {
+                let from: BTreeMap<&str, &str> = renaming
+                    .iter()
+                    .map(|(old, new)| (new.as_str(), old.as_str()))
+                    .collect();
+                let condition = renamed_at_hand(condition, 0, &from);
+                hir::Expr::Rename(restricted(operand, condition), renaming.clone())
+            }
+            hir::Expr::Remove(operand, removed) => {
+                hir::Expr::Remove(restricted(operand, condition), removed.clone())
+            }
+            hir::Expr::Extend(operand, heading, attributes) => hir::Expr::Extend(
+                restricted(operand, condition),
+                heading.clone(),
+                attributes.clone(),
+            ),
+            hir::Expr::Ungroup(operand, ungrouped) => {
+                hir::Expr::Ungroup(restricted(operand, condition), ungrouped.clone())
+            }
+            hir::Expr::Combine(combination, lhs, rhs) => hir::Expr::Combine(
+                *combination,
+                restricted(lhs, condition.clone()),
+                restricted(rhs, condition),
+            ),
+            hir::Expr::Semijoin(lhs, rhs) => {
+                hir::Expr::Semijoin(restricted(lhs, condition), rhs.clone())
+            }
+            hir::Expr::Antijoin(lhs, rhs) => {
+                hir::Expr::Antijoin(restricted(lhs, condition), rhs.clone())
+            }
+            _ => unreachable!("only what passes a conjunct is restricted below"),
+        }
     }
 
     /// `block`, and the blocks in it, and `end`, its value if it has one, with each local
@@ -691,29 +845,90 @@ fn restrictions_merged(expr: &hir::Expr) -> Option<hir::Expr> {
     let hir::Expr::Restrict(operand, outer) = expr else {
         return None;
     };
-    let mut sites = Vec::new();
-    let mut inner = &**operand;
-    while let hir::Expr::At(site, within) = inner {
-        sites.push(*site);
-        inner = within;
-    }
+    let (sites, inner) = under_sites(operand);
     let hir::Expr::Restrict(restricted, condition) = inner else {
         return None;
     };
     if condition.can_fail() {
         return None;
     }
-    let restricted = sites
-        .into_iter()
-        .rev()
-        .fold((**restricted).clone(), |restricted, site| {
-            hir::Expr::At(site, Box::new(restricted))
-        });
+    let restricted = with_sites(&sites, (**restricted).clone());
     let condition = hir::Connective::And.of(vec![(**condition).clone(), (**outer).clone()]);
     Some(hir::Expr::Restrict(
         Box::new(restricted),
         Box::new(condition),
     ))
+}
+
+/// The sites `expr` is at, outermost first, and what is computed there.
+fn under_sites(expr: &hir::Expr) -> (Vec<hir::Site>, &hir::Expr) {
+    let mut sites = Vec::new();
+    let mut inner = expr;
+    while let hir::Expr::At(site, within) = inner {
+        sites.push(*site);
+        inner = within;
+    }
+    (sites, inner)
+}
+
+/// `expr`, at `sites`, outermost first.
+fn with_sites(sites: &[hir::Site], expr: hir::Expr) -> hir::Expr {
+    sites
+        .iter()
+        .rev()
+        .fold(expr, |expr, site| hir::Expr::At(*site, Box::new(expr)))
+}
+
+/// Whether computing `expr` costs about what keeping a tuple does, whatever the values it
+/// reads: it computes scalars by the language's own operators, and tuples of them, from
+/// what it reads, with no call, which can cost anything, nor a relation or an array, which
+/// can be as large as anything.
+fn cheap(expr: &hir::Expr) -> bool {
+    let own = match expr {
+        hir::Expr::Constant(_)
+        | hir::Expr::Variable(_)
+        | hir::Expr::Parameter(_)
+        | hir::Expr::Local(_)
+        | hir::Expr::ComputedConstant(..)
+        | hir::Expr::Current(..)
+        | hir::Expr::Extract(..)
+        | hir::Expr::Unary(..)
+        | hir::Expr::Connective(..)
+        | hir::Expr::If(..)
+        | hir::Expr::Tuple(_)
+        | hir::Expr::At(..) => true,
+        hir::Expr::Binary(op, ..) => !matches!(
+            op,
+            hir::BinaryOp::ConcatenateArrays
+                | hir::BinaryOp::Compare(
+                    _,
+                    hir::Compared::Relation
+                        | hir::Compared::Array { .. }
+                        | hir::Compared::Defined { converts: true }
+                        | hir::Compared::Parameter(_)
+                )
+        ),
+        _ => false,
+    };
+    let mut children = true;
+    expr.for_each_child(|child, _| children &= cheap(child));
+    own && children
+}
+
+/// `expr`, which reads attributes of the tuple at hand `depth` of them out from it, with
+/// each read under the name `from` gives it, if it gives one, as a condition on a renaming
+/// is on what it renames.
+fn renamed_at_hand(expr: hir::Expr, depth: usize, from: &BTreeMap<&str, &str>) -> hir::Expr {
+    match expr {
+        hir::Expr::Extract(tuple, name) if matches!(*tuple, hir::Expr::Current(d, _) if d == depth) =>
+        {
+            let name = from
+                .get(name.as_str())
+                .map_or(name, |old| (*old).to_string());
+            hir::Expr::Extract(tuple, name)
+        }
+        expr => expr.map_children(|child, deeper| renamed_at_hand(child, depth + deeper, from)),
+    }
 }
 
 fn is_and(expr: &hir::Expr) -> bool {
@@ -961,13 +1176,13 @@ mod tests {
                 format!(
                     "({} where {})",
                     shorthand(optimizer, operand),
-                    written(condition)
+                    written(optimizer, condition)
                 )
             }
             hir::Expr::Extend(operand, _, attributes) => {
                 let values: Vec<String> = attributes
                     .iter()
-                    .map(|(name, value)| format!("{name} := {}", shorthand(optimizer, value)))
+                    .map(|(name, value)| format!("{name} := {}", written(optimizer, value)))
                     .collect();
                 format!(
                     "({} extend {{ {} }})",
@@ -975,21 +1190,80 @@ mod tests {
                     values.join(", ")
                 )
             }
-            hir::Expr::Call(call) => {
-                let name = &optimizer.program.operator(call.operator).name;
-                let args: Vec<String> = call
-                    .args
+            hir::Expr::Call(call) => called(optimizer, call, &|arg| shorthand(optimizer, arg)),
+            hir::Expr::Rename(operand, renaming) => {
+                let renamed: Vec<String> = renaming
                     .iter()
-                    .map(|(param, arg)| format!("{param}: {}", shorthand(optimizer, arg)))
+                    .map(|(old, new)| format!("{old} as {new}"))
                     .collect();
-                format!("{name}{{{}}}", args.join(", "))
+                format!(
+                    "({} rename {{{}}})",
+                    shorthand(optimizer, operand),
+                    renamed.join(", ")
+                )
+            }
+            hir::Expr::Remove(operand, names) | hir::Expr::Ungroup(operand, names) => {
+                let word = if matches!(expr, hir::Expr::Remove(..)) {
+                    "remove"
+                } else {
+                    "ungroup"
+                };
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                format!(
+                    "({} {word} {{{}}})",
+                    shorthand(optimizer, operand),
+                    names.join(", ")
+                )
+            }
+            hir::Expr::Combine(combination, lhs, rhs) => {
+                let word = match combination {
+                    hir::Combination::Union => "union",
+                    hir::Combination::DisjointUnion => "d_union",
+                    hir::Combination::ExclusiveUnion => "xunion",
+                    hir::Combination::Minus => "minus",
+                    hir::Combination::IncludedMinus => "i_minus",
+                    hir::Combination::DisjointChanges => "changes",
+                };
+                format!(
+                    "({} {word} {})",
+                    shorthand(optimizer, lhs),
+                    shorthand(optimizer, rhs)
+                )
+            }
+            hir::Expr::Semijoin(lhs, rhs) | hir::Expr::Antijoin(lhs, rhs) => {
+                let word = if matches!(expr, hir::Expr::Semijoin(..)) {
+                    "matching"
+                } else {
+                    "not matching"
+                };
+                format!(
+                    "({} {word} {})",
+                    shorthand(optimizer, lhs),
+                    shorthand(optimizer, rhs)
+                )
             }
             other => panic!("no shorthand for {other:?}"),
         }
     }
 
-    /// `condition`, of a restriction, in trendy.
-    fn written(condition: &hir::Expr) -> String {
+    /// `call`, in trendy, each argument as `arg` writes it.
+    fn called(
+        optimizer: &Optimizer,
+        call: &hir::Call,
+        arg: &dyn Fn(&hir::Expr) -> String,
+    ) -> String {
+        let name = &optimizer.program.operator(call.operator).name;
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|(param, value)| format!("{param}: {}", arg(value)))
+            .collect();
+        format!("{name}{{{}}}", args.join(", "))
+    }
+
+    /// `condition`, of a restriction, or a value an extension computes, in trendy, and a
+    /// relation in it as [`shorthand`] writes it.
+    fn written(optimizer: &Optimizer, condition: &hir::Expr) -> String {
         match condition {
             hir::Expr::Extract(tuple, name) if matches!(**tuple, hir::Expr::Current(..)) => {
                 name.clone()
@@ -998,20 +1272,26 @@ mod tests {
             hir::Expr::Constant(hir::Value::Integer(n)) => n.to_string(),
             hir::Expr::Connective(hir::Connective::And, operands) => operands
                 .iter()
-                .map(written)
+                .map(|operand| written(optimizer, operand))
                 .collect::<Vec<_>>()
                 .join(" and "),
+            hir::Expr::Call(call) => called(optimizer, call, &|arg| written(optimizer, arg)),
             hir::Expr::Binary(op, lhs, rhs) => {
                 let op = match op {
+                    hir::BinaryOp::Add(_) => "+",
                     hir::BinaryOp::Div => "div",
                     hir::BinaryOp::Compare(hir::Comparison::Equal, _) => "=",
                     hir::BinaryOp::Compare(hir::Comparison::Greater, _) => ">",
                     hir::BinaryOp::Compare(hir::Comparison::Less, _) => "<",
                     other => panic!("no shorthand for {other:?}"),
                 };
-                format!("{} {op} {}", written(lhs), written(rhs))
+                format!(
+                    "{} {op} {}",
+                    written(optimizer, lhs),
+                    written(optimizer, rhs)
+                )
             }
-            other => panic!("no shorthand for {other:?}"),
+            relation => shorthand(optimizer, relation),
         }
     }
 
@@ -1030,6 +1310,7 @@ mod tests {
         c: relation { z: integer }, \
         d: relation { x: integer, y: integer }, \
         e: relation { w: integer }, \
+        groups: relation { z: integer, inner: relation { x: integer } }, \
         p: boolean";
 
     fn f(r: &str) -> String {
@@ -1592,6 +1873,120 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn a_condition_restricts_what_passes_the_attributes_it_reads_on() {
+        for (restriction, pushed) in [
+            // Through a renaming, renamed back, a projection, an extension it doesn't read
+            // and an ungrouping of what it doesn't read, and on down as far as it can go.
+            (
+                "(d rename {x as w}) where w = 1 and y > 2",
+                "((d where x = 1 and y > 2) rename {x as w})",
+            ),
+            ("d{x} where x = 1", "((d where x = 1) remove {y})"),
+            (
+                "(d extend {w := x}) where y = 1",
+                "((d where y = 1) extend { w := x })",
+            ),
+            (
+                "(groups ungroup {inner}) where z = 1",
+                "((groups where z = 1) ungroup {inner})",
+            ),
+            (
+                "((d rename {x as w}) union (d rename {x as w})) where w = 1",
+                "(((d where x = 1) rename {x as w}) union ((d where x = 1) rename {x as w}))",
+            ),
+            // Into both operands of a union, a symmetric difference and a difference, and the
+            // left one of a match or a mismatch.
+            (
+                "(d xunion d) where x = 1",
+                "((d where x = 1) xunion (d where x = 1))",
+            ),
+            (
+                "(d minus d) where x = 1",
+                "((d where x = 1) minus (d where x = 1))",
+            ),
+            ("(d matching a) where y = 1", "((d where y = 1) matching a)"),
+            (
+                "(d not matching a) where y = 1",
+                "((d where y = 1) not matching a)",
+            ),
+            // Not what can fail, which could fail for another tuple first, and the rest of a
+            // condition goes on where it can.
+            (
+                "(d rename {x as w}) where w = 1 and 1 div y = 1",
+                "(((d where x = 1) rename {x as w}) where 1 div y = 1)",
+            ),
+            // Not what an extension adds, nor below one whose values can fail.
+            (
+                "(d extend {w := x}) where w = 1",
+                "((d extend { w := x }) where w = 1)",
+            ),
+            (
+                "(d extend {w := x + 1}) where y = 1",
+                "((d extend { w := x + 1 }) where y = 1)",
+            ),
+            // Not what is ungrouped, nor into what must not overlap or must be included.
+            (
+                "(groups ungroup {inner}) where x = 1",
+                "((groups ungroup {inner}) where x = 1)",
+            ),
+            ("(d d_union d) where x = 1", "((d d_union d) where x = 1)"),
+            ("(d i_minus d) where x = 1", "((d i_minus d) where x = 1)"),
+        ] {
+            assert_eq!(planned(&f(restriction)), pushed, "{restriction}");
+        }
+        // A call, below what keeps every tuple, but not below what would have dropped or
+        // merged some, as it would be computed for them too.
+        let big = "operator big{n: integer}: boolean [ n > 1 ];\n";
+        for (restriction, pushed) in [
+            (
+                "(d rename {x as w}) where big{n: w}",
+                "((d where big{n: x}) rename {x as w})",
+            ),
+            (
+                "(d extend {w := x}) where big{n: y}",
+                "((d where big{n: y}) extend { w := x })",
+            ),
+            (
+                "(d matching a) where big{n: y}",
+                "((d matching a) where big{n: y})",
+            ),
+            ("d{x} where big{n: x}", "((d remove {y}) where big{n: x})"),
+            (
+                "(d replace {x := y}) where big{n: y}",
+                "((d extend { x := y }) where big{n: y})",
+            ),
+            (
+                "(d replace {x := y}) where y = 1",
+                "((d where y = 1) extend { x := y })",
+            ),
+        ] {
+            assert_eq!(
+                planned(&format!("{big}{}", f(restriction))),
+                pushed,
+                "{restriction}"
+            );
+        }
+        // Into the operands of a union whose types differ, only what reads what they have
+        // of the result's types.
+        let source = |condition: &str| {
+            format!(
+                "type shape union;\n\
+                 type square is shape {{ {{ side: integer }} }};\n\
+                 type circle is shape {{ {{ radius: integer }} }};\n\
+                 operator main{{}} [];\n\
+                 operator f{{a: relation {{ s: square, k: integer }}, \
+                 b: relation {{ s: shape, k: integer }}, t: shape}} [ \
+                 call debug_table{{r: (a union b) where {condition}}}; ];"
+            )
+        };
+        assert_eq!(
+            planned(&source("k = 1")),
+            "((a where k = 1) union (b where k = 1))"
+        );
+        assert_eq!(planned(&source("s = t")), "((a union b) where s = t)");
     }
 
     #[test]

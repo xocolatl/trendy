@@ -10381,6 +10381,88 @@ operator main{} [
     assert!(taken.as_secs() < 5, "{taken:?}");
 }
 
+/// A condition that can't fail restricts what a renaming or an extension it doesn't read
+/// computes from, so that each of 50,000 lookups by `w`, through both, finds its tuple by a
+/// binary search, renamed back to `v`, rather than going through them all, as it did.
+#[test]
+fn a_condition_restricts_what_passes_the_attributes_it_reads_on() {
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments} + 50000;
+    const r := series{from: 1, to: n} extend { k := value, v := value * 7 mod n } remove {value};
+    var found := 0;
+    var i := 0;
+    while i < n loop [
+        found := found + count{r: ((r rename {v as w}) extend { first := k = 1 }) where w = i};
+        i := i + 1;
+    ];
+    call debug_value{v: found};
+];
+";
+    let start = std::time::Instant::now();
+    let ran = ran_source("restriction_pushed", source, b"");
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(ran.stderr.trim(), "50000");
+    let taken = start.elapsed();
+    assert!(taken.as_secs() < 5, "{taken:?}");
+}
+
+/// A condition restricts what the operation it restricts computes from only as far as it
+/// would be the same and fail the same: not what can fail, whose first tuple to fail is the
+/// first in canonical order of what it restricts, by `b` and then `z` here, rather than by
+/// `a` first, as an image relation can, building a relation; and none goes below an
+/// extension that can fail, as that is computed for every tuple.
+#[test]
+fn a_condition_restricts_what_it_passes_through_as_it_would_have() {
+    let name = "restriction_pushed_where";
+    let source = "uses { trendy.process };
+
+operator risky{a: integer, b: integer}: boolean [
+    if a + b = 3 then fail failure{message: \"a is \" || to_text{from: a}} else true
+];
+
+operator main{} [
+    const n := length{a: arguments};
+    const r := (series{from: n, to: n + 3} rename {value as a})
+        times (series{from: n, to: n + 3} rename {value as b});
+    const e := series{from: n, to: n + 2} rename {value as w} extend { q := w * 10 };
+    call debug_value{v: count{r: ((r rename {a as w}) extend { s := w = b }) where w = 1 and s}};
+    call debug_value{v: count{r: (r rename {a as w}) where count{r: !!e} = 1}};
+    call debug_value{v: count{r: (r rename {a as z}) where risky{a: z, b}}};
+];
+";
+    let ran = ran_source(name, source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr,
+        format!(
+            "1\n12\nerror[R0021]: a is 3\n{}{}",
+            site(name, 4),
+            called(name, "risky", 14)
+        )
+    );
+    let name = "restriction_pushed_extend";
+    let source = "uses { trendy.process };
+
+operator main{} [
+    const n := length{a: arguments};
+    const r := (series{from: n, to: n + 3} rename {value as a})
+        times (series{from: n, to: n + 3} rename {value as b});
+    call debug_value{v: count{r: (r extend { d := 6 div (a - 1) }) where b = 9}};
+];
+";
+    let ran = ran_source(name, source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        ran.stderr,
+        format!(
+            "error[R0002]: division by zero: 6 div 0 has no result\n{}",
+            site(name, 7)
+        )
+    );
+}
+
 /// A restriction of a restriction fails as computing both would: one whose inner condition can
 /// fail for a tuple fails though the outer one is false of it, and one whose outer condition
 /// can fails only for a tuple the inner one keeps. A failure in what the inner one restricts
