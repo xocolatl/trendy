@@ -2768,6 +2768,21 @@ did, as it is a function of the tuple (TTM RM Prescription 3), with its own erro
 site, and that failure goes on; if it didn't, `trendy_rt_unfailed` stops the program with an
 internal error. If no tuple fails, nothing is sorted, and nothing is done but the loop.
 
+What a restriction's condition or an extension's values compute that is the same for every
+tuple, as `min{r: far, of: away}` in `far where away = min{r: far, of: away}`, is computed
+once, before the loop, if there is a tuple (`FunctionBuilder::each_reading_invariants`), so
+that a loop doesn't compute an aggregate of its relation again for each of its tuples. Such a
+part (`invariant_parts`) reads none of the tuple's attributes, nor a local variable bound in
+what the loop computes, and is computed wherever what it is in is: not one in an `if`'s branch,
+in a block's statements, or in a form of an `Expr::AdaptedRead`, which the program might not
+compute; what is only read, of a variable, a parameter or a tuple, is left as it is. Each is a
+step (`FunctionBuilder::steps_put_aside`), its failure put aside, written to a tuple of them at
+hand around the loop's, which the loop reads in its place (`with_invariants`), so that the loop
+needn't put failures aside if they were all that could fail. One that fails would fail for
+every tuple, but a tuple fails only if what it computes needs it, which an `and` or an `or` may
+not, so the loop is then the one that computes each tuple's work as it is written, which finds
+the first tuple to fail, as above.
+
 A `Let`'s binding is loose if all that reads it, followed up through what passes order down,
 as far as a reader that wants it or doesn't, takes it so (`FunctionBuilder::read_want`,
 `passes_order_down`), and so is a block's local variable, a `const` in a body with statements,

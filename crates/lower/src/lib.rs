@@ -1935,6 +1935,19 @@ enum Ran {
     Bit { reads: lir::Place, bit: lir::Place },
 }
 
+/// A restriction's loop, as [`FunctionBuilder::restrict`] lowers it: of the tuples of the
+/// relation at `src`, of `heading`, which come as `order` says, each that it keeps is
+/// written, laid out as `tuple`, to `dst`, at `kept`, which counts them.
+#[derive(Clone, Copy)]
+struct Restricted<'a> {
+    src: &'a lir::Place,
+    heading: &'a hir::Heading,
+    order: Order,
+    dst: &'a lir::Place,
+    kept: &'a lir::Place,
+    tuple: &'a lir::Layout,
+}
+
 /// The slots what puts failures aside keeps what it knows in, as it runs: the loop of
 /// [`FunctionBuilder::each_at_hand_failing_first`], or the steps of
 /// [`FunctionBuilder::steps_put_aside`].
@@ -3441,7 +3454,7 @@ impl<'a> FunctionBuilder<'a> {
             return;
         }
         let broken: Vec<lir::BlockId> = failing.iter().map(|_| self.new_block()).collect();
-        let steps = self.steps_put_aside(
+        let steps = self.steps_failing_again(
             failing.len(),
             true,
             cx,
@@ -3458,7 +3471,7 @@ impl<'a> FunctionBuilder<'a> {
                 );
             },
         );
-        let failed = self.steps_failed(&steps);
+        let failed = self.steps_failed(&steps.failing);
         let (again, held) = (self.new_block(), self.new_block());
         self.end_block(
             lir::Terminator::Branch {
@@ -7284,14 +7297,14 @@ impl<'a> FunctionBuilder<'a> {
             self.decide_or_on(value, decides, settled);
         }
         let calls = failing.iter().any(|operand| makes_calls(operand));
-        let steps = self.steps_put_aside(
+        let steps = self.steps_failing_again(
             failing.len(),
             calls,
             cx,
             |this, i, cx| this.place(failing[i], cx),
             |this, _, value, _| this.decide_or_on(value, decides, settled),
         );
-        let failed = self.steps_failed(&steps);
+        let failed = self.steps_failed(&steps.failing);
         let (again, undecided) = (self.new_block(), self.new_block());
         self.end_block(
             lir::Terminator::Branch {
@@ -7880,20 +7893,29 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let tuple = hir::Type::Tuple(heading.clone());
-        let fails = attributes.values().any(hir::Expr::can_fail);
         let result_tuple = cx.layout(&hir::Type::Tuple(result.clone()));
         let result_ty = hir::Type::Relation(result.clone());
         let mut count = src.clone();
         count.path.push(1);
         let dst = self.allocated(&result_ty, count, cx);
         let built = hir::Type::Tuple(result.clone());
-        self.each_at_hand_in(src, &tuple, comes, fails, cx, |this, at_hand, index, cx| {
-            let to = this.element(&dst, index, result_tuple.clone());
-            // The work on each tuple in a scope of its own, which the
-            // tuple built outlives.
-            this.nested_scope(cx, |this, cx| {
-                this.extended(heading, at_hand, attributes, result, &to, cx);
-                vec![(to.clone(), built.clone())]
+        let names: Vec<&String> = attributes.keys().collect();
+        let values: Vec<&hir::Expr> = attributes.values().collect();
+        self.each_reading_invariants(src, &values, cx, |this, values, cx| {
+            let attributes: BTreeMap<String, hir::Expr> = names
+                .iter()
+                .zip(values)
+                .map(|(name, value)| ((*name).clone(), (*value).clone()))
+                .collect();
+            let fails = values.iter().any(|value| value.can_fail());
+            this.each_at_hand_in(src, &tuple, comes, fails, cx, |this, at_hand, index, cx| {
+                let to = this.element(&dst, index, result_tuple.clone());
+                // The work on each tuple in a scope of its own, which the
+                // tuple built outlives.
+                this.nested_scope(cx, |this, cx| {
+                    this.extended(heading, at_hand, &attributes, result, &to, cx);
+                    vec![(to.clone(), built.clone())]
+                });
             });
         });
         match made {
@@ -7995,11 +8017,54 @@ impl<'a> FunctionBuilder<'a> {
             src: zero,
             layout: lir::Layout::Usize,
         });
+        let restricted = Restricted {
+            src: &src,
+            heading,
+            order,
+            dst: &dst,
+            kept: &kept,
+            tuple: &tuple,
+        };
+        self.each_reading_invariants(&src, &[&condition], cx, |this, condition, cx| {
+            this.restriction_loop(&restricted, condition[0], cx);
+        });
+        let mut len = dst.clone();
+        len.path.push(1);
+        self.insts.push(lir::Inst::Copy {
+            dst: len,
+            src: kept,
+            layout: lir::Layout::Usize,
+        });
+        self.adopt(&dst, &ty, cx);
+        self.insts.push(lir::Inst::InOrderOf {
+            dst: dst.clone(),
+            src: whole.clone(),
+        });
+        self.operand_read(operand, &whole, &ty, cx);
+        (dst, order)
+    }
+
+    /// The tuples of `restricted` for which `condition` is true, each kept as it says, in a
+    /// loop over them.
+    fn restriction_loop(
+        &mut self,
+        restricted: &Restricted,
+        condition: &hir::Expr,
+        cx: &mut Lowering,
+    ) {
+        let Restricted {
+            src,
+            heading,
+            order,
+            dst,
+            kept,
+            tuple,
+        } = *restricted;
         let fails = condition.can_fail();
         let at_hand_ty = hir::Type::Tuple(heading.clone());
-        let ranking = self.ranking_for(&condition, cx);
+        let ranking = self.ranking_for(condition, cx);
         self.each_at_hand_in(
-            &src,
+            src,
             &at_hand_ty,
             order,
             fails,
@@ -8010,8 +8075,8 @@ impl<'a> FunctionBuilder<'a> {
                 let keep = this.slot(lir::Layout::U8);
                 this.nested_scope(cx, |this, cx| {
                     let computed = match &ranking {
-                        Some(ranking) => this.ranked_connective(&condition, ranking, cx),
-                        None => this.place(&condition, cx),
+                        Some(ranking) => this.ranked_connective(condition, ranking, cx),
+                        None => this.place(condition, cx),
                     };
                     this.insts.push(lir::Inst::Copy {
                         dst: keep.clone(),
@@ -8029,7 +8094,7 @@ impl<'a> FunctionBuilder<'a> {
                     },
                     copy,
                 );
-                let to = this.element(&dst, &kept, tuple.clone());
+                let to = this.element(dst, kept, tuple.clone());
                 this.insts.push(lir::Inst::Copy {
                     dst: to,
                     src: at_hand.clone(),
@@ -8041,20 +8106,127 @@ impl<'a> FunctionBuilder<'a> {
                 this.end_block(lir::Terminator::Jump(next), next);
             },
         );
-        let mut len = dst.clone();
-        len.path.push(1);
-        self.insts.push(lir::Inst::Copy {
-            dst: len,
-            src: kept,
-            layout: lir::Layout::Usize,
+    }
+
+    /// A loop over the tuples of the relation at `src`, which `each` lowers, given `exprs`,
+    /// what it computes for each tuple, as a restriction's condition or an extension's
+    /// values. Their parts that are the same for every tuple ([`invariant_parts`]) are
+    /// computed once, if there is a tuple, before the loop, as steps
+    /// ([`FunctionBuilder::steps_put_aside`]), into a tuple of them at hand around the loop's,
+    /// and `each` is given `exprs` with them read from it instead ([`with_invariants`]), which
+    /// then may not fail at all, so that the loop needn't put failures aside. If one fails, it
+    /// would for every tuple, but a tuple fails only if what it computes needs it, which an
+    /// `and` or an `or` may not (see [`hir::Connective::And`]), so the loop is then the one
+    /// `each` lowers given `exprs` as they are, which finds the first tuple in canonical order
+    /// to fail, if one does ([`FunctionBuilder::each_at_hand_in`]).
+    fn each_reading_invariants(
+        &mut self,
+        src: &lir::Place,
+        exprs: &[&hir::Expr],
+        cx: &mut Lowering,
+        mut each: impl FnMut(&mut Self, &[&hir::Expr], &mut Lowering),
+    ) {
+        let invariants = invariant_parts(exprs);
+        if invariants.is_empty() {
+            each(self, exprs, cx);
+            return;
+        }
+        let names: Vec<String> = (0..invariants.len())
+            .map(|i| hir::wrapped(&format!("invariant {i}")))
+            .collect();
+        let heading = hir::Heading::new(
+            names
+                .iter()
+                .zip(&invariants)
+                .map(|(name, part)| (name.clone(), self.type_of(part)))
+                .collect(),
+        );
+        let values = self.slot(cx.layout(&hir::Type::Tuple(heading.clone())));
+        // Each one's attribute's place in the tuple, which has them in name order.
+        let fields: Vec<(lir::Place, lir::Layout)> = names
+            .iter()
+            .zip(&invariants)
+            .map(|(name, part)| {
+                let mut field = values.clone();
+                field.path.push(
+                    heading
+                        .attributes()
+                        .position(|(attribute, _)| attribute == name)
+                        .expect("each is an attribute"),
+                );
+                (field, cx.layout(&self.type_of(part)))
+            })
+            .collect();
+        let (computing, fast, done) = (self.new_block(), self.new_block(), self.new_block());
+        // With no tuple, nothing reads them.
+        let mut count = src.clone();
+        count.path.push(1);
+        let zero = usize_constant(0, cx);
+        let some = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: some.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Less, lir::Operand::Usize),
+            lhs: zero,
+            rhs: count,
         });
-        self.adopt(&dst, &ty, cx);
-        self.insts.push(lir::Inst::InOrderOf {
-            dst: dst.clone(),
-            src: whole.clone(),
-        });
-        self.operand_read(operand, &whole, &ty, cx);
-        (dst, order)
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: some,
+                then: computing,
+                otherwise: fast,
+            },
+            computing,
+        );
+        // Computed before the tuples are: they read none of them, but what's further out is
+        // further out from them than from here.
+        self.tuples.push(AtHand::one(src.clone()));
+        let copied = |this: &mut Self, i: usize, computed: lir::Place| {
+            let (field, layout) = fields[i].clone();
+            this.insts.push(lir::Inst::Copy {
+                dst: field,
+                src: computed,
+                layout,
+            });
+        };
+        if invariants.iter().any(hir::Expr::can_fail) {
+            let calls = invariants.iter().any(makes_calls);
+            let failing = self.steps_put_aside(
+                invariants.len(),
+                calls,
+                cx,
+                |this, i, cx| this.place(&invariants[i], cx),
+                |this, i, computed, _| copied(this, i, computed),
+            );
+            self.tuples.pop();
+            let failed = self.steps_failed(&failing);
+            let whole = self.new_block();
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: failed,
+                    then: whole,
+                    otherwise: fast,
+                },
+                whole,
+            );
+            each(self, exprs, cx);
+            self.end_block(lir::Terminator::Jump(done), fast);
+        } else {
+            for (i, part) in invariants.iter().enumerate() {
+                let computed = self.place(part, cx);
+                copied(self, i, computed);
+            }
+            self.tuples.pop();
+            self.end_block(lir::Terminator::Jump(fast), fast);
+        }
+        let read: Vec<hir::Expr> = exprs
+            .iter()
+            .map(|expr| with_invariants((*expr).clone(), &invariants, &names, &heading, 0))
+            .collect();
+        let read: Vec<&hir::Expr> = read.iter().collect();
+        self.tuples.push(AtHand::one(values));
+        each(self, &read, cx);
+        self.tuples.pop();
+        self.end_block(lir::Terminator::Jump(done), done);
     }
 
     /// If `operand` is a transitive closure, and `condition` says one of its
@@ -8311,7 +8483,7 @@ impl<'a> FunctionBuilder<'a> {
             computing,
         );
         let (steps, places) = self.failable_values(src, values, cx);
-        let failed = self.steps_failed(&steps);
+        let failed = self.steps_failed(&steps.failing);
         let failing = self.new_block();
         self.end_block(
             lir::Terminator::Branch {
@@ -8431,7 +8603,7 @@ impl<'a> FunctionBuilder<'a> {
         // out is further out from it than from here.
         self.tuples.push(AtHand::one(src.clone()));
         let calls = values.iter().any(|(_, value)| makes_calls(value));
-        let steps = self.steps_put_aside(
+        let steps = self.steps_failing_again(
             values.len(),
             calls,
             cx,
@@ -8845,19 +9017,33 @@ impl<'a> FunctionBuilder<'a> {
         self.release_place(&error, &waiting.ty, cx);
     }
 
+    /// As [`FunctionBuilder::steps_put_aside`], and what comes after them can compute the
+    /// first to fail again ([`FunctionBuilder::fail_again`]), from a copy of `compute` of its
+    /// own, which fails as it did, as what it computes is a function of what it reads (TTM RM
+    /// Prescription 3). A copy, rather than going back to the step, keeps what only a failure
+    /// needs out of the steps' code: going back would make a loop of it, out of which what a
+    /// failure needs would be computed each time the steps are.
+    fn steps_failing_again(
+        &mut self,
+        count: usize,
+        calls: bool,
+        cx: &mut Lowering,
+        mut compute: impl FnMut(&mut Self, usize, &mut Lowering) -> lir::Place,
+        after: impl FnMut(&mut Self, usize, lir::Place, &mut Lowering),
+    ) -> Steps {
+        let failing = self.steps_put_aside(count, calls, cx, &mut compute, after);
+        let again = self.copies_to_fail_again(count, cx, compute);
+        Steps { failing, again }
+    }
+
     /// `count` steps, one after another, and what comes after them, where this leaves
     /// building: the `i`th computed by `compute`, which can fail, and then, if it didn't,
     /// what `after` does with what it computed, which can go elsewhere, as when it decides
     /// what happens. A step's failure is put aside ([`FunctionBuilder::forget_failure`]),
     /// keeping which was the first to fail, and the next is computed, as it may yet decide
     /// what happens. What comes after asks whether one failed
-    /// ([`FunctionBuilder::steps_failed`]) and computes the first again
-    /// ([`FunctionBuilder::fail_again`]), from a copy of `compute` of its own, which fails as
-    /// it did, as what it computes is a function of what it reads (TTM RM Prescription 3). A
-    /// copy, rather than going back to the step, keeps what only a failure needs out of
-    /// the steps' code: going back would make a loop of it, out of which what a failure
-    /// needs would be computed each time the steps are. The trace and site are kept if what
-    /// the steps compute `calls` functions, which change them.
+    /// ([`FunctionBuilder::steps_failed`]). The trace and site are kept if what the steps
+    /// compute `calls` functions, which change them.
     fn steps_put_aside(
         &mut self,
         count: usize,
@@ -8865,7 +9051,7 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
         mut compute: impl FnMut(&mut Self, usize, &mut Lowering) -> lir::Place,
         mut after: impl FnMut(&mut Self, usize, lir::Place, &mut Lowering),
-    ) -> Steps {
+    ) -> FirstFailing {
         let start = self.position();
         let mut failing = self.first_failing(false, calls, cx);
         let raise = self.new_block();
@@ -8922,8 +9108,7 @@ impl<'a> FunctionBuilder<'a> {
             self.end_block(lir::Terminator::Jump(next), raise);
         }
         self.end_block(lir::Terminator::Raise, done);
-        let again = self.copies_to_fail_again(count, cx, compute);
-        Steps { failing, again }
+        failing
     }
 
     /// Where each of `count` steps, the `i`th computed by `compute`, is computed again, from a
@@ -9101,7 +9286,7 @@ impl<'a> FunctionBuilder<'a> {
             failing: failed,
             again,
         };
-        let one_failed = self.steps_failed(&steps);
+        let one_failed = self.steps_failed(&steps.failing);
         let once_more = self.new_block();
         self.end_block(
             lir::Terminator::Branch {
@@ -9345,14 +9530,14 @@ impl<'a> FunctionBuilder<'a> {
         (operands, after_all)
     }
 
-    /// Whether one of `steps` failed, in a new slot.
-    fn steps_failed(&mut self, steps: &Steps) -> lir::Place {
+    /// Whether one of the steps that keep what they know in `failing` failed, in a new slot.
+    fn steps_failed(&mut self, failing: &FirstFailing) -> lir::Place {
         let failed = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Binary {
             dst: failed.clone(),
             op: lir::BinaryOp::Compare(lir::Comparison::NotEqual, lir::Operand::Usize),
-            lhs: steps.failing.first.clone(),
-            rhs: steps.failing.none.clone(),
+            lhs: failing.first.clone(),
+            rhs: failing.none.clone(),
         });
         failed
     }
@@ -11883,6 +12068,86 @@ fn estimated_cost(expr: &hir::Expr) -> u64 {
     let mut cost = own;
     expr.for_each_child(|child, _| cost += estimated_cost(child));
     cost
+}
+
+/// The parts of `exprs`, what a loop computes for each tuple, that are the same for every
+/// tuple, each once, the largest such: each reads none of the tuple at hand's attributes, nor a
+/// local variable that `exprs` bind, and is computed wherever what it is in is, not only if
+/// an `if` goes its way, a block's statements reach it or an adapted read takes the form it
+/// is in. An operand of an `and` or an `or` can be one, though another may decide it first,
+/// as which is computed first is the compiler's choice, learned as it runs (see [`Ranking`]).
+/// What is only read, of a variable, a parameter or a tuple at hand, costs no more to read
+/// again than to read once, so none is one.
+fn invariant_parts(exprs: &[&hir::Expr]) -> Vec<hir::Expr> {
+    fn read_only(expr: &hir::Expr) -> bool {
+        match expr {
+            hir::Expr::Constant(_)
+            | hir::Expr::Variable(_)
+            | hir::Expr::ComputedConstant(..)
+            | hir::Expr::Parameter(_)
+            | hir::Expr::Local(_)
+            | hir::Expr::Current(..) => true,
+            hir::Expr::Extract(tuple, _) => read_only(tuple),
+            _ => false,
+        }
+    }
+    fn found(expr: &hir::Expr, bound: &mut Vec<hir::LocalId>, parts: &mut Vec<hir::Expr>) {
+        let read = expr.tuple_read(0);
+        let invariant = read.attributes.is_empty()
+            && !read.whole
+            && !bound.iter().any(|&id| expr.reads_local(id));
+        if invariant {
+            if !read_only(expr) && !parts.contains(expr) {
+                parts.push(expr.clone());
+            }
+            return;
+        }
+        match expr {
+            hir::Expr::If(condition, ..) => found(condition, bound, parts),
+            hir::Expr::Run(..) | hir::Expr::AdaptedRead(_) => {}
+            hir::Expr::Let(id, value, body) => {
+                found(value, bound, parts);
+                bound.push(*id);
+                found(body, bound, parts);
+                bound.pop();
+            }
+            _ => expr.for_each_child(|child, tuples| {
+                if tuples == 0 {
+                    found(child, bound, parts);
+                }
+            }),
+        }
+    }
+    let mut parts = Vec::new();
+    for expr in exprs {
+        found(expr, &mut Vec::new(), &mut parts);
+    }
+    parts
+}
+
+/// `expr`, at `depth` tuples at hand in from what a loop computes for each tuple, with each
+/// of `invariants` at its own level read from the tuple at hand around the loop's, of
+/// `heading`, the attribute of its name in `names`; and what reads a tuple further out than
+/// the loop's, one further out, past that one.
+fn with_invariants(
+    expr: hir::Expr,
+    invariants: &[hir::Expr],
+    names: &[String],
+    heading: &hir::Heading,
+    depth: usize,
+) -> hir::Expr {
+    if depth == 0
+        && let Some(i) = invariants.iter().position(|part| *part == expr)
+    {
+        let values = hir::Expr::Current(1, heading.clone());
+        return hir::Expr::Extract(Box::new(values), names[i].clone());
+    }
+    match expr {
+        hir::Expr::Current(at, tuple) if at > depth => hir::Expr::Current(at + 1, tuple),
+        expr => expr.map_children(|child, tuples| {
+            with_invariants(child, invariants, names, heading, depth + tuples)
+        }),
+    }
 }
 
 /// Whether computing `expr` calls a function of the program's, an operator's or a type's,

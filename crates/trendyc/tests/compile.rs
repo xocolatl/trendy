@@ -10318,6 +10318,90 @@ operator main{} [
     );
 }
 
+/// What a restriction's condition or an extension's value computes that no tuple changes, as
+/// an aggregate of the relation, which can fail, is computed once, before the loop, not again
+/// for each tuple, though the relation comes as it is, not sorted: each of these takes about
+/// a second, and most of a minute if it is computed for each of its 30,000 tuples.
+#[test]
+fn what_no_tuple_changes_is_computed_once() {
+    for (name, value) in [
+        (
+            "once_where",
+            "count{r: far where away = min{r: far, of: away}}",
+        ),
+        (
+            "once_extend",
+            "count{r: far extend { d := away - max{r: far, of: away} } where d = 0}",
+        ),
+    ] {
+        let source = format!(
+            "uses {{ trendy.process }};
+
+operator main{{}} [
+    const n := length{{a: arguments}} + 30000;
+    const far := series{{from: 1, to: n}} extend {{ away := (value * 7919) mod 30011 }};
+    call debug_value{{v: {value}}};
+];
+"
+        );
+        let start = std::time::Instant::now();
+        let ran = ran_source(name, &source, b"");
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        assert_eq!(ran.stderr.trim(), "1");
+        let taken = start.elapsed();
+        assert!(taken.as_secs() < 5, "{name}: {taken:?}");
+    }
+}
+
+/// What no tuple changes, computed once, still fails only for a tuple whose condition or value
+/// needs it: as computing it for that tuple, the first in canonical order to need it, would.
+/// So it is computed with the tuples further out at hand, as a part of it reads them, and isn't
+/// computed for no tuple, nor where an `and` or an `or` is decided without it; and what a
+/// condition binds, or computes only if an `if` goes that way, stays where it is.
+#[test]
+fn what_no_tuple_changes_fails_only_for_a_tuple_that_needs_it() {
+    let source = "uses { trendy.process };
+
+operator least{r: relation { a: integer, b: integer }}: integer [
+    min{r: r, of: a}
+];
+
+operator main{} [
+    const n := length{a: arguments};
+    const r := series{from: 1, to: n + 12} extend { b := value mod 3, a := (value * 5) mod 13 } remove {value};
+    const s := series{from: 0, to: n + 3} rename {value as k};
+    const none := r where a > n + 100;
+    call debug_value{v: s extend { c := count{r: r where a + k > min{r: r where b = k mod 3, of: a} + 2 * k} }};
+    call debug_value{v: count{r: r where [ const m := min{r: r where b = 1, of: a}; a < m + 5 and a <> m ]}};
+    call debug_value{v: count{r: r where (if is_empty{r: none} then a > 6 else a = min{r: none, of: a})}};
+    call debug_value{v: r extend { d := a - least{r: r} } where d > 10};
+    call debug_value{v: count{r: none where a = min{r: none, of: a}}};
+    call debug_value{v: count{r: r where b = 5 and a = least{r: none}}};
+    call debug_value{v: count{r: r where b < 5 or a = least{r: none}}};
+    call debug_value{v: count{r: r extend { d := if b = 7 then least{r: none} else a }}};
+    call debug_value{v: count{r: r where b = 2 and a = least{r: none}}};
+];
+";
+    let name = "no_tuple_changes_fails";
+    let ran = ran_source(name, source, b"");
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    let written = "relation { c: integer, k: integer } { { c: 6, k: 1 }, { c: 7, k: 3 }, \
+                   { c: 9, k: 2 }, { c: 10, k: 0 } }\n\
+                   8\n\
+                   6\n\
+                   relation { a: integer, b: integer, d: integer } { { a: 12, b: 2, d: 11 } }\n\
+                   0\n\
+                   0\n\
+                   12\n\
+                   12\n";
+    let failed = format!(
+        "error[R0010]: the relation has no tuples, so it has no min\n{}{}",
+        site(name, 4),
+        called(name, "least", 20)
+    );
+    assert_eq!(ran.stderr, format!("{written}{failed}"));
+}
+
 /// A closure is found from what it is matched with, in canonical order, whatever that is
 /// named: its binding is read once, gives up its reference once, and is right.
 #[test]
