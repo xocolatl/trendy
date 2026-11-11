@@ -1296,9 +1296,11 @@ transitive closure, restricted by an attribute equal to a value, whose paths are
 followed from that value (`Expr::looked_up`, which lowering's `closure_narrowed` takes
 too), or joined with a relation, or matched with one, that has an attribute of it, whose
 paths are followed from that relation's values; and an AND, restricted by a guard that
-reads attributes of some of its operands, which restricts them as soon as they are
-joined (`Optimizer::planned`), or joined with another AND, whose operands are planned
-with its own. Each read is judged as it will be once optimized: a restriction of a
+equates an attribute of some of its operands to a value, as a lookup does, which restricts
+them as soon as they are joined (`Optimizer::planned`), but not by one that only filters
+them, as `part mod 2 = 0` does, keeping too many for computing the AND again to pay; or
+joined with another AND, whose operands are planned with its own. Each read is judged as it
+will be once optimized: a restriction of a
 restriction merged, and a condition restricting what the operation it restricts computes
 from, where it can (`Pushing`), so that a restriction of a renaming of a closure narrows
 the closure; and a constant whose value reads another such constant by that one's value,

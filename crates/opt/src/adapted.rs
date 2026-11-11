@@ -110,10 +110,10 @@ impl Adapting<'_> {
     ///   a value, the paths from that value ([`hir::Expr::looked_up`]), or joined with
     ///   a relation, or matched with one, the paths from the values that has of the
     ///   attributes they share;
-    /// - of an AND, restricted by a guard that reads attributes of some of its operands,
-    ///   that part of it, restricted as soon as it is joined, before the others are
-    ///   ([`crate::Optimizer::planned`]), or joined with another AND, its operands each
-    ///   joined with theirs, in the order the plan says.
+    /// - of an AND, restricted by a guard that equates an attribute of some of its operands
+    ///   to a value, as a lookup does, that part of it, restricted as soon as it is joined,
+    ///   before the others are ([`crate::Optimizer::planned`]), or joined with another AND,
+    ///   its operands each joined with theirs, in the order the plan says.
     ///
     /// A value that reads another constant to adapt is that one's, which the narrowed
     /// form adapts in turn, and a restriction of a restriction is the one it is merged
@@ -175,9 +175,14 @@ impl Adapting<'_> {
                             .any(|(i, heading)| i != left_out && heading.contains(name))
                     })
                 };
+                // One that equates an attribute to a value, as a lookup does, which keeps few
+                // of what its operands have, not one that only filters them, as `part mod 2 =
+                // 0` does, keeping as many as half, which computing the join again costs more
+                // than.
                 condition
                     .conjuncts()
                     .iter()
+                    .filter(|conjunct| conjunct.equated().is_some())
                     .filter_map(guard_reads)
                     .any(|reads| (0..headings.len()).any(|i| had_without(&reads, i)))
             }

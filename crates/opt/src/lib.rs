@@ -1320,8 +1320,10 @@ mod tests {
                     .to_string(),
                 &[],
             ),
-            // A join restricted by what reads one of its operands, before the other is
-            // joined, but not by what reads both.
+            // A join restricted by what equates an attribute of one of its operands to a value,
+            // before the other is joined, as a lookup does, but not by what reads both, nor by
+            // what only filters an operand, which keeps too many for computing the join again
+            // to pay.
             (
                 "call debug_table{r: p where x = 1}; call debug_table{r: p where y = 2};"
                     .to_string(),
@@ -1329,6 +1331,11 @@ mod tests {
             ),
             (
                 "call debug_table{r: p where x = y}; call debug_table{r: p where x < y};"
+                    .to_string(),
+                &[],
+            ),
+            (
+                "call debug_table{r: p where x > 1}; call debug_table{r: p where y > 2};"
                     .to_string(),
                 &[],
             ),
