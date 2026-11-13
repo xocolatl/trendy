@@ -4716,6 +4716,78 @@ operator main{{}} [
 }
 
 #[test]
+fn versions_are_chosen_for_tuples_relations_and_arrays_when_running() {
+    // A tuple is of a tuple type if each attribute's value is of its
+    // type, and a relation or an array if each tuple or element is, so an
+    // empty one is of every relation or array type of its heading or
+    // elements (IM Prescription 27): each call computes the most specific
+    // version for what its argument holds.
+    let source = format!(
+        "{FIGURES}type circle is ellipse {{ constraint a = b }};
+
+operator what{{r: relation {{ f: plane_figure }}}}: text [ \"figures\" ];
+operator what{{r: relation {{ f: ellipse }}}}: text [ \"ellipses\" ];
+operator what{{r: relation {{ f: circle }}}}: text [ \"circles\" ];
+
+operator which{{t: tuple {{ f: plane_figure, g: plane_figure }}}}: text [ \"figures\" ];
+operator which{{t: tuple {{ f: ellipse, g: plane_figure }}}}: text [ \"an ellipse first\" ];
+operator which{{t: tuple {{ f: ellipse, g: ellipse }}}}: text [ \"ellipses\" ];
+operator which{{t: tuple {{ f: plane_figure, g: ellipse }}}}: text [ \"an ellipse second\" ];
+
+operator many{{a: array plane_figure}}: text [ \"figures\" ];
+operator many{{a: array circle}}: text [ \"circles\" ];
+
+operator inner{{t: tuple {{ r: relation {{ f: plane_figure }} }}}}: text [ \"figures\" ];
+operator inner{{t: tuple {{ r: relation {{ f: polygon }} }}}}: text [ \"polygons\" ];
+
+operator shapes{{x: approximate}} [
+    var e: plane_figure := ellipse{{a: x, b: 1e0}};
+    var c: plane_figure := ellipse{{a: x - 2e0, b: 1e0}};
+    var p: plane_figure := polygon{{corners: relation {{ {{ n: 1, name: \"n\" }} }}}};
+    call debug_value{{v: array [
+        what{{r: relation {{ {{ f: c }} }}}},
+        what{{r: relation {{ {{ f: e }}, {{ f: c }} }}}},
+        what{{r: relation {{ {{ f: c }}, {{ f: p }} }}}},
+        what{{r: relation {{ {{ f: e }} }} where x < 0e0}},
+    ]}};
+    call debug_value{{v: array [
+        which{{t: tuple {{ f: e, g: p }}}},
+        which{{t: tuple {{ f: p, g: c }}}},
+        which{{t: tuple {{ f: c, g: e }}}},
+        which{{t: tuple {{ f: p, g: p }}}},
+    ]}};
+    call debug_value{{v: array [
+        many{{a: array [c, c]}},
+        many{{a: array [c, e]}},
+        many{{a: if x < 0e0 then array [e] else array plane_figure []}},
+    ]}};
+    call debug_value{{v: array [
+        inner{{t: tuple {{ r: relation {{ {{ f: p }} }} }}}},
+        inner{{t: tuple {{ r: relation {{ {{ f: p }}, {{ f: e }} }} }}}},
+    ]}};
+];
+
+operator main{{}} [
+    call shapes{{x: 3e0}};
+];
+"
+    );
+    let (code, stderr) = run_source("versioned_values", &source);
+    assert_eq!(
+        (code, stderr.lines().collect::<Vec<_>>()),
+        (
+            0,
+            vec![
+                r#"array ["circles", "ellipses", "figures", "circles"]"#,
+                r#"array ["an ellipse first", "an ellipse second", "ellipses", "figures"]"#,
+                r#"array ["circles", "figures", "circles"]"#,
+                r#"array ["polygons", "figures"]"#,
+            ]
+        )
+    );
+}
+
+#[test]
 fn relations_of_a_hierarchy_combine_when_running() {
     // Relations whose attributes are of different types in the hierarchy
     // combine (IM Prescription 13): a union's attribute is a plane
@@ -6184,6 +6256,10 @@ fn inheritance() {
             "│ plot │                 6e0 │",
             "│ pond │ 1.884955592153876e1 │",
             "└──────┴─────────────────────┘",
+            // What relations of figures hold: both kinds, an ellipse, two
+            // circles, and none, which is of every relation type of its
+            // heading, so a relation of circles.
+            r#"array ["figures", "ellipses", "circles", "circles"]"#,
             // Each figure, narrowed in an `if` statement's branch: the
             // plot's vertices, and the pond's major semiaxis.
             "3",

@@ -9,6 +9,7 @@ use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Item, Said, Section, TypeExpr};
 
 use crate::check::Lookup;
+use crate::specific::{self, Specific};
 use crate::types::{self, Origin, TypeParameters};
 use crate::{Files, Kind, Namespaces, Source, errors, scope};
 
@@ -1244,16 +1245,7 @@ fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Di
         }
         // Each before those it is more specific than: its parameters' types
         // are as deep in their hierarchies or deeper, and one is deeper.
-        let depth = |s: &Signature| -> usize {
-            s.params
-                .values()
-                .map(|p| match &p.ty {
-                    hir::Type::Defined(d) => d.supertypes.len() + 1,
-                    hir::Type::Dummy(d) => d.supertypes.len(),
-                    _ => 0,
-                })
-                .sum()
-        };
+        let depth = |s: &Signature| -> usize { s.params.values().map(|p| depth(&p.ty)).sum() };
         versions.sort_by_key(|&v| std::cmp::Reverse(depth(&list[v])));
         let made: Vec<hir::Version> = versions
             .iter()
@@ -1439,35 +1431,47 @@ fn duplicate(list: &mut [Signature], first: usize, later: usize, errors: &mut Ve
     list[later].valid = false;
 }
 
+/// How deep `ty` is in its hierarchy, which a proper subtype is deeper
+/// than: of a tuple or a relation, its attributes' together, and of an
+/// array, its elements'.
+fn depth(ty: &hir::Type) -> usize {
+    match ty {
+        hir::Type::Defined(defined) => defined.supertypes.len() + 1,
+        hir::Type::Dummy(dummy) => dummy.supertypes.len(),
+        hir::Type::Tuple(heading) | hir::Type::Relation(heading) => {
+            heading.attributes().map(|(_, ty)| depth(ty)).sum()
+        }
+        hir::Type::Array(element) => depth(element),
+        hir::Type::Scalar(_) | hir::Type::Parameter(_) => 0,
+    }
+}
+
 /// The error for the specification `spec`, of `list`, if a combination of
-/// the types with components under its versions' parameters' union types
-/// has no version for it and it has no body, or two, neither more specific
-/// than the other.
+/// the most specific types its arguments' values can have has no version
+/// for it and it has no body, or two, neither more specific than the
+/// other.
 fn uncovered(spec: &Signature, list: &[Signature], namespaces: &Namespaces) -> Option<Diagnostic> {
-    // The parameters some version is narrower for, and the types each can
-    // be of.
+    // The parameters some version is narrower for, and the most specific
+    // types each's value can have.
     let dispatched: BTreeSet<&String> =
         spec.versions.iter().flat_map(|v| v.params.keys()).collect();
-    let mut combinations: Vec<BTreeMap<String, hir::Type>> = vec![BTreeMap::new()];
-    for name in &dispatched {
-        let kinds = leaves(&spec.params[*name].ty, namespaces);
-        combinations = combinations
-            .into_iter()
-            .flat_map(|so_far| {
-                kinds.iter().map(move |kind| {
-                    let mut more = so_far.clone();
-                    more.insert((*name).clone(), kind.clone());
-                    more
-                })
-            })
-            .collect();
-    }
+    let mut combinations = specific::combinations(dispatched.iter().map(|name| {
+        (
+            name.as_str(),
+            Specific::all(&spec.params[*name].ty, namespaces),
+        )
+    }));
+    // Those with an empty relation or array last: an empty one is of every
+    // version a nonempty one is, so one is reported only where none without
+    // it is, as no version can be more specific than two (see
+    // `errors::ambiguous_versions`).
+    combinations.sort_by_key(|combination| combination.values().any(|kind| kind.empty().is_some()));
     let bodiless = spec.bodiless();
-    let fits = |version: &hir::Version, combination: &BTreeMap<String, hir::Type>| {
+    let fits = |version: &hir::Version, combination: &BTreeMap<String, Specific>| {
         version
             .params
             .iter()
-            .all(|(name, ty)| combination[name].is_subtype_of(ty))
+            .all(|(name, ty)| combination[name].is_of(ty))
     };
     let narrower = |a: &hir::Version, b: &hir::Version| {
         b.params.iter().all(|(name, ty)| {
@@ -1505,19 +1509,6 @@ fn uncovered(spec: &Signature, list: &[Signature], namespaces: &Namespaces) -> O
         }
     }
     None
-}
-
-/// The types with components a value of `ty` can be of: those under it, if
-/// it is a union type, and otherwise itself.
-fn leaves(ty: &hir::Type, namespaces: &Namespaces) -> Vec<hir::Type> {
-    match ty {
-        hir::Type::Dummy(dummy) => namespaces
-            .subtypes(&dummy.name)
-            .iter()
-            .flat_map(|subtype| leaves(subtype, namespaces))
-            .collect(),
-        other => vec![other.clone()],
-    }
 }
 
 /// The signature of `op`, the program's operator, whose id is `id`, with

@@ -4499,6 +4499,14 @@ operator main{} [
   parameters with no specification of both, which the error writes
   (A0001, A0063). A version has no name of its own: Tutorial D's
   `OPERATOR AREA VERSION AREA_C …` is fixed (P0045).
+- **A tuple, a relation or an array is of a version's type by what it
+  holds** (IM Prescription 27): a tuple if each attribute's value is of
+  its type, and a relation or an array if each tuple or element is, which
+  a call tests of each one. So an empty one is of every relation or array
+  type of its heading or elements, and computed by the most specific
+  version, and two versions for relations of disjoint types, as
+  `relation { f: ellipse }` and `relation { f: polygon }`, are both for
+  it, which no version can be more specific than (A0063).
 
 Relations whose attributes are of different types in one hierarchy
 combine (IM Prescription 13). A union's attribute is of the most specific

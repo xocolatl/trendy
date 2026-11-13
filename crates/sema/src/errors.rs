@@ -15,6 +15,7 @@ use crate::check::Written;
 use crate::globals::{Global, Pending};
 use crate::named_types::Named;
 use crate::operators::{Chosen, Operators, Signature};
+use crate::specific::Specific;
 use crate::types::{Origin, TypeParameters};
 use crate::{Kind, Namespace, Namespaces, scope, sections};
 
@@ -6319,7 +6320,7 @@ pub(crate) fn bodiless_operator(decl: &ast::Operator) -> Diagnostic {
 /// the arguments' types `combination`.
 pub(crate) fn missing_version(
     spec: &Signature,
-    combination: &BTreeMap<String, hir::Type>,
+    combination: &BTreeMap<String, Specific>,
     namespaces: &Namespaces,
 ) -> Diagnostic {
     let name = &spec.name;
@@ -6327,7 +6328,10 @@ pub(crate) fn missing_version(
     let written: Vec<String> = spec
         .params
         .iter()
-        .map(|(p, param)| format!("{p}: {}", combination.get(p).unwrap_or(&param.ty)))
+        .map(|(p, param)| match combination.get(p) {
+            Some(kind) => format!("{p}: {kind}"),
+            None => format!("{p}: {}", param.ty),
+        })
         .collect();
     let result = spec
         .result
@@ -6393,7 +6397,7 @@ fn defined_at(signature: &Signature) -> Span {
 /// other.
 pub(crate) fn ambiguous_versions(
     spec: &Signature,
-    combination: &BTreeMap<String, hir::Type>,
+    combination: &BTreeMap<String, Specific>,
     defined: (Option<&ast::Operator>, Option<&ast::Operator>),
 ) -> Diagnostic {
     let name = &spec.name;
@@ -6416,11 +6420,23 @@ pub(crate) fn ambiguous_versions(
         span,
         "one",
     )
-    .with_note(VERSIONS_RULE)
-    .with_help(format!(
-        "define a version for `{name}{{{}}}`, more specific than both",
-        written.join(", ")
-    ));
+    .with_note(VERSIONS_RULE);
+    // No type written in trendy is an empty relation's or array's most specific.
+    d = match combination.values().find_map(Specific::empty) {
+        Some(empty) => d
+            .with_note(if empty == "array" {
+                "an array is of `array t` when each of its elements is of `t`, so an empty one is of every array type of its elements, and no type a version can be for is more specific than both (*Type Inheritance and Relational Theory*, IM Prescription 27)"
+            } else {
+                "a relation is of `relation h` when each of its tuples is of `tuple h`, so an empty one is of every relation type of its heading, and no type a version can be for is more specific than both (*Type Inheritance and Relational Theory*, IM Prescription 27)"
+            })
+            .with_help(format!(
+                "keep one of the two, for `{name}` to compute the other's {empty}s as it does any others"
+            )),
+        None => d.with_help(format!(
+            "define a version for `{name}{{{}}}`, more specific than both",
+            written.join(", ")
+        )),
+    };
     if let Some(other) = at(defined.1) {
         d = d.with_secondary(other, "the other");
     }

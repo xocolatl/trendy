@@ -250,6 +250,35 @@ operator area{figure: polygon}: approximate [
 
 var sizes := figures extend { size := area{figure: figure} }{name, size};
 
+/* What a relation of figures holds: a version for relations of ellipses,
+   and one for relations of circles. A relation is of `relation { name:
+   text, figure: circle }` when each of its tuples is, which a call tests
+   of each tuple, so an empty one is of every relation type of its heading
+   and is computed by the most specific version (Type Inheritance and
+   Relational Theory, IM Prescription 27). */
+operator kinds{figures: relation { name: text, figure: plane_figure }}: text [
+    "figures"
+];
+
+operator kinds{figures: relation { name: text, figure: ellipse }}: text [
+    "ellipses"
+];
+
+operator kinds{figures: relation { name: text, figure: circle }}: text [
+    "circles"
+];
+
+var wells := relation {
+    { name: "well", figure: well },
+    { name: "ring", figure: ring },
+};
+var held := array [
+    kinds{figures: figures},
+    kinds{figures: ellipses},
+    kinds{figures: wells},
+    kinds{figures: wells where name = "lake"},
+];
+
 /* The vertex nearest the origin, and the vertices' numbers in the points'
    order: the one at the origin, then the one 3 from it, on the y axis,
    then the one 4 from it, on the x axis. */
@@ -326,6 +355,18 @@ operator geometry{p: point, shape: polygon} [
     call debug_value{v: kind{figure: w}};
     call debug_value{v: circle{r: distance{m: 2e0}, ctr: p}.r};
     call debug_table{r: figures extend { size := area{figure: figure} }{name, size}};
+    var wells := relation {
+        { name: "well", figure: ellipse{a: distance{m: 1e0}, b: distance{m: 1e0}, ctr: p} },
+        { name: "ring", figure: circle{r: distance{m: 2e0}, ctr: p} },
+    };
+    call debug_value{
+        v: array [
+            kinds{figures: figures},
+            kinds{figures: curved},
+            kinds{figures: wells},
+            kinds{figures: wells where name = "lake"},
+        ],
+    };
     call measure{figures: figures};
 ];
 
@@ -353,6 +394,7 @@ operator main{} [
     call debug_value{v: kind{figure: widened}};
     call debug_value{v: ring_radius};
     call debug_table{r: sizes};
+    call debug_value{v: held};
     call measure{figures: figures};
 
     call geometry{p: pt, shape: triangle};

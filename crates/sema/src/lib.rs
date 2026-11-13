@@ -16,6 +16,7 @@ mod operators;
 mod ops;
 mod scope;
 mod sections;
+mod specific;
 mod types;
 mod written_times;
 
@@ -14473,6 +14474,82 @@ operator sides{{f: square}}: integer [ 4 ];{MAIN}"
     }
 
     #[test]
+    fn a_call_computes_the_version_for_its_tuples_relations_and_arrays() {
+        // A tuple is of a tuple type if each attribute's value is of its
+        // type, and a relation or an array if each tuple or element is, so
+        // an empty one is of every relation or array type of its heading or
+        // elements (IM Prescription 27): it gets the most specific version,
+        // whatever order they are declared in.
+        let variables = variables(&format!(
+            "{FIGURES}type unit_disc is disc {{ constraint r = 1e0 }};
+operator what{{r: relation {{ f: figure }}}}: text [ \"figures\" ];
+operator what{{r: relation {{ f: disc }}}}: text [ \"discs\" ];
+operator what{{r: relation {{ f: unit_disc }}}}: text [ \"unit discs\" ];
+operator which{{t: tuple {{ f: figure, g: figure }}}}: text [ \"figures\" ];
+operator which{{t: tuple {{ f: disc, g: figure }}}}: text [ \"a disc first\" ];
+operator which{{t: tuple {{ f: disc, g: disc }}}}: text [ \"discs\" ];
+operator which{{t: tuple {{ f: figure, g: disc }}}}: text [ \"a disc second\" ];
+operator many{{a: array figure}}: text [ \"figures\" ];
+operator many{{a: array unit_disc}}: text [ \"unit discs\" ];
+var f: figure := round;
+var g: figure := disc{{r: 2e0}};
+var b: figure := box;
+var unit_discs := what{{r: relation {{ {{ f }} }}}};
+var discs := what{{r: relation {{ {{ f }}, {{ f: g }} }}}};
+var figures := what{{r: relation {{ {{ f }}, {{ f: b }} }}}};
+var no_figures := what{{r: relation {{ f: figure }} {{}}}};
+var first := which{{t: tuple {{ f: g, g: b }}}};
+var second := which{{t: tuple {{ f: b, g: f }}}};
+var both := which{{t: tuple {{ f, g }}}};
+var neither := which{{t: tuple {{ f: b, g: b }}}};
+var all_unit := many{{a: array [f, f]}};
+var not_all := many{{a: array [f, g]}};
+var none := many{{a: array figure []}};"
+        ));
+        let value = |name: &str| {
+            variables
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap()
+                .init
+                .to_string()
+        };
+        let found: Vec<(&str, String)> = [
+            "unit_discs",
+            "discs",
+            "figures",
+            "no_figures",
+            "first",
+            "second",
+            "both",
+            "neither",
+            "all_unit",
+            "not_all",
+            "none",
+        ]
+        .into_iter()
+        .map(|name| (name, value(name)))
+        .collect();
+        let expected: Vec<(&str, String)> = [
+            ("unit_discs", "unit discs"),
+            ("discs", "discs"),
+            ("figures", "figures"),
+            ("no_figures", "unit discs"),
+            ("first", "a disc first"),
+            ("second", "a disc second"),
+            ("both", "discs"),
+            ("neither", "figures"),
+            ("all_unit", "unit discs"),
+            ("not_all", "figures"),
+            ("none", "unit discs"),
+        ]
+        .into_iter()
+        .map(|(name, text)| (name, format!("{text:?}")))
+        .collect();
+        assert_eq!(found, expected);
+    }
+
+    #[test]
     fn versions_are_like_their_specification() {
         let found = |defined: &str| -> Vec<(Code, String)> {
             errors(&format!("{FIGURES}{defined}{MAIN}"))
@@ -14521,6 +14598,26 @@ operator sides{{f: square}}: integer [ 4 ];{MAIN}"
                 Code::Versions,
                 "two versions of `pair` are for `pair{f: disc, g: disc}`, neither more specific than the other",
             ),
+            (
+                "type unit_disc is disc { constraint r = 1e0 };\noperator pair{f: disc, g: disc}: integer [ 0 ];\noperator pair{f: unit_disc, g: disc}: integer [ 1 ];\noperator pair{f: disc, g: unit_disc}: integer [ 2 ];",
+                Code::Versions,
+                "two versions of `pair` are for `pair{f: unit_disc, g: unit_disc}`, neither more specific than the other",
+            ),
+            (
+                "operator pair{t: tuple { f: figure, g: figure }}: integer [ 0 ];\noperator pair{t: tuple { f: disc, g: figure }}: integer [ 1 ];\noperator pair{t: tuple { f: figure, g: disc }}: integer [ 2 ];",
+                Code::Versions,
+                "two versions of `pair` are for `pair{t: tuple { f: disc, g: disc }}`, neither more specific than the other",
+            ),
+            (
+                "operator sides{r: relation { f: figure }}: integer;\noperator sides{r: relation { f: disc }}: integer [ 0 ];",
+                Code::Versions,
+                "no version of `sides` is for `relation { f: square }`",
+            ),
+            (
+                "operator sides{r: relation { f: figure }}: integer;\noperator sides{r: relation { f: disc }}: integer [ 0 ];\noperator sides{r: relation { f: square }}: integer [ 4 ];",
+                Code::Versions,
+                "no version of `sides` is for `relation { f: figure }`",
+            ),
         ] {
             let found = found(defined);
             assert!(
@@ -14546,6 +14643,41 @@ operator sides{{f: square}}: integer [ 4 ];{MAIN}"
                 "declare their specification, of their parameters' union types, `operator sides{f: figure}: integer;`, which they are versions of"
             ]
         );
+    }
+
+    #[test]
+    fn an_empty_relation_or_array_is_of_versions_of_disjoint_types() {
+        // An empty relation or array is of both of two versions for
+        // relations or arrays of disjoint types, and no version can be
+        // more specific than both (IM Prescription 27).
+        for (defined, message) in [
+            (
+                "operator many{r: relation { f: figure }}: integer [ 0 ];\noperator many{r: relation { f: disc }}: integer [ 1 ];\noperator many{r: relation { f: square }}: integer [ 2 ];",
+                "two versions of `many` are for `many{r: relation { f: figure } {}}`, neither more specific than the other",
+            ),
+            (
+                "operator many{a: array figure}: integer [ 0 ];\noperator many{a: array disc}: integer [ 1 ];\noperator many{a: array square}: integer [ 2 ];",
+                "two versions of `many` are for `many{a: array figure []}`, neither more specific than the other",
+            ),
+        ] {
+            let found = errors(&format!("{FIGURES}{defined}{MAIN}"));
+            assert_eq!(found.len(), 1, "{found:#?}");
+            assert_eq!(
+                (found[0].code, found[0].message.as_str()),
+                (Code::Versions, message)
+            );
+            assert_eq!(
+                found[0].help,
+                [format!(
+                    "keep one of the two, for `many` to compute the other's {}s as it does any others",
+                    if defined.contains("array") {
+                        "array"
+                    } else {
+                        "relation"
+                    }
+                )]
+            );
+        }
     }
 
     #[test]

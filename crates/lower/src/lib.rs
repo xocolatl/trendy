@@ -5213,16 +5213,7 @@ impl<'a> FunctionBuilder<'a> {
                         .expect("a version's parameters are its specification's");
                     let mut arg = args.clone().expect("a version has parameters");
                     arg.path.push(index);
-                    let fits = self.is_of(&arg, ty, cx);
-                    let tested = self.new_block();
-                    self.end_block(
-                        lir::Terminator::Branch {
-                            condition: fits,
-                            then: tested,
-                            otherwise: next,
-                        },
-                        tested,
-                    );
+                    self.branch_of(&arg, &params[name].ty, ty, next, cx);
                 }
             }
             lower(self, version.operator, args.clone(), cx);
@@ -9860,6 +9851,64 @@ impl<'a> FunctionBuilder<'a> {
                 self.is_of(&value, ty, cx)
             }
             _ => unreachable!("only treats and tests are typed"),
+        }
+    }
+
+    /// Go on in a new block if the value at `value`, of `declared`, is of
+    /// `ty`, a subtype of it, and to `otherwise` if not. A tuple is if each
+    /// attribute's value is of its type in `ty`, and a relation or an array
+    /// if each tuple or element is, so an empty one is of every relation or
+    /// array type of its heading or elements (*Type Inheritance and
+    /// Relational Theory*, IM Prescription 27); a value of a type in a
+    /// hierarchy is as [`FunctionBuilder::is_of`] says.
+    fn branch_of(
+        &mut self,
+        value: &lir::Place,
+        declared: &hir::Type,
+        ty: &hir::Type,
+        otherwise: lir::BlockId,
+        cx: &mut Lowering,
+    ) {
+        if declared == ty {
+            return;
+        }
+        match (declared, ty) {
+            (hir::Type::Tuple(from), hir::Type::Tuple(to)) => {
+                for (index, (name, from)) in from.attributes().enumerate() {
+                    let to = to
+                        .get(name)
+                        .expect("a subtype has its supertype's attributes");
+                    let mut attribute = value.clone();
+                    attribute.path.push(index);
+                    self.branch_of(&attribute, from, to, otherwise, cx);
+                }
+            }
+            (hir::Type::Relation(from), hir::Type::Relation(to)) => {
+                let from = hir::Type::Tuple(from.clone());
+                let to = hir::Type::Tuple(to.clone());
+                let layout = cx.layout(&from);
+                self.each_tuple(value, layout, cx, |this, tuple, _, cx| {
+                    this.branch_of(&tuple, &from, &to, otherwise, cx);
+                });
+            }
+            (hir::Type::Array(from), hir::Type::Array(to)) => {
+                let layout = cx.layout(from);
+                self.each_tuple(value, layout, cx, |this, element, _, cx| {
+                    this.branch_of(&element, from, to, otherwise, cx);
+                });
+            }
+            _ => {
+                let fits = self.is_of(value, ty, cx);
+                let tested = self.new_block();
+                self.end_block(
+                    lir::Terminator::Branch {
+                        condition: fits,
+                        then: tested,
+                        otherwise,
+                    },
+                    tested,
+                );
+            }
         }
     }
 

@@ -5634,12 +5634,25 @@ pub enum Value {
 }
 
 impl Value {
-    /// Whether the value is of the type `ty`: its own type is `ty` or one
-    /// of its subtypes (*Type Inheritance and Relational Theory*, IM
-    /// Prescription 15).
+    /// Whether the value is of the type `ty` (*Type Inheritance and
+    /// Relational Theory*, IM Prescriptions 15 and 27): a scalar if its own
+    /// type is `ty` or one of its subtypes, a tuple if each attribute's
+    /// value is of its type in `ty`, and a relation or an array if each
+    /// tuple or element is, so an empty one is of every relation or array
+    /// type of its heading or elements.
     #[must_use]
     pub fn is_of(&self, ty: &Type) -> bool {
-        self.ty().is_subtype_of(ty)
+        match (self, ty) {
+            (Value::Tuple(tuple), Type::Tuple(heading)) => tuple.is_of(heading),
+            (Value::Relation(relation), Type::Relation(heading)) => {
+                relation.heading.0.keys().eq(heading.0.keys())
+                    && relation.tuples.iter().all(|tuple| tuple.is_of(heading))
+            }
+            (Value::Array(array), Type::Array(element)) => {
+                array.elements.iter().all(|value| value.is_of(element))
+            }
+            _ => self.ty().is_subtype_of(ty),
+        }
     }
 
     #[must_use]
@@ -6254,6 +6267,17 @@ fn renamed(name: &str, renamings: &BTreeMap<String, String>) -> String {
 }
 
 impl TupleValue {
+    /// Whether the tuple is of the tuple type with `heading`: it has its
+    /// attributes, and each's value is of its type.
+    #[must_use]
+    pub fn is_of(&self, heading: &Heading) -> bool {
+        self.0.keys().eq(heading.0.keys())
+            && self
+                .0
+                .iter()
+                .all(|(name, value)| value.is_of(&heading.0[name]))
+    }
+
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Value> {
         self.0.get(name)
